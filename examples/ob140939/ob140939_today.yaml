@@ -1,7 +1,19 @@
+# OGLE-2014-BLG-0939 with everything available TODAY (best practice).
+# ob140939.yaml is the validation: it reproduces Yee et al. (2015) with only
+# the inputs they used.  This config differs from it in three ways, all in
+# ob140939_today.params.yaml / ob140939_today.sed.yaml:
+#   1. the source proper motion is Gaia DR3's ABSOLUTE measurement, not
+#      Yee's bulge-relative OGLE value;
+#   2. a source SED (Gaia G + 2MASS JHKs, fetched with mkticsed and vetted
+#      for the crowded bulge) ties the OGLE source flux to the source star
+#      through the calibrated OGLE zero point;
+#   3. Yee's independently measured instrumental (I - [3.6]) source colour
+#      ties the Spitzer source flux to OGLE's (Spitzer has no absolute zero
+#      point and the BC grid no IRAC column, so it cannot be SED-tied).
 run:
-  name: "OB140939"
+  name: "OB140939_today"
 
-prefix: "fitresults/OB140939"
+prefix: "fitresults/OB140939_today"
 logger_level: INFO   # DEBUG, INFO, or WARNING
 
 # 1. Define the physical bodies!
@@ -29,7 +41,9 @@ galacticmodel:
 
 band:
   - name: "OGLE_I"
-    filter: "OGLE.I"
+    # The BC grid has Cousins I, not an OGLE-IV column; OGLE-IV I is
+    # calibrated onto (and close to) Cousins I.
+    filter: "Generic/Cousins.I"
     ld_law: "linear"
   - name: "Spitzer_36"
     filter: "Spitzer.IRAC.36"
@@ -38,24 +52,28 @@ band:
 mulensinstrument:
   - name: "OGLE4"
     # Yee et al.'s published FLUXES, read as given (no magnitude round trip).
-    # Flux system: 1 unit = I 22 (calibrated OGLE-IV I; baseline 437.3 ->
-    # I = 15.40).  Nothing here reads that -- with no SED there is no
-    # zeropoint tie -- but an SED fit would state it in the params file as
-    # mulensinstrument.OGLE4.zeropoint: {mu: 22.0, sigma: <trust>}.
+    # Flux system: 1 unit = I 22 (calibrated OGLE-IV I, Vega; baseline
+    # 437.3 -> I = 15.40); the zero point is stated in the params file.
     file: "n20100310.I.OGLE.OB140939.flux.dat"
     data_format: flux
     observer_location: "earth" # earth, spitzer, kepler, roman, a site name (CTIO), "lon_deg,lat_deg[,height_m]" (lon FIRST), or filename of horizons ephemeris to interpolate
     band: "OGLE_I"
+    magsys: Vega
     reference: true # peg all plotted data + model curves to this instrument's f_source/f_blend (defaults to the first instrument)
   - name: "Spitzer"
-    # Yee et al.'s published Spitzer [3.6] fluxes; their zero point is not
-    # established here, so do not tie this light curve to an SED without it.
+    # Yee et al.'s published Spitzer [3.6] fluxes, on the same instrumental
+    # scale as the OGLE file (1 unit = "22"), but with no absolute zero
+    # point: NOT SED-tied.  Yee's colour prior ties its source flux instead.
     file: "n20140605.L.Spitzer.OB140939.flux.dat"
     data_format: flux
     observer_location: "spitzer"
     band: "Spitzer_36"
 
-parameter_file: "ob140939.params.yaml"
+# Source SED: catalog photometry of the baseline object (= source).
+sed:
+  file: "ob140939_today.sed.yaml"
+
+parameter_file: "ob140939_today.params.yaml"
 
 sampler:
   # ptde_async: the params file seeds all FOUR Yee+2015 degenerate
@@ -88,13 +106,11 @@ sampler:
   # mode changes on a replay; the ladder funnels descending replicas).  The
   # weights are trusted only because the T=1 chains themselves switch
   # basins -- check modes.txt's 'mode changes' count, never the profile.
-  # Converged (all 50000 draws: max_rhat/min_ess early stop off), with
-  # the source pm prior in its correct Sgr-A*-relative frame
-  # (src/exozippy/components/mulensing/conventions.md C31), the split is
-  # about 90/10 (89-94% across independent repeats): u0,-,- is the
-  # solution Yee+2015's proper-motion argument prefers, with a lens at
-  # ~3.3 kpc and ~0.23 Msun (hers: 3.1 +/- 0.4 kpc, 0.23 +/- 0.07).
-  # An earlier "~98/2" here was a stuck-ladder artifact, not a posterior.
+  # This config, converged (2026-10-07, all 50000 draws): u0,-,- 86%
+  # (validation config: about 90%, 89-94% across repeats -- the same
+  # preference within the repeat scatter), lens 3.5 +/- 0.4 kpc and
+  # 0.22 +/- 0.04 Msun; Yee's dchi2 = 8 and 17 solutions rejected; the
+  # source a reddened bulge K giant (Teff ~4300 K, R ~19 Rsun, ~9 kpc).
   n_temps: 24
   # Keep thinned hot-rung draws: they detect posterior-suppressed modes
   # (occupancy ~exp(-dlp/T)) for the seeded-solution ledger, so solutions

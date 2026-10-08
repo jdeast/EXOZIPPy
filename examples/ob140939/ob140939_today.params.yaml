@@ -1,0 +1,196 @@
+# From Yee et al. 2015 (ApJ 802, 76), Table 1 (free F_B).
+# The initval lists are per-seed starts (multi-seed sampling), one per
+# Refsdal four-fold degenerate solution, in Table 1's column order:
+#   seed 0: u0,-,+  chi2/dof = 273.1/265
+#   seed 1: u0,-,-  273.7/265  (ecliptic twin of seed 0; the paper's
+#                               proper-motion argument prefers this one)
+#   seed 2: u0,+,+  281.5/265  (dchi2 = 8)
+#   seed 3: u0,+,-  290.2/265  (dchi2 = 17)
+# eventually, we'd like to get this from MMEXOFAST
+source.Source.t_0:
+    initval: [2456836.22, 2456836.20, 2456836.06, 2456835.95]
+source.Source.u_0:
+    initval: [0.922, -0.913, 0.897, -0.843]
+mulensevent.t_E:
+    initval: [22.87, 22.99, 22.91, 23.87]
+mulensevent.pi_E_N:
+    initval: [-0.248, 0.220, -1.370, 1.325]
+mulensevent.pi_E_E:
+    initval: [0.234, 0.238, -0.060, 0.024]
+
+# the solver needs this, but it shouldn't
+#star.Lens.mass:
+#    initval: 0.23
+
+# Yee+2015 Table 1: q = F_S/(F_S+F_B) per solution (same column order).
+# OGLE: 13.20/11.01, 12.95/11.02, 12.51/11.02, 11.09/11.01. Negative
+# blending is common for OGLE difference imaging in the crowded bulge.
+mulensinstrument.OGLE4.q_source:
+    initval: [1.199, 1.175, 1.135, 1.007]
+# Spitzer: 4.31/4.23, 4.37/4.22, 3.32/4.28, 3.30/4.32.
+mulensinstrument.Spitzer.q_source:
+    initval: [1.019, 1.036, 0.776, 0.764]
+
+# Starting err_scale near its posterior keeps the whitening probe measuring
+# posterior widths instead of a huge start-point gradient (a start thousands
+# of nats low once measured scales ~1000x too small and ~90% of draws
+# diverged).
+# OGLE errors are underestimated ~1.65x (difference-imaging convention).
+mulensinstrument.OGLE4.err_scale:
+    initval: 1.65
+# The Spitzer file is Yee's RAW published photometry (flux errors ~0.09% ->
+# ~1 mmag). Her fits imply working errors ~17x larger: the paper never states
+# a renormalization, but every fit lands at chi2/dof ~ 1 (Spitzer-only:
+# 28.0/26, Table 3) and the Fig. 1 Spitzer residuals scatter ~+/-20 mmag --
+# so the errors were evidently rescaled between the raw data and the fits.
+# err_scale absorbs that factor here; do not "fix" the data file.
+mulensinstrument.Spitzer.err_scale:
+    initval: 17.0
+
+# this come from a catalog and only influences the galactic model prior (with course precision)
+# we probably want to link the ra/dec of source/lens within the model
+# or maybe all stars with syntax like this:
+#star.ra:
+#    initval: 266.801041667
+#    sigma: 0
+#star.dec:
+#    initval: -21.3829722222
+#    sigma: 0
+star.Lens.ra:
+    initval: 266.801041667
+    sigma: 0
+star.Lens.dec:
+    initval: -21.3829722222
+    sigma: 0
+star.Source.ra:
+    initval: 266.801041667
+    sigma: 0
+star.Source.dec:
+    initval: -21.3829722222
+    sigma: 0
+
+# Source proper motion measured from 4 years of OGLE-IV astrometry of the
+# baseline object: mu_S,hel(N,E) = (-0.64, -5.31) +/- 0.45 mas/yr (Eq. 8 of
+# the cited paper). This is the datum behind her degeneracy-breaking argument: with
+# mu_S measured, the disk-rotation term in the galactic kinematic prior
+# predicts the lens-source relative motion direction to ~8.5 deg, which
+# excludes the u0,-,+ mode (direction ~130 deg vs expected ~54). Without it
+# the source pm marginalizes over the ~2.6 mas/yr bulge dispersion and the
+# prior discriminates between the ecliptic-degenerate modes by only ~1 nat.
+#
+# FRAME (src/exozippy/components/mulensing/conventions.md C31): that value
+# is OGLE RELATIVE astrometry -- the source's motion relative to the mean
+# of the field (bulge) stars; "hel" in
+# her notation means not-geocentric, NOT absolute.  So it goes on the
+# Sgr-A*-relative pm_*_sgra parameters, never on the absolute (ICRS)
+# star.Source.pm_ra/pm_dec.  Her own Eq. 9 reproduces her 53.9 deg only for a
+# bulge-relative mu_S.  Absolute, this is (pm_ra, pm_dec) ~ (-8.43, -6.25).
+# sigma is HER 0.45, deliberately: this example reproduces Yee+2015 as a
+# validation.  It does NOT add the ~0.7 mas/yr zero-point term C31
+# recommends in quadrature (field-mean vs Sgr A*: measured 0.7 here) --
+# include it, sigma ~0.83, for a science fit that trusts the frame no more
+# than it should.
+# The ABSOLUTE Gaia DR3 proper motion of the baseline object (= source),
+# INSTEAD of Yee's bulge-relative OGLE value (ob140939.params.yaml has that
+# one, on pm_*_sgra).  Gaia DR3 4118632779506798848: 0.32" from the event,
+# G = 16.79, RUWE 0.99, matching Yee's baseline I ~ 15.4; it measures the
+# absolute frame directly, so neither the Sgr A* conversion nor its ~0.7
+# mas/yr field-mean zero point (conventions C31) enters.
+star.Source.pm_ra:
+    mu: -7.560
+    sigma: 0.088
+    citation: GaiaCollaboration:2023
+star.Source.pm_dec:
+    mu: -5.883
+    sigma: 0.051
+    citation: GaiaCollaboration:2023
+
+# Yee+2015 is pure PSPL (their Eq. 4) -- no finite source, no limb darkening
+# (u0 ~ 0.9 makes them negligible). The source radius only enters rho, which
+# is unused with finite_source: False; fix it at an arbitrary sane value.
+# No `sigma: 0` on the six below: this is a point-source fit with no SED, so
+# nothing reads the source or lens radius/teff/feh and they are not parameters
+# of this configuration (review 3.8.1).  The values stay as starts.
+star.Source.radius:
+    initval: 18.0   # a giant start; the SED reads it through the fbol floor
+
+# these shouldn't be fit for such models (on the to do list)
+# but as a temporary hack, we're just going to fix them at their arbitrary starting values
+
+# Yee+2015 Sec. 5.3: the source's instrumental colour (I - [3.6])_S =
+# -1.216 +/- 0.044, measured from field-star colour-colour regressions
+# (I-[3.6] vs V-I, and I-H), independent of the light-curve model.  Both
+# flux files share one instrumental scale (verified: fitted without this
+# prior, the Spitzer/OGLE source-flux ratio is 0.39 +/- 0.06), so
+# F_S,Spitzer / F_S,OGLE = 10**(-0.4*1.216) = 0.3266, fractional width
+# 0.4*ln(10)*0.044 = 0.0405 -> sigma = 0.0405 * ~171 = 7.0 flux units.  It
+# does not separate the u0,-,+/- ecliptic pair (they predict nearly the same
+# colour, -1.215 and -1.179 in Yee's Table 1); it pins the poorly constrained
+# Spitzer source flux and disfavours the u0,+,+/- pair further.
+mulensinstrument.Spitzer.f_source:
+    mu: "0.3266 * mulensinstrument.OGLE4.f_source"
+    sigma: 7.0
+
+# ---- source SED + OGLE zero-point tie ----------------------------------
+# OGLE flux unit 1 = I 22 (calibrated OGLE-IV I, Vega).  The band uses the
+# grid's Cousins I (OGLE-IV I is calibrated onto, and close to, Cousins I).
+# sigma 0.2 covers the I-band calibration and bulge extinction-law
+# systematics: the SED (G + JHKs) predicts the baseline object 0.16 mag
+# fainter in I than OGLE measures, and with sigma 0.03 the fit absorbed that
+# by inventing a +14% blend (Yee: blending ~0) and shifting u0 and t_E.
+# With 0.2 the zero point absorbs it instead (fitted 22.13 +/- 0.15).
+# Spitzer is left UNTIED (no absolute [3.6] zero point; no IRAC BC column);
+# Yee's instrumental-colour prior above still ties its source flux to OGLE's.
+mulensinstrument.OGLE4.zeropoint: {mu: 22.0, sigma: 0.2}
+
+# From mkticsed (TIC 169097367 = Gaia DR3 4118632779506798848): Gaia DR3
+# parallax 0.01360 mas, + 0.04075 (Lindegren+2021 zero point); sigma 0.07070
+# x 1.033 (El-Badry+2021 at G = 16.79) (+) 0.01 mas local systematic.
+star.Source.parallax:
+    mu: 0.05435
+    sigma: 0.07375
+    citation: ["GaiaCollaboration:2016", "GaiaCollaboration:2023", "Lindegren:2021", "ElBadry:2021"]
+
+# mkticsed's star.Source.appks prior is DROPPED: it is the input to the
+# Mann+2015/2019 M-dwarf relations (mann component), which this topology
+# does not have; the Ks datum is already an SED row.
+# mkticsed's Schlegel A_V < 3.32 upper limit is DROPPED: a full-column
+# upper limit, unreliable at b = 3.6 deg toward the bulge.
+# A_V instead from the VVV red-clump extinction map of Surot+2020 (VizieR
+# J/A+A/644/A140): E(J-Ks) = 0.44 +/- 0.01 at 2.9" (nine nearest 0.43-0.45),
+# inverted through the SED's OWN law (components/sed/extinction.py,
+# av_from_colour_excess at 2MASS J/Ks effective wavelengths 1.235/2.159 um):
+# A_V = 0.44 / (0.3048 - 0.1248) = 2.44 (+/- 0.06 from the map alone).
+# sigma 0.49 (20%) covers the extinction-law uncertainty toward the bulge:
+# the NIR slope there is steeper than this table's (Nishiyama+2009), which
+# moves the A_V implied by a fixed E(J-Ks) by tens of percent (and upward).
+star.Source.av:
+    initval: 2.44
+    mu: 2.44
+    sigma: 0.49
+    lower: 0.0
+    upper: 15.0
+
+# Bulge metallicity distribution: broad, centred near solar (Ness+2013,
+# Zoccali+2017: mean ~ -0.1 to 0, dispersion ~0.4); no spectrum.
+star.Source.feh:
+    initval: 0.0
+    mu: 0.0
+    sigma: 0.5
+
+# Source = bulge giant (Yee+2015).  Old-bulge RGB mass ~0.8-1.25 Msun; the
+# mass reaches the SED only through loggsed.
+star.Source.logmass:
+    initval: 0.0
+    mu: 0.0
+    sigma: 0.1
+# Starts only: a ~4600 K giant, sized to I_S ~ 15.2 at ~8 kpc.
+star.Source.teffsed:
+    initval: 4600.0
+star.Source.teff:
+    initval: 4600.0
+star.Source.radiussed:
+    initval: 18.0
+# Start the source in the bulge, not at the parallax's 1000/0.054 = 18 kpc.
+star.Source.distance:
+    initval: 8000.0

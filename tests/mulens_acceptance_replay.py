@@ -219,6 +219,7 @@ GROUP_A = (
     "KMT-2019-BLG-1806_nt24",
     "KMT-2019-BLG-1806_nt8long",
     "ob09020",
+    "ob140939_today",
 )
 GROUP_B = (
     "OGLE_0383LD",
