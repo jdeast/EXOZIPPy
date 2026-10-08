@@ -1625,15 +1625,7 @@ def _wrap_up(
     # consumer is how the convergence check, the mode reporter and the seed
     # ledger come to disagree about how many solutions a chain found.
     wrapup.stage("collapsing declared label degeneracies")
-    refolded = system.fold_degenerate_draws(idata, model)
-    if refolded:
-        # The regenerated deterministics come back in INTERNAL units --
-        # PyMC recomputes them from the model graph, which knows nothing
-        # about the conversion already applied to the rest of the
-        # posterior -- so put just those back in the user's units.
-        _convert_posterior_to_user_units(
-            idata, system.get_parameter_lookup(), only=refolded
-        )
+    fold_degeneracies(system, model, idata)
 
     # Branch-marginalized parameterizations (System.register_branch_
     # alternative; today V_c/V_e): every Deterministic in the trace was
@@ -3527,6 +3519,25 @@ def _sanitize_netcdf_attrs(idata):
                 # (_save_sampled_trace), where nothing may raise, and a
                 # sampler's metadata dict may hold a value json cannot encode.
                 ds.attrs[k] = json.dumps(v, default=str)
+
+
+def fold_degeneracies(system, model, idata):
+    """Collapse the declared label degeneracies of a user-unit posterior,
+    in place (``System.fold_degenerate_draws``), keeping it in user units.
+
+    The wrap-up's fold, shared with ``exozippy-summary``: the fold is not
+    written to the trace on disk, so a reader that rebuilds the reported
+    posterior from that trace must apply it too, and the same way.
+    """
+    refolded = system.fold_degenerate_draws(idata, model)
+    if refolded:
+        # The regenerated deterministics come back in INTERNAL units --
+        # PyMC recomputes them from the model graph, which knows nothing
+        # about the conversion already applied to the rest of the
+        # posterior -- so put just those back in the user's units.
+        _convert_posterior_to_user_units(
+            idata, system.get_parameter_lookup(), only=refolded
+        )
 
 
 def _convert_posterior_to_user_units(idata, param_lookup, only=None):

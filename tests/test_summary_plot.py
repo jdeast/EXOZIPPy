@@ -100,6 +100,102 @@ def test_format_value_collapses_equal_errors_and_marks_fixed_values():
 
 
 # ---------------------------------------------------------------------------
+# The reported posterior
+# ---------------------------------------------------------------------------
+
+
+class _RecordingSystem:
+    """The System calls reported_posterior makes, recorded."""
+
+    def __init__(self):
+        self.calls = []
+
+    def report_only_labels(self):
+        return []
+
+    def fold_degenerate_draws(self, idata, model):
+        self.calls.append(("fold", model))
+        return []
+
+    def distribute_posterior(self, idata):
+        self.calls.append(("distribute", idata))
+
+
+def _trace_with_stale_modes():
+    rng = np.random.default_rng(1)
+    return az.from_dict(
+        {
+            "posterior": {
+                "x": rng.normal(size=(2, 50)),
+                "mode": np.full((2, 50), 3),
+            }
+        }
+    )
+
+
+@pytest.fixture
+def no_trim(monkeypatch):
+    """analyze_idata as the identity, so the test sees what it hands on."""
+    from exozippy.samplers import convergence
+
+    monkeypatch.setattr(
+        convergence, "analyze_idata", lambda idata, exclude=(): (idata, {})
+    )
+
+
+def test_reported_posterior_folds_and_drops_stale_mode_labels(
+    monkeypatch, no_trim
+):
+    """
+    Given a saved trace carrying posterior['mode'] labels from an earlier
+      mode pass,
+    When reported_posterior rebuilds the reported posterior from it,
+    Then it folds the declared degeneracies first (as run._wrap_up does),
+      the mode pass never sees the stale labels, and the posterior is
+      distributed afterwards (review 2.11.8).
+    """
+    from exozippy.outputs import modes
+
+    seen = {}
+
+    def _identify(idata):
+        seen["vars"] = set(idata.posterior.data_vars)
+        return SimpleNamespace(n_modes=1)
+
+    monkeypatch.setattr(modes, "identify_modes", _identify)
+    system = _RecordingSystem()
+    model = object()
+
+    sp.reported_posterior(system, model, _trace_with_stale_modes())
+
+    assert "mode" not in seen["vars"]
+    assert [c[0] for c in system.calls] == ["fold", "distribute"]
+    assert system.calls[0][1] is model
+
+
+def test_reported_posterior_raises_on_a_mode_pass_failure(
+    monkeypatch, no_trim
+):
+    """
+    Given a mode pass that fails for a reason other than "no valid draws",
+    When reported_posterior runs it,
+    Then the failure propagates -- the figure is not drawn from an
+      unlabelled posterior behind a warning.
+    """
+    from exozippy.outputs import modes
+
+    def _identify(idata):
+        raise RuntimeError("mode pass bug")
+
+    monkeypatch.setattr(modes, "identify_modes", _identify)
+
+    with pytest.raises(RuntimeError, match="mode pass bug"):
+        sp.reported_posterior(
+            _RecordingSystem(), object(), _trace_with_stale_modes()
+        )
+
+
+# ---------------------------------------------------------------------------
 # The median draw
 # ---------------------------------------------------------------------------
 
@@ -1106,9 +1202,9 @@ def kelt4_posterior(kelt4_fit):
     try:
         system = System(_kelt4_config())
         system.prepare()
-        system.build_model()
+        model = system.build_model()
         idata = az.from_netcdf("fitresults/KELT-4A_trace.nc")
-        posterior = sp.reported_posterior(system, idata)
+        posterior = sp.reported_posterior(system, model, idata)
         point, where, _distance = sp.median_draw_point(system, posterior)
     finally:
         os.chdir(cwd)

@@ -28,9 +28,10 @@ the per-component PDFs and the GUI share.  A new panel kind is a new
 component chart, not new arithmetic here.
 
 THE REFERENCE POINT IS THE MEDIAN DRAW OF THE REPORTED POSTERIOR.
-``reported_posterior`` reproduces what ``run.py`` reports from -- burn-in and
-stuck chains trimmed (``convergence.analyze_idata``), draws the mode pass
-rejects as numerically invalid labelled -1 -- and ``median_draw_point`` takes
+``reported_posterior`` reproduces what ``run.py`` reports from -- the declared
+label degeneracies folded, burn-in and stuck chains trimmed
+(``convergence.analyze_idata``), draws the mode pass rejects as numerically
+invalid labelled -1 -- and ``median_draw_point`` takes
 the valid draw nearest its median: one joint draw, never a vector of
 per-parameter medians, which need not be a point the posterior contains, and
 a typical draw rather than the highest-lp one (see that function for why).
@@ -269,47 +270,45 @@ _KIEL_AGE_MARK = {"color": "b", "marker": "o", "ms": 6}
 # ---------------------------------------------------------------------------
 
 
-def reported_posterior(system, idata):
+def reported_posterior(system, model, idata):
     """The posterior a fit's tables and plots describe, distributed onto
     ``system``'s Parameters.
 
     ``idata`` is the trace as saved -- run.py keeps the FULL, untrimmed trace
-    on disk and trims a view for every report -- so this repeats that
-    trimming: ``convergence.analyze_idata`` drops burn-in and stuck chains,
-    and ``identify_modes`` labels the draws it rejects as numerically
-    invalid -1, which ``distribute_posterior`` then leaves out of every
-    summary and ``median_draw_point`` out of its choice.  A mode pass that
-    finds NO valid draw raises (a figure of rejected draws is meaningless);
-    any other mode-pass failure is the one ``report_pipeline`` tolerates --
-    the tables then describe the combined posterior -- and is tolerated here
-    for the same reason, with the same warning.
+    on disk and derives every report from it -- so this repeats what
+    ``run._wrap_up`` does between that trace and the tables:
+    ``run.fold_degeneracies`` collapses the declared label degeneracies
+    (not written to disk), ``convergence.analyze_idata`` drops burn-in and
+    stuck chains, and ``identify_modes`` labels the draws it rejects as
+    numerically invalid -1, which ``distribute_posterior`` then leaves out
+    of every summary and ``median_draw_point`` out of its choice.  Labels
+    an earlier mode pass left on the trace are dropped first, as
+    ``report_pipeline`` drops them (review 2.11.8).  Any mode-pass failure
+    raises, ``NoValidDrawsError`` included: a figure of rejected draws is
+    meaningless, and every other failure is a bug ``report_pipeline``
+    raises on too.
 
     Returns the trimmed InferenceData, ``posterior["mode"]`` attached.
-    ``system`` must be built (``prepare()`` + ``build_model()``).
+    ``system`` must be built (``prepare()`` + ``build_model()``) and
+    ``model`` is what ``build_model`` returned.
     """
+    from ..run import fold_degeneracies
     from ..samplers import convergence
-    from .modes import NoValidDrawsError, identify_modes
+    from .modes import identify_modes
 
+    fold_degeneracies(system, model, idata)
     report_only = set(system.report_only_labels())
     trimmed, _ = convergence.analyze_idata(idata, exclude=report_only)
-    try:
-        report = identify_modes(trimmed)
-    except NoValidDrawsError:
-        raise
-    except Exception:  # noqa: BLE001 - report_pipeline's tolerance, see above
+    if "mode" in trimmed.posterior.data_vars:
+        del trimmed.posterior["mode"]
+    report = identify_modes(trimmed)
+    if report.n_modes > 1:
         logger.warning(
-            "summary plot: mode identification failed; ranking every "
-            "post-burn-in draw (the fit's tables fall back the same way).",
-            exc_info=True,
+            f"summary plot: the posterior has {report.n_modes} modes.  "
+            "The panels are drawn at the median draw, which lies in "
+            "one of them, and the header quotes the COMBINED posterior; "
+            "the per-mode values are in the results table."
         )
-    else:
-        if report.n_modes > 1:
-            logger.warning(
-                f"summary plot: the posterior has {report.n_modes} modes.  "
-                "The panels are drawn at the median draw, which lies in "
-                "one of them, and the header quotes the COMBINED posterior; "
-                "the per-mode values are in the results table."
-            )
     system.distribute_posterior(trimmed)
     return trimmed
 
@@ -1953,11 +1952,11 @@ def create_summary_plot(
 
         system = System(config)
         system.prepare()
-        system.build_model()
+        model = system.build_model()
 
         idata = az.from_netcdf(str(trace_path))
         check_trace_freshness(idata, system, trace_path)
-        posterior = reported_posterior(system, idata)
+        posterior = reported_posterior(system, model, idata)
         if title is None:
             title = (config.get("run") or {}).get("name")
         if out is None:
