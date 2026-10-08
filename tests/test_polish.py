@@ -20,7 +20,6 @@ from pytensor.graph.op import Op
 
 from exozippy.components.parameter import Parameter
 from exozippy.polish import (
-    DEFAULT_POLISH_STEPS,
     ENGINE_DEFAULT,
     polish_raw_starts,
     resolve_polish_steps,
@@ -400,8 +399,9 @@ def test_integer_one_is_one_step_not_the_default():
 
     Regression (review 2.9.1, #104): the old
     `spec in (True, "on")` test matched the integer 1, because 1 == True in
-    Python, so asking for a single step silently got DEFAULT_POLISH_STEPS
-    (then 150, now 400).  Every small integer 2..N was honored, which is
+    Python, so asking for a single step silently got the default cap
+    (then 150 L-BFGS iterations).  Every small integer 2..N was honored,
+    which is
     what made the one-value hole invisible.
     """
     assert (
@@ -602,7 +602,7 @@ def test_an_improvement_window_would_quit_on_a_staircase_plateau():
 def test_lbfgs_polish_stops_on_the_gradient_not_the_cap():
     """
     Given a smooth quadratic basin and a 150-iteration cap (the shipped
-      DEFAULT_POLISH_STEPS is larger; the point is that neither is reached),
+      L-BFGS engine has none; the point is that it is not reached),
     When the L-BFGS engine polishes,
     Then it converges on the gradient tolerance in a handful of iterations
       -- the cap is a safety net, never the stopping criterion -- and
@@ -618,11 +618,16 @@ def test_lbfgs_polish_stops_on_the_gradient_not_the_cap():
 
     # ACT
     _cap1, dlp_1, _m1 = polish_raw_starts(model, [start], n_steps=1)
-    full, dlp_full, _m2 = polish_raw_starts(model, [start], n_steps=150)
+    stops = []
+    full, dlp_full, _m2 = polish_raw_starts(
+        model, [start], n_steps=150, stops_out=stops
+    )
 
     # ASSERT
     assert dlp_1[0] < dlp_full[0]
     assert float(lp_fn(full[0])) == pytest.approx(0.0, abs=1.0)
+    assert stops[0][0] == "converged", stops
+    assert stops[0][1].startswith("converged: |grad| <"), stops
 
 
 # ---------------------------------------------------------------------------
@@ -1552,13 +1557,16 @@ def test_ulp_perturbation_does_not_move_the_polished_start(
       (lp, grad) multiplied by (1 + s*2**-52) for four seeds -- one ulp of
       arithmetic difference per evaluation, the size of a cross-runner
       libm/BLAS-kernel difference,
-    When each is polished by _lbfgs_polish_one under the SHIPPED constants,
-    Then every seed converges (none hits DEFAULT_POLISH_STEPS) and the four
+    When each is polished by _lbfgs_polish_one under the SHIPPED gradient
+      tolerance, with the driver's rate stop and cap OFF (this pins the
+      engine's own stop, which the last round of a converging polish ends on),
+    Then every seed converges on the gradient (none stops any other way, and
+      none needs more than the 400 iterations it was measured at) and the four
       polished starts agree in cosi to ~5x the measured 16-seed width and
       in lp to ~5x its width -- i.e. the stop is a converged optimum, not
       a first dip on the ridge (review 7.13.8).
     """
-    from exozippy.polish import DEFAULT_POLISH_STEPS, _lbfgs_polish_one
+    from exozippy.polish import PolishMonitor, _lbfgs_polish_one
 
     model, raw_start, fn, cosi_par = kelt4_rvonly_polish_inputs
     keys = list(raw_start.keys())
@@ -1569,14 +1577,26 @@ def test_ulp_perturbation_does_not_move_the_polished_start(
     # Act
     cosis, lps, iters, capped = [], [], [], []
     for seed in _ULP_SEEDS:
-        best, lp0, lp_best, _n_evals, n_iter, hit_cap = _lbfgs_polish_one(
+        monitor = PolishMonitor(
+            1,
+            unit="iterations",
+            cap=None,
+            tol=None,
+            window=0,
+            label="ulp harness",
+            progress_interval_s=None,
+        )
+        best, lp0, lp_best, _n_evals = _lbfgs_polish_one(
             raw_start,
             _ulp_perturbed(fn, keys, seed),
             keys,
             shapes,
             sizes,
-            maxiter=DEFAULT_POLISH_STEPS,
+            monitor,
+            0,
         )
+        n_iter = monitor.steps[0]
+        hit_cap = monitor.stop_kind[0] != "converged" or n_iter > 400
         raw = float(np.asarray(best["orbit.cosi_raw"]).reshape(-1)[0])
         cosis.append(float(cosi_par.element_phys_from_raw(0, raw)))
         lps.append(lp_best)
@@ -1586,8 +1606,9 @@ def test_ulp_perturbation_does_not_move_the_polished_start(
 
     # Assert: converged, not capped
     assert not any(capped), (
-        f"seeds {[s for s, c in zip(_ULP_SEEDS, capped) if c]} hit the "
-        f"{DEFAULT_POLISH_STEPS}-iteration cap ({iters} iterations). Under the "
+        f"seeds {[s for s, c in zip(_ULP_SEEDS, capped) if c]} did not "
+        f"converge on the gradient within the 400 iterations kelt4 was "
+        f"measured at ({iters} iterations). Under the "
         f"shipped gtol kelt4 needs 240-294; a cap-stop is an unconverged "
         f"start whose value depends on the arithmetic that produced it."
     )
@@ -1883,7 +1904,14 @@ def test_polish_raw_starts_forwards_the_engine_choice(monkeypatch):
     seen = {}
 
     def _spy(raw_starts, logp_fn, rng, scales, **kw):
+        # An engine under the shared driver: open each seed with the
+        # monitor and step it until the monitor stops it (the 3-step cap).
         seen.update(kw)
+        monitor = kw["monitor"]
+        for s in range(len(raw_starts)):
+            monitor.begin(s, 0.0)
+            while not monitor.step(s, 0.0):
+                pass
         return list(raw_starts), [0.0 for _ in raw_starts]
 
     monkeypatch.setattr(ptde_mod, "polish_seed_starts", _spy)
@@ -1971,7 +1999,7 @@ def test_pipeline_de_polish_stops_on_rate(caplog):
         return lp(p)
 
     # ACT
-    with caplog.at_level(logging.INFO, logger="exozippy.samplers.ptde"):
+    with caplog.at_level(logging.INFO):
         polish_raw_starts(
             model, [{"x": np.array(3.0)}], logp_fn=counting, cores=1
         )
@@ -1979,6 +2007,7 @@ def test_pipeline_de_polish_stops_on_rate(caplog):
     # ASSERT
     assert POLISH_TOL_WINDOW == 400
     assert (len(calls) - 8) / 8 == POLISH_TOL_WINDOW + 1
+    assert "Seed polish (DE): seed 0" in caplog.text
     assert "stopped on rate" in caplog.text
 
 
@@ -2082,33 +2111,39 @@ def _rounds_model(initval=2.0):
     return model, p
 
 
-def test_polish_rounds_lbfgs_is_one_round_and_unchanged():
+def test_polish_rounds_runs_the_lbfgs_engine_through_the_same_rounds(caplog):
     """
-    Given a DIFFERENTIABLE model (the L-BFGS engine),
+    Given a DIFFERENTIABLE model (the L-BFGS engine) and re-whitening on,
     When polish_rounds runs,
-    Then it is exactly one polish_raw_starts + apply -- the pipeline
-      before review 2.4.14 (run.py re-centers next, as it always did) -- so
-      every model with a gradient keeps a bit-identical start.
+    Then it runs the same loop the DE engine does -- round 2 re-whitens and
+      polishes again with L-BFGS, the loop ends on a round that gains less
+      than the threshold, and the wrap-up names each seed's stop reason.
+
+    Until 2026-10-07 the L-BFGS engine was "one round, as before", a
+    separate path that kept a 400-iteration cap after the DE path gained
+    rounds and a rate stop; on examples/ob140939 that cap stranded every
+    seed 2-7 nats below its basin optimum.  A reintroduced one-round
+    L-BFGS shortcut fails here.
     """
-    # ARRANGE: two identical copies, one through each path
-    model_a, p_a = _toy_param_model()
-    model_b, p_b = _toy_param_model()
     from exozippy.polish import polish_rounds
 
-    # ACT
-    summary = polish_rounds(
-        _RoundsSystem([p_a]), model_a, cores=1, rewhiten=True
-    )
-    sys_b = _RoundsSystem([p_b])
-    raws, idx = sys_b.get_raw_starts(model_b)
-    polished, _d, _m = polish_raw_starts(model_b, raws, seed_indices=idx)
-    sys_b.apply_polished_starts(polished, idx)
+    model, p = _toy_param_model()
+    system = _RoundsSystem([p])
 
-    # ASSERT
+    with caplog.at_level(logging.INFO, logger="exozippy.polish"):
+        summary = polish_rounds(system, model, cores=1, rewhiten=True)
+
     assert summary["method"] == "lbfgs"
-    assert len(summary["rounds"]) == 1
-    np.testing.assert_array_equal(p_a.raw_initval, p_b.raw_initval)
-    assert p_a.initval == p_b.initval
+    assert len(summary["rounds"]) >= 2
+    assert summary["stop"] == "converged"
+    assert summary["rounds"][-1][0] < 1.0  # polish_tol_nats(1)
+    assert "Seed polish round 2" in caplog.text
+    assert caplog.text.count("Seed polish (L-BFGS): seed 0") == len(
+        summary["rounds"]
+    )
+    assert summary["reasons"][0].startswith("converged: |grad| <")
+    assert "last round converged: |grad| <" in caplog.text
+    assert p.initval == pytest.approx(7.5, abs=0.01)
 
 
 def test_polish_rounds_rewhitens_and_polishes_again_on_the_de_engine(caplog):
@@ -2224,3 +2259,342 @@ def test_seeds_walked_together_across_rounds_are_warned_about(caplog):
         _warn_if_seeds_converged(system, model, lookup, origins, 3)
 
     assert "after round 3, seeds 0 and 1" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# ONE driver, two engines (JDE 2026-10-07): the shared stopping rule
+# ---------------------------------------------------------------------------
+
+
+class _FakeClock:
+    """A stand-in for polish.py's `time` module: monotonic() returns `now`,
+    which the test advances by hand."""
+
+    def __init__(self, now=1000.0):
+        self.now = now
+
+    def monotonic(self):
+        return self.now
+
+
+def _monitor(n=1, **kw):
+    from exozippy.polish import PolishMonitor
+
+    args = dict(
+        unit="iterations",
+        cap=None,
+        tol=1.0,
+        window=5,
+        label="test",
+        progress_interval_s=None,
+    )
+    args.update(kw)
+    return PolishMonitor(n, **args)
+
+
+def test_monitor_stops_on_rate_after_a_full_window_of_small_gains():
+    """
+    Given a seed whose best lp climbs 2 nats per step and then 0.1,
+    When it is stepped under a 5-step window and a 1-nat threshold,
+    Then it stops exactly when the last 5 steps gained < 1 nat -- not on the
+      first small step -- and says "stopped on rate".
+    """
+    m = _monitor()
+    m.begin(0, 0.0)
+    lp, stopped_at = 0.0, None
+    for k in range(1, 100):
+        lp += 2.0 if k <= 10 else 0.1
+        if m.step(0, lp):
+            stopped_at = k
+            break
+    assert stopped_at == 15  # steps 11..15 gained 0.5 nats
+    assert m.stop_kind[0] == "rate"
+    assert m.describe(0) == (
+        "stopped on rate: gained < 1 nats over the last 5 iterations"
+    )
+
+
+def test_monitor_stops_on_cap_and_rate_off_runs_to_it():
+    """
+    Given a 7-step cap and the rate stop switched off (tol=None),
+    When a seed that never gains is stepped,
+    Then it runs all 7 steps and says "stopped on cap".
+    """
+    m = _monitor(cap=7, tol=None, unit="sweeps")
+    m.begin(0, 0.0)
+    n = 0
+    while not m.step(0, 0.0):
+        n += 1
+    assert m.steps[0] == 7
+    assert m.describe(0) == "stopped on cap: ran all 7 sweeps"
+
+
+def test_monitor_stops_on_timeout_mid_run(monkeypatch):
+    """
+    Given a deadline 10 s out and a seed still gaining 5 nats a step,
+    When the clock passes the deadline,
+    Then the very next step stops it "on timeout" -- the timeout STOPS the
+      polish, it is not an alarm -- and a seed begun after the deadline is
+      never started.
+    """
+    import exozippy.polish as polish_mod
+
+    clock = _FakeClock()
+    monkeypatch.setattr(polish_mod, "time", clock)
+    m = _monitor(n=2, deadline=clock.now + 10.0, budget_s=10.0)
+    assert not m.begin(0, 0.0)
+    assert not m.step(0, 5.0)
+    clock.now += 11.0
+    assert m.step(0, 10.0)
+    assert m.stop_kind[0] == "timeout"
+    assert m.describe(0) == (
+        "stopped on timeout: the polish's 10 s wall-clock budget ran out"
+    )
+    assert m.begin(1, 0.0)
+    assert m.done(1) and m.steps[1] == 0
+    assert m.timed_out()
+
+
+def test_monitor_records_the_engine_convergence_and_never_overwrites():
+    """
+    Given an engine that ends a seed on its own criterion,
+    When it reports with finish("converged", why),
+    Then the reason reads "converged: <why>"; and a seed the DRIVER already
+      stopped keeps the driver's reason.  Only engine stop kinds are
+      accepted from an engine.
+    """
+    m = _monitor(n=2, cap=1)
+    m.begin(0, 0.0)
+    m.finish(0, "converged", "|grad| < 0.0001 nats/unit")
+    assert m.describe(0) == "converged: |grad| < 0.0001 nats/unit"
+    m.begin(1, 0.0)
+    assert m.step(1, 0.0)  # the cap
+    m.finish(1, "converged", "too late")
+    assert m.describe(1) == "stopped on cap: ran all 1 iterations"
+    with pytest.raises(ValueError, match="not an engine stop"):
+        m.finish(0, "rate")
+
+
+def test_monitor_refuses_to_describe_a_seed_nobody_stopped():
+    """An engine that returns a seed without step()/finish() ending it is a
+    bookkeeping bug, and the per-seed line raises rather than invent one."""
+    m = _monitor()
+    m.begin(0, 0.0)
+    with pytest.raises(RuntimeError, match="no recorded stop"):
+        m.describe(0)
+
+
+def test_progress_line_without_a_cap_reports_the_rate_and_no_eta(caplog):
+    """
+    Given a monitor with no cap (the L-BFGS default) and a heartbeat on
+      every opportunity,
+    When it writes a line,
+    Then the line has the step, the rate in the engine's unit and each
+      seed's gain -- and no eta, which needs a cap to extrapolate to.
+    """
+    m = _monitor(progress_interval_s=1e-9)
+    m.begin(0, 0.0)
+    m.step(0, 3.0)
+    with caplog.at_level(logging.INFO, logger="exozippy.polish"):
+        m.heartbeat(detail=lambda: "  (seed 0)")
+    line = caplog.records[-1].getMessage()
+    assert line.startswith("test: iteration 1  elapsed=")
+    assert "iterations/min" in line
+    assert "eta" not in line
+    assert "dlp=[+3.0]  (seed 0)" in line
+
+
+class _ScriptedEngine:
+    """A fake engine for the driver: round r gains gains[r] nats on every
+    seed in `steps` steps, then the driver's stopping rule decides."""
+
+    def __init__(self, gains, steps=3, clock=None, tick=0.0):
+        self.gains = list(gains)
+        self.steps = steps
+        self.calls = 0
+        self.clock = clock
+        self.tick = tick
+
+    def engine(self, *args, **kwargs):
+        from exozippy.polish import _Engine
+
+        def run(raw_starts, monitor):
+            gain = self.gains[min(self.calls, len(self.gains) - 1)]
+            self.calls += 1
+            out, lps = [], []
+            for s, start in enumerate(raw_starts):
+                monitor.begin(s, 0.0)
+                lp = 0.0
+                while not monitor.done(s):
+                    if self.clock is not None:
+                        self.clock.now += self.tick
+                    lp = min(lp + gain / self.steps, gain)
+                    if monitor.step(s, lp):
+                        break
+                    if lp >= gain:
+                        monitor.finish(s, "converged", "scripted")
+                out.append(dict(start))
+                lps.append(monitor.best[s])
+            return out, lps, [""] * len(out)
+
+        return _Engine(
+            "lbfgs", "Fake", "iterations", None, run, "Fake polish", None
+        )
+
+
+def test_driver_rounds_stop_on_the_first_round_that_gains_less_than_tol(
+    monkeypatch,
+):
+    """
+    Given a fake engine whose rounds gain 50, 20, 0.5 nats (the driver
+      deciding everything that is not the optimizer),
+    When polish_rounds runs with re-whitening on,
+    Then it runs exactly three rounds, stops "converged" on the round that
+      gained < polish_tol_nats(1) = 1 nat, and reports each seed's last
+      stop reason.
+    """
+    import exozippy.polish as polish_mod
+
+    fake = _ScriptedEngine([50.0, 20.0, 0.5])
+    monkeypatch.setattr(polish_mod, "_lbfgs_engine", fake.engine)
+    model, p = _toy_param_model()
+
+    summary = polish_mod.polish_rounds(
+        _RoundsSystem([p]), model, cores=1, rewhiten=True
+    )
+
+    assert fake.calls == 3
+    assert [r[0] for r in summary["rounds"]] == pytest.approx([50, 20, 0.5])
+    assert summary["stop"] == "converged"
+    assert summary["reasons"] == {0: "converged: scripted"}
+
+
+def test_driver_timeout_stops_the_round_and_starts_no_other(monkeypatch):
+    """
+    Given a fake engine that would gain 50 nats per round for ever, a
+      100 s polish budget and a clock that advances 30 s per step,
+    When polish_rounds runs,
+    Then the step that crosses the budget stops the seed "on timeout",
+      no further round starts, and the polish's stop is "timeout".
+    """
+    import exozippy.polish as polish_mod
+
+    clock = _FakeClock()
+    monkeypatch.setattr(polish_mod, "time", clock)
+    fake = _ScriptedEngine([50.0], steps=10, clock=clock, tick=30.0)
+    monkeypatch.setattr(polish_mod, "_lbfgs_engine", fake.engine)
+    model, p = _toy_param_model()
+
+    summary = polish_mod.polish_rounds(
+        _RoundsSystem([p]), model, cores=1, rewhiten=False, timeout_s=100.0
+    )
+
+    assert fake.calls == 1
+    assert summary["stop"] == "timeout"
+    assert summary["reasons"][0].startswith("stopped on timeout")
+
+
+def test_both_real_engines_report_every_step_to_one_shared_monitor(
+    monkeypatch,
+):
+    """
+    Given the REAL L-BFGS engine (a differentiable model) and the REAL DE
+      engine (a gradient-free one),
+    When polish_raw_starts runs each,
+    Then each round builds exactly ONE PolishMonitor, the engine reports
+      its steps to it (iterations / sweeps), and the stop reason comes from
+      it.  A reintroduced private L-BFGS loop -- a scipy run with its own
+      maxiter and no monitor, which is how the two engines drifted apart --
+      leaves the monitor with zero steps and fails here.
+    """
+    import exozippy.polish as polish_mod
+
+    made = []
+
+    class _Recording(polish_mod.PolishMonitor):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            made.append(self)
+
+    monkeypatch.setattr(polish_mod, "PolishMonitor", _Recording)
+
+    # L-BFGS: a curved valley needs several iterations.
+    with pm.Model() as smooth:
+        x = pm.Flat("x")
+        y = pm.Flat("y")
+        pm.Potential("like", -0.5 * ((y - x**2) ** 2 / 0.01 + (x - 1.0) ** 2))
+    _p, _d, method = polish_raw_starts(
+        smooth, [{"x": np.array(-1.0), "y": np.array(1.0)}]
+    )
+    assert method == "lbfgs"
+    assert len(made) == 1
+    assert made[0].unit == "iterations" and made[0].cap is None
+    assert made[0].steps[0] > 3
+    assert made[0].stop_kind[0] == "converged"
+
+    # DE: the gradient-free fallback, serial and synchronous.
+    _p, _d, method = polish_raw_starts(
+        _nograd_model(), [{"x": np.array(0.0)}], n_steps=7, cores=1
+    )
+    assert method == "de"
+    assert len(made) == 2
+    assert made[1].unit == "sweeps" and made[1].cap == 7
+    assert made[1].steps[0] == 7
+    assert made[1].stop_kind[0] == "cap"
+
+
+@pytest.mark.parametrize("gradient", [True, False])
+def test_a_spent_budget_takes_no_step_on_either_engine(gradient, caplog):
+    """
+    Given a polish deadline that has already passed,
+    When polish_raw_starts runs either real engine,
+    Then no engine step is taken (0 L-BFGS iterations; 0 DE sweeps -- the
+      DE engine still keeps the best member of the population it scored
+      to open, which is never worse than the seed), and each seed's line
+      says "stopped on timeout": the budget is the shared driver's, so it
+      holds on both engines identically.
+    """
+    import time as _time
+
+    if gradient:
+        model, start = _toy_param_model()[0], {"toy.x_raw": np.array([0.0])}
+    else:
+        model, start = _nograd_model(), {"x": np.array(0.0)}
+    with caplog.at_level(logging.INFO):
+        polished, dlps, method = polish_raw_starts(
+            model,
+            [start],
+            cores=1,
+            deadline=_time.monotonic() - 1.0,
+            budget_s=5.0,
+        )
+    assert method == ("lbfgs" if gradient else "de")
+    assert dlps[0] >= 0.0
+    if gradient:
+        assert dlps == [0.0]
+        np.testing.assert_array_equal(polished[0]["toy.x_raw"], [0.0])
+        assert "(dlp=+0.0, 0 iterations / 1 evaluations, stopped on" in (
+            caplog.text
+        )
+    else:
+        assert "seed 0: 0 steps x 8 pop" in caplog.text
+    assert "stopped on timeout: the polish's 5 s wall-clock budget" in (
+        caplog.text
+    )
+
+
+def test_polish_timeout_spellings():
+    """
+    Given the sampler-config `polish_timeout` value,
+    When resolve_polish_timeout maps it,
+    Then a positive number is seconds, null removes the budget, and 0, a
+      negative number, a bool or a string raise -- a typo is not a request.
+    """
+    from exozippy.polish import resolve_polish_timeout
+
+    assert resolve_polish_timeout(3600) == 3600.0
+    assert resolve_polish_timeout(1.5) == 1.5
+    assert resolve_polish_timeout(None) is None
+    for bad in (0, -1, True, "1h", float("nan")):
+        with pytest.raises(ValueError, match="polish_timeout"):
+            resolve_polish_timeout(bad)

@@ -417,7 +417,8 @@ _START_ROW = re.compile(
     r"\s+(?P<units>[^|]*?)\s*\|"
 )
 
-# polish.py's own summary line, the only place the run reports a TOTAL logp:
+# polish.py's own per-seed line, the only place the run reports a TOTAL logp,
+# once per polish ROUND (the L-BFGS engine runs rounds since 2026-10-07):
 #   ... exozippy.polish: Seed polish (L-BFGS): seed 0 lp -601.1 -> 81.9 (...)
 _POLISH_LP = re.compile(
     r"Seed polish \(L-BFGS\): seed 0 lp\s+"
@@ -460,13 +461,22 @@ def read_polish_logp(log_path):
     present.  `inspect_start` prints a per-parameter Log-Prob column but no
     total, and the rows it suppresses (the logit-uniform log-volume terms)
     mean the printed column cannot be summed into one; the polish summary is
-    the run's only whole-model logp.
+    the run's only whole-model logp.  The polish runs in ROUNDS, one line per
+    round: the build lp is the FIRST round's "before" and the polished lp
+    the LAST round's "after" (a later round's "before" is the previous
+    round's point re-expressed under the re-measured whitening, whose
+    soft-bound barriers can move the lp by a little).
     """
-    for line in Path(log_path).read_text().splitlines():
-        m = _POLISH_LP.search(line)
-        if m is not None:
-            return float(m.group("before")), float(m.group("after"))
-    return None, None
+    found = [
+        m
+        for m in map(
+            _POLISH_LP.search, Path(log_path).read_text().splitlines()
+        )
+        if m is not None
+    ]
+    if not found:
+        return None, None
+    return float(found[0].group("before")), float(found[-1].group("after"))
 
 
 def test_run_fit_kelt4_start_is_physical(kelt4_result):

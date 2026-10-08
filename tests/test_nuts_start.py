@@ -406,14 +406,18 @@ def nuts_dispatch(tmp_path_factory):
 
     def stub_polish(model, raw_starts, **kwargs):
         """Return the same starts displaced by _POLISH_OFFSET, in the shape
-        polish_raw_starts promises: (polished_raws, dlps, method_name)."""
+        polish_raw_starts promises: (polished_raws, dlps, method_name), plus
+        one (kind, reason) per seed in ``stops_out``.  Every round displaces
+        (polish_rounds runs two with re-whitening on), so the start run.py
+        re-centers last is always off the anchor it re-centers from."""
+        offset = _POLISH_OFFSET
         polished = [
-            {
-                k: np.asarray(v, dtype=float) + _POLISH_OFFSET
-                for k, v in s.items()
-            }
+            {k: np.asarray(v, dtype=float) + offset for k, v in s.items()}
             for s in raw_starts
         ]
+        kwargs["stops_out"].extend(
+            ("converged", "converged: stub") for _ in polished
+        )
         return polished, [0.0] * len(polished), "stub"
 
     def spy_get_mcmc_init(self, model):

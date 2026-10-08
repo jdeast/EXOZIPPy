@@ -61,13 +61,18 @@ Returns arviz.InferenceData compatible with the EXOZIPPy pipeline.
 """
 
 import logging
+import math
 import queue
 import signal
 import time
 
 import numpy as np
 
-from exozippy.logger import fmt_duration
+from exozippy.polish import (  # the shared polish driver (polish.py)
+    POLISH_PROGRESS_S,
+    POLISH_TOL_WINDOW,
+    PolishMonitor,
+)
 from exozippy.samplers import _common, convergence
 from exozippy.samplers._common import (  # noqa: F401
     DE_JITTER,
@@ -111,15 +116,19 @@ from exozippy.whitening import (
     probe_step_1d as _probe_step_1d,
 )
 
-# IMPROVEMENT WINDOW for the gradient-free polish: a seed stops when its best
-# point has gained less than `tol` nats over the last `tol_window` sweeps.
-# polish_seed_starts' own default is still OFF (tol=None: run the cap).  The
-# PIPELINE turns it on -- polish.polish_raw_starts passes
+# IMPROVEMENT WINDOW (the RATE stop) on the gradient-free polish: a seed
+# stops when its best point has gained less than `tol` nats over the last
+# `tol_window` sweeps.  The window itself is the shared driver's
+# (polish.PolishMonitor; POLISH_TOL_WINDOW is defined in polish.py and
+# re-exported here), and it is the same rule on the L-BFGS engine, counted
+# in iterations.  polish_seed_starts' own default, when it is called
+# WITHOUT a monitor, is still OFF (tol=None: run the cap).  The PIPELINE
+# turns it on -- polish.polish_raw_starts hands this engine a monitor with
 # tol = polish.polish_tol_nats(D) over POLISH_TOL_WINDOW sweeps (review
-# 2.4.14, JDE ruling 2026-09-14) -- and this note is why that is safe there
-# when it was not before.
+# 2.4.14, JDE ruling 2026-09-14) -- and this note is the DE measurement
+# behind why that is safe there when it was not before.
 #
-# The L-BFGS engine stops on its GRADIENT NORM (polish.py _LBFGS_GTOL) -- an
+# The L-BFGS engine also has its GRADIENT NORM (polish.py _LBFGS_GTOL) -- an
 # actual statement about the local surface.  No such quantity exists here;
 # this engine is gradient-free by construction.  The only observable is the
 # best-lp history, and on a real binary-lens surface that history is a
@@ -167,7 +176,12 @@ from exozippy.whitening import (
 # ABSOLUTE nats, never relative to |lp|: logp carries an arbitrary additive
 # normalization, so a relative threshold means something different for every
 # model -- the trap documented on polish._LBFGS_FTOL.
-POLISH_TOL_WINDOW = 400
+#
+#
+# POLISH_TOL_WINDOW itself is polish.py's (imported above): the stopping rule
+# and the progress line are the shared driver's (JDE 2026-10-07: one code
+# path for both engines); this engine reports each sweep to the monitor and
+# stops a seed when told to.
 
 
 # Acceptance the polish adapts gamma toward, and how many proposals it
@@ -179,17 +193,8 @@ POLISH_TARGET_ACCEPT = 0.2
 POLISH_GAMMA_WINDOW = 4  # sweeps between gamma updates
 
 
-# Wall-clock heartbeat for the polish, in seconds.  WALL CLOCK rather than
-# "every N sweeps" because the quantity a watcher needs is "is this process
-# alive", and a sweep on a binary-lens model can take anywhere from
-# milliseconds to minutes -- a sweep count that is chatty on one model is
-# silent for 40 minutes on another.  30 s is short enough that a human (or
-# an agent) never has to sample /proc/<pid>/stat to tell computing from
-# hung, and long enough that a fast model adds a handful of lines to the
-# whole run.  A short polish emits NOTHING: the first heartbeat is one
-# interval in, so the test suite and every sub-30 s polish stay silent
-# (review 2.3.5, which cost a wrong diagnosis in the session that found it).
-POLISH_PROGRESS_S = 30.0
+# The polish heartbeat interval, POLISH_PROGRESS_S, is polish.py's (imported
+# above): one progress line for both engines.
 
 # Floor on how often the in-batch wait wakes up to let the heartbeat fire.
 # The wait aims at a quarter of `progress_interval_s` so a beat is never much
@@ -198,25 +203,32 @@ POLISH_PROGRESS_S = 30.0
 POLISH_POLL_MIN_S = 0.05
 
 
+# Sentinel for polish_seed_starts' stopping arguments: "not given".  They
+# have defaults of their own only when no monitor is passed; with one, the
+# monitor is the single source and passing them too is refused.
+_FROM_MONITOR = object()
+
+
 def polish_seed_starts(
     raw_starts,
     logp_fn,
     rng,
     scales,
-    n_steps=150,
+    n_steps=_FROM_MONITOR,
     pop_size=None,
     gamma=None,
-    tol=None,
-    tol_window=POLISH_TOL_WINDOW,
+    tol=_FROM_MONITOR,
+    tol_window=_FROM_MONITOR,
     pool=None,
     adapt_gamma=False,
     trust_fraction=0.5,
     target_accept=POLISH_TARGET_ACCEPT,
     gamma_window=POLISH_GAMMA_WINDOW,
-    progress_interval_s=POLISH_PROGRESS_S,
+    progress_interval_s=_FROM_MONITOR,
     eval_timeout=None,
     pool_recycler=None,
     asynchronous=True,
+    monitor=None,
 ):
     """Parallel T=1 differential-evolution polish of each seed's raw start.
 
@@ -226,13 +238,20 @@ def polish_seed_starts(
     difference-vector proposals, the same move the sampler itself uses), and
     return the best-lp point visited as the new seed.
 
-    Stopping: ``n_steps`` sweeps, or -- when ``tol`` is given -- a seed whose
-    best point gained less than ``tol`` nats over its last ``tol_window``
-    sweeps.  This function's own default is the cap (``tol=None``); the
-    pipeline's caller, polish.polish_raw_starts, turns the window on and runs
-    the polish in rounds -- see the POLISH_TOL_WINDOW comment for the
-    measurement behind both.  The wrap-up line names which stop fired
-    ("stopped on rate" / "stopped on cap").
+    Stopping is NOT this function's: it is the shared driver's
+    (``monitor``, a polish.PolishMonitor in sweeps -- the same rule the
+    L-BFGS engine runs under, JDE 2026-10-07).  Each completed sweep is
+    reported to ``monitor.step`` and a seed stops when that says so: on the
+    cap, on the rate window or on the polish's wall-clock deadline.  The
+    pipeline's caller, polish.polish_raw_starts, builds the monitor (rate
+    window ON) and runs the polish in rounds -- see the POLISH_TOL_WINDOW
+    comment for the DE measurement behind both.  Called WITHOUT a monitor,
+    this function builds one from ``n_steps`` (default 150 sweeps), ``tol``
+    (default None: no rate stop), ``tol_window`` (POLISH_TOL_WINDOW) and
+    ``progress_interval_s`` (POLISH_PROGRESS_S) -- the historical standalone
+    defaults; with one, those four must not be passed.  The wrap-up line
+    names which stop fired ("stopped on rate" / "stopped on cap" / "stopped
+    on timeout").
 
     Rationale: an unpolished solution-estimate seed (e.g. an external
     fitter's solution) can start hundreds of nats below its own basin's optimum, and
@@ -340,8 +359,10 @@ def polish_seed_starts(
     result that raced the write-off finds its id gone and is dropped.
 
     PROGRESS.  Every ``progress_interval_s`` seconds of wall clock one line
-    is logged: which sweep against the cap, elapsed, an upper-bound ETA at
-    the rate so far, and each seed's gain so far.  This engine is the long
+    is logged (by the monitor -- the shared progress line -- with this
+    engine's acceptance counts appended): which sweep against the cap,
+    elapsed, an upper-bound ETA at the rate so far, and each seed's gain so
+    far.  This engine is the long
     pole of a gradient-free wrap-up and used to run entirely mute -- on
     examples/ob09020 the log's last line was the gradient-fallback notice
     and then nothing for 38 minutes, so the only way to tell computing from
@@ -406,6 +427,51 @@ def polish_seed_starts(
         raw_starts = [raw_starts]
     keys = list(raw_starts[0].keys())
     n_params = sum(np.asarray(v).size for v in raw_starts[0].values())
+    own_monitor = monitor is None
+    if own_monitor:
+        monitor = PolishMonitor(
+            len(raw_starts),
+            unit="sweeps",
+            cap=150 if n_steps is _FROM_MONITOR else n_steps,
+            tol=None if tol is _FROM_MONITOR else tol,
+            window=(
+                POLISH_TOL_WINDOW
+                if tol_window is _FROM_MONITOR
+                else tol_window
+            ),
+            label="PTDE seed polish",
+            log=logger,
+            progress_interval_s=(
+                POLISH_PROGRESS_S
+                if progress_interval_s is _FROM_MONITOR
+                else progress_interval_s
+            ),
+            opening_text="scoring the initial population",
+        )
+    else:
+        given = [
+            name
+            for name, v in (
+                ("n_steps", n_steps),
+                ("tol", tol),
+                ("tol_window", tol_window),
+                ("progress_interval_s", progress_interval_s),
+            )
+            if v is not _FROM_MONITOR
+        ]
+        if given:
+            raise TypeError(
+                f"polish_seed_starts: {given} passed together with a "
+                f"monitor; the monitor owns the cap, the rate window and the "
+                f"progress interval"
+            )
+        if monitor.n_seeds != len(raw_starts):
+            raise ValueError(
+                f"polish_seed_starts: the monitor is for {monitor.n_seeds} "
+                f"seed(s), the call has {len(raw_starts)}"
+            )
+    progress_interval_s = monitor.progress_interval_s
+    n_steps = monitor.cap
     if pop_size is None:
         pop_size = int(max(8, min(2 * n_params, 64)))
     if gamma is None:
@@ -479,92 +545,43 @@ def polish_seed_starts(
                 )
         return [float(v) for v in vals]
 
-    t_start = time.monotonic()
-    t_last_log = t_start
-    # The previous progress line's sweep count, clock and per-seed
-    # acceptance totals: the next line reports the CURRENT rate and what
-    # was accepted in between.  Filled once the populations are scored.
-    beat = {"t": t_start, "done": 0.0, "acc": [], "prop": []}
+    # The previous progress line's per-seed acceptance totals: the next line
+    # reports what was accepted in between.  Filled once the populations are
+    # scored.  (The line itself, its clock and its rate are the monitor's.)
+    beat = {"acc": [], "prop": []}
 
-    def _heartbeat(n_swept, n_live=None, partial=None):
-        """One progress line, RATE-LIMITED to `progress_interval_s`.
+    def _acc_detail():
+        """This engine's column of the shared progress line.
 
-        Called between sweeps and, on an interleaving pool, once per
-        proposal that comes back.  Idempotent by construction: every caller
-        shares the one `t_last_log` clock, so calling it 64 times a sweep
-        produces no more lines than calling it once -- which is what makes
-        it safe to hand to `_map_logp_timeout` as an `on_poll`.
-
-        `n_live=None` marks the opening batch (no sweep has started);
-        `partial=(n_back, n_batch)` marks a batch still in flight.
+        Accepted proposals since the previous line, per seed.  "A flat
+        plateau, still accepting" (the population is moving and may yet
+        jump) and "accepting nothing" (a frozen population, 84-88% of
+        sweeps on ob09020) are different states that the dlp column alone
+        cannot tell apart.  Called only when a line is written.
         """
-        nonlocal t_last_log
-        if not progress_interval_s:
-            return
-        now = time.monotonic()
-        if now - t_last_log < float(progress_interval_s):
-            return
-        t_last_log = now
-        elapsed = now - t_start
-        if n_live is None:
-            # The opening batch scores every seed's population before sweep
-            # 1 exists.  It is one blocking batch like any other and hangs
-            # like any other, so it gets a line -- but there is no sweep
-            # rate yet to extrapolate an ETA from.
-            k, m = partial
-            logger.info(
-                f"PTDE seed polish: scoring the initial population "
-                f"({k}/{m} evaluations back)  "
-                f"elapsed={fmt_duration(elapsed)}"
-            )
-            return
-        if partial is None:
-            n_done = float(n_swept)
-            where = f"sweep {n_swept}/{int(n_steps)}"
-        else:
-            k, m = partial
-            n_done = n_swept + (k / m if m else 0.0)
-            where = (
-                f"sweep {n_swept + 1}/{int(n_steps)} IN PROGRESS "
-                f"({k}/{m} proposals back)"
-            )
-        # The ETA comes from the CURRENT rate -- the sweeps completed since
-        # the previous line over the time since it -- not from the history
-        # average.  On DC2018-226 the sweep rate fell 66/min -> 2.6/min as the
-        # population migrated into the expensive region, and the average
-        # understated the remaining time 3x (review 2.4.14).  It is an UPPER
-        # bound and labelled as one: the cap is what it extrapolates to, and
-        # the improvement window can end a seed earlier.  A beat with no sweep
-        # progress since the last one says so rather than inventing a rate.
-        d_done = n_done - beat["done"]
-        d_t = now - beat["t"]
-        if d_done > 0 and d_t > 0:
-            rate = d_done / d_t
-            eta = fmt_duration((int(n_steps) - n_done) / rate)
-            rate_txt = f"{60.0 * rate:.3g} sweeps/min"
-        else:
-            eta = "?"
-            rate_txt = "no sweep completed since the last line"
-        # Accepted proposals since the previous line, per seed.  "A flat
-        # plateau, still accepting" (the population is moving and may yet
-        # jump) and "accepting nothing" (a frozen population, 84-88% of
-        # sweeps on ob09020) are different states that the dlp column alone
-        # cannot tell apart.
         acc = ", ".join(
             f"{st['n_acc_tot'] - a0}/{st['n_prop_tot'] - p0}"
             for st, a0, p0 in zip(states, beat["acc"], beat["prop"])
         )
-        beat["t"], beat["done"] = now, n_done
         beat["acc"] = [st["n_acc_tot"] for st in states]
         beat["prop"] = [st["n_prop_tot"] for st in states]
-        gains = ", ".join(f"{st['best_lp'] - st['lp0']:+.1f}" for st in states)
-        logger.info(
-            f"PTDE seed polish: {where}  "
-            f"elapsed={fmt_duration(elapsed)}  "
-            f"eta<={eta} ({rate_txt})  "
-            f"dlp=[{gains}]  accepted since last line=[{acc}]  "
-            f"({n_live} seed(s) still running)"
-        )
+        return f"  accepted since last line=[{acc}]"
+
+    def _heartbeat(n_swept, partial=None, opening=None):
+        """The shared progress line (monitor.heartbeat), RATE-LIMITED there.
+
+        Called between sweeps and, on an interleaving pool, once per
+        proposal that comes back -- safe because the monitor's one clock
+        makes it idempotent, which is what lets it be `_map_logp_timeout`'s
+        `on_poll`.  `opening=(n_back, n_batch)` marks the opening batch (no
+        sweep has started: it is one blocking batch like any other and
+        stalls like any other, so it gets a line, but there is no rate
+        yet); `partial=(n_back, n_batch)` marks a batch still in flight.
+        """
+        if opening is not None:
+            monitor.heartbeat(opening=opening)
+            return
+        monitor.heartbeat(n_done=n_swept, partial=partial, detail=_acc_detail)
 
     # --- build every seed's population, then score them all in one batch ---
     pops, states = [], []
@@ -606,7 +623,7 @@ def polish_seed_starts(
     flat = [p for pop in pops for p in pop]
     n_flat = len(flat)
     flat_lps = _lps(
-        flat, on_progress=lambda k: _heartbeat(0, None, (k, n_flat))
+        flat, on_progress=lambda k: _heartbeat(0, opening=(k, n_flat))
     )
     for s, center in enumerate(raw_starts):
         lps = np.array(flat_lps[s * pop_size : (s + 1) * pop_size])
@@ -645,12 +662,13 @@ def polish_seed_starts(
                 "n_prop_tot": 0,
                 "n_acc_member": np.zeros(pop_size, dtype=int),
                 "n_done": 0,  # completed proposals (async budget)
-                "history": [],
-                "done": False,
-                "steps": 0,
-                "stop": "cap",
+                "steps": 0,  # completed sweeps (gamma cadence)
             }
         )
+        # The seed's own lp opens its record with the driver; the best of
+        # the opening population is already progress.
+        monitor.begin(s, lps[0])
+        monitor.observe(s, float(lps[best_i]))
     beat["acc"] = [0] * n_seeds
     beat["prop"] = [0] * n_seeds
 
@@ -682,9 +700,12 @@ def polish_seed_starts(
             if lp > st["best_lp"]:
                 st["best_lp"] = lp
                 st["best"] = {k: v.copy() for k, v in prop.items()}
+                monitor.observe(s, lp)
 
     def _end_of_sweep(s):
-        """Per-sweep bookkeeping: gamma adaptation and the opt-in window."""
+        """Per-sweep bookkeeping: gamma adaptation, then the sweep goes to
+        the driver, which decides whether the seed stops (cap, rate window,
+        wall-clock deadline)."""
         st = states[s]
         st["steps"] += 1
         if adapt_gamma and st["steps"] % gamma_window == 0:
@@ -693,20 +714,12 @@ def polish_seed_starts(
             ar = st["n_acc"] / max(st["n_prop"], 1)
             st["gamma"] = next_gamma(st["gamma"], ar, target_accept)
             st["n_acc"] = st["n_prop"] = 0
-        if tol is None or not tol_window:
-            return
-        st["history"].append(st["best_lp"])
-        if (
-            len(st["history"]) > tol_window
-            and st["history"][-1] - st["history"][-1 - tol_window] < tol
-        ):
-            st["stop"] = "tol"
-            st["done"] = True
+        monitor.step(s, st["best_lp"])
 
     def _run_async():
         """ptde_async's procedure for the polish (see ASYNCHRONOUS above)."""
         nonlocal pool, n_timeouts
-        budget = int(n_steps) * pop_size
+        budget = math.inf if n_steps is None else int(n_steps) * pop_size
         result_q = queue.Queue()
         in_flight = {}  # sub_id -> (s, i, prop, t_submitted)
         n_sub = [0] * n_seeds
@@ -734,7 +747,7 @@ def polish_seed_starts(
             )
 
         def _live():
-            return [s for s in range(n_seeds) if not states[s]["done"]]
+            return [s for s in range(n_seeds) if not monitor.done(s)]
 
         def _beat():
             live = _live()
@@ -743,8 +756,7 @@ def polish_seed_starts(
             done_sweeps = min(states[s]["n_done"] for s in live)
             _heartbeat(
                 done_sweeps // pop_size,
-                len(live),
-                (done_sweeps % pop_size, pop_size),
+                partial=(done_sweeps % pop_size, pop_size),
             )
 
         wait_s = poll_s if poll_s is not None else 1.0
@@ -802,7 +814,7 @@ def polish_seed_starts(
             for sid, (s, i, _, _) in lost:
                 if (
                     sid not in stale
-                    and not states[s]["done"]
+                    and not monitor.done(s)
                     and n_sub[s] < budget
                 ):
                     _submit(s, i)
@@ -813,7 +825,7 @@ def polish_seed_starts(
             st["n_done"] += 1
             if st["n_done"] % pop_size == 0:
                 _end_of_sweep(s)
-            if not st["done"] and n_sub[s] < budget:
+            if not monitor.done(s) and n_sub[s] < budget:
                 _submit(s, i)
 
         for s in _live():
@@ -846,8 +858,11 @@ def polish_seed_starts(
 
     # The synchronous batch engine.  Zero sweeps when the asynchronous one
     # has already spent the budget above.
-    for _sweep in range(0 if _async else int(n_steps)):
-        live = [s for s in range(n_seeds) if not states[s]["done"]]
+    # The cap is the driver's (monitor.step ends every seed on it), so the
+    # loop runs until no seed is live.
+    _sweep = 0
+    while not _async:
+        live = [s for s in range(n_seeds) if not monitor.done(s)]
         if not live:
             break
 
@@ -858,10 +873,10 @@ def polish_seed_starts(
             for i in range(pop_size):
                 batch.append(_propose(s, i))
                 index.append((s, i))
-        n_batch, n_live = len(batch), len(live)
+        n_batch = len(batch)
         lps_batch = _lps(
             batch,
-            on_progress=lambda k: _heartbeat(_sweep, n_live, (k, n_batch)),
+            on_progress=lambda k: _heartbeat(_sweep, partial=(k, n_batch)),
         )
 
         for (s, i), prop, lp in zip(index, batch, lps_batch):
@@ -870,8 +885,9 @@ def polish_seed_starts(
         for s in live:
             _end_of_sweep(s)
 
+        _sweep += 1
         # Heartbeat (see PROGRESS in the docstring).
-        _heartbeat(_sweep + 1, len(live))
+        _heartbeat(_sweep)
 
     if n_timeouts:
         logger.warning(
@@ -895,23 +911,28 @@ def polish_seed_starts(
     for s, st in enumerate(states):
         polished.append(st["best"])
         dlps.append(st["best_lp"] - st["lp0"])
-        # "on rate" and "on cap" in so many words: the two stops mean
-        # different things to whoever reads the log (a seed still climbing
-        # at its cap is a candidate for another round; one that stopped on
-        # rate ran a whole window without gaining).
-        reason = (
-            f"stopped on rate: gained < {tol:.3g} nats over the last "
-            f"{tol_window} sweeps"
-            if st["stop"] == "tol"
-            else f"stopped on cap: ran all {int(n_steps)} sweeps"
-        )
-        logger.info(
-            f"PTDE seed polish: seed {s} lp {st['lp0']:.1f} -> "
-            f"{st['best_lp']:.1f} (dlp=+{st['best_lp'] - st['lp0']:.1f}, "
+        engine_detail = (
             f"{st['steps']} steps x {pop_size} pop, accepted "
             f"{st['n_acc_tot']}/{st['n_prop_tot']} proposals, gamma "
-            f"{gamma:.4f}->{st['gamma']:.4f}, {reason})"
+            f"{gamma:.4f}->{st['gamma']:.4f}"
         )
+        if own_monitor:
+            # Standalone call: this line is the only record, so it carries
+            # the gain and the stop reason ("on rate", "on cap", "on
+            # timeout" in so many words -- a seed still climbing at its cap
+            # is a candidate for another round; one that stopped on rate ran
+            # a whole window without gaining).  The words are the monitor's.
+            logger.info(
+                f"PTDE seed polish: seed {s} lp {st['lp0']:.1f} -> "
+                f"{st['best_lp']:.1f} "
+                f"(dlp=+{st['best_lp'] - st['lp0']:.1f}, {engine_detail}, "
+                f"{monitor.describe(s)})"
+            )
+        else:
+            # Under the driver (polish.polish_raw_starts), which logs the
+            # gain and the stop reason in its own per-seed line for both
+            # engines; this line adds what only this engine knows.
+            logger.info(f"PTDE seed polish: seed {s}: {engine_detail}.")
         # Where the population ENDED, not only its best member.  At the
         # fixed step's ~0.3% acceptance most members never leave their
         # birth position, and a population that is one migrant plus 63
