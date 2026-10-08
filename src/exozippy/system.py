@@ -816,6 +816,50 @@ class System(Component):
             }
         )
 
+    @staticmethod
+    def _check_branch_replacements_reach_the_model(model, branches, l_ref):
+        """Raise unless every declared branch can actually move this logp.
+
+        A replaced node that no logp term reads is LEGAL -- substituting a
+        node into a graph that does not contain it is the identity -- and it
+        is not rare: a V_c/V_e orbit with no data replaces its clipped `ecc`,
+        which only a likelihood consumes, alongside the unclipped root and the
+        Jacobian, which its own prior potentials always read (review 2.8.15).
+        The mixture then marginalizes the PRIOR over both roots, which is what
+        a prior-only fit must sample, and the report (exozippy/branches.py)
+        still substitutes `ecc` into the Deterministics that read it.
+
+        Two shapes of "unused" are NOT legal, because each is a bookkeeping
+        bug that would otherwise turn the mixture into a silent no-op:
+
+        * a replaced node that does not descend from any free variable of
+          this model -- one left over from a previous build (3.14.12) or never
+          wired to a parameter -- so the substitution reaches nothing;
+        * a branch NONE of whose replaced nodes any term reads: its
+          combinations would duplicate their complements, i.e. no branch.
+        """
+        present = set(ancestors([l_ref]))
+        free = set(model.free_RVs)
+        for branch in branches:
+            keys = list(branch["replacements"])
+            for key in keys:
+                if key not in present and not (set(ancestors([key])) & free):
+                    raise ValueError(
+                        f"[system] branch '{branch['label']}' replaces node "
+                        f"'{key.name or key}', which does not descend from "
+                        f"any free variable of this model -- a node from a "
+                        f"previous build, or one never wired to a parameter. "
+                        f"The substitution would reach nothing."
+                    )
+            if not any(key in present for key in keys):
+                raise ValueError(
+                    f"[system] branch '{branch['label']}' replaces "
+                    f"{sorted(k.name or str(k) for k in keys)}, none of which "
+                    f"any likelihood term or potential reads, so the branch "
+                    f"cannot change the logp: it was declared against nodes "
+                    f"the model does not consume."
+                )
+
     def _add_branch_mixtures(self, model):
         """Marginalize the likelihood over every declared branch alternative.
 
@@ -869,6 +913,7 @@ class System(Component):
             )
             return 0
         l_ref = terms[0] if len(terms) == 1 else pt.add(*terms)
+        self._check_branch_replacements_reach_the_model(model, branches, l_ref)
 
         n_comb = 2 ** len(branches)
         labels = ", ".join(b["label"] for b in branches)
@@ -908,7 +953,22 @@ class System(Component):
                     # rewrites the first's `set_subtensor` base too, so both
                     # elements land -- which is why register_branch_alternative
                     # requires a replacement to read the node it replaces.
-                    term = graph_replace(term, branch["replacements"])
+                    #
+                    # Only the keys this term still READS are passed: a node no
+                    # term consumes cannot change it, so dropping it is exactly
+                    # the identity (graph_replace refuses an unused key).  That
+                    # is a prior-only V_c/V_e orbit's `ecc`, which only a
+                    # likelihood reads (review 2.8.15); the check above has
+                    # proven every such key is a live node of this model.
+                    present = set(ancestors([term]))
+                    term = graph_replace(
+                        term,
+                        {
+                            key: value
+                            for key, value in branch["replacements"].items()
+                            if key in present
+                        },
+                    )
                     log_w += float(np.log(branch["weight"]))
                 else:
                     log_w += float(np.log1p(-branch["weight"]))
