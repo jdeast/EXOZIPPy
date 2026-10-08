@@ -900,13 +900,18 @@ class EvolutionaryModel(StellarRelation, Component):
         global fit's values, and MIST's prediction at the draw's mass,
         initial [Fe/H] and EEP -- the compiled Kiel node, evaluated at up to
         ``max_draws`` evenly spaced draws, the same per-draw values this
-        component's contour plot uses.  Empty before a posterior is
-        distributed (``System.distribute_posterior``).  Read by the system
-        summary figure for its Kiel-diagram contours.
+        component's contour plot uses.  Read by the system summary figure
+        for its Kiel-diagram contours; raises before a posterior is
+        distributed (``System.distribute_posterior``), since the summary
+        only ever asks for it after.
         """
         plotter = MISTPlot(system, [])
         if not plotter._posteriorBool:
-            return {}
+            raise RuntimeError(
+                f"[{self.prefix}] posterior_kiel_samples: no posterior has "
+                "been distributed onto the Parameters yet "
+                "(System.distribute_posterior)."
+            )
         values = np.stack(
             plotter._get_posterior_compiled_values(max_draws=max_draws)
         )  # (draws, instances, columns)

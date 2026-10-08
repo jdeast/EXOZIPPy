@@ -2003,15 +2003,16 @@ def test_posterior_kiel_samples_are_each_draws_fit_and_mist_values(
     When posterior_kiel_samples reads it, and again with max_draws=3,
     Then the fit samples are exactly those draws' Teff, the MIST samples are
       the compiled Kiel node's prediction at the same draws, thinning keeps
-      the first, middle and last draws, and before any posterior there is
-      nothing to return.
+      the first, middle and last draws, and before any posterior it raises
+      naming the component.
     """
     # Arrange -- DataArrays with the sample dimension last, the layout
     # System.distribute_posterior attaches.
     import xarray as xr
 
     system, comp = _kiel_system(model_root)
-    assert comp.posterior_kiel_samples(system) == {}
+    with pytest.raises(RuntimeError, match="no posterior"):
+        comp.posterior_kiel_samples(system)
     for param in system.plot_params:
         user = np.atleast_1d(param.from_internal(param.initval)).astype(float)
         draws = np.repeat(user[..., None], 5, axis=-1)

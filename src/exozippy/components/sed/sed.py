@@ -2236,9 +2236,14 @@ class SED(Component):
         id_color, id_marker, _id_line = self._identity_styles(plot_obj)
 
         traces = []
+        # Each trace's star or star combination, which its color/marker
+        # follows: a renderer pairs a star's spectrum with its photometry by
+        # this, never by parsing the trace names.
+        identity = {}
         # per-star model spectra: lambda * F_lambda at Earth, from the shared helper
         for nstar in range(plot_obj.nstars):
             name = plot_obj.star_names[nstar]
+            identity[f"Star {name}"] = name
             traces.append(
                 Trace(
                     name=f"Star {name}",
@@ -2251,6 +2256,7 @@ class SED(Component):
                 )
             )
         if plot_obj.nstars > 1:
+            identity["Total"] = "Total"
             traces.append(
                 Trace(
                     name="Total",
@@ -2267,6 +2273,7 @@ class SED(Component):
         # any other multi-star combination the data measure (e.g. "B+C"
         # from an "A-(B+C)" differential row), matching the PDF's curves
         for label, combo_idx in self._sub_combos(plot_obj):
+            identity[label] = label
             traces.append(
                 Trace(
                     name=label,
@@ -2307,6 +2314,7 @@ class SED(Component):
         for combo in plot_obj.unique_combos:
             mask = point_labels == combo
             style = {"color": id_color[combo], "marker": id_marker[combo]}
+            identity[combo] = combo
             traces.append(
                 Trace(
                     name=combo,
@@ -2383,6 +2391,7 @@ class SED(Component):
                         )
                     ),
                     "residuals": residual_traces,
+                    "identity": identity,
                 },
             )
         ]

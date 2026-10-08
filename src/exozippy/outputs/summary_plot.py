@@ -448,9 +448,9 @@ def planet_header_lines(system):
     blank; a system with no planet has no lines.  With more than one planet
     each line is prefixed by the planet's name.
     """
-    planet = getattr(system, "planet", None)
-    if planet is None:
+    if "planet" not in system.active_components:
         return []
+    planet = system.active_components["planet"]
     lookup = system.get_parameter_lookup()
     lines = []
     for p_idx, pname in enumerate(planet.names):
@@ -500,8 +500,9 @@ def _draw_model_traces(system, panels, draws):
     The spaghetti ``plotrender.render_spec_groups`` overlays, gathered the
     same way: each draw's ``plot_data``, matched to the panel's chart by id,
     model traces only (the data and its cleaning are the reference point's).
-    A draw whose ``plot_data`` raises is skipped with a warning, as
-    ``plotrender.plot_via_specs`` skips it.  Only the panels in
+    A draw whose ``plot_data`` raises is a component bug at a posterior
+    draw and propagates; it is not dropped from the spaghetti.  Only the
+    panels in
     ``_PANELS_WITH_DRAWS`` are gathered for, so no other component is
     evaluated at the draws.
     """
@@ -514,19 +515,9 @@ def _draw_model_traces(system, panels, draws):
     }
     components = [system.active_components[key] for key in sorted(keys)]
     models = {}
-    for idx, extra in enumerate(draws):
+    for extra in draws:
         for comp in components:
-            try:
-                charts = comp.plot_data(system, extra)
-            except Exception as exc:  # noqa: BLE001 - skip a bad posterior draw
-                logger.warning(
-                    "summary plot: plot_data failed for draw %d of %s: %s",
-                    idx,
-                    getattr(comp, "prefix", comp),
-                    exc,
-                )
-                continue
-            for chart in charts:
+            for chart in comp.plot_data(system, extra):
                 traces = _role(chart, "model")
                 if chart.id in wanted and traces:
                     models.setdefault(chart.id, []).append(traces)
@@ -1312,21 +1303,21 @@ def _draw_sed(fig, cell, chart, draw_models=()):
     wherever a spectrum lies within the flux axis.
     """
     residuals = (chart.meta or {}).get("residuals") or []
+    identity = chart.meta["identity"]
     ax, ax_oc = _axes(fig, cell, bool(residuals))
     data = _role(chart, "data")
     colors = {}
     for trace in data:
-        colors[trace.name] = PALETTE[-(len(colors) + 1) % len(PALETTE)]
+        colors[identity[trace.name]] = PALETTE[
+            -(len(colors) + 1) % len(PALETTE)
+        ]
     alpha = _SED_DRAWS_ALPHA if draw_models else None
     spectra = []
     for traces in [_role(chart, "model"), *draw_models]:
         for trace in traces:
-            name = trace.name
-            identity = (
-                name[len("Star ") :] if name.startswith("Star ") else name
-            )
-            if identity not in colors:
-                colors[identity] = PALETTE[-(len(colors) + 1) % len(PALETTE)]
+            who = identity[trace.name]
+            if who not in colors:
+                colors[who] = PALETTE[-(len(colors) + 1) % len(PALETTE)]
             spectra.append(
                 (
                     np.asarray(trace.x, dtype=float),
@@ -1335,7 +1326,7 @@ def _draw_sed(fig, cell, chart, draw_models=()):
             )
             ax.plot(
                 *spectra[-1],
-                color=colors[identity],
+                color=colors[who],
                 lw=_SED_SPECTRUM_LW,
                 alpha=alpha,
                 zorder=0,
@@ -1346,7 +1337,7 @@ def _draw_sed(fig, cell, chart, draw_models=()):
         _errorbar(
             ax,
             trace,
-            colors[trace.name],
+            colors[identity[trace.name]],
             "o",
             _SED_MARKERSIZE,
             label="Observations" if single else trace.name,
@@ -1364,7 +1355,7 @@ def _draw_sed(fig, cell, chart, draw_models=()):
             zorder=4,
             label=_MODEL_LABEL,
         )
-        _errorbar(ax_oc, oc, colors[oc.name], ".", _SED_MARKERSIZE)
+        _errorbar(ax_oc, oc, colors[identity[oc.name]], ".", _SED_MARKERSIZE)
 
     _geometry(ax, chart)
     y = np.concatenate([np.asarray(t.y, float) for t in data])
@@ -1667,10 +1658,10 @@ def summary_figure(
 
     # Each instrument's display name: an override, else its `label:`, else
     # its `name:` (Instrument.display_label).
-    transit = getattr(system, TRANSIT_KEY, None)
-    rv = getattr(system, RV_KEY, None)
     has_transits = any(p.kind == "transit" for p in panels)
     has_rvs = any(p.kind in ("rv_time", "rv_phase") for p in panels)
+    transit = system.active_components[TRANSIT_KEY] if has_transits else None
+    rv = system.active_components[RV_KEY] if has_rvs else None
     transit_names = list(transit.names) if has_transits else []
     rv_names = list(rv.names) if has_rvs else []
     _check_names("labels", labels, transit_names + rv_names)
@@ -1819,7 +1810,7 @@ def summary_figure(
                         fig,
                         cell,
                         chart,
-                        kiel_samples.get(name),
+                        kiel_samples[name],
                         _reported_star(system, name),
                     )
             # Every RV panel on one scale, and every RV O-C on another.

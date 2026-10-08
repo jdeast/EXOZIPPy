@@ -796,37 +796,50 @@ def test_rv_draws_are_faint_but_their_legend_swatch_is_not():
     assert swatch.get_alpha() == sp._LEGEND_ALPHA
 
 
-def test_draw_model_traces_gathers_panel_models_and_skips_a_bad_draw(caplog):
+def test_draw_model_traces_gathers_the_panel_charts_model_traces():
     """
-    Given a component whose plot_data raises at one of three draws, and a
-      panel drawing one of its two charts,
+    Given a component with two charts at each of two draws, and a panel
+      drawing one of them,
     When the draws' model traces are gathered,
-    Then the panel's chart gets the model traces (not the data) of the two
-      good draws, the other chart nothing, and the bad draw is skipped with
-      a warning -- plotrender.plot_via_specs's tolerance.
+    Then the panel's chart gets the model traces (not the data) of both
+      draws, and the other chart nothing.
     """
     chart = _rv_chart()
     other = dataclasses.replace(chart, id="rvinstrument.unphased")
-
-    def plot_data(system, point):
-        if point["bad"]:
-            raise RuntimeError("non-finite draw")
-        return [chart, other]
-
-    component = SimpleNamespace(plot_data=plot_data, prefix="rvinstrument")
+    component = SimpleNamespace(plot_data=lambda system, point: [chart, other])
     system = SimpleNamespace(active_components={"rvinstrument": component})
     panels = [sp._Panel("rv_phase", [chart], 1)]
-    draws = [{"bad": False}, {"bad": True}, {"bad": False}]
 
-    with caplog.at_level("WARNING", logger=sp.logger.name):
-        models = sp._draw_model_traces(system, panels, draws)
+    models = sp._draw_model_traces(system, panels, [{}, {}])
 
     assert list(models) == [chart.id]
     assert [[t.role for t in traces] for traces in models[chart.id]] == [
         ["model"],
         ["model"],
     ]
-    assert "plot_data failed for draw 1" in caplog.text
+
+
+def test_draw_model_traces_raises_on_a_failing_draw():
+    """
+    Given a component whose plot_data raises at one posterior draw,
+    When the draws' model traces are gathered,
+    Then the failure propagates: a component that cannot draw a draw of
+      its own posterior is a bug to surface, not a curve to drop from the
+      spaghetti behind a warning.
+    """
+    chart = _rv_chart()
+
+    def plot_data(system, point):
+        if point["bad"]:
+            raise RuntimeError("non-finite draw")
+        return [chart]
+
+    component = SimpleNamespace(plot_data=plot_data)
+    system = SimpleNamespace(active_components={"rvinstrument": component})
+    panels = [sp._Panel("rv_phase", [chart], 1)]
+
+    with pytest.raises(RuntimeError, match="non-finite draw"):
+        sp._draw_model_traces(system, panels, [{"bad": False}, {"bad": True}])
 
 
 def test_the_kiel_and_rv_time_panels_are_not_drawn_with_posterior_draws():
@@ -905,7 +918,8 @@ def test_sed_panel_spans_the_photometry_and_marks_the_model():
         meta={
             "residuals": [
                 Trace("A", "residual", "scatter", x, y * 0.1, yerr, xerr)
-            ]
+            ],
+            "identity": {"Star A": "A", "A": "A"},
         },
     )
     fig = plt.figure()

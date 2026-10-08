@@ -1072,3 +1072,31 @@ def test_sed_residual_is_log_data_minus_log_model_per_point(sed_built):
             np.asarray(obs.y) - np.asarray(oc.y), model_log, rtol=1e-9
         )
         np.testing.assert_array_equal(oc.yerr, obs.yerr)
+
+
+def test_sed_chart_declares_every_traces_star(sed_built):
+    """
+    Given the three-star kelt4 SED build at its start point,
+    When its model-mode chart is built,
+    Then meta["identity"] names the star (or star combination) of every
+      trace and every residual, each spectrum pointing at a combination the
+      photometry also carries -- what a renderer pairs colors by, instead of
+      parsing trace names.
+    """
+    system, model, point = sed_built
+    spec = [
+        s for s in system.sed.plot_data(system, point) if s.id == "sed.sed"
+    ][0]
+    identity = spec.meta["identity"]
+
+    names = {t.name for t in spec.traces} | set(_residual_traces(spec))
+    assert names == set(identity)
+    data = {t.name for t in spec.traces if t.role == "data"}
+    assert all(identity[name] == name for name in data)
+    stars = [
+        identity[t.name]
+        for t in spec.traces
+        if t.role == "model" and t.name.startswith("Star ")
+    ]
+    assert stars == [n for n in system.star.names if n in stars]
+    _assert_json_roundtrip([spec])
