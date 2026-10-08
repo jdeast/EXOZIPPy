@@ -534,7 +534,12 @@ def _panel_kind(chart):
         return "transit" if folded else None
     if key == RV_KEY:
         return "rv_phase" if folded else "rv_time"
-    return {SED_KEY: "sed", KIEL_KEY: "kiel"}.get(key)
+    if key == SED_KEY:
+        # The SED's data-only chart (its plotters failed to compile, which
+        # the SED already warned about) has photometry in magnitudes and
+        # no spectrum: not the panel's chart.
+        return "sed" if _role(chart, "model") else None
+    return {KIEL_KEY: "kiel"}.get(key)
 
 
 def _panels(charts):
@@ -624,9 +629,12 @@ def tess_cadence_groups(transit, band):
     exposure time agree.  A group is labelled with its members' common
     ``label:`` when they share one that no other cadence uses, and
     otherwise ``"<label or TESS> <seconds> s"``, e.g. ``"TESS 120 s"`` --
-    the cadence only when every member's config states its ``exptime:``.
-    Without one the fit uses the inert 1-minute default (no smearing),
-    which is not the data's cadence, so such a row is just ``"TESS"``.
+    the cadence only when every member states an ``exptime:`` the transit
+    component accepted (``exptime_stated``).  Without one, or with one it
+    rejected, the fit uses the inert 1-minute default (no smearing), which
+    is not the data's cadence, so such a row is just ``"TESS"``.  Two
+    groups that would share a label raise, naming both: a row is never
+    silently replaced.
 
     ``transit`` and ``band`` are the fit's components (names, band names,
     ``exptime_min``, ``plot_label`` and the per-file ``config``; band names
@@ -649,14 +657,21 @@ def tess_cadence_groups(transit, band):
     groups = {}
     for seconds, members in by_cadence.items():
         base = common[seconds]
-        stated = all("exptime" in transit.config[i] for i in members)
+        stated = all(transit.exptime_stated[i] for i in members)
         if base is not None and list(common.values()).count(base) == 1:
             label = base
         elif stated:
             label = f"{base or 'TESS'} {seconds} s"
         else:
             label = base or "TESS"
-        groups[label] = [transit.names[i] for i in members]
+        names = [transit.names[i] for i in members]
+        if label in groups:
+            raise ValueError(
+                f"summary plot: the TESS cadence groups {groups[label]} and "
+                f"{names} would both be labelled {label!r}.  Give them "
+                "distinct `label:`s in the config, or pass transit_groups."
+            )
+        groups[label] = names
     return groups
 
 
@@ -1382,12 +1397,31 @@ def _draw_sed(fig, cell, chart, draw_models=()):
     _finish(ax, ax_oc)
 
 
+def _kiel_degeneracy(teff, logg):
+    """Why the draws ``(teff, logg)`` have no 2-D density to contour, or
+    None when they have one.  A pinned star, or a Teff and logg that move
+    together exactly (one of them derived from the other alone), has a
+    singular covariance: ``gaussian_kde`` cannot be built on it."""
+    if teff.size < 3:
+        return f"{teff.size} draw(s)"
+    s_t, s_g = np.std(teff), np.std(logg)
+    if not (s_t > 0 and s_g > 0):
+        return "a constant Teff or logg"
+    r = np.corrcoef(teff, logg)[0, 1]
+    if not abs(r) < 1.0 - 1e-9:
+        return f"Teff and logg perfectly correlated (r = {r:.12f})"
+    return None
+
+
 def _kiel_contours(ax, samples):
     """Draw the 1- and 2-sigma contours of each sample set in ``samples``
     (``{"fit"|"mist": (teff, logg)}``, ``posterior_kiel_samples``), returning
-    the Teff and logg extent of the drawn lines.  A Gaussian KDE (Scott's
-    bandwidth) of the draws, contoured at the densities enclosing
-    ``_KIEL_CONTOUR_PROBS`` of it: the shared ``contour_plot.Contour``."""
+    the Teff and logg extent of the drawn lines, or None when neither set
+    has a density to contour.  A Gaussian KDE (Scott's bandwidth) of the draws, contoured at
+    the densities enclosing ``_KIEL_CONTOUR_PROBS`` of it: the shared
+    ``contour_plot.Contour``.  A sample set with no 2-D density
+    (``_kiel_degeneracy``) gets no contour, and says so at INFO; the star's
+    point and error bars still show where it is."""
     from matplotlib.lines import Line2D
 
     from .contour_plot import Contour
@@ -1395,6 +1429,15 @@ def _kiel_contours(ax, samples):
     extent = []
     for kind, color, label in _KIEL_CONTOURS:
         teff, logg = (np.asarray(a, dtype=float) for a in samples[kind])
+        why = _kiel_degeneracy(teff, logg)
+        if why is not None:
+            logger.info(
+                "summary plot: no %s contour on the Kiel diagram -- its "
+                "posterior has no 2-D density (%s).",
+                label,
+                why,
+            )
+            continue
         contour = Contour(
             teff,
             logg,
@@ -1412,6 +1455,21 @@ def _kiel_contours(ax, samples):
             linewidths=_KIEL_CONTOUR_LW,
             zorder=6,
         )
+        # What was drawn, the 2-sigma line included: the KDE's region
+        # reaches past the draws' own central 95%, so the window has to
+        # follow the lines rather than the draws.
+        polygons = [
+            poly
+            for path in drawn.get_paths()
+            for poly in path.to_polygons(closed_only=False)
+        ]
+        if not polygons:
+            # Contour's levels are densities of its own KDE grid, so a
+            # non-degenerate sample set always yields a line.
+            raise RuntimeError(
+                f"summary plot: the {label} KDE of {teff.size} draws drew no "
+                f"contour line at levels {list(contour.levels)}."
+            )
         ax.add_line(
             Line2D(
                 [],
@@ -1421,16 +1479,7 @@ def _kiel_contours(ax, samples):
                 label=rf"{label} ($1\sigma$, $2\sigma$)",
             )
         )
-        # What was drawn, the 2-sigma line included: the KDE's region
-        # reaches past the draws' own central 95%, so the window has to
-        # follow the lines rather than the draws.
-        vertices = np.concatenate(
-            [
-                poly
-                for path in drawn.get_paths()
-                for poly in path.to_polygons(closed_only=False)
-            ]
-        )
+        vertices = np.concatenate(polygons)
         extent.append(
             (
                 vertices[:, 0].min(),
@@ -1439,6 +1488,8 @@ def _kiel_contours(ax, samples):
                 vertices[:, 1].max(),
             )
         )
+    if not extent:
+        return None
     lo_t, hi_t, lo_g, hi_g = zip(*extent)
     return min(lo_t), max(hi_t), min(lo_g), max(hi_g)
 
@@ -1518,7 +1569,9 @@ def _draw_kiel(fig, cell, chart, samples=None, star=None):
 
     boxes = [(teff - t_lo, teff + t_hi, logg - g_lo, logg + g_hi)]
     if samples:
-        boxes.append(_kiel_contours(ax, samples))
+        drawn = _kiel_contours(ax, samples)
+        if drawn is not None:
+            boxes.append(drawn)
     main_sequence = _main_sequence(chart)
     if main_sequence is not None:
         ms_teff, ms_logg, ms_age = main_sequence

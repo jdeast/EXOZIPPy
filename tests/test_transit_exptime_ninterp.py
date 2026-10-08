@@ -176,6 +176,9 @@ def test_invalid_smearing_config_warns_and_falls_back(
     tr = system.transit
     assert tr.ninterp == [1, 1, 1, 3]
     assert tr.exptime_min == [1.0, 1.0, 1.0, 30.0]
+    # Only the accepted exptime is the file's own (the summary figure labels
+    # a TESS row with its cadence by this): the rejected -5 is not.
+    assert tr.exptime_stated == [False, False, False, True]
 
     smearing_warnings = [
         r.message for r in caplog.records if "exposure smearing" in r.message

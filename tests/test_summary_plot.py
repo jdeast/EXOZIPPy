@@ -347,13 +347,14 @@ def test_an_unknown_instrument_name_raises_with_a_suggestion():
 
 def _transits(rows, stated=True):
     """A transit component stand-in: (name, band, exptime_min, label), each
-    file's config stating its exptime unless ``stated`` is False."""
+    file's exptime stated in its config and accepted unless ``stated`` is
+    False."""
     return SimpleNamespace(
         names=[r[0] for r in rows],
         band_names=[r[1] for r in rows],
         exptime_min=[r[2] for r in rows],
         plot_label=[r[3] for r in rows],
-        config=[{"exptime": r[2]} if stated else {} for r in rows],
+        exptime_stated=[stated] * len(rows),
     )
 
 
@@ -431,6 +432,85 @@ def test_a_tess_group_with_no_stated_exptime_is_not_given_a_cadence():
     )
 
     assert sp.tess_cadence_groups(transit, _BANDS) == {"TESS": ["S16", "S22"]}
+
+
+def test_two_tess_groups_with_one_label_raise_rather_than_overwrite():
+    """
+    Given a 60 s TESS sector, labelled "TESS 60 s" by its cadence, and a
+      120 s sector whose config labels it "TESS 60 s" too,
+    When the default grouping is formed,
+    Then it raises naming both groups' files -- one row is never silently
+      replaced by the other.
+    """
+    transit = _transits(
+        [("S16", "TESS", 1.0, None), ("S22", "TESS", 2.0, "TESS 60 s")]
+    )
+
+    with pytest.raises(ValueError, match=r"\['S16'\] and \['S22'\]"):
+        sp.tess_cadence_groups(transit, _BANDS)
+
+
+def test_the_seds_data_only_chart_is_not_an_sed_panel():
+    """
+    Given the SED's data-only chart (no spectrum: what plot_data returns
+      when its plotters failed to compile), and its model-mode chart,
+    When each is assigned a summary panel,
+    Then only the model-mode chart is an SED panel; the data-only one, in
+      magnitudes with no y_range, is left to the SED's own outputs.
+    """
+    from exozippy.chart import Chart, Trace
+
+    photometry = Chart(
+        id="sed.photometry",
+        component={"yaml_key": "sed", "instance": None},
+        title="",
+        xlabel="",
+        ylabel="",
+        traces=[Trace("observed", "data", "scatter", [0.5], [10.0])],
+    )
+    model = dataclasses.replace(
+        photometry,
+        id="sed.sed",
+        traces=[
+            *photometry.traces,
+            Trace("Star A", "model", "line", [0.5], [-9.0]),
+        ],
+    )
+
+    assert sp._panel_kind(photometry) is None
+    assert sp._panel_kind(model) == "sed"
+
+
+@pytest.mark.parametrize(
+    "teff, logg",
+    [
+        (np.full(50, 5800.0), np.linspace(4.3, 4.5, 50)),
+        (np.linspace(5700.0, 5900.0, 50), 4.4 + np.linspace(0, 0.2, 50)),
+        (np.array([5800.0, 5810.0]), np.array([4.4, 4.5])),
+    ],
+    ids=["constant-teff", "collinear", "two-draws"],
+)
+def test_a_degenerate_kiel_posterior_gets_no_contour(teff, logg, caplog):
+    """
+    Given Kiel samples with no 2-D density -- a pinned Teff, a logg that
+      moves exactly with Teff, or too few draws -- for both the fit and MIST,
+    When the contours are drawn,
+    Then none is drawn and none is in the legend, the panel's window falls
+      back to the star and the track (None is returned), and the reason is
+      logged -- instead of gaussian_kde's LinAlgError costing the whole page.
+    """
+    samples = {"fit": (teff, logg), "mist": (teff, logg)}
+    fig, ax = plt.subplots()
+    try:
+        with caplog.at_level("INFO", logger=sp.logger.name):
+            extent = sp._kiel_contours(ax, samples)
+        handles, _ = ax.get_legend_handles_labels()
+    finally:
+        plt.close(fig)
+
+    assert extent is None
+    assert handles == []
+    assert caplog.text.count("no 2-D density") == 2
 
 
 def test_sed_in_flux_converts_the_points_and_their_oc_together():
