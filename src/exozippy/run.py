@@ -1795,8 +1795,8 @@ def _wrap_up(
     # draw of the posterior the tables above were built from -- `idata` is
     # already trimmed, mode-labelled and distributed onto the Parameters --
     # with the same `draws` overlaid as the component PDFs above.  A fit
-    # with nothing it draws (no transit, RV, SED or evolutionary model)
-    # gets none: write_summary_plot says so at INFO and returns.  Like every
+    # with nothing it draws (no component declares a summary chart) gets
+    # none: write_summary_plot says so at INFO and returns.  Like every
     # post-save stage it raises on any other failure, and a
     # `recompute_trace: false` rerun (or `exozippy-summary <config>`)
     # redraws it from the saved trace.

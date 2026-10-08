@@ -1185,7 +1185,7 @@ def test_sed_chart_declares_every_traces_star(sed_built):
     """
     Given the three-star kelt4 SED build at its start point,
     When its model-mode chart is built,
-    Then meta["identity"] names the star (or star combination) of every
+    Then meta["summary"]["identity"] names the star (or star combination) of every
       trace and every residual, each spectrum pointing at a combination the
       photometry also carries -- what a renderer pairs colors by, instead of
       parsing trace names.
@@ -1194,7 +1194,7 @@ def test_sed_chart_declares_every_traces_star(sed_built):
     spec = [
         s for s in system.sed.plot_data(system, point) if s.id == "sed.sed"
     ][0]
-    identity = spec.meta["identity"]
+    identity = spec.meta["summary"]["identity"]
 
     names = {t.name for t in spec.traces} | set(_residual_traces(spec))
     assert names == set(identity)

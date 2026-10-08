@@ -2391,7 +2391,18 @@ class SED(Component):
                         )
                     ),
                     "residuals": residual_traces,
-                    "identity": identity,
+                    # The summary figure draws lambda*F_lambda itself, on a
+                    # log axis (this chart's y is log10 of it), each trace
+                    # colored by its star or star combination.
+                    "summary": {
+                        "layout": "spectrum",
+                        "y_log10": True,
+                        "identity": identity,
+                        "xlabel": r"Wavelength [$\mu$m]",
+                        "ylabel": (
+                            r"$\lambda F_\lambda$ [erg s$^{-1}$ cm$^{-2}$]"
+                        ),
+                    },
                 },
             )
         ]

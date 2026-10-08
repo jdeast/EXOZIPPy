@@ -2037,14 +2037,55 @@ def test_posterior_kiel_samples_are_each_draws_fit_and_mist_values(
     np.testing.assert_allclose(thinned["A"]["fit"][0], fit_teff[[0, 2, 4]])
 
 
-def test_the_kiel_chart_declares_its_tracks_eeps_ages_and_main_sequence(built):
+def test_summary_posterior_is_the_contours_and_the_reported_star(model_root):
+    """
+    Given a posterior of five draws in which the star's Teff varies,
+    When the evolutionary model's summary_posterior is read,
+    Then the star's Kiel chart gets MIST's then the global fit's sample sets
+      (posterior_kiel_samples) as its contours, and a marker at the REPORTED
+      median Teff and logg with their errors (the results table's numbers).
+    """
+    import xarray as xr
+
+    system, comp = _kiel_system(model_root)
+    for param in system.plot_params:
+        user = np.atleast_1d(param.from_internal(param.initval)).astype(float)
+        draws = np.repeat(user[..., None], 5, axis=-1)
+        if param is system.star.teff:
+            draws = draws * np.linspace(0.98, 1.02, 5)
+        param.posterior = xr.DataArray(draws, dims=("element", "sample"))
+    # star.logg is derived (not a plotter input); a distributed posterior
+    # carries it, so this one does too.
+    fit_logg = comp.posterior_kiel_samples(system)["A"]["fit"][1]
+    system.star.logg.posterior = xr.DataArray(
+        np.asarray(fit_logg)[None, :], dims=("element", "sample")
+    )
+
+    overlay = comp.summary_posterior(system)
+
+    (chart_id,) = overlay
+    assert chart_id == f"{comp.prefix}.kiel.star.A"
+    contours = overlay[chart_id]["contours"]
+    samples = comp.posterior_kiel_samples(system)
+    assert [c[0] for c in contours] == ["MIST", "Global fit"]
+    np.testing.assert_allclose(contours[1][1], samples["A"]["fit"][0])
+    (teff, t_lo, t_hi), _ = overlay[chart_id]["marker"]
+    system.star.teff.ensure_summary()
+    summ = system.star.teff.summary
+    summ = summ[0] if isinstance(summ, list) else summ
+    assert (teff, t_lo, t_hi) == pytest.approx(
+        (summ.median, abs(summ.err_minus), abs(summ.err_plus))
+    )
+
+
+def test_the_kiel_chart_declares_its_summary_window_and_age_marks(built):
     """
     Given the built one-star system,
     When its Kiel chart is drawn,
-    Then meta["track"] carries an EEP and an age (Gyr) for every point of the
-      drawn track, ages rising with EEP, and the main sequence's bounding
-      EEPs (MIST's ZAMS and TAMS) -- what a renderer frames the main
-      sequence with -- and meta["star"] names the star.
+    Then it declares the summary figure's track layout: a window inside the
+      drawn track's extent (its main sequence, MIST's ZAMS to TAMS) and
+      three round reference ages marked inside that window, in Gyr -- all a
+      renderer needs, without knowing MIST.
     """
     # Arrange
     system, _model = built
@@ -2053,10 +2094,14 @@ def test_the_kiel_chart_declares_its_tracks_eeps_ages_and_main_sequence(built):
     spec = _kiel_spec(system)
 
     # Assert
-    track = spec.meta["track"]
+    hints = spec.meta["summary"]
     (curve,) = [t for t in spec.traces if t.role == "model"]
-    assert len(track["eep"]) == len(track["age"]) == len(curve.x) > 0
-    assert np.all(np.diff(track["eep"]) > 0)
-    assert np.all(np.diff(track["age"]) >= 0)
-    assert track["main_sequence_eeps"] == [202.0, 454.0]
-    assert spec.meta["star"] == "A"
+    x, y = np.asarray(curve.x, float), np.asarray(curve.y, float)
+    t_lo, t_hi, g_lo, g_hi = hints["window"]
+    assert hints["layout"] == "track"
+    assert x.min() <= t_lo < t_hi <= x.max()
+    assert y.min() <= g_lo < g_hi <= y.max()
+    assert len(hints["marks"]) == 3
+    for mark in hints["marks"]:
+        assert t_lo <= mark["x"] <= t_hi and g_lo <= mark["y"] <= g_hi
+        assert mark["text"].endswith(" Gyr")

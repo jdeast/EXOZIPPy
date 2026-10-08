@@ -1680,12 +1680,71 @@ class Transit(Instrument):
 
         plot_via_specs(self, system, points, filename_prefix=filename_prefix)
 
+    #: A band whose filter is this one is TESS: on the summary figure its
+    #: files share one row per exposure time (cadence).  Filter names are
+    #: case-sensitive, as everywhere in EXOZIPPy.
+    SUMMARY_TESS_FILTER = "TESS"
+
+    def summary_rows(self, system):
+        """Each file's row on the summary figure's transit stack:
+        ``{name: (row key, row label)}``, the files sharing a key drawn on
+        one row.
+
+        The TESS files (band filter ``SUMMARY_TESS_FILTER``) share a row per
+        exposure time (``exptime:``, rounded to the second): the sectors of
+        one cadence are one instrument setup with one model curve.  Every
+        other file keeps its own row (key and label its name and
+        ``display_label``): ground-based follow-up from different
+        telescopes or nights stays apart even when filter and exposure time
+        agree.  A TESS row is labelled with its members' common ``label:``
+        when they share one that no other cadence uses, and otherwise
+        ``"<label or TESS> <seconds> s"``, e.g. ``"TESS 120 s"`` -- the
+        cadence only when every member states an ``exptime:`` this
+        component accepted (``exptime_stated``).  Without one, or with one
+        it rejected, the fit uses the inert 1-minute default (no
+        smearing), which is not the data's cadence, so such a row is just
+        ``"TESS"``.  Two rows with one label are the renderer's to refuse
+        (``summary_plot``), since only a figure needs them distinct.
+        """
+        band = system.band
+        by_cadence = {}
+        rows = {}
+        for i, name in enumerate(self.names):
+            b = band.names.index(self.band_names[i])
+            if band.filter_names[b] != self.SUMMARY_TESS_FILTER:
+                rows[name] = (name, self.display_label(i))
+                continue
+            seconds = int(round(60.0 * float(self.exptime_min[i])))
+            by_cadence.setdefault(seconds, []).append(i)
+
+        common = {}
+        for seconds, members in by_cadence.items():
+            labels = {self.plot_label[i] for i in members}
+            one = len(labels) == 1 and None not in labels
+            common[seconds] = labels.pop() if one else None
+        for seconds, members in by_cadence.items():
+            base = common[seconds]
+            stated = all(self.exptime_stated[i] for i in members)
+            if base is not None and list(common.values()).count(base) == 1:
+                label = base
+            elif stated:
+                label = f"{base or 'TESS'} {seconds} s"
+            else:
+                label = base or "TESS"
+            for i in members:
+                rows[self.names[i]] = (f"TESS cadence {seconds} s", label)
+        return rows
+
     def plot_data(self, system, point=None):
         """
         GUI charts for the transit photometry: per instrument an
         unphased flux-vs-time chart, and (with a point) one phased chart
         per planet/instrument. point=None returns only the raw data
         traces. See Component.plot_data and chart.Chart.
+
+        Each phased chart is a row of its planet's stack on the summary
+        figure (``meta["summary"]``, layout ``stacked_fold``), grouped as
+        ``summary_rows`` says.
         """
         from exozippy.chart import Chart, Trace
 
@@ -1806,6 +1865,7 @@ class Transit(Instrument):
             # Once per (component, point), not once per planet x instrument
             # (6.5.1); the per-instrument matrices fill in lazily.
             shared = self._phased_lc_shared(system, point)
+            summary_rows = self.summary_rows(system)
             for p_idx in range(planets.n_elements):
                 for i in range(self.n_elements):
                     # A failed prep skips this panel, exactly as the old
@@ -1864,6 +1924,19 @@ class Transit(Instrument):
                         # subtracts the baseline, other planets and any GP --
                         # all point-dependent, so live evals must re-ship it.
                         "dynamic_data": True,
+                        "summary": {
+                            "layout": "stacked_fold",
+                            "stack": pname,
+                            "instrument": self.names[i],
+                            "label": self.display_label(i),
+                            "color": self.plot_color[i],
+                            "row_key": summary_rows[self.names[i]][0],
+                            "row_label": summary_rows[self.names[i]][1],
+                            # The fold is in days; the stack reads hours.
+                            "x_scale": 24.0,
+                            "xlabel": "Time from Mid-Transit [hr]",
+                            "ylabel": "Normalized Flux + Constant",
+                        },
                     }
                     # Zoom to +/- t14 around mid-transit when a transit
                     # duration is known for this planet.  `planet.t14`, not

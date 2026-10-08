@@ -11,17 +11,22 @@ star's Kiel diagram, under a header quoting every planet's P, R_P, M_P and e.
 A panel is drawn only when the fit has the component behind it, so an RV-only
 or a star-only fit gets a shorter page rather than empty axes.
 
-THIS MODULE ADDS NO PHYSICS.  It is a third renderer of the components' Charts
-(``plotrender.py`` and the GUI's ``plotly-adapter.ts`` are the other two):
-every curve and point is what ``Component.plot_data(system, point)`` returned,
-and every O-C is the component's own ``meta["residuals"]`` -- data minus the
-likelihood's model at the observations, which only the component can
-evaluate, given in the chart's own units.  What it owns is the presentation:
-which charts make a panel, stacking the transits with offsets (in hours,
-TESS files grouped by cadence, optionally binned), each instrument's display
-name (its ``label:`` in the config), a BJD offset on the RV time axis and
-a break in it at every gap of over ``RV_BREAK_DAYS``, the SED in
-lambda*F_lambda rather than the chart's log10 of it, and the header.
+THIS MODULE ADDS NO PHYSICS AND KNOWS NO COMPONENT.  It is a third renderer
+of the components' Charts (``plotrender.py`` and the GUI's
+``plotly-adapter.ts`` are the other two): every curve and point is what
+``Component.plot_data(system, point)`` returned, and every O-C is the
+component's own ``meta["residuals"]`` -- data minus the likelihood's model
+at the observations, which only the component can evaluate, given in the
+chart's own units.  A chart is on the page when it declares
+``meta["summary"]``: one of the ``LAYOUTS`` and the hints that layout reads
+(display labels, colors, rows, axis labels, marks); the header is every
+component's ``summary_header`` and a track panel's contours and marked point
+its component's ``summary_posterior`` (both on ``Component``).  Nothing here
+names a component, a filter or a unit, so a component from another field
+joins the page by declaring a layout.  What it owns is the presentation:
+stacking the folded rows with offsets (optionally binned), an offset on a
+time axis and a break in it at every gap of over ``RV_BREAK_DAYS``, a
+log10 chart drawn as the quantity on a log axis, and the page layout.
 It draws in its own style, that of the one-page EXOFASTv2-era figures it
 replaces (``PALETTE`` and the style constants below), not the role encodings
 the per-component PDFs and the GUI share.  A new panel kind is a new
@@ -58,55 +63,33 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-#: The yaml_key of each component whose charts make summary panels.
-TRANSIT_KEY = "transit"
-RV_KEY = "rvinstrument"
-SED_KEY = "sed"
-KIEL_KEY = "evolutionarymodel"
-
-#: Header entries, per planet: the Parameter label and which element it is
-#: read at -- the planet's own index, or the index of the orbit it sits on.
-HEADER_PARAMETERS = (
-    ("orbit.period", "orbit"),
-    ("planet.radius", "planet"),
-    ("planet.mass", "planet"),
-    ("orbit.ecc", "orbit"),
-)
+#: The layouts a chart can declare in ``meta["summary"]["layout"]``, in the
+#: page's reading order: a stack of phase-folded rows (one panel per
+#: ``stack``), a time series (its axis broken at long gaps), a phase fold, a
+#: spectrum (y declared as log10 of the drawn quantity) and a track with
+#: posterior contours.  The vocabulary and every hint each layout reads are
+#: in outputs.md, "The system summary figure".
+LAYOUTS = ("stacked_fold", "time_series", "phase_fold", "spectrum", "track")
 
 #: The run.py default, for a config that names no prefix.
 DEFAULT_PREFIX = "fitresults/planet"
 
 
 class NoSummaryPanels(ValueError):
-    """The fit has no chart a summary panel is made of (no transit, RV, SED
-    or evolutionary model -- a microlensing fit, say).  ``summary_figure``
+    """No component of the fit declares a summary chart
+    (``meta["summary"]``) -- a microlensing fit, say, whose components
+    declare none.  ``summary_figure``
     and an explicit ``create_summary_plot`` raise it.  ``write_summary_plot``
     instead returns None for such a fit, so the live fit's wrap-up, which
     catches nothing (run.md, "A fit has three phases"), skips the figure
     with an INFO line."""
 
 
-#: A band whose filter is this one is TESS: its files are grouped onto one
-#: row per exposure time (cadence) by default.  Filter names are
-#: case-sensitive, as everywhere in EXOZIPPy.
-TESS_FILTER = "TESS"
-
-#: The SED panel's axes.  It is drawn as lambda*F_lambda on a log axis (the
-#: chart carries log10 of it, which keeps its JSON payload at normal scale).
-SED_XLABEL = r"Wavelength [$\mu$m]"
-SED_YLABEL = r"$\lambda F_\lambda$ [erg s$^{-1}$ cm$^{-2}$]"
-
 #: Every O-C axis is in the units of the panel above it, so it names none.
 OC_YLABEL = "O-C"
 
-#: Subtracted from a BJD time axis: the largest of these that every time on
-#: the axis exceeds -- TESS's BTJD zero point, else the older 2450000
-#: convention -- so the tick labels are short numbers rather than a
-#: matplotlib offset.  A time axis already offset by its data is untouched.
-BJD_OFFSETS = (2457000, 2450000)
-
-#: The RV time axis is broken wherever consecutive observations are more
-#: than this many days apart (``summary_figure(rv_break_days=)``).
+#: A time series' axis is broken wherever consecutive observations are
+#: more than this many days apart (``summary_figure(rv_break_days=)``).
 RV_BREAK_DAYS = 50.0
 
 # Page geometry.  A transit stack is two grid rows tall, every other panel
@@ -184,9 +167,6 @@ PALETTE = (
     "#0661AC",
 )
 
-#: The RV axes, all of them: one label and, across the panels, one range.
-RV_YLABEL = "RV [m/s]"
-
 # Line weights and marks, after the same figures.  Ticks point in and out,
 # long and heavy; points are filled circles with black edges.
 _TICK_MAJOR = {"direction": "inout", "length": 10, "width": 2}
@@ -228,7 +208,7 @@ _MODEL_LABEL = "Model"
 # leave on no track the eye can follow.  The RVs against time span many
 # orbits, where fifty faint curves blur into a grey band; the folded panel
 # shows their spread.
-_PANELS_WITH_DRAWS = frozenset({"transit", "rv_phase", "sed"})
+_PANELS_WITH_DRAWS = frozenset({"stacked_fold", "phase_fold", "spectrum"})
 _N_DRAWS = 50
 _DRAWS_ALPHA = 0.1
 _SED_DRAWS_ALPHA = 0.15
@@ -240,29 +220,21 @@ _SED_SPECTRUM_LW = 1.0
 _SED_SMOOTH = 9
 _SED_X_PAD = 1.5
 _SED_Y_PAD = 2.0
-# Kiel diagram: the track heavy blue with three reference ages, the star a
-# red cross at its reported median Teff and logg with their reported
-# (asymmetric) errors, and the 1- and 2-sigma contours (highest-density
-# regions enclosing 68.27% and 95.45% of the posterior draws) of MIST's
-# prediction in black and of the global fit in green.  Only the contours
-# have legend entries.
-_KIEL_TRACK = {"color": "b", "lw": 3.0}
-_KIEL_FIT = {"ecolor": "r", "elinewidth": 2.0, "capsize": 3}
-_KIEL_CONTOUR_PROBS = (0.9545, 0.6827)
-_KIEL_CONTOURS = (
-    ("mist", "k", "MIST"),
-    ("fit", "g", "Global fit"),
-)
-_KIEL_CONTOUR_LW = 1.5
-# The window frames the track's main sequence (zero age to turnoff, the EEPs
-# the chart declares), the star (median and error bars) and the 2-sigma
-# contours, padded by this fraction of its span on each side.
-_KIEL_PAD_FRAC = 0.06
-# Reference ages: this many, round, along the main sequence up to the
-# turnoff or the age of the universe, whichever is younger.
-_KIEL_N_AGES = 3
-_AGE_UNIVERSE_GYR = 13.8
-_KIEL_AGE_MARK = {"color": "b", "marker": "o", "ms": 6}
+# Track (the Kiel diagram): the track heavy blue with its marks, the
+# reported point a red cross with its (asymmetric) errors, and the 1- and
+# 2-sigma contours (highest-density regions enclosing 68.27% and 95.45% of
+# the draws) of each posterior sample set, the first in black and the second
+# in green.  Only the contours have legend entries.
+_TRACK_LINE = {"color": "b", "lw": 3.0}
+_TRACK_MARKER = {"ecolor": "r", "elinewidth": 2.0, "capsize": 3}
+_CONTOUR_PROBS = (0.9545, 0.6827)
+_CONTOUR_COLORS = ("k", "g")
+_CONTOUR_LW = 1.5
+# The window frames the chart's declared window, the reported point (with
+# its error bars) and the 2-sigma contours, padded by this fraction of its
+# span on each side.
+_TRACK_PAD_FRAC = 0.06
+_TRACK_MARK = {"color": "b", "marker": "o", "ms": 6}
 
 
 # ---------------------------------------------------------------------------
@@ -438,39 +410,13 @@ def reported_summary(param, index):
     return summary[index] if isinstance(summary, list) else summary
 
 
-def planet_header_lines(system):
-    """One header line per planet: P, R_P, M_P and e from the posterior.
-
-    Read off the distributed posterior (``reported_posterior``), each value
-    formatted by ``format_value`` with the Parameter's own table symbol and
-    unit.  A quantity this fit does not report -- no such Parameter, or one
-    with no posterior -- is left out of the line rather than shown as a
-    blank; a system with no planet has no lines.  With more than one planet
-    each line is prefixed by the planet's name.
-    """
-    if "planet" not in system.active_components:
-        return []
-    planet = system.active_components["planet"]
-    lookup = system.get_parameter_lookup()
+def summary_header_lines(system):
+    """The header under the title: every active component's
+    ``summary_header`` lines (the planet's P, R_P, M_P and e, say), in
+    component order.  Called once a posterior is distributed."""
     lines = []
-    for p_idx, pname in enumerate(planet.names):
-        o_idx = int(planet.orbit_map[p_idx])
-        parts = []
-        for label, owner in HEADER_PARAMETERS:
-            param = lookup.get(label)
-            index = o_idx if owner == "orbit" else p_idx
-            summ = reported_summary(param, index)
-            if summ is None:
-                continue
-            value = format_value(summ)
-            if value is None:
-                continue
-            unit = (param.unit_latex or "").replace("$", "")
-            unit_text = rf"\,{unit}" if unit else ""
-            parts.append(f"${param.latex} = {value}{unit_text}$")
-        if parts:
-            prefix = f"{pname}:  " if len(planet.names) > 1 else ""
-            lines.append(prefix + "   |   ".join(parts))
+    for comp in system.active_components.values():
+        lines.extend(comp.summary_header(system))
     return lines
 
 
@@ -481,7 +427,7 @@ def planet_header_lines(system):
 
 @dataclasses.dataclass
 class _Panel:
-    kind: str  # "transit", "rv_time", "rv_phase", "sed", "kiel"
+    kind: str  # one of LAYOUTS
     charts: list
     rows: int
 
@@ -524,60 +470,62 @@ def _draw_model_traces(system, panels, draws):
     return models
 
 
+def _hints(chart):
+    """The chart's ``meta["summary"]``, or None for a chart not on the
+    page."""
+    return (chart.meta or {}).get("summary")
+
+
 def _panel_kind(chart):
-    """The kind of summary panel ``chart`` is drawn on -- "transit" (a
-    phase-folded transit), "rv_time", "rv_phase", "sed" or "kiel" -- or
-    None for a chart no panel draws."""
-    key = chart.component.get("yaml_key")
-    folded = bool((chart.meta or {}).get("phase_folded"))
-    if key == TRANSIT_KEY:
-        return "transit" if folded else None
-    if key == RV_KEY:
-        return "rv_phase" if folded else "rv_time"
-    if key == SED_KEY:
-        # The SED's data-only chart (its plotters failed to compile, which
-        # the SED already warned about) has photometry in magnitudes and
-        # no spectrum: not the panel's chart.
-        return "sed" if _role(chart, "model") else None
-    return {KIEL_KEY: "kiel"}.get(key)
+    """The layout ``chart`` declares (``meta["summary"]["layout"]``), or
+    None for a chart that declares none.  An unknown layout raises, naming
+    the chart: a component's declaration is a contract, not a guess."""
+    hints = _hints(chart)
+    if hints is None:
+        return None
+    layout = hints["layout"]
+    if layout not in LAYOUTS:
+        raise ValueError(
+            f"summary plot: chart {chart.id!r} declares layout {layout!r}; "
+            f"the layouts are {list(LAYOUTS)}."
+        )
+    return layout
 
 
 def _panels(charts):
-    """Sort the charts into panels, in reading order.
+    """Sort the charts into panels, in reading order (``LAYOUTS``).
 
-    Transit stacks (one per planet, its phase-folded charts), the RVs against
-    time, one folded RV panel per orbit, the SED, one Kiel diagram per star.
-    The unphased transit charts and every other component's charts are not
-    part of the summary; the latter are logged so a missing panel is not a
-    mystery.
+    One stacked panel per declared ``stack`` (a planet's phase-folded
+    transits), every other chart a panel of its own.  A component none of
+    whose charts declares a layout has no panel; it is logged, so a missing
+    panel is not a mystery.
     """
+    by_kind = {layout: [] for layout in LAYOUTS}
     stacks = {}
-    rv_time, rv_phase, sed, kiel, unused = [], [], [], [], []
-    by_kind = {
-        "rv_time": rv_time,
-        "rv_phase": rv_phase,
-        "sed": sed,
-        "kiel": kiel,
-    }
+    owners, drawn = set(), set()
     for chart in charts:
+        key = chart.component["yaml_key"]
+        owners.add(key)
         kind = _panel_kind(chart)
-        if kind == "transit":
-            stacks.setdefault(chart.meta["planet"], []).append(chart)
-        elif kind is not None:
+        if kind is None:
+            continue
+        drawn.add(key)
+        if kind == "stacked_fold":
+            stacks.setdefault(_hints(chart)["stack"], []).append(chart)
+        else:
             by_kind[kind].append(chart)
-        elif chart.component.get("yaml_key") != TRANSIT_KEY:
-            unused.append(chart.id)
-    if unused:
+    if owners - drawn:
         logger.info(
-            "summary plot: no summary panel for chart(s) %s; they are in "
-            "the component's own PDFs.",
-            ", ".join(unused),
+            "summary plot: no summary panel for component(s) %s; their "
+            "charts are in their own PDFs.",
+            ", ".join(sorted(owners - drawn)),
         )
-    panels = [_Panel("transit", c, _TRANSIT_ROWS) for c in stacks.values()]
-    panels += [_Panel("rv_time", [c], _PANEL_ROWS) for c in rv_time]
-    panels += [_Panel("rv_phase", [c], _PANEL_ROWS) for c in rv_phase]
-    panels += [_Panel("sed", [c], _PANEL_ROWS) for c in sed]
-    panels += [_Panel("kiel", [c], _PANEL_ROWS) for c in kiel]
+    panels = []
+    for kind in LAYOUTS:
+        if kind == "stacked_fold":
+            panels += [_Panel(kind, c, _TRANSIT_ROWS) for c in stacks.values()]
+        else:
+            panels += [_Panel(kind, [c], _PANEL_ROWS) for c in by_kind[kind]]
     return panels
 
 
@@ -618,74 +566,60 @@ def _check_names(what, names, known):
         )
 
 
-def tess_cadence_groups(transit, band):
-    """The default ``transit_groups``: the TESS files, one group per cadence.
+def declared_row_groups(charts):
+    """The default ``transit_groups``: the rows the stacked charts declare.
 
-    A file is TESS when its band's filter is ``TESS_FILTER``; files with the
-    same exposure time (``exptime:``, rounded to the second) share a row,
-    the sectors of one cadence being one instrument setup with one model
-    curve.  Every other file keeps its own row: ground-based follow-up from
-    different telescopes or nights stays apart even when filter and
-    exposure time agree.  A group is labelled with its members' common
-    ``label:`` when they share one that no other cadence uses, and
-    otherwise ``"<label or TESS> <seconds> s"``, e.g. ``"TESS 120 s"`` --
-    the cadence only when every member states an ``exptime:`` the transit
-    component accepted (``exptime_stated``).  Without one, or with one it
-    rejected, the fit uses the inert 1-minute default (no smearing), which
-    is not the data's cadence, so such a row is just ``"TESS"``.  Two
-    groups that would share a label raise, naming both: a row is never
-    silently replaced.
-
-    ``transit`` and ``band`` are the fit's components (names, band names,
-    ``exptime_min``, ``plot_label`` and the per-file ``config``; band names
-    and ``filter_names``).  Returns ``{label: [transit names]}`` in config
-    order.
+    ``{row label: [instruments]}`` for every declared row that is more than
+    one file under its own name (``meta["summary"]["row_key"]``, labelled
+    ``row_label``) -- the TESS sectors of one cadence, say
+    (``Transit.summary_rows``).  Two groups that would share a label
+    raise, naming both: one group is never silently replaced by another.
     """
-    by_cadence = {}
-    for i, name in enumerate(transit.names):
-        b = band.names.index(transit.band_names[i])
-        if band.filter_names[b] != TESS_FILTER:
+    keys = {}
+    for chart in charts:
+        hints = _hints(chart)
+        if hints is None or hints["layout"] != "stacked_fold":
             continue
-        seconds = int(round(60.0 * float(transit.exptime_min[i])))
-        by_cadence.setdefault(seconds, []).append(i)
-
-    common = {}
-    for seconds, members in by_cadence.items():
-        labels = {transit.plot_label[i] for i in members}
-        one = len(labels) == 1 and None not in labels
-        common[seconds] = labels.pop() if one else None
+        members = keys.setdefault(
+            hints["row_key"], {"label": hints["row_label"], "names": []}
+        )
+        if hints["instrument"] not in members["names"]:
+            members["names"].append(hints["instrument"])
     groups = {}
-    for seconds, members in by_cadence.items():
-        base = common[seconds]
-        stated = all(transit.exptime_stated[i] for i in members)
-        if base is not None and list(common.values()).count(base) == 1:
-            label = base
-        elif stated:
-            label = f"{base or 'TESS'} {seconds} s"
-        else:
-            label = base or "TESS"
-        names = [transit.names[i] for i in members]
+    for key, row in keys.items():
+        # A row is a group when it is more than its one file: several
+        # files, or one file under the row's own key (a TESS cadence).  A
+        # file on its own row is labelled on its own, and two such files
+        # may share a label (both "LCO", say); two GROUPS may not, since
+        # the label is how transit_groups and transit_bin name a group.
+        if row["names"] == [key]:
+            continue
+        label = row["label"]
         if label in groups:
             raise ValueError(
-                f"summary plot: the TESS cadence groups {groups[label]} and "
-                f"{names} would both be labelled {label!r}.  Give them "
-                "distinct `label:`s in the config, or pass transit_groups."
+                f"summary plot: the rows {groups[label]} and "
+                f"{row['names']} would both be labelled {label!r}.  Give "
+                "them distinct `label:`s in the config, or pass "
+                "transit_groups."
             )
-        groups[label] = names
+        groups[label] = row["names"]
     return groups
 
 
-def _transit_rows(stack, display, groups, bins, colors):
-    """The rows of one transit stack, ``[(bin key, label, charts,
-    bin_minutes, color)]`` in config order, a group placed where its first
-    member is.  ``display`` maps a file to its label, ``groups`` a group
-    label to its files, ``colors`` a file to its user ``plot: color`` (or
-    None); ``bins`` is None, minutes, or ``{group label or file: minutes}``.
+def _transit_rows(stack, labels, groups, bins):
+    """The rows of one stack, ``[(bin key, label, charts, bin_minutes,
+    color)]`` in chart order, a group placed where its first member is.
+    ``labels`` maps an instrument to a user's display name (else its
+    declared ``label``), ``groups`` a group label to its instruments;
+    ``bins`` is None, minutes, or ``{group label or instrument: minutes}``.
+    A row's color is its first member's declared ``color`` (a user's
+    ``plot: color:``), else the palette by row.
     """
     member_of = {m: g for g, members in groups.items() for m in members}
     rows, seen = [], {}
     for chart in stack:
-        inst = chart.meta["instrument"]
+        hints = _hints(chart)
+        inst = hints["instrument"]
         key = (
             ("group", member_of[inst]) if inst in member_of else ("file", inst)
         )
@@ -694,13 +628,13 @@ def _transit_rows(stack, display, groups, bins, colors):
             continue
         seen[key] = len(rows)
         name = key[1]
-        label = name if key[0] == "group" else display[inst]
+        label = name if key[0] == "group" else labels.get(inst, hints["label"])
         minutes = bins.get(name) if isinstance(bins, dict) else bins
         rows.append([name, label, [chart], minutes, None])
     for k, row in enumerate(rows):
         # A user's per-instrument plot: color (the first member's) wins;
         # otherwise the theme palette by row, so neighbors differ.
-        user = colors[row[2][0].meta["instrument"]]
+        user = _hints(row[2][0])["color"]
         row[4] = user or PALETTE[k % len(PALETTE)]
     return [tuple(r) for r in rows]
 
@@ -741,16 +675,19 @@ def _robust_sigma(r):
 
 
 def _transit_row_arrays(row):
-    """Per member chart: data (x hours, y), the binned set or None, and the
-    model (x hours, y) -- ``y`` relative to the baseline, as the chart has it."""
+    """Per member chart: data (x, y), the binned set or None, and the model
+    (x, y) -- x times the chart's declared ``x_scale`` (days to hours for a
+    transit), ``y`` relative to the baseline, as the chart has it.  The bin
+    width is in minutes of that time axis."""
     out = []
     for chart in row[2]:
+        scale = _hints(chart)["x_scale"]
         data, model = _one(chart, "data"), _one(chart, "model")
-        x = np.asarray(data.x, dtype=float) * 24.0
+        x = np.asarray(data.x, dtype=float) * scale
         y = np.asarray(data.y, dtype=float)
-        xm = np.asarray(model.x, dtype=float) * 24.0
+        xm = np.asarray(model.x, dtype=float) * scale
         ym = np.asarray(model.y, dtype=float)
-        binned = _bin(x, y, row[3] / 60.0) if row[3] else None
+        binned = _bin(x, y, row[3] * scale / 1440.0) if row[3] else None
         out.append((x, y, binned, xm, ym))
     return out
 
@@ -773,9 +710,9 @@ def _auto_spacing(arrays):
 
 
 def _row_model_curves(row, members, draw_models):
-    """Every model curve of one stack row, ``(x hours, y)``: the members'
-    at the reference point, then at each draw (``draw_models``, by chart
-    id).  Within one draw, a curve repeated exactly -- grouped TESS files
+    """Every model curve of one stack row, ``(x, y)`` with x scaled as in
+    ``_transit_row_arrays``: the members' at the reference point, then at
+    each draw (``draw_models``, by chart id).  Within one draw, a curve repeated exactly -- grouped TESS files
     share their model -- is kept once, so overlapping files do not darken
     it; a draw repeating another draw is kept, as every draw is in
     ``plotrender``.
@@ -783,10 +720,11 @@ def _row_model_curves(row, members, draw_models):
     per_draw = {}
     for chart, (_, _, _, xm, ym) in zip(row[2], members):
         per_draw.setdefault(0, []).append((xm, ym))
+        scale = _hints(chart)["x_scale"]
         for k, traces in enumerate(draw_models.get(chart.id, ()), start=1):
             per_draw.setdefault(k, []).extend(
                 (
-                    24.0 * np.asarray(trace.x, dtype=float),
+                    scale * np.asarray(trace.x, dtype=float),
                     np.asarray(trace.y, dtype=float),
                 )
                 for trace in traces
@@ -817,7 +755,9 @@ def _draw_transit_stack(ax, rows, spacing, draw_models=None):
     auto, depth, sigmas = _auto_spacing(arrays)
     spacing = auto if spacing is None else float(spacing)
 
-    x_range = rows[0][2][0].x_range
+    first = rows[0][2][0]
+    hints = _hints(first)
+    x_range = first.x_range
     for k, (row, members) in enumerate(zip(rows, arrays)):
         offset = 1.0 - k * spacing
         color = row[4]
@@ -854,7 +794,9 @@ def _draw_transit_stack(ax, rows, spacing, draw_models=None):
                 )
 
     if x_range is not None:
-        ax.set_xlim(24.0 * x_range[0], 24.0 * x_range[1])
+        ax.set_xlim(
+            hints["x_scale"] * x_range[0], hints["x_scale"] * x_range[1]
+        )
     lo, hi = ax.get_xlim()
     gap = spacing - depth
     for k, (row, sigma) in enumerate(zip(rows, sigmas)):
@@ -876,8 +818,8 @@ def _draw_transit_stack(ax, rows, spacing, draw_models=None):
         1.0 - (len(rows) - 1) * spacing - depth - margin,
         1.0 + margin,
     )
-    ax.set_xlabel("Time from Mid-Transit [hr]")
-    ax.set_ylabel("Normalized Flux + Constant")
+    ax.set_xlabel(hints["xlabel"])
+    ax.set_ylabel(hints["ylabel"])
     _ticks(ax)
 
 
@@ -896,16 +838,21 @@ def _offset_label(label, offset):
     return label[:-1] + text + "]" if label.endswith("]") else label + text
 
 
-def _bjd_offset(chart):
-    """The largest of ``BJD_OFFSETS`` that every x of the chart is past; 0
-    for none (an axis its data already offsets)."""
+def _x_offset(chart):
+    """The largest of the chart's declared ``x_offsets`` (a time axis's
+    zero points, largest first: BTJD, then the older 2450000 convention)
+    that every x of the chart is past, subtracted so the tick labels are
+    short numbers rather than a matplotlib offset; 0 for none declared or
+    none passed (an axis its data already offsets)."""
+    offsets = _hints(chart).get("x_offsets") or ()
     x_min = min(float(np.min(t.x)) for t in chart.traces if np.size(t.x) > 0)
-    return next((o for o in BJD_OFFSETS if x_min > o), 0)
+    return next((o for o in offsets if x_min > o), 0)
 
 
 def _prepared(chart, labels, offset=0):
-    """The chart with instrument names relabelled and ``offset`` (a
-    ``_bjd_offset``) subtracted from its x axis."""
+    """The chart with instrument names relabelled, ``offset`` (an
+    ``_x_offset``) subtracted from its x axis, and its declared ``ylabel``
+    (if any) as its y label."""
     meta = dict(chart.meta or {})
     if "residuals" in meta:
         meta["residuals"] = [
@@ -915,6 +862,7 @@ def _prepared(chart, labels, offset=0):
         chart,
         traces=[_shifted(t, offset, labels) for t in chart.traces],
         xlabel=_offset_label(chart.xlabel, offset),
+        ylabel=_hints(chart).get("ylabel", chart.ylabel),
         x_range=None
         if chart.x_range is None
         else [float(v) - offset for v in chart.x_range],
@@ -931,26 +879,31 @@ def _log_errors_to_linear(y, yerr):
 
 
 def trace_in_flux(trace):
-    """An SED chart trace (log10 of lambda*F_lambda, errors in dex) at
-    ``10**y``, its error bars converted on each side."""
+    """A trace of log10 of a quantity (errors in dex) at ``10**y``, its
+    error bars converted on each side."""
     y = np.asarray(trace.y, dtype=float)
     yerr = None if trace.yerr is None else _log_errors_to_linear(y, trace.yerr)
     return dataclasses.replace(trace, y=10**y, yerr=yerr)
 
 
 def sed_in_flux(chart):
-    """The SED chart as lambda*F_lambda on a log axis, O-C converted with it.
+    """A spectrum chart as the quantity itself on a log axis, O-C converted
+    with it.
 
-    The chart carries log10(lambda*F_lambda) on a linear axis -- the log is
-    taken component-side so its JSON payload stays at normal scale -- and
-    its ``meta["residuals"]`` in that unit (dex).  The summary draws the
-    flux itself, so every trace becomes ``10**y`` (error bars converted on
-    each side), and each residual becomes the flux difference it encodes,
-    ``F_obs - F_model = 10**y_obs - 10**(y_obs - oc)``, carrying its point's
-    linear error bars.  A residual is paired with the data trace of the same
-    name, point for point (the SED component builds them that way); anything
-    else is a chart this function does not know how to convert, and raises.
+    A chart that declares ``y_log10`` carries log10 of what is drawn on a
+    linear axis (the SED's log10(lambda*F_lambda): the log is taken
+    component-side so its JSON payload stays at normal scale) and its
+    ``meta["residuals"]`` in that unit (dex).  Every trace becomes
+    ``10**y`` (error bars converted on each side), and each residual the
+    difference it encodes, ``obs - model = 10**y_obs - 10**(y_obs - oc)``,
+    carrying its point's linear error bars.  A residual is paired with the
+    data trace of the same name, point for point; anything else is a chart
+    this function does not know how to convert, and raises.  The declared
+    ``xlabel``/``ylabel`` replace the chart's, which name the log.
     """
+    hints = _hints(chart)
+    if not hints.get("y_log10"):
+        return chart
 
     data = {t.name: t for t in chart.traces if t.role == "data"}
     residuals = []
@@ -960,7 +913,7 @@ def sed_in_flux(chart):
             np.asarray(obs.x, dtype=float), np.asarray(oc.x, dtype=float)
         ):
             raise ValueError(
-                f"summary plot: SED residual trace {oc.name!r} has no data "
+                f"summary plot: residual trace {oc.name!r} has no data "
                 f"trace with the same points in chart {chart.id!r}."
             )
         y_obs = np.asarray(obs.y, dtype=float)
@@ -977,8 +930,8 @@ def sed_in_flux(chart):
         traces=[trace_in_flux(t) for t in chart.traces],
         y_range=[10.0**lo, 10.0**hi],
         y_log=True,
-        xlabel=SED_XLABEL,
-        ylabel=SED_YLABEL,
+        xlabel=hints.get("xlabel", chart.xlabel),
+        ylabel=hints.get("ylabel", chart.ylabel),
         meta={**(chart.meta or {}), "residuals": residuals},
     )
 
@@ -1276,7 +1229,6 @@ def _draw_rv(
                 _RV_MARKERSIZE,
             )
         _geometry(ax, chart)
-        ax.set_ylabel(RV_YLABEL)
         if phased:
             ax.set_xlim(0.0, 1.0)
             _legend(ax, loc="upper right")
@@ -1318,7 +1270,7 @@ def _draw_sed(fig, cell, chart, draw_models=()):
     wherever a spectrum lies within the flux axis.
     """
     residuals = (chart.meta or {}).get("residuals") or []
-    identity = chart.meta["identity"]
+    identity = _hints(chart)["identity"]
     ax, ax_oc = _axes(fig, cell, bool(residuals))
     data = _role(chart, "data")
     colors = {}
@@ -1397,54 +1349,58 @@ def _draw_sed(fig, cell, chart, draw_models=()):
     _finish(ax, ax_oc)
 
 
-def _kiel_degeneracy(teff, logg):
-    """Why the draws ``(teff, logg)`` have no 2-D density to contour, or
-    None when they have one.  A pinned star, or a Teff and logg that move
-    together exactly (one of them derived from the other alone), has a
-    singular covariance: ``gaussian_kde`` cannot be built on it."""
-    if teff.size < 3:
-        return f"{teff.size} draw(s)"
-    s_t, s_g = np.std(teff), np.std(logg)
-    if not (s_t > 0 and s_g > 0):
-        return "a constant Teff or logg"
-    r = np.corrcoef(teff, logg)[0, 1]
+def _degeneracy(x, y):
+    """Why the draws ``(x, y)`` have no 2-D density to contour, or None
+    when they have one.  A pinned quantity, or two that move together
+    exactly (one derived from the other alone), has a singular covariance:
+    ``gaussian_kde`` cannot be built on it."""
+    if x.size < 3:
+        return f"{x.size} draw(s)"
+    if not (np.std(x) > 0 and np.std(y) > 0):
+        return "a constant coordinate"
+    r = np.corrcoef(x, y)[0, 1]
     if not abs(r) < 1.0 - 1e-9:
-        return f"Teff and logg perfectly correlated (r = {r:.12f})"
+        return f"perfectly correlated coordinates (r = {r:.12f})"
     return None
 
 
-def _kiel_contours(ax, samples):
-    """Draw the 1- and 2-sigma contours of each sample set in ``samples``
-    (``{"fit"|"mist": (teff, logg)}``, ``posterior_kiel_samples``), returning
-    the Teff and logg extent of the drawn lines, or None when neither set
-    has a density to contour.  A Gaussian KDE (Scott's bandwidth) of the draws, contoured at
-    the densities enclosing ``_KIEL_CONTOUR_PROBS`` of it: the shared
-    ``contour_plot.Contour``.  A sample set with no 2-D density
-    (``_kiel_degeneracy``) gets no contour, and says so at INFO; the star's
-    point and error bars still show where it is."""
+def _contours(ax, contours):
+    """Draw the 1- and 2-sigma contours of each ``(label, x, y)`` sample
+    set, in ``_CONTOUR_COLORS`` order, returning the x and y extent of the
+    drawn lines, or None when no set has a density to contour.  A Gaussian
+    KDE (Scott's bandwidth) of the draws, contoured at the densities
+    enclosing ``_CONTOUR_PROBS`` of it: the shared ``contour_plot.Contour``.
+    A sample set with no 2-D density (``_degeneracy``) gets no contour and
+    no legend entry, and says so at INFO; the reported point and its error
+    bars still show where it is."""
     from matplotlib.lines import Line2D
 
     from .contour_plot import Contour
 
+    if len(contours) > len(_CONTOUR_COLORS):
+        raise ValueError(
+            f"summary plot: {len(contours)} contour sets, more than the "
+            f"{len(_CONTOUR_COLORS)} colors a track panel draws."
+        )
     extent = []
-    for kind, color, label in _KIEL_CONTOURS:
-        teff, logg = (np.asarray(a, dtype=float) for a in samples[kind])
-        why = _kiel_degeneracy(teff, logg)
+    for (label, x, y), color in zip(contours, _CONTOUR_COLORS):
+        x, y = np.asarray(x, dtype=float), np.asarray(y, dtype=float)
+        why = _degeneracy(x, y)
         if why is not None:
             logger.info(
-                "summary plot: no %s contour on the Kiel diagram -- its "
-                "posterior has no 2-D density (%s).",
+                "summary plot: no %s contour -- its posterior has no 2-D "
+                "density (%s).",
                 label,
                 why,
             )
             continue
         contour = Contour(
-            teff,
-            logg,
-            x_err=np.std(teff),
-            y_err=np.std(logg),
+            x,
+            y,
+            x_err=np.std(x),
+            y_err=np.std(y),
             bw_method="scott",
-            probs=_KIEL_CONTOUR_PROBS,
+            probs=_CONTOUR_PROBS,
         )
         drawn = ax.contour(
             contour.X,
@@ -1452,7 +1408,7 @@ def _kiel_contours(ax, samples):
             contour.Z,
             levels=contour.levels,
             colors=color,
-            linewidths=_KIEL_CONTOUR_LW,
+            linewidths=_CONTOUR_LW,
             zorder=6,
         )
         # What was drawn, the 2-sigma line included: the KDE's region
@@ -1467,7 +1423,7 @@ def _kiel_contours(ax, samples):
             # Contour's levels are densities of its own KDE grid, so a
             # non-degenerate sample set always yields a line.
             raise RuntimeError(
-                f"summary plot: the {label} KDE of {teff.size} draws drew no "
+                f"summary plot: the {label} KDE of {x.size} draws drew no "
                 f"contour line at levels {list(contour.levels)}."
             )
         ax.add_line(
@@ -1475,7 +1431,7 @@ def _kiel_contours(ax, samples):
                 [],
                 [],
                 color=color,
-                lw=_KIEL_CONTOUR_LW,
+                lw=_CONTOUR_LW,
                 label=rf"{label} ($1\sigma$, $2\sigma$)",
             )
         )
@@ -1490,135 +1446,101 @@ def _kiel_contours(ax, samples):
         )
     if not extent:
         return None
-    lo_t, hi_t, lo_g, hi_g = zip(*extent)
-    return min(lo_t), max(hi_t), min(lo_g), max(hi_g)
+    lo_x, hi_x, lo_y, hi_y = zip(*extent)
+    return min(lo_x), max(hi_x), min(lo_y), max(hi_y)
 
 
-def reference_ages(age_lo, age_hi, n=_KIEL_N_AGES):
-    """``n`` round ages (Gyr) spread through ``(age_lo, age_hi)``.
+def _draw_track(fig, cell, chart, overlay=None):
+    """A track panel (the Kiel diagram).
 
-    The ages at 1/(n+1), 2/(n+1), ... of the span, each rounded to one
-    significant figure -- two, then three, when rounding would merge two of
-    them or push one out of the span.  Returns ``[]`` for an empty span.
+    The chart's model track heavy blue with its declared ``marks`` (each
+    ``{"x", "y", "text"}``: reference ages along the main sequence, say);
+    and from ``overlay`` (the owning component's ``summary_posterior`` for
+    this chart): the reported ``marker`` a red cross with its asymmetric
+    errors, and the 1- and 2-sigma ``contours`` of each sample set, the
+    only legend entries.  The window frames the declared ``window``, the
+    marker and the contours, padded by ``_TRACK_PAD_FRAC``; an axis the
+    chart declares inverted (the Kiel convention: hot on the left, low
+    gravity at the top) stays inverted.
     """
-    if not age_hi > age_lo:
-        return []
-    fractions = np.arange(1, n + 1) / (n + 1)
-    targets = age_lo + fractions * (age_hi - age_lo)
-    for digits in (1, 2, 3):
-        ages = [float(f"{t:.{digits}g}") for t in targets]
-        if len(set(ages)) == n and all(age_lo < a < age_hi for a in ages):
-            return ages
-    return [float(t) for t in targets]
-
-
-def _main_sequence(chart):
-    """The drawn track's main-sequence rows ``(teff, logg, age)``, ordered
-    by age, from the chart's ``meta["track"]``; None without any."""
-    track = (chart.meta or {}).get("track")
-    models = _role(chart, "model")
-    if track is None or not models:
-        return None
-    eep = np.asarray(track["eep"], dtype=float)
-    zams, tams = track["main_sequence_eeps"]
-    rows = (eep >= zams) & (eep <= tams)
-    if not rows.any():
-        return None
-    teff = np.asarray(models[0].x, dtype=float)[rows]
-    logg = np.asarray(models[0].y, dtype=float)[rows]
-    age = np.asarray(track["age"], dtype=float)[rows]
-    order = np.argsort(age)
-    return teff[order], logg[order], age[order]
-
-
-def _draw_kiel(fig, cell, chart, samples=None, star=None):
-    """The Kiel diagram.
-
-    The reference point's track heavy blue, with ``_KIEL_N_AGES`` reference
-    ages marked along its main sequence; the star a red cross at ``star`` --
-    ``((teff, minus, plus), (logg, minus, plus))``, the reported medians and
-    their errors -- or, without one, at the chart's fitted point; and, with
-    ``samples`` (this star's ``posterior_kiel_samples``), the 1- and 2-sigma
-    contours of MIST and of the global fit, the only legend entries.  The
-    window frames the main sequence up to the turnoff, and always the star
-    and the contours.
-    """
+    hints = _hints(chart)
+    overlay = overlay or {}
     ax = fig.add_subplot(cell)
     for trace in _role(chart, "model"):
         ax.plot(
             np.asarray(trace.x, dtype=float),
             np.asarray(trace.y, dtype=float),
             zorder=7,
-            **_KIEL_TRACK,
+            **_TRACK_LINE,
         )
-    if star is None:
-        (fit,) = [t for t in chart.traces if t.name.endswith("fit value")]
-        teff, logg = float(np.ravel(fit.x)[0]), float(np.ravel(fit.y)[0])
-        star = ((teff, 0.0, 0.0), (logg, 0.0, 0.0))
-    (teff, t_lo, t_hi), (logg, g_lo, g_hi) = star
-    ax.errorbar(
-        [teff],
-        [logg],
-        xerr=[[t_lo], [t_hi]],
-        yerr=[[g_lo], [g_hi]],
-        fmt="none",
-        zorder=9,
-        **_KIEL_FIT,
-    )
     _geometry(ax, chart)
 
-    boxes = [(teff - t_lo, teff + t_hi, logg - g_lo, logg + g_hi)]
-    if samples:
-        drawn = _kiel_contours(ax, samples)
+    boxes = []
+    if hints.get("window") is not None:
+        boxes.append(tuple(hints["window"]))
+    if "marker" in overlay:
+        (x, x_lo, x_hi), (y, y_lo, y_hi) = overlay["marker"]
+        ax.errorbar(
+            [x],
+            [y],
+            xerr=[[x_lo], [x_hi]],
+            yerr=[[y_lo], [y_hi]],
+            fmt="none",
+            zorder=9,
+            **_TRACK_MARKER,
+        )
+        boxes.append((x - x_lo, x + x_hi, y - y_lo, y + y_hi))
+    if overlay.get("contours"):
+        drawn = _contours(ax, overlay["contours"])
         if drawn is not None:
             boxes.append(drawn)
-    main_sequence = _main_sequence(chart)
-    if main_sequence is not None:
-        ms_teff, ms_logg, ms_age = main_sequence
-        boxes.append(
-            (ms_teff.min(), ms_teff.max(), ms_logg.min(), ms_logg.max())
+    for mark in hints.get("marks") or ():
+        ax.plot(mark["x"], mark["y"], ls="none", zorder=8, **_TRACK_MARK)
+        ax.annotate(
+            mark["text"],
+            (mark["x"], mark["y"]),
+            xytext=(7, -3),
+            textcoords="offset points",
+            color=_TRACK_MARK["color"],
+            fontweight="bold",
+            fontsize=_TICK_LABELSIZE - 2,
+            zorder=10,
         )
-        last = min(ms_age[-1], _AGE_UNIVERSE_GYR)
-        for age in reference_ages(ms_age[0], last):
-            x = np.interp(age, ms_age, ms_teff)
-            y = np.interp(age, ms_age, ms_logg)
-            ax.plot(x, y, ls="none", zorder=8, **_KIEL_AGE_MARK)
-            ax.annotate(
-                f"{age:g} Gyr",
-                (x, y),
-                xytext=(7, -3),
-                textcoords="offset points",
-                color=_KIEL_AGE_MARK["color"],
-                fontweight="bold",
-                fontsize=_TICK_LABELSIZE - 2,
-                zorder=10,
-            )
-    lo_t, hi_t, lo_g, hi_g = (
-        f(v) for f, v in zip((min, max, min, max), zip(*boxes))
-    )
-    pad_t = _KIEL_PAD_FRAC * (hi_t - lo_t)
-    pad_g = _KIEL_PAD_FRAC * (hi_g - lo_g)
-    # Both axes run reversed (Kiel convention): hot on the left, low
-    # gravity at the top.
-    ax.set_xlim(hi_t + pad_t, lo_t - pad_t)
-    ax.set_ylim(hi_g + pad_g, lo_g - pad_g)
+    if boxes:
+        lo_x, hi_x, lo_y, hi_y = (
+            f(v) for f, v in zip((min, max, min, max), zip(*boxes))
+        )
+        pad_x = _TRACK_PAD_FRAC * (hi_x - lo_x)
+        pad_y = _TRACK_PAD_FRAC * (hi_y - lo_y)
+        x_lim = (lo_x - pad_x, hi_x + pad_x)
+        y_lim = (lo_y - pad_y, hi_y + pad_y)
+        ax.set_xlim(*(x_lim[::-1] if chart.x_inverted else x_lim))
+        ax.set_ylim(*(y_lim[::-1] if chart.y_inverted else y_lim))
     _legend(ax, loc="best", fontsize="small")
     _finish(ax, None)
 
 
-def _reported_star(system, name):
-    """``((teff, minus, plus), (logg, minus, plus))`` for star ``name``: the
-    medians and errors the results table reports.  None before a posterior
-    is distributed."""
-    index = system.star.names.index(name)
-    teff = reported_summary(system.star.teff, index)
-    logg = reported_summary(system.star.logg, index)
-    if teff is None or logg is None:
-        return None
-    return tuple(
-        (float(s.median), abs(float(s.err_minus)), abs(float(s.err_plus)))
-        for s in (teff, logg)
-    )
+def _in_linear(chart, trace):
+    """A draw's trace of a spectrum chart, in the units ``sed_in_flux``
+    draws the chart in."""
+    return trace_in_flux(trace) if _hints(chart).get("y_log10") else trace
+
+
+def _posterior_overlays(system, panels):
+    """``{chart id: overlay}`` from the ``summary_posterior`` of every
+    component owning a track panel (``Component.summary_posterior``)."""
+    keys = {
+        chart.component["yaml_key"]
+        for panel in panels
+        if panel.kind == "track"
+        for chart in panel.charts
+    }
+    overlays = {}
+    for key in sorted(keys):
+        overlays.update(
+            system.active_components[key].summary_posterior(system)
+        )
+    return overlays
 
 
 def _share_ylims(axes):
@@ -1661,7 +1583,7 @@ def summary_figure(
     title : str, optional
         Bold title across the top.
     header_lines : sequence of str
-        Lines under the title -- ``planet_header_lines(system)`` once a
+        Lines under the title -- ``summary_header_lines(system)`` once a
         posterior is distributed.  Mathtext is rendered.
     labels : dict, optional
         Display names that override the fit's own, keyed by instrument name
@@ -1671,8 +1593,9 @@ def summary_figure(
     transit_groups : dict, optional
         ``{row label: [transit names]}``: files drawn on ONE row of the
         stack, each with its own model curve (identical curves overlap).
-        Default: ``tess_cadence_groups`` -- the TESS files, one row per
-        exposure time, every other file on its own row.  Passing a dict
+        Default: the rows the charts declare (``declared_row_groups``) --
+        for transits, the TESS files one row per exposure time, every other
+        file on its own row (``Transit.summary_rows``).  Passing a dict
         replaces that rule (``{}`` puts every file on its own row).  A name
         in two groups, or not a transit of this fit, raises.
     transit_bin : float or dict, optional
@@ -1705,32 +1628,35 @@ def summary_figure(
     panels = _panels(charts)
     if not panels:
         raise NoSummaryPanels(
-            "This fit has no chart a summary panel is made of (transits, "
-            "RVs, an SED or a Kiel diagram)."
+            "No component of this fit declares a summary chart "
+            '(meta["summary"]): no transit, RV, SED or evolutionary model, '
+            "or any other component that draws one."
         )
 
-    # Each instrument's display name: an override, else its `label:`, else
-    # its `name:` (Instrument.display_label).
-    has_transits = any(p.kind == "transit" for p in panels)
-    has_rvs = any(p.kind in ("rv_time", "rv_phase") for p in panels)
-    transit = system.active_components[TRANSIT_KEY] if has_transits else None
-    rv = system.active_components[RV_KEY] if has_rvs else None
-    transit_names = list(transit.names) if has_transits else []
-    rv_names = list(rv.names) if has_rvs else []
-    _check_names("labels", labels, transit_names + rv_names)
-    display = {}
-    for comp, names in ((transit, transit_names), (rv, rv_names)):
-        for i, name in enumerate(names):
-            display[name] = labels.get(name, comp.display_label(i))
+    # Each instrument's display name: an override, else what its chart
+    # declares (an instrument's `label:`, else its `name:`).
+    stacked = [c for p in panels if p.kind == "stacked_fold" for c in p.charts]
+    stacked_names = list(
+        dict.fromkeys(_hints(c)["instrument"] for c in stacked)
+    )
+    series = [
+        c
+        for p in panels
+        if p.kind in ("time_series", "phase_fold")
+        for c in p.charts
+    ]
+    series_labels = {}
+    for chart in series:
+        series_labels.update(_hints(chart)["labels"])
+    _check_names("labels", labels, stacked_names + list(series_labels))
+    display = {**series_labels, **labels}
 
     if transit_groups is None:
-        groups = (
-            tess_cadence_groups(transit, system.band) if has_transits else {}
-        )
+        groups = declared_row_groups(stacked)
     else:
         groups = {str(g): list(m) for g, m in transit_groups.items()}
     grouped = [m for members in groups.values() for m in members]
-    _check_names("transit_groups", grouped, transit_names)
+    _check_names("transit_groups", grouped, stacked_names)
     twice = sorted({m for m in grouped if grouped.count(m) > 1})
     if twice:
         raise ValueError(
@@ -1738,7 +1664,7 @@ def summary_figure(
             "drawn on one row."
         )
     if isinstance(transit_bin, dict):
-        ungrouped = [n for n in transit_names if n not in grouped]
+        ungrouped = [n for n in stacked_names if n not in grouped]
         _check_names("transit_bin", transit_bin, ungrouped + list(groups))
         bad = {k: v for k, v in transit_bin.items() if not v > 0}
     elif transit_bin is not None:
@@ -1800,36 +1726,30 @@ def summary_figure(
                 hspace=0.2,
                 wspace=0.24,
             )
-            # Each RV instrument's color: its `plot: color:`, else the
-            # palette from the back (by the instrument's series_index).
-            rv_colors = {
-                i: rv.plot_color[i] or PALETTE[-(i + 1) % len(PALETTE)]
-                for i in range(len(rv_names))
+            # Each series' color, by its series_index: the declared user
+            # `plot: color:`, else the palette from the back.
+            declared = {}
+            for chart in series:
+                declared.update(_hints(chart)["colors"])
+            series_colors = {
+                int(i): c or PALETTE[-(int(i) + 1) % len(PALETTE)]
+                for i, c in declared.items()
             }
             draw_models = _draw_model_traces(system, panels, draws)
-            rv_axes, rv_oc_axes = [], []
-            # Each star's posterior (Teff, logg) for its Kiel contours; none
-            # before a posterior is distributed.
-            kiel_samples = (
-                system.active_components[KIEL_KEY].posterior_kiel_samples(
-                    system
-                )
-                if any(p.kind == "kiel" for p in panels)
-                else {}
-            )
+            overlays = _posterior_overlays(system, panels)
+            series_axes, series_oc_axes = [], []
             for panel, col, row in placed:
                 cell = grid[row : row + panel.rows, col]
-                if panel.kind == "transit":
+                if panel.kind == "stacked_fold":
                     ax = fig.add_subplot(cell)
-                    colors = dict(zip(transit.names, transit.plot_color))
                     rows = _transit_rows(
-                        panel.charts, display, groups, transit_bin, colors
+                        panel.charts, labels, groups, transit_bin
                     )
                     _draw_transit_stack(ax, rows, transit_spacing, draw_models)
-                elif panel.kind in ("rv_time", "rv_phase"):
-                    phased = panel.kind == "rv_phase"
+                elif panel.kind in ("time_series", "phase_fold"):
+                    phased = panel.kind == "phase_fold"
                     chart = panel.charts[0]
-                    offset = 0 if phased else _bjd_offset(chart)
+                    offset = 0 if phased else _x_offset(chart)
                     extra = [
                         [_shifted(t, offset, display) for t in traces]
                         for traces in draw_models.get(chart.id, ())
@@ -1838,37 +1758,31 @@ def summary_figure(
                         fig,
                         cell,
                         _prepared(chart, display, offset),
-                        rv_colors,
+                        series_colors,
                         phased,
                         extra,
                         rv_break_days,
                     )
-                    rv_axes += axes
-                    rv_oc_axes += oc_axes
-                elif panel.kind == "sed":
+                    series_axes += axes
+                    series_oc_axes += oc_axes
+                elif panel.kind == "spectrum":
                     chart = panel.charts[0]
                     _draw_sed(
                         fig,
                         cell,
                         sed_in_flux(chart),
                         [
-                            [trace_in_flux(t) for t in traces]
+                            [_in_linear(chart, t) for t in traces]
                             for traces in draw_models.get(chart.id, ())
                         ],
                     )
                 else:
                     chart = panel.charts[0]
-                    name = chart.meta["star"]
-                    _draw_kiel(
-                        fig,
-                        cell,
-                        chart,
-                        kiel_samples[name],
-                        _reported_star(system, name),
-                    )
-            # Every RV panel on one scale, and every RV O-C on another.
-            _share_ylims(rv_axes)
-            _share_ylims(rv_oc_axes)
+                    _draw_track(fig, cell, chart, overlays.get(chart.id))
+            # Every time-series and phase-fold panel on one scale (they
+            # plot one quantity: the RVs), and every such O-C on another.
+            _share_ylims(series_axes)
+            _share_ylims(series_oc_axes)
         except BaseException:
             plt.close(fig)
             raise
@@ -1891,8 +1805,8 @@ def write_summary_plot(
     ``_N_DRAWS`` of ``posterior`` with ``run.get_draws``.  The other
     keywords are ``summary_figure``'s.
 
-    A fit with nothing to draw (no transit, RV, SED or evolutionary model)
-    is skipped with an INFO line rather than raising: run.py's wrap-up
+    A fit with nothing to draw (no component declares a summary chart) is
+    skipped with an INFO line rather than raising: run.py's wrap-up
     calls this for every fit and catches nothing, so a microlensing fit
     must not fail there.  Anything else that goes wrong raises.
     """
@@ -1901,8 +1815,8 @@ def write_summary_plot(
     point, (chain, draw), distance = median_draw_point(system, posterior)
     if not any(_panel_kind(c) for c in _collect_charts(system, point)):
         logger.info(
-            "summary plot: none written -- this fit has no transit, RV, SED "
-            "or evolutionary-model chart to draw."
+            "summary plot: none written -- no component of this fit "
+            "declares a summary chart."
         )
         return None
     logger.info(
@@ -1923,7 +1837,7 @@ def write_summary_plot(
         system,
         point,
         title=title,
-        header_lines=planet_header_lines(system),
+        header_lines=summary_header_lines(system),
         draws=draws,
         **kwargs,
     )
@@ -2019,7 +1933,9 @@ def create_summary_plot(
         )
     if written is None:
         raise NoSummaryPanels(
-            f"{config_path.name}: this fit has no transit, RV, SED or "
-            "evolutionary-model chart, so there is no summary figure to draw."
+            f"{config_path.name}: no component of this fit declares a "
+            'summary chart (meta["summary"]; the transit, RV, SED and '
+            "evolutionary-model components do), so there is no summary "
+            "figure to draw."
         )
     return out

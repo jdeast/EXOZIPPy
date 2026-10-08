@@ -303,24 +303,24 @@ def test_place_reproduces_the_classic_one_planet_page():
       two-column, three-row grid.
     """
     panels = [
-        sp._Panel("transit", [], 2),
-        sp._Panel("rv_time", [], 1),
-        sp._Panel("rv_phase", [], 1),
-        sp._Panel("sed", [], 1),
-        sp._Panel("kiel", [], 1),
+        sp._Panel("stacked_fold", [], 2),
+        sp._Panel("time_series", [], 1),
+        sp._Panel("phase_fold", [], 1),
+        sp._Panel("spectrum", [], 1),
+        sp._Panel("track", [], 1),
     ]
 
     placed, ncols, nrows = sp._place(panels)
 
     assert (ncols, nrows) == (2, 3)
     assert [(p.kind, col, row) for p, col, row in placed] == [
-        ("transit", 0, 0),
-        ("rv_time", 1, 0),
-        ("rv_phase", 1, 1),
-        ("sed", 0, 2),
-        ("kiel", 1, 2),
+        ("stacked_fold", 0, 0),
+        ("time_series", 1, 0),
+        ("phase_fold", 1, 1),
+        ("spectrum", 0, 2),
+        ("track", 1, 2),
     ]
-    _, ncols, _ = sp._place([sp._Panel("sed", [], 1)])
+    _, ncols, _ = sp._place([sp._Panel("spectrum", [], 1)])
     assert ncols == 1
 
 
@@ -356,12 +356,17 @@ def _transits(rows, stated=True):
     """A transit component stand-in: (name, band, exptime_min, label), each
     file's exptime stated in its config and accepted unless ``stated`` is
     False."""
+    from exozippy.components.transit.transit import Transit
+
+    labels = [r[3] for r in rows]
     return SimpleNamespace(
         names=[r[0] for r in rows],
         band_names=[r[1] for r in rows],
         exptime_min=[r[2] for r in rows],
-        plot_label=[r[3] for r in rows],
+        plot_label=labels,
         exptime_stated=[stated] * len(rows),
+        display_label=lambda i: labels[i] or rows[i][0],
+        SUMMARY_TESS_FILTER=Transit.SUMMARY_TESS_FILTER,
     )
 
 
@@ -369,6 +374,36 @@ _BANDS = SimpleNamespace(
     names=["TESS", "Sloang", "Kepler"],
     filter_names=["TESS", "Sloang", "Kepler"],
 )
+
+
+def _default_groups(transit):
+    """The default grouping end to end: Transit.summary_rows declares each
+    file's row on its stacked chart, and declared_row_groups reads them."""
+    from exozippy.chart import Chart
+    from exozippy.components.transit.transit import Transit
+
+    rows = Transit.summary_rows(transit, SimpleNamespace(band=_BANDS))
+    charts = [
+        Chart(
+            id=f"transit.{name}",
+            component={"yaml_key": "transit", "instance": None},
+            title="",
+            xlabel="",
+            ylabel="",
+            traces=[],
+            meta={
+                "summary": {
+                    "layout": "stacked_fold",
+                    "stack": "b",
+                    "instrument": name,
+                    "row_key": rows[name][0],
+                    "row_label": rows[name][1],
+                }
+            },
+        )
+        for name in transit.names
+    ]
+    return sp.declared_row_groups(charts)
 
 
 def test_tess_files_are_grouped_by_cadence_and_nothing_else_is():
@@ -392,7 +427,7 @@ def test_tess_files_are_grouped_by_cadence_and_nothing_else_is():
         ]
     )
 
-    groups = sp.tess_cadence_groups(transit, _BANDS)
+    groups = _default_groups(transit)
 
     assert groups == {
         "TESS 600 s": ["TESS_UT20210916", "TESS_UT20211107"],
@@ -417,7 +452,7 @@ def test_a_tess_group_takes_its_members_common_label():
         ]
     )
 
-    groups = sp.tess_cadence_groups(transit, _BANDS)
+    groups = _default_groups(transit)
 
     assert groups == {
         "TESS 600 s": ["S43", "S45"],
@@ -438,7 +473,7 @@ def test_a_tess_group_with_no_stated_exptime_is_not_given_a_cadence():
         stated=False,
     )
 
-    assert sp.tess_cadence_groups(transit, _BANDS) == {"TESS": ["S16", "S22"]}
+    assert _default_groups(transit) == {"TESS": ["S16", "S22"]}
 
 
 def test_two_tess_groups_with_one_label_raise_rather_than_overwrite():
@@ -454,16 +489,31 @@ def test_two_tess_groups_with_one_label_raise_rather_than_overwrite():
     )
 
     with pytest.raises(ValueError, match=r"\['S16'\] and \['S22'\]"):
-        sp.tess_cadence_groups(transit, _BANDS)
+        _default_groups(transit)
 
 
-def test_the_seds_data_only_chart_is_not_an_sed_panel():
+def test_two_single_file_rows_may_share_a_label():
     """
-    Given the SED's data-only chart (no spectrum: what plot_data returns
-      when its plotters failed to compile), and its model-mode chart,
-    When each is assigned a summary panel,
-    Then only the model-mode chart is an SED panel; the data-only one, in
-      magnitudes with no y_range, is left to the SED's own outputs.
+    Given two ground-based files a user labelled alike ("LCO"),
+    When the default grouping is formed,
+    Then neither is a group and nothing raises: each keeps its own row
+      under the same label, as two rows of one telescope.
+    """
+    transit = _transits(
+        [("LCO_1", "Sloang", 1.0, "LCO"), ("LCO_2", "Sloang", 1.0, "LCO")]
+    )
+
+    assert _default_groups(transit) == {}
+
+
+def test_a_chart_is_on_the_page_only_by_declaring_a_layout():
+    """
+    Given a chart that declares no meta["summary"] (the SED's data-only
+      photometry, say), one that declares a layout, and one that declares a
+      layout the summary does not have,
+    When each is assigned a panel,
+    Then the first has none, the second its layout, and the third raises
+      naming the chart -- a declaration is a contract, not a guess.
     """
     from exozippy.chart import Chart, Trace
 
@@ -475,17 +525,17 @@ def test_the_seds_data_only_chart_is_not_an_sed_panel():
         ylabel="",
         traces=[Trace("observed", "data", "scatter", [0.5], [10.0])],
     )
-    model = dataclasses.replace(
-        photometry,
-        id="sed.sed",
-        traces=[
-            *photometry.traces,
-            Trace("Star A", "model", "line", [0.5], [-9.0]),
-        ],
+    spectrum = dataclasses.replace(
+        photometry, id="sed.sed", meta={"summary": {"layout": "spectrum"}}
+    )
+    typo = dataclasses.replace(
+        photometry, id="sed.typo", meta={"summary": {"layout": "spectra"}}
     )
 
     assert sp._panel_kind(photometry) is None
-    assert sp._panel_kind(model) == "sed"
+    assert sp._panel_kind(spectrum) == "spectrum"
+    with pytest.raises(ValueError, match=r"'sed.typo' declares layout"):
+        sp._panel_kind(typo)
 
 
 @pytest.mark.parametrize(
@@ -506,11 +556,11 @@ def test_a_degenerate_kiel_posterior_gets_no_contour(teff, logg, caplog):
       back to the star and the track (None is returned), and the reason is
       logged -- instead of gaussian_kde's LinAlgError costing the whole page.
     """
-    samples = {"fit": (teff, logg), "mist": (teff, logg)}
+    contours = [("MIST", teff, logg), ("Global fit", teff, logg)]
     fig, ax = plt.subplots()
     try:
         with caplog.at_level("INFO", logger=sp.logger.name):
-            extent = sp._kiel_contours(ax, samples)
+            extent = sp._contours(ax, contours)
         handles, _ = ax.get_legend_handles_labels()
     finally:
         plt.close(fig)
@@ -547,7 +597,13 @@ def test_sed_in_flux_converts_the_points_and_their_oc_together():
         meta={
             "residuals": [
                 Trace("A", "residual", "scatter", [0.6, 1.2], oc_dex, err)
-            ]
+            ],
+            "summary": {
+                "layout": "spectrum",
+                "y_log10": True,
+                "xlabel": "wave",
+                "ylabel": "flux",
+            },
         },
     )
 
@@ -559,7 +615,7 @@ def test_sed_in_flux_converts_the_points_and_their_oc_together():
     np.testing.assert_allclose(data.yerr[0], 10**y - 10 ** (y - err[0]))
     np.testing.assert_allclose(oc.y, 10**y - 10 ** (y - oc_dex))
     np.testing.assert_allclose(oc.yerr, data.yerr)
-    assert flux.y_log and flux.ylabel == sp.SED_YLABEL
+    assert flux.y_log and (flux.xlabel, flux.ylabel) == ("wave", "flux")
     np.testing.assert_allclose(flux.y_range, [1e-13, 1e-9])
 
     chart.meta["residuals"][0].name = "B"
@@ -604,7 +660,23 @@ def _phased_chart(depth, x_range=(-0.1, 0.1)):
             Trace("T", "data", "scatter", x, model + 1e-4, yerr=x * 0),
         ],
         x_range=list(x_range),
-        meta={"instrument": "T", "planet": "b", "phase_folded": True},
+        meta={
+            "instrument": "T",
+            "planet": "b",
+            "phase_folded": True,
+            "summary": {
+                "layout": "stacked_fold",
+                "stack": "b",
+                "instrument": "T",
+                "label": "T",
+                "color": None,
+                "row_key": "T",
+                "row_label": "T",
+                "x_scale": 24.0,
+                "xlabel": "Time from Mid-Transit [hr]",
+                "ylabel": "Normalized Flux + Constant",
+            },
+        },
     )
 
 
@@ -709,6 +781,18 @@ def test_posterior_draws_share_one_alpha_with_the_reference_curve():
     assert alphas == [[None], [sp._DRAWS_ALPHA] * 3]
 
 
+def _rv_hints(layout):
+    hints = {
+        "layout": layout,
+        "labels": {"HIRES": "HIRES"},
+        "colors": {0: None},
+        "ylabel": "RV [m/s]",
+    }
+    if layout == "time_series":
+        hints["x_offsets"] = [2457000, 2450000]
+    return hints
+
+
 def _rv_chart(n=50):
     from exozippy.chart import Chart, Trace
 
@@ -732,7 +816,7 @@ def _rv_chart(n=50):
                 style={"series_index": 0},
             ),
         ],
-        meta={"phase_folded": True},
+        meta={"phase_folded": True, "summary": _rv_hints("phase_fold")},
     )
 
 
@@ -800,7 +884,7 @@ def _rv_time_chart():
             Trace("Model", "model", "line", model_x, np.sin(model_x)),
             data,
         ],
-        meta={"residuals": [oc]},
+        meta={"residuals": [oc], "summary": _rv_hints("time_series")},
     )
 
 
@@ -812,7 +896,7 @@ def test_a_long_gap_breaks_the_rv_time_axis_and_its_oc():
       the facing spines are hidden, only the first piece carries the y
       labels, and one x label is left; without breaks it is one piece.
     """
-    chart = _rv_time_chart()
+    chart = sp._prepared(_rv_time_chart(), {})
 
     fig = plt.figure(figsize=(8, 6))
     try:
@@ -842,7 +926,7 @@ def test_a_long_gap_breaks_the_rv_time_axis_and_its_oc():
     assert xlims[0][0] < 10.0 and 15.0 < xlims[0][1] < 115.0
     assert 15.0 < xlims[1][0] < 115.0 and xlims[1][1] > 130.0
     assert facing == (False, False, False, False)
-    assert ylabels == [sp.RV_YLABEL, "", sp.OC_YLABEL, ""]
+    assert ylabels == ["RV [m/s]", "", sp.OC_YLABEL, ""]
     assert [x for x in xlabels if x] == ["Time [BJD - 2457000]"]
     assert [len(a) for a in unbroken] == [1, 1]
 
@@ -895,7 +979,7 @@ def test_draw_model_traces_gathers_the_panel_charts_model_traces():
     other = dataclasses.replace(chart, id="rvinstrument.unphased")
     component = SimpleNamespace(plot_data=lambda system, point: [chart, other])
     system = SimpleNamespace(active_components={"rvinstrument": component})
-    panels = [sp._Panel("rv_phase", [chart], 1)]
+    panels = [sp._Panel("phase_fold", [chart], 1)]
 
     models = sp._draw_model_traces(system, panels, [{}, {}])
 
@@ -923,7 +1007,7 @@ def test_draw_model_traces_raises_on_a_failing_draw():
 
     component = SimpleNamespace(plot_data=plot_data)
     system = SimpleNamespace(active_components={"rvinstrument": component})
-    panels = [sp._Panel("rv_phase", [chart], 1)]
+    panels = [sp._Panel("phase_fold", [chart], 1)]
 
     with pytest.raises(RuntimeError, match="non-finite draw"):
         sp._draw_model_traces(system, panels, [{"bad": False}, {"bad": True}])
@@ -958,9 +1042,9 @@ def test_the_kiel_and_rv_time_panels_are_not_drawn_with_posterior_draws():
         }
     )
     panels = [
-        sp._Panel("rv_time", [time_chart], 1),
-        sp._Panel("rv_phase", [rv_chart], 1),
-        sp._Panel("kiel", [kiel_chart], 1),
+        sp._Panel("time_series", [time_chart], 1),
+        sp._Panel("phase_fold", [rv_chart], 1),
+        sp._Panel("track", [kiel_chart], 1),
     ]
 
     models = sp._draw_model_traces(system, panels, [{}, {}])
@@ -992,8 +1076,8 @@ def test_sed_panel_spans_the_photometry_and_marks_the_model():
         id="sed.sed",
         component={"yaml_key": "sed", "instance": None},
         title="",
-        xlabel=sp.SED_XLABEL,
-        ylabel=sp.SED_YLABEL,
+        xlabel="wave",
+        ylabel="flux",
         traces=[
             Trace("Star A", "model", "line", [0.05, 30.0], [1e-11, 1e-13]),
             Trace("A", "data", "scatter", x, y, yerr=yerr, xerr=xerr),
@@ -1006,7 +1090,10 @@ def test_sed_panel_spans_the_photometry_and_marks_the_model():
             "residuals": [
                 Trace("A", "residual", "scatter", x, y * 0.1, yerr, xerr)
             ],
-            "identity": {"Star A": "A", "A": "A"},
+            "summary": {
+                "layout": "spectrum",
+                "identity": {"Star A": "A", "A": "A"},
+            },
         },
     )
     fig = plt.figure()
@@ -1024,7 +1111,86 @@ def test_sed_panel_spans_the_photometry_and_marks_the_model():
     np.testing.assert_allclose(ylim, [y_lo, (1e-10 + 1e-12) * 2.0])
     np.testing.assert_allclose(xlim, [0.05, 15.0 * 1.5])
     np.testing.assert_allclose(model_y, y * 0.9)
-    assert labels == (sp.SED_YLABEL, sp.OC_YLABEL, sp.SED_XLABEL)
+    assert labels == ("flux", sp.OC_YLABEL, "wave")
+
+
+def test_the_renderer_names_no_component():
+    """
+    Given every component the factory discovers,
+    When the summary renderer's source is read,
+    Then no string literal in it is a component's yaml_key: it reaches a
+      component only through what a chart declares (meta["summary"]) and
+      the Component hooks, so a rename inside a component cannot break the
+      page, and a component from another field joins it by declaring a
+      layout.
+    """
+    import ast
+    import inspect
+
+    from exozippy.components.factory import discover_components
+
+    keys = set(discover_components())
+    tree = ast.parse(inspect.getsource(sp))
+    literals = {
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
+
+    assert keys and not (literals & keys), sorted(literals & keys)
+
+
+def test_a_component_from_another_field_joins_the_page_by_declaring():
+    """
+    Given a system whose only component is not an astronomy one (yaml_key
+      "assay"), whose chart declares the track layout with a window and a
+      mark, whose summary_header headlines one line and whose
+      summary_posterior marks the reported point,
+    When the summary figure is drawn,
+    Then it has that one panel, framed by the declared window and the
+      marker, with the mark labelled, under the header line -- nothing in
+      the renderer had to know the component.
+    """
+    from exozippy.chart import Chart, Trace
+
+    chart = Chart(
+        id="assay.curve",
+        component={"yaml_key": "assay", "instance": None},
+        title="",
+        xlabel="dose",
+        ylabel="response",
+        traces=[Trace("fit", "model", "line", [0.0, 10.0], [0.0, 1.0])],
+        meta={
+            "summary": {
+                "layout": "track",
+                "window": [2.0, 8.0, 0.2, 0.8],
+                "marks": [{"x": 5.0, "y": 0.5, "text": "EC50"}],
+            }
+        },
+    )
+    assay = SimpleNamespace(
+        plot_data=lambda system, point: [chart],
+        summary_header=lambda system: ["$EC_{50} = 5.0$"],
+        summary_posterior=lambda system: {
+            "assay.curve": {"marker": ((5.0, 0.5, 0.5), (0.5, 0.1, 0.1))}
+        },
+    )
+    system = SimpleNamespace(active_components={"assay": assay})
+
+    fig = sp.summary_figure(
+        system, {}, header_lines=sp.summary_header_lines(system)
+    )
+    try:
+        (ax,) = fig.get_axes()
+        texts = [t.get_text() for t in fig.texts]
+        marks = [t.get_text() for t in ax.texts]
+        (left, right), (bottom, top) = ax.get_xlim(), ax.get_ylim()
+    finally:
+        plt.close(fig)
+
+    assert texts == ["$EC_{50} = 5.0$"]
+    assert marks == ["EC50"]
+    assert left < 2.0 and right > 8.0 and bottom < 0.2 and top > 0.8
 
 
 def test_a_fit_with_nothing_to_draw_raises_its_own_error():
@@ -1063,18 +1229,21 @@ def test_the_wrapup_writer_skips_a_fit_with_nothing_to_draw(
 
     assert written is None
     assert not out.exists()
-    assert "no transit, RV, SED or evolutionary-model chart" in caplog.text
+    assert "declares a summary chart" in caplog.text
 
 
 def _kiel_chart():
     """A Kiel chart whose track runs from EEP 150 to 600, cooling and
-    dropping in gravity with age; the main sequence is EEP 202-454."""
+    dropping in gravity with age; the main sequence is EEP 202-454.  Its
+    summary hints are the evolutionary model's own (summary_track_marks)."""
     from exozippy.chart import Chart, Trace
+    from exozippy.components.evolutionarymodel.plot import MISTPlot
 
     eep = np.linspace(150.0, 600.0, 451)
     teff = 4900.0 + 1.2 * (eep - 150.0)
     logg = 4.7 - 0.0015 * (eep - 150.0)
     age = 0.02 * (eep - 150.0)
+    rows = {"eep": eep, "teff": teff, "logg": logg, "age": age}
     return Chart(
         id="evolutionarymodel.kiel.star.A",
         component={"yaml_key": "evolutionarymodel", "instance": None},
@@ -1093,12 +1262,10 @@ def _kiel_chart():
         x_inverted=True,
         y_inverted=True,
         meta={
-            "star": "A",
-            "track": {
-                "eep": eep,
-                "age": age,
-                "main_sequence_eeps": [202.0, 454.0],
-            },
+            "summary": {
+                "layout": "track",
+                **MISTPlot.summary_track_marks(MISTPlot, rows),
+            }
         },
     )
 
@@ -1106,25 +1273,31 @@ def _kiel_chart():
 def test_the_kiel_panel_frames_the_main_sequence_star_and_contours():
     """
     Given a Kiel chart, contour samples clustered about 5200 K and 4.55, and
-      the star's reported median 5210 K and 4.56 with asymmetric errors,
-    When the Kiel panel is drawn,
+      the star's reported median 5210 K and 4.56 with asymmetric errors (the
+      evolutionary model's summary_posterior),
+    When the track panel is drawn,
     Then the reversed axes span the main sequence up to the turnoff (EEP
-      202-454), the star and the contours, padded; the star is a red cross
-      at its reported median with those errors; the MIST model point is not
-      drawn; three reference ages are labelled along the main sequence; and
-      the legend holds only the two contour entries.
+      202-454, the declared window), the star and the contours, padded; the
+      star is a red cross at its reported median with those errors; the
+      MIST model point is not drawn; three reference ages are labelled along
+      the main sequence; and the legend holds only the two contour entries.
     """
     from matplotlib.contour import ContourSet
 
     rng = np.random.default_rng(5)
     teff = rng.normal(5200.0, 40.0, 1500)
     logg = rng.normal(4.55, 0.015, 1500)
-    samples = {"fit": (teff, logg), "mist": (teff + 20.0, logg - 0.01)}
-    star = ((5210.0, 50.0, 70.0), (4.56, 0.02, 0.03))
+    overlay = {
+        "contours": [
+            ("MIST", teff + 20.0, logg - 0.01),
+            ("Global fit", teff, logg),
+        ],
+        "marker": ((5210.0, 50.0, 70.0), (4.56, 0.02, 0.03)),
+    }
     fig = plt.figure()
     try:
-        sp._draw_kiel(
-            fig, fig.add_gridspec(1, 1)[0, 0], _kiel_chart(), samples, star
+        sp._draw_track(
+            fig, fig.add_gridspec(1, 1)[0, 0], _kiel_chart(), overlay
         )
         (ax,) = fig.get_axes()
         contours = [c for c in ax.get_children() if isinstance(c, ContourSet)]
@@ -1157,6 +1330,22 @@ def test_the_kiel_panel_frames_the_main_sequence_star_and_contours():
     assert ages == ["2 Gyr", "4 Gyr", "5 Gyr"]
 
 
+def test_a_track_without_a_main_sequence_declares_no_window_or_marks():
+    """
+    Given a drawn track that never reaches the main sequence (EEP < 202),
+    When the evolutionary model builds its summary hints,
+    Then it declares no window and no marks, and the panel still draws.
+    """
+    from exozippy.components.evolutionarymodel.plot import MISTPlot
+
+    eep = np.linspace(100.0, 180.0, 50)
+    rows = {"eep": eep, "teff": eep * 30.0, "logg": 4.0 + 0 * eep, "age": eep}
+
+    hints = MISTPlot.summary_track_marks(MISTPlot, rows)
+
+    assert hints == {"window": None, "marks": []}
+
+
 def test_reference_ages_are_round_and_spread_through_the_span():
     """
     Given main-sequence age spans from tens of Myr to past the age of the
@@ -1165,10 +1354,13 @@ def test_reference_ages_are_round_and_spread_through_the_span():
     Then they sit near the quarter points, rounded to one significant figure
       unless that would merge two of them, and an empty span has none.
     """
-    assert sp.reference_ages(0.04, 13.8) == [3.0, 7.0, 10.0]
-    assert sp.reference_ages(0.02, 1.2) == [0.3, 0.6, 0.9]
-    assert sp.reference_ages(1.0, 1.4) == [1.1, 1.2, 1.3]
-    assert sp.reference_ages(2.0, 2.0) == []
+    from exozippy.components.evolutionarymodel.plot import MISTPlot
+
+    ages = MISTPlot.reference_ages
+    assert ages(0.04, 13.8, 3) == [3.0, 7.0, 10.0]
+    assert ages(0.02, 1.2, 3) == [0.3, 0.6, 0.9]
+    assert ages(1.0, 1.4, 3) == [1.1, 1.2, 1.3]
+    assert ages(2.0, 2.0, 3) == []
 
 
 def test_cli_refuses_an_unknown_options_key(tmp_path):
@@ -1394,7 +1586,7 @@ def test_summary_figure_draws_one_panel_per_chart_kind(kelt4_posterior):
     from exozippy.run import get_draws
 
     system, posterior, point, _ = kelt4_posterior
-    header = sp.planet_header_lines(system)
+    header = sp.summary_header_lines(system)
     draws = get_draws(
         posterior,
         n_draws=3,
@@ -1426,7 +1618,7 @@ def test_summary_figure_draws_one_panel_per_chart_kind(kelt4_posterior):
         curves = [
             [ln.get_alpha() for ln in ax.get_lines() if ln.get_ls() == "-"]
             for ax in axes
-            if ax.get_ylabel() in (sp.RV_YLABEL, "Normalized Flux + Constant")
+            if ax.get_ylabel() in ("RV [m/s]", "Normalized Flux + Constant")
         ]
     finally:
         plt.close(fig)
@@ -1443,7 +1635,7 @@ def test_summary_figure_draws_one_panel_per_chart_kind(kelt4_posterior):
     assert pieces > 1
     assert len(axes) == 3 + 2 * pieces
     assert ylabels.count(sp.OC_YLABEL) == 2
-    rv_axes = [ax for ax in axes if ax.get_ylabel() == sp.RV_YLABEL]
+    rv_axes = [ax for ax in axes if ax.get_ylabel() == "RV [m/s]"]
     assert len(rv_axes) == 2
     assert rv_axes[0].get_ylim() == rv_axes[1].get_ylim()
     assert texts[0] == "KELT-4A" and texts[1:] == header

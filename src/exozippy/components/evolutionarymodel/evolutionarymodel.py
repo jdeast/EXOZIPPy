@@ -893,6 +893,46 @@ class EvolutionaryModel(StellarRelation, Component):
         """
         return MISTPlot(system, [point]).kiel_specs(point)
 
+    def summary_posterior(self, system):
+        """Each star's Kiel chart on the summary figure: the 1- and 2-sigma
+        contours of MIST's (Teff, logg) prediction and of the global fit's,
+        in that order (``posterior_kiel_samples``), and the star marked at
+        its REPORTED median Teff and logg with their asymmetric errors --
+        the numbers in ``<prefix>_results.csv``, not the chart's fitted
+        mark, whose logg is the Kiel node at the vector of medians.  See
+        ``Component.summary_posterior``.
+        """
+        samples = self.posterior_kiel_samples(system)
+        star = system.star
+        out = {}
+        for star_index in self.star_indices:
+            name = star.names[star_index]
+            marker = []
+            for param in (star.teff, star.logg):
+                summ = param.ensure_summary()
+                if summ is None:
+                    raise RuntimeError(
+                        f"[{self.prefix}] summary_posterior: {param.label} "
+                        "has no posterior summary; the posterior must be "
+                        "distributed (System.distribute_posterior) first."
+                    )
+                summ = summ[star_index] if isinstance(summ, list) else summ
+                marker.append(
+                    (
+                        float(summ.median),
+                        abs(float(summ.err_minus)),
+                        abs(float(summ.err_plus)),
+                    )
+                )
+            out[f"{self.prefix}.kiel.star.{name}"] = {
+                "contours": [
+                    ("MIST", *samples[name]["mist"]),
+                    ("Global fit", *samples[name]["fit"]),
+                ],
+                "marker": tuple(marker),
+            }
+        return out
+
     def posterior_kiel_samples(self, system, max_draws=2000):
         """Each star's (Teff, logg) at the distributed posterior's draws.
 
