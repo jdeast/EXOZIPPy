@@ -311,6 +311,38 @@ def calc_beta(pi_rel, theta_E, s, ds_dt, dalpha_dt, d_source):
 
 
 @register_physics
+def calc_period_min(pi_rel, theta_E, s, d_source):
+    """LOWER bound on a lens binary's orbital period from its projected
+    separation (review 8.8.14), in days.
+
+    The 3-D separation is at least the projected one and at most
+    a(1 + e) < 2a, so a > r_sky / 2, and Kepler's third law with the TOTAL
+    lens mass gives
+
+        P > P_min = sqrt((r_sky / 2)^3 / M)      [yr, AU, M_sun]
+
+    with r_sky = s r_E, r_E = theta_E / (pi_rel + pi_s) AU (theta_E D_L,
+    D_L = 1 / (pi_rel + pi_s) kpc in mas units) and M = theta_E^2 /
+    (kappa pi_rel) -- the same quantities `calc_beta` reads.  A BOUND:
+    reported, never a potential (a consequence of the fit; a prior on it
+    would double-count the light curve).
+
+    Deliberately NOT a truncation warning (JDE 2026-10-08): the floor is
+    loose -- projection, and e anywhere up to 1 -- and a bound lens binary
+    sits near r_E, so P_min is routinely comparable to t_E.  Against
+    t0_par +/- t_E it flagged examples/ob09020_linear (P_min 133 d, t_E
+    84 d), whose linear fit Skowron+2011 found adequate.  beta < 1 remains
+    the physical check.
+    """
+    theta_E = pt.maximum(theta_E, THETA_E_FLOOR)
+    pi_rel = pt.maximum(pi_rel, THETA_E_FLOOR)
+    r_e_au = theta_E / (pi_rel + 1000.0 / d_source)
+    r_sky = pt.maximum(s, S_FLOOR) * r_e_au
+    m_total = theta_E**2 / (KAPPA * pi_rel)
+    return pt.sqrt((0.5 * r_sky) ** 3 / m_total) * DAYS_PER_YEAR
+
+
+@register_physics
 def calc_t_E(theta_E, mu_rel_mag):
     # Convert mu_rel_mag from mas/yr to mas/day, then divide theta_E
     return theta_E / (mu_rel_mag / DAYS_PER_YEAR)

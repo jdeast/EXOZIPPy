@@ -431,6 +431,7 @@ def test_linear_mode_declares_rates_and_beta(linear_om_system):
         assert name in system.orbit.manifest, f"orbit.{name} missing"
         assert name not in system.lens.manifest
     assert "beta" in system.lens.manifest
+    assert "period_min" in system.lens.manifest
     # The orbit's only element is the Taylor one: nothing Keplerian samples.
     orbit_rvs = sorted(
         v.name for v in model.free_RVs if v.name.startswith("orbit.")
@@ -500,6 +501,27 @@ def test_beta_is_the_a19_ratio_and_logp_is_finite(linear_om_system):
     np.testing.assert_allclose(
         float(np.atleast_1d(beta_v)[1]), expected, rtol=1e-6
     )
+
+
+def test_period_min_is_half_the_projected_separation_keplers_law():
+    """
+    Given a binary of total mass M whose projected separation r_sky is known
+      (through s, theta_E, pi_rel and the source distance),
+    When calc_period_min evaluates it,
+    Then it is Kepler's period at a = r_sky / 2 -- the floor that
+      r_sky <= a(1 + e) < 2a allows -- i.e. 2**-1.5 times the period of a
+      circular face-on orbit at r_sky.
+    """
+    from exozippy.components.mulensing.physics import calc_period_min
+    from exozippy.constants import DAYS_PER_YEAR, KAPPA
+
+    m_total, d_l_kpc, d_s_kpc, s = 1.1, 1.0, 8.0, 0.43
+    pi_rel = 1.0 / d_l_kpc - 1.0 / d_s_kpc  # mas
+    theta_E = np.sqrt(KAPPA * m_total * pi_rel)  # mas
+    r_sky = s * theta_E * d_l_kpc  # AU
+    p_circ = np.sqrt(r_sky**3 / m_total) * DAYS_PER_YEAR
+    got = float(calc_period_min(pi_rel, theta_E, s, d_s_kpc * 1000.0).eval())
+    np.testing.assert_allclose(got, p_circ / 2**1.5, rtol=1e-12)
 
 
 def test_mulensmodel_backend_gets_native_rates(tmp_path):

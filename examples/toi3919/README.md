@@ -24,7 +24,11 @@ A `type: linear` orbit is a Taylor orbit -- the reflex of a companion too
 long-period for the data to resolve, written as the derivative of the star's
 radial velocity about a reference epoch, `orbit.trend.gammadot` (m/s/day).
 It has no period, eccentricity, mass or K, and none are reported; its
-companion is unseen, so none is named.  `type: quadratic` adds the curvature
+companion is unseen, so none is named.  What the slope DOES say about that
+companion is reported as a bound: `orbit.trend.mc_over_r2_min` = |gammadot|/G,
+the companion's mass over its squared separation (1 M_J at 1 AU pulls the
+star at 0.489 m/s/day), ~1.6 M_J/AU^2 for this slope -- e.g. at least
+~1.6 M_J at 1 AU, or ~6.4 M_J at 2 AU.  `type: quadratic` adds the curvature
 `gammaddot` (m/s/day^2, a second derivative -- twice EXOFASTv2's QUAD).  The
 same orbit type carries a microlensing lens's linear orbital motion
 (`examples/ob09020/ob09020_linear.yaml`).  The design, the epoch rule and

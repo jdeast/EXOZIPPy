@@ -1,5 +1,7 @@
 from collections import namedtuple
 
+import astropy.constants as _const
+import astropy.units as _u
 import numpy as np
 import pytensor.tensor as pt
 from exoplanet_core.pymc import ops
@@ -1088,3 +1090,31 @@ def calc_lam_from_sv(svcoslam, svsinlam):
     """
     v_raw = pt.sqr(svcoslam) + pt.sqr(svsinlam)
     return pt.arctan2(svsinlam, svcoslam + _circular_bias(v_raw))
+
+
+# An acceleration of 1 solRad/d^2 (gammadot's internal unit) divided by G, in
+# jupiterMass/AU^2 (mc_over_r2_min's unit): ~16463.  Equivalently, 1 M_J at
+# 1 AU pulls a star at 0.489 m/s/day.
+_ACCEL_OVER_G = float(
+    ((1.0 * _u.solRad / _u.d**2) / _const.G)
+    .to(_u.jupiterMass / _u.AU**2)
+    .value
+)
+
+
+@register_physics
+def calc_mc_over_r2_min(gammadot):
+    """LOWER bound on a Taylor orbit's companion mass over its squared
+    separation, from the primary's radial acceleration (review 8.8.14).
+
+    A companion of mass M_c at 3-D separation r pulls the primary with
+    G M_c / r^2 (M_c << M_primary, else read M_c as the companion's share of
+    the pull); the RVs see only its line-of-sight component, so
+
+        M_c / r^2 >= |gammadot| / G.
+
+    A BOUND, reported and never a potential: it is a consequence of the
+    fitted slope, and a prior on a consequence double-counts the RVs.
+    ``gammadot`` in solRad/d^2; returns jupiterMass/AU^2.
+    """
+    return pt.abs(gammadot) * _ACCEL_OVER_G
