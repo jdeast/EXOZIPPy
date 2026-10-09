@@ -278,13 +278,24 @@ class Dopptom(Component):
     # ------------------------------------------------------------------
     # The Doppler shadow is an eclipse: it times its conjunction
     # (Component.epochs_constraining).
-    epoch_timing_rank = 2
-
     def epochs_constraining(self, system, orbit):
-        """Each line-profile cube's epochs on the orbit its `orbit:` names.
+        """Each line-profile cube's epochs on the orbit its `orbit:` names,
+        with the timing information each carries.
 
-        Every epoch weighs the same (see ``Instrument.dataset_epochs``).
+        The shadow is an eclipse, so an epoch is weighed like a transit
+        point (``timing.transit_information``, the transit shape from the
+        stage-3 seeds): the shadow removes a fraction ``p^2`` of the
+        profile, and an exposure measures it against the cube's per-pixel
+        rms averaged over its independent velocity pixels,
+        ``rms sqrt(IndepVels / n_vel)``.  An order-of-magnitude estimate
+        -- the profile's normalization is the reduction's, and the shadow's
+        motion across the line also times it -- which is enough for the
+        integer epoch.
         """
+        from ..orbit import timing
+
+        planets = system.active_components["planet"]
+        seed = orbit.timing_seed
         out = {}
         for i, name in enumerate(self.orbit_names):
             if name not in orbit.names:
@@ -292,10 +303,24 @@ class Dopptom(Component):
                     f"[dopptom.{self.names[i]}] orbit: {name!r} names no "
                     f"orbit block; defined orbits: {list(orbit.names)}."
                 )
+            o = orbit.names.index(name)
             t = np.asarray(self.bjd[i], dtype=float)
-            out.setdefault(orbit.names.index(name), []).append(
-                (t, np.ones_like(t))
+            sigma = self.rms[i] * np.sqrt(
+                self.indep_vels[i] / self.vel[i].size
             )
+            w = np.zeros_like(t)
+            for j in np.flatnonzero(planets.orbit_map == o):
+                _, depth, T, tau = orbit.seeded_transit_shape(system, int(j))
+                w = w + timing.transit_information(
+                    t,
+                    np.full_like(t, sigma),
+                    seed.tc[o],
+                    seed.period[o],
+                    depth,
+                    T,
+                    tau,
+                )
+            out.setdefault(o, []).append((t, w, "conjunction"))
         return out
 
     def load_data(self, system):

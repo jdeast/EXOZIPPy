@@ -374,26 +374,65 @@ class Transit(Instrument):
             )
         return block
 
-    # An eclipse times its conjunction (Component.epochs_constraining).
-    epoch_timing_rank = 2
-
     def epochs_constraining(self, system, orbit):
-        """Every light curve's epochs on every orbit with a planet companion.
+        """Every light curve's epochs on every planet's orbit, with the
+        transit-timing information each carries.
 
         Every transit file models every planet (the assumption
         ``Orbit._transit_only`` and ``orbit.occultation_datasets`` make), so
-        each file times each orbit whose companion group holds one.
+        each file times each planet's orbit.  The information is Carter et
+        al. (2008)'s, spread over the points between first and fourth
+        contact of the seeded ephemeris (``timing.transit_information``),
+        with the transit's depth, duration and ingress from the stage-3
+        seeds (``Orbit.seeded_transit_shape``) and the errors relative to
+        the file's baseline flux -- rescaled to the light curve's own
+        point-to-point scatter (``timing.error_scale``), because that is
+        the noise the fit's jitter will find, and a file whose quoted
+        errors are off would otherwise be misweighted by the square of the
+        error (measured: `examples/kelt17`'s MVRC errors are 1.7x too
+        small; `examples/hat3`'s TESS S16 errors 1.2x too large).
+        Occultations are not counted: their
+        timing information is smaller by the depth ratio squared.
         """
-        planet_orbits = [
-            i
-            for i in range(orbit.n_elements)
-            if any(t == "planet" for t, _ in orbit.companion_bodies[i])
+        from ..orbit import timing
+
+        # No planet block: nothing transits, and the build refuses the
+        # config later with its own message.
+        planets = system.active_components.get("planet")
+        if planets is None:
+            return {}
+        shapes = [
+            orbit.seeded_transit_shape(system, j)
+            for j in range(planets.n_elements)
         ]
+        seed = orbit.timing_seed
         out = {}
         for i in range(self.n_elements):
-            epochs = self.dataset_epochs(i)
-            for o in planet_orbits:
-                out.setdefault(int(o), []).append(epochs)
+            t = self.dataset_times(i)
+            sigma = (
+                self.dataset_errors(i)
+                * timing.error_scale(
+                    np.asarray(self.flux[self.rows(i)], dtype=float),
+                    self.dataset_errors(i),
+                )
+                / self.baseline_init[i]
+            )
+            exptime = self.exptime_min[i] / 1440.0
+            per_orbit = {}
+            for o, depth, T, tau in shapes:
+                w = timing.transit_information(
+                    t,
+                    sigma,
+                    seed.tc[o],
+                    seed.period[o],
+                    depth,
+                    T,
+                    tau,
+                    exptime=exptime,
+                )
+                per_orbit[o] = per_orbit.get(o, 0.0) + w
+            for o, w in per_orbit.items():
+                out.setdefault(int(o), []).append((t, w, "conjunction"))
         return out
 
     def _seed_from_bls(self, system):
