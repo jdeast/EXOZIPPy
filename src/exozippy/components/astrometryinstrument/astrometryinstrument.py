@@ -622,20 +622,40 @@ class AstrometryInstrument(Instrument):
     # Stage 3
     # ------------------------------------------------------------------
     def epochs_constraining(self, system, orbit):
-        """Each dataset's epochs on the orbits it measures.
+        """Each dataset's epochs on the orbits it measures, with the timing
+        information each carries.
 
         The membership ``orbit.amplitude_constrained_orbits`` reads: a rel
         dataset times the orbit it names; a gaia/abs photocenter wobble sums
-        the orbits whose PRIMARY group contains the target star.  Every
-        epoch weighs the same (see ``Instrument.dataset_epochs``).
+        the orbits whose PRIMARY group contains the target star.  An epoch's
+        information is its squared sky-plane speed over its squared error
+        (``timing.sky_speed_sq``, at the seeded e, omega, cos i and
+        conjunction), averaged over direction -- the node and the scan angle
+        are not needed for a factor-of-two estimate:
+
+          * rel: the speed of the relative orbit, whose angular size is read
+            off the data themselves (the median separation), against the
+            mean of the radial and tangential variances;
+          * gaia/abs: the photocenter of a dark companion, ``a parallax M_c
+            / M_total`` from the seeded group masses, period and parallax
+            (a luminous companion pulls it in by its flux fraction, which
+            is ignored), against the along-scan error (half the speed
+            squared, for one dimension of two) or the mean E/N variance.
         """
+        from ..orbit import timing
+
+        seed = orbit.timing_seed
         out = {}
         for i, mode in enumerate(self.modes):
-            t = np.asarray(self.datasets[i]["time"], dtype=float)
-            epochs = (t, np.ones_like(t))
+            d = self.datasets[i]
+            t = np.asarray(d["time"], dtype=float)
             if mode == "rel":
                 targets = (
                     [] if self.rel_orbit[i] is None else [self.rel_orbit[i]]
+                )
+                amplitude = float(np.median(d["sep"]))
+                inv_var = 0.5 * (
+                    d["err_sep"] ** -2.0 + (d["err_pa"] * d["sep"]) ** -2.0
                 )
             else:
                 s = int(self.config[i].get("star_ndx", 0))
@@ -644,9 +664,46 @@ class AstrometryInstrument(Instrument):
                     for o, role in orbit.star_membership(s)
                     if role == "primary"
                 ]
+                plx = self._seeded_parallax(system, orbit, s)
+                if mode == "gaia":
+                    inv_var = 0.5 * d["err"] ** -2.0
+                else:
+                    inv_var = 0.5 * (d["err_E"] ** -2.0 + d["err_N"] ** -2.0)
             for o in targets:
-                out.setdefault(int(o), []).append(epochs)
+                o = int(o)
+                if mode != "rel":
+                    m_pri, m_com = orbit.seeded_group_masses(system, o)
+                    m_tot = m_pri + m_com
+                    amplitude = (
+                        timing.semimajor_axis_au(seed.period[o], m_tot)
+                        * plx
+                        * m_com
+                        / m_tot
+                    )
+                v2 = timing.sky_speed_sq(
+                    t,
+                    seed.tc[o],
+                    seed.period[o],
+                    seed.ecc[o],
+                    seed.omega[o],
+                    seed.cosi[o],
+                    amplitude,
+                )
+                out.setdefault(o, []).append((t, v2 * inv_var, "phase"))
         return out
+
+    @staticmethod
+    def _seeded_parallax(system, orbit, s):
+        """Star ``s``'s parallax (mas) from the stage-3 seeds: the user's
+        ``parallax``, else the user's ``distance``, else whichever resolves
+        (parallax first)."""
+        plx = float(orbit._seed_array(system, "star", "parallax")[s])
+        dist = float(orbit._seed_array(system, "star", "distance")[s])
+        if orbit._user_seeded_in(system, "star", "parallax")[s]:
+            return plx
+        if orbit._user_seeded_in(system, "star", "distance")[s]:
+            return 1000.0 / dist
+        return plx if np.isfinite(plx) else 1000.0 / dist
 
     def register_parameters(self, system):
         # `fluxfrac` is the gaia/abs PHOTOCENTER flux fraction, and it is a

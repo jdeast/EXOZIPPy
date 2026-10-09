@@ -202,18 +202,119 @@ class RVInstrument(Instrument):
         self._seed_from_lombscargle(system)
 
     def epochs_constraining(self, system, orbit):
-        """Each RV file's epochs on every orbit its star is a body of.
+        """Each RV file's epochs on every orbit its star is a body of, with
+        the information each carries on the conjunction time.
 
         The same membership ``orbit.amplitude_constrained_orbits`` reads:
         the observed star's Doppler signal is the sum over every orbit
         containing it (``Orbit.star_membership``), primary or companion side.
+        Per star, the RVs' own optimal epoch and their information on the
+        conjunction there come from the full linearized Fisher matrix of a
+        Keplerian at the seeded period, e, omega and conjunction
+        (``timing.rv_epoch_information``: tc, P, K, the eccentricity where
+        it is free, and the file offsets, marginalized to the ``(tc, P)``
+        block), returned as ONE epoch per orbit carrying all of it -- which
+        is all an information-weighted mean needs.
+        The amplitude and the noise come from the data, through the seeds
+        (``timing.rv_amplitudes_and_jitter``): per star, a linear fit of one
+        offset per file plus one seeded Keplerian shape per orbit gives each
+        orbit's ``K``, and each file's residual scatter beyond its quoted
+        errors is the jitter the fit will find (measured on
+        `examples/kelt4`'s RVs: HIRES 21 m/s and TRES 48 m/s here, against
+        posterior medians of 25 and 59 m/s, where the quoted errors are 3.6
+        and 22 m/s).  These Keplerian epochs time the orbital PHASE
+        (``Orbit.TIMING_KINDS``; ``Orbit._sampling_epochs`` explains why
+        that differs from timing the conjunction on an eccentric orbit).
+
+        A file with ``rm:`` also times the transit by its Rossiter-McLaughlin
+        anomaly, an eclipse of amplitude ~ ``p^2 vsini``: it adds that
+        orbit's transit information (``timing.transit_information``) at
+        that depth in velocity, with ``vsini`` from the seeded
+        ``svcoslam``/``svsinlam``.
         """
+        from ..orbit import timing
+
+        seed = orbit.timing_seed
+        circular = orbit._seeded_circular()
         out = {}
-        for i, s in enumerate(self.star_ndx):
-            epochs = self.dataset_epochs(i)
-            for o, _role in orbit.star_membership(s):
-                out.setdefault(int(o), []).append(epochs)
+        for s in sorted(set(int(x) for x in self.star_ndx)):
+            files = [i for i, x in enumerate(self.star_ndx) if int(x) == s]
+            orbits = [int(o) for o, _role in orbit.star_membership(s)]
+            if not orbits:
+                continue
+            ts = [self.dataset_times(i) for i in files]
+            vs = [
+                np.asarray(self.rv[self.rows(i)], dtype=float) for i in files
+            ]
+            es = [self.dataset_errors(i) for i in files]
+            shapes = [
+                [
+                    timing.rv_shape(
+                        t,
+                        seed.tc[o],
+                        seed.period[o],
+                        seed.ecc[o],
+                        seed.omega[o],
+                    )
+                    for o in orbits
+                ]
+                for t in ts
+            ]
+            K, jitter = timing.rv_amplitudes_and_jitter(vs, es, shapes)
+            sigmas = [
+                np.sqrt(es[k] ** 2 + jitter[k] ** 2) for k in range(len(files))
+            ]
+            fisher = timing.rv_epoch_information(
+                ts,
+                sigmas,
+                [
+                    (
+                        seed.tc[o],
+                        seed.period[o],
+                        seed.ecc[o],
+                        seed.omega[o],
+                        K[m],
+                    )
+                    for m, o in enumerate(orbits)
+                ],
+                [not circular[o] for o in orbits],
+            )
+            for m, o in enumerate(orbits):
+                E, info = fisher[m]
+                out.setdefault(o, []).append(
+                    (
+                        np.array([seed.tc[o] + E * seed.period[o]]),
+                        np.array([info]),
+                        "phase",
+                    )
+                )
+        for i in range(self.n_elements):
+            if self.rm_orbit[i]:
+                t = self.dataset_times(i)
+                o, w = self._rm_information(
+                    system, orbit, i, t, self.dataset_errors(i)
+                )
+                out.setdefault(int(o), []).append((t, w, "conjunction"))
         return out
+
+    def _rm_information(self, system, orbit, i, t, err):
+        """``(orbit, per-point information)`` of file ``i``'s RM anomaly
+        (see ``epochs_constraining``)."""
+        from ..orbit import timing
+        from ..rm import resolve_rm_indices
+
+        o, j, _ = resolve_rm_indices(system, self.rm_orbit[i], self.rm_band[i])
+        seed = orbit.timing_seed
+        sv = [
+            orbit._resolve_initval(name, (orbit.n_elements,))[o]
+            for name in ("svcoslam", "svsinlam")
+        ]
+        vsini = (sv[0] ** 2 + sv[1] ** 2) * (u.m / u.s).to(u.solRad / u.d)
+        _, depth, T, tau = orbit.seeded_transit_shape(system, int(j))
+        w = timing.transit_information(
+            t, err, seed.tc[o], seed.period[o], depth * vsini, T, tau
+        )
+        return o, w
 
     def _seed_from_lombscargle(self, system):
         """Seed orbital period and conjunction epoch from a Lomb-Scargle peak.

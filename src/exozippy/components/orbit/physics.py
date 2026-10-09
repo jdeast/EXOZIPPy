@@ -781,7 +781,7 @@ def calc_tc_from_sampled(tc_sampled, period, _tc_epoch):
 
     ``tc_sampled`` is the conjunction ``_tc_epoch`` (an integer per orbit,
     fixed at stage 3) whole periods after the user's seed, chosen so it lies
-    near the time center of the data (``Orbit._sampling_epochs``); this
+    at the information-weighted epoch of the data (``Orbit._sampling_epochs``); this
     walks it back, so the period's uncertainty propagates into ``tc`` exactly
     as it does into any conjunction quoted away from the data.  orbit.md, "tc
     is SAMPLED near the data".
