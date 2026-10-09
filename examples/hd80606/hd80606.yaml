@@ -1,3 +1,11 @@
+# HD 80606 b: EXOZIPPy's high-eccentricity validation (e ~ 0.93).
+#
+# The best-practice fit: MIST + SED for the star, the TESS Sector 21 transit,
+# and every public RV.  Its siblings drop one kind of data each:
+# hd80606_rvonly.yaml (no transit) and hd80606_transitonly.yaml (no RVs).
+# None of the three pins cos i.  README.md has the data provenance, the cuts
+# and the start logps.
+
 run:
   name: "hd80606"
 
@@ -5,7 +13,12 @@ prefix: "fitresults/HD80606"
 
 star:
   - name: "A"
-    mist: False
+
+evolutionarymodel:
+  - star: "A"
+
+sed:
+  file: "hd80606.sed.yaml"
 
 planet:
   - name: "b"
@@ -15,15 +28,40 @@ orbit:
     primary: ["A"]
     companion: ["b"]
 
-rvinstrument:
-  - name: "HIRES"
-    file: "HD80606.HIRES.SIMULATED.rv"
 parameter_file: "hd80606.params.yaml"
+
+# The fourth column of the light curve (time - T_C) is a detrend column: a
+# linear baseline is fit along with the transit.
+transit:
+  - name: "TESS-S21"
+    file: "n20200213.TESS.TESS.HD80606.S21.0120.SPOC.dat"
+    band: "TESS"
+    exptime: 2.0
+
+band:
+  - name: "TESS"
+    filter: "TESS"
+
+# The .mask files exclude the in-transit RVs (the Rossiter-McLaughlin effect
+# is not modeled here).
+rvinstrument:
+  - name: "ELODIE-2001"
+    file: "HD80606b.ELODIE-2001.rv"
+  - name: "ELODIE-2009"
+    file: "HD80606b.ELODIE-2009.rv"
+  - name: "SOPHIE"
+    file: "HD80606b.SOPHIE.rv"
+    mask: "HD80606b.SOPHIE.mask"
+  - name: "HIRES-pre"
+    file: "HD80606b.HIRES-pre.rv"
+  - name: "HIRES-post"
+    file: "HD80606b.HIRES-post.rv"
+    mask: "HD80606b.HIRES-post.mask"
 
 sampler:
   method: numpyro   # nuts, numpyro, blackjax, nutpie, ptde, ptde_async, demc, demcz
-  tune: 2000
-  draws: 4000
+  tune: 1000
+  draws: 1000
   chains: 4
   cores: 4
   target_accept: 0.95

@@ -1,0 +1,80 @@
+# HD 80606 = TIC 457134360, written by scripts/mkticsed.py "HD 80606".
+# The star is in the Washington Double Star catalog: its companion HD 80607 is
+# 20.5" away, which Gaia, 2MASS and WISE all resolve, so these magnitudes are
+# HD 80606 alone.
+# Gaia DR3 RUWE = 0.9270
+# Gaia DR3 photometry, with the GAIA/GAIA3 (DR3) filter curves
+# GALEX: atmospheric models are unreliable in the UV
+
+model: NextGen
+nstars: 1
+filters:
+    - name: "GAIA/GAIA3.G"
+      mag: 8.828991
+      err: 0.02
+      magsys: Vega
+
+    - name: "GAIA/GAIA3.Gbp"
+      mag: 9.196297
+      err: 0.02
+      magsys: Vega
+
+    - name: "GAIA/GAIA3.Grp"
+      mag: 8.295464
+      err: 0.02
+      magsys: Vega
+
+    - name: "2MASS/2MASS.J"
+      mag: 7.702
+      err: 0.03
+      magsys: Vega
+
+    - name: "2MASS/2MASS.H"
+      mag: 7.4
+      err: 0.034
+      magsys: Vega
+
+    - name: "2MASS/2MASS.Ks"
+      mag: 7.316
+      err: 0.02
+      magsys: Vega
+
+    - name: "WISE/WISE.W1"
+      mag: 7.203
+      err: 0.03
+      magsys: Vega
+
+    - name: "WISE/WISE.W2"
+      mag: 7.322
+      err: 0.03
+      magsys: Vega
+
+    - name: "WISE/WISE.W3"
+      mag: 7.297
+      err: 0.03
+      magsys: Vega
+
+    - name: "WISE/WISE.W4"
+      mag: 7.196
+      err: 0.114
+      magsys: Vega
+
+    # - name: "TYCHO/TYCHO.B"
+    #   mag: 9.964
+    #   err: 0.027
+    #   magsys: Vega
+
+    # - name: "TYCHO/TYCHO.V"
+    #   mag: 9.088
+    #   err: 0.02
+    #   magsys: Vega
+
+    # - name: "GALEX/GALEX.FUV"
+    #   mag: 21.599001
+    #   err: 0.288
+    #   magsys: AB
+
+    # - name: "GALEX/GALEX.NUV"
+    #   mag: 15.302
+    #   err: 0.1
+    #   magsys: AB
