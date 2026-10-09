@@ -41,7 +41,7 @@
   "orbit.sesinw_raw": [
    0.0
   ],
-  "orbit.tc_raw": [
+  "orbit.tc_sampled_raw": [
    0.0
   ],
   "orbit.xbigomega_raw": [
@@ -109,7 +109,7 @@
   "POT:logit_uniform_prior.orbit.logP": -1.6085843940399494,
   "POT:logit_uniform_prior.orbit.secosw": -2.051021223381771,
   "POT:logit_uniform_prior.orbit.sesinw": -1.5247083064863947,
-  "POT:logit_uniform_prior.orbit.tc": -1.3862943611198906,
+  "POT:logit_uniform_prior.orbit.tc_sampled": -1.3862943611198906,
   "POT:logit_uniform_prior.orbit.xbigomega": -1.3863031568263726,
   "POT:logit_uniform_prior.orbit.ybigomega": -1.3863855696114586,
   "POT:logit_uniform_prior.planet.log_q": -1.6336116906951328,
@@ -164,13 +164,13 @@
   "RV:lens.yalpha_raw": -0.9189385332046727,
   "RV:mulensinstrument.err_scale_raw": -0.9189385332046727,
   "RV:mulensinstrument.log_f_total_raw": -0.9189385332046727,
-  "RV:mulensinstrument.model": 6017.508625051255,
+  "RV:mulensinstrument.model": 6017.508625051277,
   "RV:mulensinstrument.q_source_raw": -0.9189385332046727,
   "RV:orbit.cosi_raw": -0.9189385332046727,
   "RV:orbit.logP_raw": -0.9189385332046727,
   "RV:orbit.secosw_raw": -0.9189385332046727,
   "RV:orbit.sesinw_raw": -0.9189385332046727,
-  "RV:orbit.tc_raw": -0.9189385332046727,
+  "RV:orbit.tc_sampled_raw": -0.9189385332046727,
   "RV:orbit.xbigomega_raw": -0.9189385332046727,
   "RV:orbit.ybigomega_raw": -0.9189385332046727,
   "RV:planet.log_q_raw": -0.9189385332046727,
@@ -184,5 +184,5 @@
   "RV:star.radius_raw": -1.8378770664093453,
   "RV:star.rv_raw": -2.756815599614018
  },
- "total_logp": 5939.361661315228
+ "total_logp": 5939.3616613152535
 }

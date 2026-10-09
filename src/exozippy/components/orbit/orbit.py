@@ -1,4 +1,5 @@
 import logging
+from types import SimpleNamespace
 
 import astropy.units as u
 import numpy as np
@@ -1183,7 +1184,7 @@ class Orbit(Component):
 
     # Which conjunction the sampler moves, per orbit (orbit.md, "tc is
     # SAMPLED near the data").  `user`: the one the user's seed names, which
-    # is already within half a period of the data's time center -- exactly
+    # is already within half a period of the data's information-weighted epoch -- exactly
     # the graph every orbit had before (JDE 2026-10-07).  `shifted`: the
     # conjunction `tc_epoch` whole periods later, near the data, with `tc` at
     # the user's epoch derived from it.
@@ -1226,21 +1227,213 @@ class Orbit(Component):
                 fixed[int(i)] = True
         return fixed
 
-    def _sampling_epochs(self, system, tc_seed, period):
-        """Per orbit: how many whole periods to move the seeded `tc` to
-        reach the data, and the data's time center.
+    def _seed_array(self, system, prefix, name):
+        """``prefix.name``'s stage-3 initval for every element (user unit,
+        NaN where unseeded): what the user wrote, else a component hint,
+        else defaults.yaml -- nothing the relaxation engine will derive."""
+        comp = system.active_components[prefix]
+        n = int(comp.n_elements)
+        val = self.config_manager.resolve(
+            prefix, name, shape=(n,), names=comp.names
+        )["initval"]
+        if val is None:
+            return np.full(n, np.nan)
+        return np.broadcast_to(np.atleast_1d(val).astype(float), (n,)).copy()
 
-        The center is the weighted mean of the epochs the components' data
-        put on the orbit (`Component.epochs_constraining`, built on the same
-        membership maps as `amplitude_constrained_orbits`) -- those of the
-        SHARPEST timing rank present only (`epoch_timing_rank`: eclipses over
-        RVs and astrometry).  A seed outside the span of those epochs (by
-        more than half a period) is shifted by `round((center - tc_seed) /
-        period)`, so the sampled conjunction lies within half a period of
-        the center, where `tc` and the period are far less correlated than
-        at the seed.  Zero for a seed inside the span (the optimal epoch is
-        inside it too, and the center is no better a guess than the user's
-        own), for an orbit no dataset times (nothing to be near) and for one
+    def _user_seeded_in(self, system, prefix, name):
+        """Per element of ``prefix``: did the USER write an initval for
+        ``name``?  `_user_seeded_initval`'s reading, for any component."""
+        n = int(system.active_components[prefix].n_elements)
+        user = getattr(self.config_manager, "user_params", None) or {}
+        seeded = np.zeros(n, dtype=bool)
+        entry = user_entry(user, f"{prefix}.{name}")
+        if entry is not None and entry.get("initval") is not None:
+            seeded[:] = True
+        for i in range(n):
+            entry = user_entry(user, f"{prefix}.{i}.{name}")
+            if entry is not None and entry.get("initval") is not None:
+                seeded[i] = True
+        return seeded
+
+    def seeded_star_mass(self, system):
+        """Per star: the mass (solMass) the stage-3 seeds imply.
+
+        Both spellings are legal and the engine has not reconciled them, so
+        a user's `mass` wins, then a user's `logmass`, then whatever
+        resolves (a hint or defaults.yaml) -- `_seeded_period`'s job for the
+        star.
+        """
+        mass = self._seed_array(system, "star", "mass")
+        logm = self._seed_array(system, "star", "logmass")
+        user_m = self._user_seeded_in(system, "star", "mass")
+        user_lm = self._user_seeded_in(system, "star", "logmass")
+        from_log = 10.0**logm
+        out = np.where(np.isnan(mass), from_log, mass)
+        out = np.where(user_lm & ~user_m, from_log, out)
+        return out
+
+    def seeded_group_masses(self, system, o):
+        """Orbit ``o``'s (primary, companion) group masses in solMass from
+        the stage-3 seeds (`seeded_star_mass`; a planet's `mass`,
+        converted).  One orbit at a time: only the orbits a transit or an
+        astrometric amplitude actually reads need their bodies' seeds."""
+        out = np.zeros(2)
+        for side, group in enumerate(
+            (self.primary_bodies[o], self.companion_bodies[o])
+        ):
+            for kind, idx in group:
+                if kind not in system.active_components:
+                    raise ValueError(
+                        f"[{self.prefix}.{self.names[o]}] body {kind}.{idx} "
+                        f"has no {kind!r} component to seed its mass from."
+                    )
+                if kind == "star":
+                    out[side] += self.seeded_star_mass(system)[idx]
+                else:
+                    out[side] += self._seed_array(system, kind, "mass")[
+                        idx
+                    ] * self.config_manager.get_conversion_factor(kind, "mass")
+        return out
+
+    def _seed_timing(self, tc_seed, period):
+        """The stage-3 orbit seeds the data components read to weigh their
+        epochs (`Component.epochs_constraining`): per orbit, the user's
+        conjunction (days), period (days), e, omega (radians) and cos i.
+        The group masses, which only a transit shape or an astrometric
+        amplitude needs, are `seeded_group_masses`."""
+        shape = (self.n_elements,)
+        ecc, omega = self._seeded_ecc_omega(shape)
+        cosi = self._resolve_initval("cosi", shape)
+        return SimpleNamespace(
+            tc=np.asarray(tc_seed, dtype=float),
+            period=np.asarray(period, dtype=float),
+            ecc=np.asarray(ecc, dtype=float),
+            omega=np.asarray(omega, dtype=float),
+            cosi=np.asarray(cosi, dtype=float),
+        )
+
+    def seeded_transit_shape(self, system, planet_idx):
+        """``(orbit index, depth, T, tau)`` of planet ``planet_idx``'s transit
+        from the stage-3 seeds (`timing.transit_shape`; days, depth as a
+        fraction of the host's flux).
+
+        For the data components that time a conjunction by an eclipse
+        (transit, the RM effect, the Doppler shadow).  The radius ratio is
+        the user's `p`, else the user's planet `radius` over the host's
+        seeded radius, else whatever resolves for `p` (a BLS hint), else the
+        resolved radius ratio; ``a / R_*`` is Kepler's law at the seeded
+        period and group masses over the host's seeded radius.  The depth is
+        ``p^2``, without limb darkening: a factor of order unity, which the
+        epoch does not need.
+        """
+        from . import timing
+
+        planets = system.active_components["planet"]
+        o = int(planets.orbit_map[planet_idx])
+        host = int(planets.star_map[planet_idx])
+        rstar = self._seed_array(system, "star", "radius")[host]
+        p_seed = self._seed_array(system, "planet", "p")[planet_idx]
+        r_seed = (
+            self._seed_array(system, "planet", "radius")[planet_idx]
+            * self.config_manager.get_conversion_factor("planet", "radius")
+            / rstar
+        )
+        user_p = self._user_seeded_in(system, "planet", "p")[planet_idx]
+        user_r = self._user_seeded_in(system, "planet", "radius")[planet_idx]
+        if user_p:
+            p = p_seed
+        elif user_r:
+            p = r_seed
+        else:
+            p = r_seed if np.isnan(p_seed) else p_seed
+        seed = self.timing_seed
+        m_total = self.seeded_group_masses(system, o).sum()
+        ar = (
+            timing.semimajor_axis_au(seed.period[o], m_total)
+            / timing.AU_PER_SOLRAD
+            / rstar
+        )
+        T, tau = timing.transit_shape(
+            seed.period[o], ar, p, seed.cosi[o], seed.ecc[o], seed.omega[o]
+        )
+        if not all(np.isfinite([p, T, tau])) or p <= 0:
+            raise ValueError(
+                f"[{self.prefix}.{self.names[o]}] the stage-3 seeds give "
+                f"planet {planets.names[planet_idx]!r} no transit shape "
+                f"(p={p}, a/R*={ar}, T={T} d, tau={tau} d); seed "
+                f"planet.p (or planet.radius), star.radius and star.mass."
+            )
+        return o, p**2, T, tau
+
+    def _user_tc_prior(self):
+        """Per orbit: the user's Gaussian prior on `tc` as ``(mu, sigma)``
+        in days, NaN where there is none.  It is information about the
+        conjunction AT the user's epoch, so it joins the data's epochs."""
+        user = getattr(self.config_manager, "user_params", None) or {}
+        out = np.full((self.n_elements, 2), np.nan)
+        for i in range(self.n_elements):
+            for key in (f"{self.prefix}.{i}.tc", f"{self.prefix}.tc"):
+                entry = user_entry(user, key)
+                if entry is None:
+                    continue
+                mu, sigma = entry.get("mu"), entry.get("sigma")
+                if mu is None or sigma is None:
+                    continue
+                mu = np.atleast_1d(np.asarray(mu, dtype=float))
+                sigma = np.atleast_1d(np.asarray(sigma, dtype=float))
+                # A broadcast entry may list one value per orbit.
+                out[i] = (
+                    mu[i] if mu.size > 1 else mu[0],
+                    sigma[i] if sigma.size > 1 else sigma[0],
+                )
+                break
+        return out
+
+    # What an epoch's timing information is about (epochs_constraining):
+    # "conjunction" -- an eclipse (transit, RM anomaly, Doppler shadow) or a
+    # prior on tc, which times the conjunction itself; "phase" -- a
+    # Keplerian curve (RVs, astrometry, a binary lens's rotation), which
+    # times the orbital phase and reaches the conjunction through e and
+    # omega.
+    TIMING_KINDS = ("conjunction", "phase")
+
+    def _seeded_circular(self):
+        """Per orbit: is the sqrt(e) pair PINNED at zero in the stage-3
+        seeds?  `circular_orbits`'s test, readable before the manifest
+        exists."""
+        circ = np.ones(self.n_elements, dtype=bool)
+        for name in ("secosw", "sesinw"):
+            cfg = self.config_manager.resolve(
+                self.prefix, name, shape=(self.n_elements,), names=self.names
+            )
+            sigma = np.atleast_1d(np.asarray(cfg.get("sigma"), dtype=float))
+            initval = np.atleast_1d(
+                np.asarray(cfg.get("initval"), dtype=float)
+            )
+            if (
+                sigma.size != self.n_elements
+                or initval.size != self.n_elements
+            ):
+                return np.zeros(self.n_elements, dtype=bool)
+            circ &= (sigma == 0.0) & (initval == 0.0)
+        return circ
+
+    def _sampling_epochs(self, system, tc_seed, period):
+        """Per orbit: how many whole periods to move the seeded `tc` to the
+        epoch where it and the period are uncorrelated, and that epoch.
+
+        Every component states the Fisher information each of its epochs
+        carries on the orbit's conjunction time, in 1/day^2
+        (`Component.epochs_constraining`, from the stage-3 seeds;
+        `orbit/timing.py`), so a transit, an RV and an astrometric epoch
+        are weighed against each other on one scale; a user's Gaussian
+        prior on `tc` joins them as one more epoch.  The information-
+        weighted mean of the epochs is the epoch at which `tc` and `P`
+        decorrelate (`timing.py`'s module docstring has the two lines of
+        algebra), so the sampled conjunction is the one nearest it:
+        `round((center - tc_seed) / period)` periods from the seed.
+
+        Zero for an orbit no dataset times (nothing to be near) and for one
         whose `tc` the user pinned, bounded or linked
         (`_user_fixes_tc_support`).
 
@@ -1248,45 +1441,69 @@ class Orbit(Component):
         where no data), one entry per orbit.
         """
         n = self.n_elements
-        times = [[] for _ in range(n)]
-        weights = [[] for _ in range(n)]
-        ranks = np.full(n, -np.inf)
+        self.timing_seed = self._seed_timing(tc_seed, period)
+        times = {k: [[] for _ in range(n)] for k in self.TIMING_KINDS}
+        info = {k: [[] for _ in range(n)] for k in self.TIMING_KINDS}
         components = getattr(system, "active_components", None) or {}
         for comp in components.values():
-            rank = comp.epoch_timing_rank
-            for o, pairs in comp.epochs_constraining(system, self).items():
-                if rank < ranks[o]:
-                    continue
-                if rank > ranks[o]:
-                    ranks[o] = rank
-                    times[o], weights[o] = [], []
-                for t, w in pairs:
-                    times[o].append(np.asarray(t, dtype=float))
-                    weights[o].append(np.asarray(w, dtype=float))
-        centers = np.full(n, np.nan)
-        spans = np.full((n, 2), np.nan)
+            for o, triples in comp.epochs_constraining(system, self).items():
+                for t, w, kind in triples:
+                    if kind not in self.TIMING_KINDS:
+                        raise ValueError(
+                            f"[{comp.prefix}] epochs_constraining returned "
+                            f"timing kind {kind!r} for orbit "
+                            f"{self.names[o]!r}; expected one of "
+                            f"{self.TIMING_KINDS}."
+                        )
+                    times[kind][o].append(np.asarray(t, dtype=float))
+                    info[kind][o].append(np.asarray(w, dtype=float))
+        # The user's prior on tc is information about the conjunction itself.
+        prior = self._user_tc_prior()
         for o in range(n):
-            if times[o]:
-                t = np.concatenate(times[o])
-                w = np.concatenate(weights[o])
-                centers[o] = float(np.sum(w * t) / np.sum(w))
-                spans[o] = (float(t.min()), float(t.max()))
+            if np.isfinite(prior[o]).all() and prior[o, 1] > 0:
+                times["conjunction"][o].append(np.array([prior[o, 0]]))
+                info["conjunction"][o].append(np.array([prior[o, 1] ** -2]))
+        circular = self._seeded_circular()
+        centers = np.full(n, np.nan)
+        for o in range(n):
+            t = {
+                k: np.concatenate(times[k][o]) if times[k][o] else np.zeros(0)
+                for k in self.TIMING_KINDS
+            }
+            w = {
+                k: np.concatenate(info[k][o]) if info[k][o] else np.zeros(0)
+                for k in self.TIMING_KINDS
+            }
+            for k in self.TIMING_KINDS:
+                if not np.isfinite(w[k]).all() or (w[k] < 0).any():
+                    raise ValueError(
+                        f"[{self.prefix}.{self.names[o]}] a data component "
+                        f"returned a non-finite or negative timing "
+                        f"information for this orbit's {k} epochs."
+                    )
+            # On an eccentric orbit the PHASE of a Keplerian curve reaches
+            # the conjunction only through e cos(omega) (to first order in
+            # e the RV curve is K cos(n (t - tc) + pi/2 - 2 e cos(omega))), so
+            # where eclipses time the conjunction better than the curve
+            # times the phase, the curve's information goes into e
+            # cos(omega), not into tc, and the eclipses alone set the
+            # epoch.  Where the curve carries more (a loose prior on tc
+            # against RVs, say), tc follows the phase and both count, as
+            # they always do on a circular orbit.
+            kinds = (
+                ("conjunction",)
+                if not circular[o]
+                and w["conjunction"].sum() > w["phase"].sum()
+                else self.TIMING_KINDS
+            )
+            tt = np.concatenate([t[k] for k in kinds])
+            ww = np.concatenate([w[k] for k in kinds])
+            if ww.sum() > 0:
+                centers[o] = float(np.sum(ww * tt) / np.sum(ww))
         epochs = np.zeros(n, dtype=int)
         fixed = self._user_fixes_tc_support()
         for o in range(n):
             if np.isnan(centers[o]) or fixed[o]:
-                continue
-            # A seed INSIDE the span of the epochs that time the orbit (to
-            # within half a period) stays where the user put it: the optimal
-            # epoch lies inside that span too, and the equal-weight center
-            # is only a guess at it -- measured, a worse one than an in-span
-            # seed on examples/kelt17 (corr(tc, P) -0.70 at the center
-            # against -0.41 at the seed) and examples/gj1214 (-0.20 against
-            # -0.06).  Only a seed OUTSIDE the span, beyond the optimum by
-            # construction, is moved -- to the center, which for a seed far
-            # outside (kelt4's TESS-era seed on its RVs) is far closer.
-            half = 0.5 * period[o]
-            if spans[o, 0] - half <= tc_seed[o] <= spans[o, 1] + half:
                 continue
             epochs[o] = int(np.round((centers[o] - tc_seed[o]) / period[o]))
         return epochs, centers
@@ -1311,7 +1528,7 @@ class Orbit(Component):
         half_period = period_init / 2.0
 
         # WHICH conjunction is sampled (JDE 2026-10-07): the one nearest the
-        # data's time center, `tc_epoch` whole periods from the user's seed.
+        # data's information-weighted epoch, `tc_epoch` whole periods from the user's seed.
         # An orbit already within half a period of it (tc_epoch == 0) keeps
         # exactly the manifest it always had; a shifted one samples
         # `tc_sampled` in the same one-period window around the moved seed,
@@ -1352,7 +1569,7 @@ class Orbit(Component):
             )
             logger.info(
                 "[%s.%s] tc is sampled %d period(s) from the seeded epoch, "
-                "at %.6f (the data's time center is %.6f); tc is reported "
+                "at %.6f (the data's information-weighted epoch is %.6f); tc is reported "
                 "at the seeded epoch and t0 at the epoch the posterior "
                 "prefers.",
                 self.prefix,

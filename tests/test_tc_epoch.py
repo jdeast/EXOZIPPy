@@ -7,9 +7,10 @@ seed is ~1160 periods after its RVs -- is correlated with the period almost
 perfectly (the item measured corr 0.94 and raw stds ~20 on kelt4_rvonly),
 which costs the sampler several times the gradient evaluations.  So:
 
-  * the SAMPLED conjunction is the one nearest the data's time center
-    (`Orbit._sampling_epochs`, at stage 3, from `epochs_constraining`), and
-    an orbit already near its data keeps exactly the graph it always had;
+  * the SAMPLED conjunction is the one nearest the data's INFORMATION-
+    weighted epoch, where tc and P decorrelate (`Orbit._sampling_epochs`,
+    at stage 3, from `epochs_constraining`; JDE 2026-10-08), and an orbit
+    already there keeps exactly the graph it always had;
   * `tc` stays the conjunction at the USER's epoch, derived from the sampled
     one, so the period's uncertainty propagates into it;
   * `t0` is reported at the epoch the posterior itself prefers (EXOFASTv2's
@@ -40,29 +41,39 @@ TC_FAR = TC_TRUE + N_FAR * P
 
 
 class _Epochs:
-    """A stand-in data component: fixed epochs on fixed orbits."""
+    """A stand-in data component: fixed epochs on fixed orbits, each
+    carrying ``info`` (1/day^2) of timing information."""
 
-    def __init__(self, per_orbit, rank=1):
+    prefix = "stand_in"
+
+    def __init__(self, per_orbit, info=1.0, kind="phase"):
         self.per_orbit = per_orbit
-        self.epoch_timing_rank = rank
+        self.info = info
+        self.kind = kind
 
     def epochs_constraining(self, system, orbit):
         return {
-            o: [(np.asarray(t, float), np.ones(len(t)))]
+            o: [
+                (
+                    np.asarray(t, float),
+                    np.full(len(t), float(self.info)),
+                    self.kind,
+                )
+            ]
             for o, t in self.per_orbit.items()
         }
 
 
 def _registered(user_params, names=("b",), data=None, eclipses=None):
-    """An Orbit after stage 3, with `data` (smooth-curve epochs, rank 1)
-    and `eclipses` (rank 2) as its data components."""
+    """An Orbit after stage 3, with `data` (epochs of unit information) and
+    `eclipses` (epochs of 1e4 times more) as its data components."""
     cm = ConfigManager(dict(user_params))
     orbit = Orbit([{"name": n} for n in names], cm)
     comps = {"orbit": orbit}
     if data is not None:
         comps["data"] = _Epochs(data)
     if eclipses is not None:
-        comps["eclipses"] = _Epochs(eclipses, rank=2)
+        comps["eclipses"] = _Epochs(eclipses, info=1e4, kind="conjunction")
     orbit.register_parameters(SimpleNamespace(active_components=comps))
     return orbit, cm
 
@@ -124,15 +135,16 @@ def test_a_seed_near_the_data_keeps_the_manifest_it_always_had():
     }
 
 
-def test_a_seed_inside_the_data_span_is_the_users_choice():
+def test_a_seed_inside_the_data_span_is_moved_to_the_information_center():
     """
     Given a tc seed near one end of its data, many periods from their
-      center but inside their span,
+      information-weighted center but inside their span,
     When the orbit registers its parameters,
-    Then it is not moved: the optimal epoch lies inside the span too, and
-      the equal-weight center is no better a guess than the user's own --
-      measured worse on examples/kelt17 (corr(tc, P) -0.70 at the center,
-      -0.41 at the seed) and examples/gj1214 (-0.20 against -0.06).
+    Then it is moved to the center too: the information-weighted epoch is
+      where tc and P decorrelate, wherever the seed sits (JDE 2026-10-08,
+      "why the 'outside the time span of the data' gate?").  The equal-
+      weight center this replaced was a worse guess than an in-span seed,
+      which is why the old rule moved only seeds outside the span.
     """
     t = np.linspace(TC_TRUE - 40.0, TC_TRUE + 40.0, 30)
     orbit, _ = _registered(
@@ -142,20 +154,11 @@ def test_a_seed_inside_the_data_span_is_the_users_choice():
         },
         data={0: t},
     )
-    assert orbit.tc_epoch.tolist() == [0]
-    assert "tc_sampled" not in orbit.manifest
+    assert orbit.tc_epoch.tolist() == [-13]
+    assert "tc_sampled" in orbit.manifest
 
 
-def test_eclipses_set_the_center_over_rvs():
-    """
-    Given one orbit timed by three transits around the seed and by a long
-      baseline of RVs months earlier,
-    When the orbit registers its parameters,
-    Then only the eclipses set the center.  On `examples/kelt17`'s fast
-      config (two eclipses, twelve RVs) an equal-weight mean over both
-      dragged the sampled epoch two periods from the seed, where the
-      measured tc-P correlation was -0.98 against +0.30 at the seed.
-    """
+def _rv_and_transits():
     rv = np.linspace(TC_TRUE - 300.0, TC_TRUE - 100.0, 400)
     transits = np.concatenate(
         [
@@ -163,13 +166,111 @@ def test_eclipses_set_the_center_over_rvs():
             for k in (-1, 0, 1)
         ]
     )
-    orbit, _ = _registered(
-        {"orbit.b.period": {"initval": P}, "orbit.b.tc": {"initval": TC_TRUE}},
-        data={0: rv},
-        eclipses={0: transits},
+    return rv, transits
+
+
+def _register_with(params, comps):
+    cm = ConfigManager(dict(params))
+    orbit = Orbit([{"name": "b"}], cm)
+    orbit.register_parameters(
+        SimpleNamespace(active_components={"orbit": orbit, **comps})
+    )
+    return orbit
+
+
+def test_on_a_circular_orbit_all_information_adds():
+    """
+    Given a CIRCULAR orbit (the sqrt(e) pair pinned at zero) timed by three
+      transits around the seed and by a long RV baseline months earlier,
+    When the orbit registers its parameters,
+    Then the center is the information-weighted mean of BOTH: no rank says
+      an eclipse beats a smooth curve, so RVs that carry more information
+      than the transits pull the epoch to themselves (JDE 2026-10-08, "a
+      long rv baseline can beat it out"), and ones that carry less do not.
+    """
+    rv, transits = _rv_and_transits()
+    params = {
+        "orbit.b.period": {"initval": P},
+        "orbit.b.tc": {"initval": TC_TRUE},
+        "orbit.b.secosw": {"initval": 0.0, "sigma": 0},
+        "orbit.b.sesinw": {"initval": 0.0, "sigma": 0},
+    }
+    weak = _register_with(
+        params,
+        {
+            "rv": _Epochs({0: rv}, info=1.0),
+            "eclipses": _Epochs({0: transits}, info=1e4, kind="conjunction"),
+        },
+    )
+    assert weak.tc_epoch.tolist() == [0]
+
+    strong = _register_with(
+        params,
+        {
+            "rv": _Epochs({0: rv}, info=100.0),
+            "eclipses": _Epochs({0: transits}, info=1.0, kind="conjunction"),
+        },
+    )
+    w = np.concatenate([np.full(rv.size, 100.0), np.ones(transits.size)])
+    center = np.sum(w * np.concatenate([rv, transits])) / w.sum()
+    np.testing.assert_allclose(strong.data_time_center, [center])
+    assert strong.tc_epoch.tolist() == [int(np.round((center - TC_TRUE) / P))]
+    assert strong.tc_epoch[0] < -30
+
+
+def test_on_an_eccentric_orbit_eclipses_time_the_conjunction():
+    """
+    Given the same data on an orbit whose eccentricity is FREE,
+    When the orbit registers its parameters,
+    Then where the eclipses carry more information than the RVs, they
+      alone set the center: to first order in e the RV curve is K cos(n (t
+      - tc) + pi/2 - 2 e cos(omega)), so once an eclipse times the
+      conjunction the RVs' timing information measures e cos(omega)
+      instead of tc.  With no eclipse at all, the RVs set it.
+    """
+    rv, transits = _rv_and_transits()
+    params = {
+        "orbit.b.period": {"initval": P},
+        "orbit.b.tc": {"initval": TC_TRUE},
+    }
+    orbit = _register_with(
+        params,
+        {
+            "rv": _Epochs({0: rv}, info=1.0),
+            "eclipses": _Epochs({0: transits}, info=1e3, kind="conjunction"),
+        },
     )
     assert orbit.tc_epoch.tolist() == [0]
     np.testing.assert_allclose(orbit.data_time_center, [transits.mean()])
+
+    rv_only = _register_with(params, {"rv": _Epochs({0: rv}, info=100.0)})
+    np.testing.assert_allclose(rv_only.data_time_center, [rv.mean()])
+
+
+def test_a_user_prior_on_tc_counts_as_information_at_its_epoch():
+    """
+    Given a tight Gaussian prior on tc far from weak data,
+    When the orbit registers its parameters,
+    Then the prior is information about the conjunction AT the user's
+      epoch and holds the center there; a loose one does not.
+    """
+    t = np.linspace(TC_TRUE - 40.0, TC_TRUE + 40.0, 30)
+    tight, _ = _registered(
+        {
+            "orbit.b.period": {"initval": P},
+            "orbit.0.tc": {"initval": TC_FAR, "mu": TC_FAR, "sigma": 1e-3},
+        },
+        data={0: t},
+    )
+    assert tight.tc_epoch.tolist() == [0]
+    loose, _ = _registered(
+        {
+            "orbit.b.period": {"initval": P},
+            "orbit.0.tc": {"initval": TC_FAR, "mu": TC_FAR, "sigma": 10.0},
+        },
+        data={0: t},
+    )
+    assert loose.tc_epoch.tolist() == [-N_FAR]
 
 
 def test_a_periastron_seed_is_moved_like_a_conjunction_seed():

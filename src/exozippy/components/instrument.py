@@ -1947,22 +1947,14 @@ class Instrument(TimeSystem, Component):
         lo, hi = self.row_ranges[i]
         return slice(lo, hi)
 
-    def dataset_epochs(self, i):
-        """File ``i``'s observation epochs and their weights, for
-        ``Component.epochs_constraining``.
+    def dataset_times(self, i):
+        """File ``i``'s observation epochs (BJD_TDB days), for
+        ``Component.epochs_constraining``."""
+        return np.asarray(self.time[self.rows(i)], dtype=float)
 
-        Every epoch counts once.  The weights are a GUESS at the timing
-        information and say so: the information a point carries on an
-        orbit's phase is (d model / d t)^2 / sigma^2, which needs the
-        model's amplitude and shape (an RV semi-amplitude, a transit's
-        ingress) -- none of which the relaxation engine has solved at stage
-        3, where the sampled epoch has to be chosen.  Equal weights make the
-        center the mean epoch of the data, which is all the integer epoch
-        needs; the epoch the posterior itself prefers is computed exactly
-        after sampling (``orbit.t0``).
-        """
-        t = np.asarray(self.time[self.rows(i)], dtype=float)
-        return t, np.ones_like(t)
+    def dataset_errors(self, i):
+        """File ``i``'s error bars, in the unit of its model."""
+        return np.asarray(self.err[self.rows(i)], dtype=float)
 
     # ------------------------------------------------------------------
     # Shared plotting helpers
