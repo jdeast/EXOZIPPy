@@ -413,13 +413,32 @@ class MulensInstrument(Instrument):
         for i in range(self.n_elements):
             fmt = self.config[i].get("data_format", "magnitude")
             if fmt == "dia":
-                # Native difference imaging: five columns, and the mag
-                # column is not optional -- it is the only thing that
-                # carries the reference flux.  Validated before the read so
-                # the message names the real problem rather than surfacing
-                # as a column-selection IndexError.
+                # Native difference imaging: the mag column is not optional
+                # -- it is the only thing that carries the reference flux.
+                # Validated before the read so the message names the real
+                # problem rather than surfacing as a column-selection
+                # IndexError.
                 self._require_dia_columns(i)
                 roles = ("time", "dflux", "err", "mag", "mag_err")
+                if self.column_specs[i] is None:
+                    # A native pySIS file carries MORE than these five:
+                    # KMT's is eight (`... fwhm sky secz`).  Without a
+                    # spec, _select_columns treats "everything past the
+                    # named roles" as DETREND columns, so those three
+                    # diagnostics would silently become three fitted
+                    # coefficients per light curve.  Naming the five
+                    # explicitly makes the extras ignored instead, which is
+                    # the right default for a file whose layout is fixed.
+                    # A user who genuinely wants to detrend against seeing
+                    # or airmass can still say so with an explicit
+                    # `columns:` including `detrend: [...]`.
+                    self.column_specs[i] = {
+                        "time": 0,
+                        "dflux": 1,
+                        "err": 2,
+                        "mag": 3,
+                        "mag_err": 4,
+                    }
             else:
                 roles = ("time", "flux" if fmt == "flux" else "mag", "err")
             # Shared reader: columns:, mask:, time_* conversion, then sort
@@ -434,16 +453,42 @@ class MulensInstrument(Instrument):
 
             if fmt == "dia":
                 # dflux -> TOTAL flux.  F = ref - dflux (pySIS dflux grows
-                # more negative as the star brightens).  The error is
-                # unchanged: the reference is a constant offset, so
-                # sigma_F = sigma_dflux exactly, with no propagation.
+                # more negative as the star brightens), then divided by ref
+                # as explained below.  The reference is a CONSTANT, so the
+                # error needs no propagation -- it is simply carried through
+                # the same linear map, sigma_F = sigma_dflux / ref.
                 ref, zp = self._dia_reference(
                     i,
                     dflux=f,
                     mag=df.iloc[:, 3].values.astype(float),
                 )
-                self._dia_zp[self.names[i]] = zp
-                f = ref - f
+                # Total flux IN UNITS OF THE REFERENCE, not in raw counts.
+                # The reference is the natural unit of a difference image,
+                # and the absolute scale is arbitrary anyway without an
+                # `sed:` block to tie f_source to a magnitude -- while raw
+                # pySIS counts (f_source ~ 1.8e4 on OGLE-2016-BLG-1045) sit
+                # far outside f_source's [0, 1000] default, whose soft
+                # bound would then dominate the logp.  Dividing by `ref`
+                # puts the baseline at ~1, which is the scale those
+                # defaults were written for.  RATIOS ARE UNCHANGED, so
+                # q_source and the blending are unaffected; only the unit
+                # moves.  The zeropoint that recovers the absolute scale is
+                # kept in _dia_zp (zp_ref below), so nothing is lost:
+                #     m = zp - 2.5*log10(F_native) = zp_ref - 2.5*log10(F)
+                # with zp_ref = zp - 2.5*log10(ref).
+                f = (ref - f) / ref
+                e = e / ref
+                self._dia_zp[self.names[i]] = zp - 2.5 * np.log10(ref)
+                # DROP the mag columns now that they have been consumed.
+                # The accumulator below treats every column of `df` past
+                # the first three (time, obs, err) as a DETREND basis
+                # vector, so leaving `mag`/`mag_err` in place silently
+                # fits two extra coefficients per light curve against the
+                # magnitudes -- which are an exact function of the flux
+                # already being fitted.  Measured on ob161045 before this
+                # line: detrend_matrix came out (831, 6), six coefficients
+                # across the three KMT curves, none of them wanted.
+                df = df.iloc[:, :3]
 
             if fmt not in ("flux", "dia"):
                 # Magnitudes -> flux.  Exact for the value; the error is the
