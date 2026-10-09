@@ -25,9 +25,14 @@ class MISTPlot:
     KIEL_EEP_WINDOW = (202.0, 630.0)
     # MIST's primary EEPs bounding the main sequence: the zero-age main
     # sequence (202) and the terminal-age main sequence (454, core hydrogen
-    # exhaustion -- the turnoff).  Declared on the Kiel chart (meta["track"])
-    # so a renderer can frame the main sequence without knowing MIST.
+    # exhaustion -- the turnoff).  The summary figure's Kiel panel frames
+    # them (meta["summary"]["window"]) and marks reference ages along them.
     MAIN_SEQUENCE_EEPS = (202.0, 454.0)
+    # Reference ages on the summary figure: this many, round, along the
+    # main sequence up to the turnoff or the age of the universe, whichever
+    # is younger.
+    SUMMARY_N_AGES = 3
+    AGE_UNIVERSE_GYR = 13.8
 
     # Nominal logg axis window, chosen to exclude the giant regime for the same
     # reason.  Ascending [lo, hi]; the Kiel convention's reversal is meta's
@@ -165,6 +170,63 @@ class MISTPlot:
             )
         )
         return self.evolutionarymodel._reported_kiel_cache
+
+    @staticmethod
+    def reference_ages(age_lo, age_hi, n):
+        """``n`` round ages (Gyr) spread through ``(age_lo, age_hi)``.
+
+        The ages at 1/(n+1), 2/(n+1), ... of the span, each rounded to one
+        significant figure -- two, then three, when rounding would merge two
+        of them or push one out of the span.  Returns ``[]`` for an empty
+        span.
+        """
+        if not age_hi > age_lo:
+            return []
+        fractions = np.arange(1, n + 1) / (n + 1)
+        targets = age_lo + fractions * (age_hi - age_lo)
+        for digits in (1, 2, 3):
+            ages = [float(f"{t:.{digits}g}") for t in targets]
+            if len(set(ages)) == n and all(age_lo < a < age_hi for a in ages):
+                return ages
+        return [float(t) for t in targets]
+
+    def summary_track_marks(self, track_rows):
+        """The Kiel chart's summary hints from the drawn track's rows:
+        ``{"window": [teff_lo, teff_hi, logg_lo, logg_hi], "marks": [{"x",
+        "y", "text"}, ...]}``.
+
+        The window is the extent of the track's main sequence
+        (``MAIN_SEQUENCE_EEPS``), and the marks are ``SUMMARY_N_AGES``
+        round ages along it up to the turnoff or ``AGE_UNIVERSE_GYR``, each
+        at the track's (Teff, logg) at that age.  A track with no
+        main-sequence row (a star drawn off it) gets neither.
+        """
+        eep = np.asarray(track_rows["eep"], dtype=float)
+        zams, tams = self.MAIN_SEQUENCE_EEPS
+        rows = (eep >= zams) & (eep <= tams)
+        if not rows.any():
+            return {"window": None, "marks": []}
+        teff = np.asarray(track_rows["teff"], dtype=float)[rows]
+        logg = np.asarray(track_rows["logg"], dtype=float)[rows]
+        age = np.asarray(track_rows["age"], dtype=float)[rows]
+        order = np.argsort(age)
+        teff, logg, age = teff[order], logg[order], age[order]
+        last = min(age[-1], self.AGE_UNIVERSE_GYR)
+        marks = [
+            {
+                "x": float(np.interp(a, age, teff)),
+                "y": float(np.interp(a, age, logg)),
+                "text": f"{a:g} Gyr",
+            }
+            for a in self.reference_ages(age[0], last, self.SUMMARY_N_AGES)
+        ]
+        window = [
+            float(teff.min()),
+            float(teff.max()),
+            float(logg.min()),
+            float(logg.max()),
+        ]
+        return {"window": window, "marks": marks}
 
     def _track_rows(self, i, logmass, initfeh, eep_window):
         """Instance ``i``'s track over ``eep_window``: ``{"teff", "logg",
@@ -425,17 +487,14 @@ class MISTPlot:
         )
 
         meta = {
-            # Which star this chart is (the system summary figure pairs it
-            # with that star's posterior contours).
-            "star": star_name,
-            # The drawn track's EEP and age (Gyr), row-aligned with the track
-            # trace, and the EEPs bounding the main sequence: what a renderer
-            # needs to frame the main sequence and mark reference ages
-            # without knowing MIST (the system summary figure does both).
-            "track": {
-                "eep": track_rows["eep"],
-                "age": track_rows["age"],
-                "main_sequence_eeps": list(self.MAIN_SEQUENCE_EEPS),
+            # The system summary figure's Kiel panel: the window frames the
+            # drawn track's main sequence, and round reference ages are
+            # marked along it (summary_track_marks).  Its posterior contours
+            # and the star's reported point come from
+            # EvolutionaryModel.summary_posterior.
+            "summary": {
+                "layout": "track",
+                **self.summary_track_marks(track_rows),
             },
             # Per star, like every other component's per-instance tag: with
             # one tag for all stars the last star's PDF overwrote the rest.

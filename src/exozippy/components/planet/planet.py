@@ -325,6 +325,50 @@ class Planet(Component):
         self.star_map = np.array([p.get("star_ndx", 0) for p in self.config])
         self.orbit_map = np.array([p.get("orbit_ndx", 0) for p in self.config])
 
+    #: The summary figure's header, per planet: the Parameter label and the
+    #: element it is read at -- the planet's own index, or the index of the
+    #: orbit it sits on.
+    SUMMARY_HEADER = (
+        ("orbit.period", "orbit"),
+        ("planet.radius", "planet"),
+        ("planet.mass", "planet"),
+        ("orbit.ecc", "orbit"),
+    )
+
+    def summary_header(self, system):
+        """One header line per planet: P, R_P, M_P and e from the posterior.
+
+        Read off the distributed posterior, each value formatted by
+        ``summary_plot.format_value`` with the Parameter's own table symbol
+        and unit.  A quantity this fit does not report -- no such
+        Parameter, or one with no posterior -- is left out of the line
+        rather than shown as a blank.  With more than one planet each line
+        is prefixed by the planet's name.  See ``Component.summary_header``.
+        """
+        from ...outputs.summary_plot import format_value, reported_summary
+
+        lookup = system.get_parameter_lookup()
+        lines = []
+        for p_idx, pname in enumerate(self.names):
+            o_idx = int(self.orbit_map[p_idx])
+            parts = []
+            for label, owner in self.SUMMARY_HEADER:
+                param = lookup.get(label)
+                index = o_idx if owner == "orbit" else p_idx
+                summ = reported_summary(param, index)
+                if summ is None:
+                    continue
+                value = format_value(summ)
+                if value is None:
+                    continue
+                unit = (param.unit_latex or "").replace("$", "")
+                unit_text = rf"\,{unit}" if unit else ""
+                parts.append(f"${param.latex} = {value}{unit_text}$")
+            if parts:
+                prefix = f"{pname}:  " if len(self.names) > 1 else ""
+                lines.append(prefix + "   |   ".join(parts))
+        return lines
+
     def register_parameters(self, system):
         """Stage 3: Auto-estimates and Manifest declaration."""
         has_orbit = "orbit" in system.active_components

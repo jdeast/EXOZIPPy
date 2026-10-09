@@ -1279,6 +1279,7 @@ class RVInstrument(Instrument):
         )
         unphased_meta = {
             "phase_folded": False,
+            "summary": self._summary_meta("time_series"),
             "file_tag": "RV_unphased",
             "figsize": (12, 6),
             "dynamic_data": True,
@@ -1387,6 +1388,7 @@ class RVInstrument(Instrument):
                         param_deps=deps,
                         meta={
                             "phase_folded": True,
+                            "summary": self._summary_meta("phase_fold"),
                             "orbit": oname,
                             "period": P_ref,
                             "tc": tc_ref,
@@ -1414,6 +1416,29 @@ class RVInstrument(Instrument):
                 )
 
         return specs
+
+    #: The RV axes of the summary figure, all of them: one label (and,
+    #: across the panels, one range), and the BJD zero points its time axis
+    #: may subtract (TESS's BTJD, then the older 2450000 convention).
+    SUMMARY_YLABEL = "RV [m/s]"
+    SUMMARY_X_OFFSETS = (2457000, 2450000)
+
+    def _summary_meta(self, layout):
+        """A chart's ``meta["summary"]``: drawn in ``layout``, each
+        instrument shown by its ``display_label`` and, by series index, its
+        user ``plot: color:`` (None: the figure's palette)."""
+        meta = {
+            "layout": layout,
+            "labels": {
+                name: self.display_label(i)
+                for i, name in enumerate(self.names)
+            },
+            "colors": {i: self.plot_color[i] for i in range(self.n_elements)},
+            "ylabel": self.SUMMARY_YLABEL,
+        }
+        if layout == "time_series":
+            meta["x_offsets"] = list(self.SUMMARY_X_OFFSETS)
+        return meta
 
     def _residuals_meta(self, point, shared, x):
         """The O-C at the observations, as a chart's ``meta["residuals"]``:

@@ -1138,8 +1138,36 @@ class Component(ABC):
 
         The default returns []; components that own observational data
         override it. See chart.Chart for the payload contract.
+
+        A chart joins the one-page summary figure
+        (``outputs/summary_plot.py``) by declaring ``meta["summary"]``: the
+        layout it is drawn in and the display hints that go with it.  The
+        vocabulary is in ``src/exozippy/outputs/outputs.md``, "The system
+        summary figure"; a chart without the key is not on the page.
         """
         return []
+
+    def summary_header(self, system):
+        """Lines for the summary figure's header, from the distributed
+        posterior: mathtext strings, one line each (the planet's P, R_P,
+        M_P and e, say).  Called after ``System.distribute_posterior``.
+        The default -- a component with nothing to headline -- returns [].
+        """
+        return []
+
+    def summary_posterior(self, system):
+        """Posterior overlays for this component's summary charts, keyed by
+        chart id: ``{chart id: {"contours": [(label, x, y), ...], "marker":
+        ((x, minus, plus), (y, minus, plus))}}``, either key optional.
+
+        ``plot_data`` draws ONE point; this is what only the whole
+        posterior has -- the draws a 2-D contour is built from (each
+        ``(label, x, y)`` one sample set, drawn in order), and the reported
+        median and credible interval of the quantity the chart plots.
+        Called after ``System.distribute_posterior``.  The default returns
+        {}.
+        """
+        return {}
 
     def _point_to_plot_params(self, point, system):
         """
