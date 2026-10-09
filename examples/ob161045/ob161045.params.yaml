@@ -110,7 +110,7 @@ star.Lens.pm_dec:
 #
 # The R value is the one Shin+18 modified for Auckland's Wratten 12 filter:
 # Gamma_R = (Gamma_R + Gamma_V)/2 = (0.61118 + 0.7048)/2 = 0.6583.
-band.KMT_I.u1:
+band.I.u1:
     initval: 0.60985
     sigma: 0
 band.Auckland_R.u1:
@@ -118,46 +118,64 @@ band.Auckland_R.u1:
     sigma: 0
 
 # --------------------------------------------------------------------
-# Baseline flux -- seeded, because the default is six orders of magnitude out
+# Baseline flux
 # --------------------------------------------------------------------
-# `log_f_total`'s default initval is -6 (f_total = 1e-6) against a true
-# ~1.8 here, which alone put the start ~350,000 nats from the data.  The
-# values below are the weighted linear-flux solution at the published
-# trajectory, on the files convert_data.py generates.
+# log_f_total's default initval is -6 against ~-7.07 here, so these are
+# seeded.  They are the weighted linear-flux solution at the published
+# trajectory, with the published limb darkening and error rescaling
+# applied -- the same calculation the table in the README reports.
 #
-# q_source = 1 EXACTLY, and that is not a coincidence or a fit: those files
-# were offset to zero blending precisely because no DIA reference flux is
-# available (see convert_data.py).  f_blend comes back at ~1e-9, i.e. zero
-# to rounding.  So these two seeds carry the imposed-blending assumption,
-# and if a reference flux is ever supplied they must be recomputed along
-# with the data.
+# THE BLENDING IS SMALL AND CONSISTENT: q_source = f_source/f_total comes
+# out 1.022-1.030 at OGLE and all three KMT sites, i.e. ~3% blending, with
+# chi2/N of 1.00-1.04.  Nothing here goes near q_source's [0, 2] bound.
+#
+# That is worth recording because an earlier version of this example, built
+# on re-derived three-column flux files rather than these reductions,
+# measured q_source = 2.161 +/- 0.006 at KMTC and appeared to need the
+# bound widened.  It did not: that number was an artifact of reconstructing
+# a total flux from difference imaging with a solved reference, not a
+# property of the event.  The bound is fine; the data were not.
+mulensinstrument.OGLE.log_f_total:
+    initval: -7.0734
+mulensinstrument.OGLE.q_source:
+    initval: 1.030
 mulensinstrument.KMTC.log_f_total:
-    initval: 0.25149
-mulensinstrument.KMTS.log_f_total:
-    initval: 0.20068
-mulensinstrument.KMTA.log_f_total:
-    initval: 0.13868
-mulensinstrument.Auckland.log_f_total:
-    initval: 0.39764
+    initval: -7.0731
 mulensinstrument.KMTC.q_source:
-    initval: 1.0
+    initval: 1.022
+mulensinstrument.KMTS.log_f_total:
+    initval: -7.0743
 mulensinstrument.KMTS.q_source:
-    initval: 1.0
+    initval: 1.030
+mulensinstrument.KMTA.log_f_total:
+    initval: -7.0728
 mulensinstrument.KMTA.q_source:
-    initval: 1.0
+    initval: 1.029
+
+# AUCKLAND'S BLENDING IS NOT CONSTRAINED BY ITS OWN DATA, and this seed is
+# a prior rather than a measurement.  Its 91 epochs span only HJD'
+# 7558.90-7563.96, all within 2.5 d of t_0, so it never reaches baseline:
+# the free solution gives q_source = 4.3 +/- 1.5, consistent with the other
+# sites' ~1.03 at 2.2 sigma and with almost anything else.  Seeded at no
+# blending, which the sampler is free to leave.  Its flux scale differs
+# from the I-band sets because it is a different band and zeropoint.
+mulensinstrument.Auckland.log_f_total:
+    initval: -6.4203          # log10(3.7998e-07)
 mulensinstrument.Auckland.q_source:
     initval: 1.0
 
 # --------------------------------------------------------------------
-# Error re-scaling -- Shin+18 Table 1, factor k
+# Error re-scaling -- Shin+18, as distributed with the data
 # --------------------------------------------------------------------
-# Mapped onto err_scale (sigma = err * err_scale), whose own default
-# initval is 1.0, so these are the published factors verbatim.  They are
-# initvals, NOT pins: err_scale stays free, as in every other shipped fit.
-# Shin+18 derived them against their (-, +) best fit.
-#
-# Their OGLE entry (k = 0.913) is deliberately absent: no OGLE photometry
-# ships with this data set, which is why the fit here is KMT + Auckland.
+# The reductions ship the final rescaling as
+#     error_new = coeff_A * sqrt(error_old**2 + coeff_B**2)
+# with coeff_B = 0 for every dataset, so this is a pure multiplicative
+# factor and maps one-to-one onto err_scale.  Initvals, NOT pins:
+# err_scale stays free, as in every other shipped fit.  Applying them
+# brings chi2/N to 1.00-1.04 at OGLE and the three KMT sites, which is the
+# check that these are the right factors for these files.
+mulensinstrument.OGLE.err_scale:
+    initval: 0.913
 mulensinstrument.KMTC.err_scale:
     initval: 1.116
 mulensinstrument.KMTS.err_scale:
