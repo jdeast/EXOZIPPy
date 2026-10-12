@@ -38,6 +38,10 @@ cfg, n = sys.argv[1], int(sys.argv[2])
 d = yaml.safe_load(open("KMT-2021-BLG-1122L.yaml"))
 d.setdefault("sampler", {})["cores"] = n
 d["prefix"] = "fitresults_sync_slowtail/KMT-2021-BLG-1122L"
+# Starts seeded at the convention scan's optimum (seed_from_optimum.py; start
+# lp 9285 against -10808 from the plain params file, whose population had to
+# climb and froze the cold rungs at step size 0.003).
+d["parameter_file"] = "KMT-2021-BLG-1122L.params.scanopt.yaml"
 # The T_max 20 workaround of the shipped config is for the UNFIXED kernel:
 # under the fixed one the full ladder comes back.  start_dispersion 3.0
 # STAYS: with the auto 3*sqrt(T) the serial, untimed start scoring (review

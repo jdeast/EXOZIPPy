@@ -24,6 +24,9 @@ def main():
     spec.loader.exec_module(mmf)
     os.chdir(HERE)
     cfg = yaml.safe_load(open("KMT-2021-BLG-1122L.yaml"))
+    cfg["parameter_file"] = os.environ.get(
+        "PARAMS", cfg["parameter_file"]
+    )  # a params-file override for checks
     prm = yaml.safe_load(open(cfg["parameter_file"]))
     for k in ("run", "prefix", "parameter_file", "sampler"):
         cfg.pop(k, None)

@@ -1,0 +1,220 @@
+# STARTS SEEDED FROM THE CONVENTION SCAN'S OPTIMUM (seed_from_optimum.py,
+# scan_conventions_opt.py task 13, light-curve term 9424): every sampled
+# parameter's initval is its value at that optimum; priors, bounds and
+# links are the shipped file's.  Everything below is otherwise
+# KMT-2021-BLG-1122L.params.yaml.
+source.Source.t_0:
+  initval: 2459374.5924019227
+
+source.Source.u_0:
+  initval: 0.13824280958230917
+
+# t_E is DERIVED from the lens masses, distances and proper motions, and a
+# bare `mulensevent.t_E: initval` does not survive the relaxation engine
+# when the proper-motion leaves carry the galactic model's own hints: the
+# 2026-10-06 scan started at t_E = 36.3 d (mu_rel 4.87 mas/yr, the prior
+# mean) with the published 14.74 silently dropped.  So, per review 8.6.15's
+# recipe, the LEAVES are seeded and t_E is not: masses and distances below
+# give theta_E = 0.50 mas, and the proper motions below give |mu_rel| =
+# 12.39 mas/yr, hence t_E = theta_E / mu_rel = 14.74 d.  The direction of
+# mu_rel on the sky is unconstrained without a parallax measurement (the
+# light curve only sees it relative to the lens axis, through alpha), so
+# the lens's pm is placed 12.39 mas/yr east of a bulge-typical source pm.
+star.Source.pm_ra:
+  initval: -3.0000105475824768
+star.Source.pm_dec:
+  initval: -5.22420648988442
+star.Lens.pm_ra:
+  initval: 9.389920976965449
+star.Lens.pm_dec:
+  initval: -5.17032376056159
+# The companions ARE the primary's system: their distance, proper motion and
+# rv are HARD-LINKED to the primary's (sigma 0: never sampled, they track the
+# primary).  Review 2.6.32: the model otherwise samples a companion body's
+# distance / pm / rv as free prior-only nuisances, and the first acceptance
+# fit parked LensB at 5844 pc beside a primary at 174 pc.  Should become
+# automatic for companion bodies; until then it is stated here.
+star.LensB.pm_ra: {initval: star.Lens.pm_ra, sigma: 0}
+star.LensB.pm_dec: {initval: star.Lens.pm_dec, sigma: 0}
+star.LensB.rv: {initval: star.Lens.rv, sigma: 0}
+star.LensC.pm_ra: {initval: star.Lens.pm_ra, sigma: 0}
+star.LensC.pm_dec: {initval: star.Lens.pm_dec, sigma: 0}
+star.LensC.rv: {initval: star.Lens.rv, sigma: 0}
+
+# rho is not seeded directly: it derives from the source radius and
+# theta_E.  The source-flux seed alone gave rho = 1.9e-3 (scan 2026-10-06),
+# so the radius is seeded from the paper's theta_* = 1.26 uas at the
+# 8.68 kpc above: R = 2.35 Rsun (a K subgiant), rho = 2.5e-3 as published.
+star.Source.radius:
+  initval: 2.3288121963591113
+
+# ---- the lens geometry: two companions of the primary ---------------------
+# Han's (s, q, alpha) are relative to M1 (the primary) for M2, and
+# (s_3, q_3, psi) for M3, with psi "the orientation angle of M3 as
+# measured from the M1-M2 axis with a center at the position of M1".
+# EXOZIPPy (conventions.md, "N-body lens"): every companion carries its
+# own alpha_j = angle from the primary->companion_j axis to tau_hat (the
+# LENS's motion relative to the source), measured CCW, with the companion
+# placed at s_j (cos alpha_j, -sin alpha_j) in the trajectory frame.
+#
+# alpha for M2: Han's "angle between the relative lens-source proper motion
+# and the M1-M2 axis", sense unstated; mapped as -alpha_Han (above):
+# 2.292 rad = 131.32 deg -> -131.32 deg = 228.68 deg.
+# alpha for M3: psi is "the orientation angle of M3 as measured from the
+# M1-M2 axis with a center at the position of M1"; mapped as
+# alpha_3 = alpha_2 - psi = 228.68 - 79.24 = 149.44 deg.
+# BOUNDS on both separations, s in [0.4, 2.3] (published 1.386 +/- 0.027
+# and 1.601 +/- 0.043, both companions near the Einstein ring): VBM's
+# three-body MultiMag2 aborts, segfaults or hangs on ~1.8e-3 of DE-style
+# proposals (check_vbm_crash.py, 11 of 6000), EVERY one of them with a
+# companion at s < 0.2 or s > 2.4, and the sampler's start population is
+# scored serially with no timeout (review 2.6.36), where one such call
+# kills or freezes the fit.  A bounded log_s never reaches the kernel.
+# For LensC (slot 1) the bound goes on log_s itself: the s <-> log_s
+# relation exists for slot 0 only, so an `s:` bound there would be
+# dropped silently (8.6.13).
+lens.LensB.s:
+  initval: 1.386
+  lower: 0.4
+  upper: 2.3
+lens.LensB.alpha:
+  initval: -131.32192664398448
+# LensC is companion SLOT 1: the engine's s <-> log_s and alpha <->
+# (xalpha, yalpha) relations exist for slot 0 only (mulensing.md, "Three
+# or more lens bodies"), so an `s:` or `alpha:` initval here would NOT reach
+# the sampled coordinates and LensC would start at the defaults (s = 1,
+# alpha = 0).  The 2026-10-06 scan found exactly that: every combination
+# gave the same total.  Seed the sampled coordinates themselves.  Review
+# 8.6.13 (per-companion relations) is what would let `s:`/`alpha:` work.
+lens.LensC.log_s:
+  initval: 0.2043913319192997 # log10(1.601)
+  lower: -0.397940         # log10(0.4)
+  upper: 0.361728          # log10(2.3)
+lens.LensC.xalpha:
+  initval: -0.8610795380381306 # cos(149.44 deg)
+lens.LensC.yalpha:
+  initval: 0.5084702834699777 # sin(149.44 deg)
+
+# ---- explicit body masses (REQUIRED for 3+ lens bodies) -------------------
+# q_j = M_j / M_1 is DERIVED from the masses at runtime (the engine's
+# q <-> companion-mass relation exists for companion slot 0 only, and a
+# user lens.<j>.q for j >= 1 cannot back-propagate, mulensing.md).  The
+# masses are set so the derived q's reproduce Table 2 exactly:
+#   M_1 = 0.47 (Bayesian median, Eq. 10), M_2 = 0.526 M_1, M_3 = 0.241 M_1.
+star.Lens.mass:
+  initval: 0.4530402664837273
+star.LensB.mass:
+  initval: 0.2382993205543845
+star.LensC.mass:
+  initval: 0.10918269351915187
+
+# ---- distances (Sect. 5): D_L = 6.57 kpc (Eq. 13).  D_S is set to 8.68
+# kpc (inside the Fig. 7 posterior, which peaks near 8.5) so that with the
+# masses above theta_E = sqrt(kappa M_tot pi_rel) = 0.50 mas exactly as
+# published (pi_rel = 1/6.57 - 1/8.68 = 0.0370 mas).
+star.Lens.distance:
+  initval: 6572.941317701116
+star.LensB.distance: {initval: star.Lens.distance, sigma: 0}   # hard link, see the pm block
+star.LensC.distance: {initval: star.Lens.distance, sigma: 0}
+star.Source.distance:
+  initval: 8680.190310905527
+
+# Coordinates (J2000) from the KMTNet event page: 17:35:51.10 -28:26:47.22
+# ((l, b) = (-0.720, 2.076), Sect. 2).  Pinned on every star.
+star.Lens.ra: {initval: 263.96292, sigma: 0}
+star.Lens.dec: {initval: -28.44645, sigma: 0}
+star.LensB.ra: {initval: 263.96292, sigma: 0}
+star.LensB.dec: {initval: -28.44645, sigma: 0}
+star.LensC.ra: {initval: 263.96292, sigma: 0}
+star.LensC.dec: {initval: -28.44645, sigma: 0}
+star.Source.ra: {initval: 263.96292, sigma: 0}
+star.Source.dec: {initval: -28.44645, sigma: 0}
+
+# As in KMT-2019-BLG-1806: hold the source metallicity (nothing reads it
+# beyond the SED, and there is no spectrum).
+star.Source.feh:
+  sigma: 0.0
+
+# ---- photometric zeropoints -------------------------------------------
+# NOT calibrated.  The files are pySIS difference flux at the pipeline's
+# fixed zp 28.0 (prepare_data.py), an instrumental scale per site and band.
+# Han+2023 Sect. 4 calibrate through the red giant clump on pyDIA photometry
+# (instrumental (V-I, I)_RGC = (3.669, 18.025) against intrinsic (1.060,
+# 14.377) with A_I = 3.3); pySIS differs from pyDIA by an unknown constant
+# and we have no field photometry for our own clump.  So every zeropoint is
+# centred on no offset and left wide (0.5 mag, JDE 2026-10-11): the light
+# curves pin the site-to-site offsets within a band, and theta_* comes from
+# the V-I colour plus the A_V prior below, to roughly 25% -- weaker than
+# Han's CMD measurement, and honest about what we can calibrate.
+#
+# WHY mu IS 16.0 / 19.0, NOT 0 (a library bug, worked around here): the dia
+# reader rescales flux to units of the reference and records the offset
+# zp_ref = 28 - 2.5*log10(ref) = reference_mag, but the SED tie
+# (zp = m_SED + 2.5*log10(f_source)) never applies it, so for a dia file
+# the zeropoint parameter carries an extra +reference_mag.  Centring the
+# prior on reference_mag is exactly equivalent to "instrumental = Vega,
+# +/- 0.5 mag".  Revert to mu 0 when the tie subtracts zp_ref.
+mulensinstrument.KMTC14.zeropoint: {mu: 16.0, sigma: 0.5}
+mulensinstrument.KMTS14.zeropoint: {mu: 16.0, sigma: 0.5}
+mulensinstrument.KMTA14.zeropoint: {mu: 16.0, sigma: 0.5}
+mulensinstrument.KMTC14V.zeropoint: {mu: 19.0, sigma: 0.5}
+mulensinstrument.KMTS14V.zeropoint: {mu: 19.0, sigma: 0.5}
+mulensinstrument.KMTA14V.zeropoint: {mu: 19.0, sigma: 0.5}
+
+# Source-flux fraction (q_source, in units of each file's reference) and
+# error-scale STARTS, from the optimum of the convention scan's winner
+# (scan_conventions_opt.py task 13, light-curve term 9424).  The flux
+# bootstrap cannot run on a 3-body lens (t_E is not derivable at stage 1,
+# review 2.6.34) and falls back to q_source 0.95; the sampler does not
+# polish its start; without these the start sits ~38,000 nats below the
+# basin's optimum.  Starts only -- both are sampled.
+mulensinstrument.KMTC14.q_source: {initval: 0.010363731023428288}
+mulensinstrument.KMTS14.q_source: {initval: 0.012177305640456985}
+mulensinstrument.KMTA14.q_source: {initval: 0.010902796621555966}
+mulensinstrument.KMTC14V.q_source: {initval: 0.011076661482335312}
+mulensinstrument.KMTS14V.q_source: {initval: 0.010878598557045264}
+mulensinstrument.KMTA14V.q_source: {initval: 0.009825951155816047}
+mulensinstrument.KMTC14.err_scale: {initval: 1.4871898568327138}
+mulensinstrument.KMTS14.err_scale: {initval: 1.821053503209806}
+mulensinstrument.KMTA14.err_scale: {initval: 2.314146192219927}
+mulensinstrument.KMTC14V.err_scale: {initval: 1.363307022797127}
+mulensinstrument.KMTS14V.err_scale: {initval: 1.8815370836114766}
+mulensinstrument.KMTA14V.err_scale: {initval: 2.049528941807533}
+
+# Han+2023 Sect. 4: A_I = 3.3 toward the field.  Through this fit's own
+# Cousins-I BC grid (A_I/A_V ~ 0.62 at this reddening) that is A_V ~ 5.3.
+# A PRIOR, not just a start (JDE 2026-10-11): a colour alone cannot break
+# the reddening degeneracy, and without it the first acceptance fit gave
+# the source A_V 17-20.  Width 0.3 mag: the clump-method A_I uncertainty
+# plus the extinction-law conversion.  The dereddened source is (V-I, I)_0
+# = (0.892, 17.432), a K subgiant with theta_* = 1.26 +/- 0.11 uas.
+star.Source.av:
+  initval: 6.192887944214235
+  mu: 5.3
+  sigma: 0.3
+star.Lens.rv:
+  initval: 6250.487037351427
+star.Source.rv:
+  initval: 790.058599342558
+star.Source.teff:
+  initval: 6352.407185921037
+star.Source.radiussed:
+  initval: 2.323804838083908
+star.Source.teffsed:
+  initval: 6348.095392879369
+band.I.u1:
+  initval: 0.47626927505889954
+band.V.u1:
+  initval: 0.5000016958129554
+mulensinstrument.KMTC14.log_f_total:
+  initval: -0.0004870707265991481
+mulensinstrument.KMTS14.log_f_total:
+  initval: -0.0007855869519890479
+mulensinstrument.KMTA14.log_f_total:
+  initval: -0.002660502053962732
+mulensinstrument.KMTC14V.log_f_total:
+  initval: 0.0003386694757923081
+mulensinstrument.KMTS14V.log_f_total:
+  initval: 0.0028467806468035484
+mulensinstrument.KMTA14V.log_f_total:
+  initval: -0.008543523872323044
