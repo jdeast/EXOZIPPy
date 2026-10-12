@@ -1,3 +1,7 @@
-# scratch outputs of the fixed-kernel tests and the shared-env install (logs, journals, wheels)
+# scratch outputs of the fixed-kernel tests, the shared-env installs and the fits (logs, journals, wheels, optimizer vectors)
 vbmfix_results/
 fitresults_vbmfix/
+fitresults_sync_slowtail/
+scan_opt/
+*.npy
+*.journal
