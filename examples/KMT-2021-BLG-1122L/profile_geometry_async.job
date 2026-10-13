@@ -1,0 +1,22 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 2
+#$ -q mThM.q
+#$ -l use_himem=TRUE
+#$ -cwd
+#$ -j y
+#$ -N kmtprof_async
+#$ -o profile_geometry_async.$JOB_ID.log
+# Review 7.6.4 step 2 (JDE 2026-10-11): the async geometry variant, Powell on the
+# I+V difference-flux model, under VBMicrolensing PR #75 (~/vbm_slowtail_venv).
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor_kmtprof_async"
+export OMP_NUM_THREADS=1
+cd $HOME/python/EXOZIPPy/examples/KMT-2021-BLG-1122L
+echo "commit $(git -C $HOME/python/EXOZIPPy rev-parse --short HEAD)   $(date)"
+$HOME/vbm_slowtail_venv/bin/python -u profile_geometry.py async 8000 2>&1 | grep -v "DEBUG\|^\[\|Warning\|warn"
+echo "exit $?   $(date)"

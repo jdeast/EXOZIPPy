@@ -1,0 +1,40 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 8
+#$ -q mThM.q
+#$ -l use_himem=TRUE
+#$ -cwd
+#$ -j y
+#$ -N vbmslowfix
+#$ -o vbmfix_results/slowtailfix/vbm_slowtail_test.$JOB_ID.log
+# Build upstream PR valboz/VBMicrolensing#75 (jdeast:fix-multipoly-slowtail
+# @77fc851: Newton polish of accepted Multipoly images, on top of 2873391)
+# into ~/vbm_slowtail_venv, then verify: the 4 slow Multipoly cases, the 24
+# reproducers, and Multipoly vs Nopoly.  Writes PASS when no case crashes or
+# exceeds 120 s under Multipoly.
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+P=$HOME/.conda/envs/exozippy/bin
+V=$HOME/vbm_slowtail_venv
+export CC=$P/x86_64-conda-linux-gnu-gcc CXX=$P/x86_64-conda-linux-gnu-g++
+cd $HOME/python/EXOZIPPy/examples/KMT-2021-BLG-1122L/vbmfix_results/slowtailfix
+rm -f PASS
+echo "$(date)"
+$V/bin/pip install --no-build-isolation --no-deps --force-reinstall "git+https://github.com/jdeast/VBMicrolensing.git@77fc851" 2>&1 | grep -i "error\|Successfully" | tail -2
+$V/bin/python -c "from importlib.metadata import distribution; import VBMicrolensing as v; print(v.__file__); print(distribution('VBMicrolensing').read_text('direct_url.json'))"
+echo "=== slow 4 (Multipoly)"
+cp check_vbm_crash_Multipoly_1.json m.bak; cp check_vbm_crash_Nopoly_1.json n.bak
+cp slow4.json check_vbm_crash_Multipoly_1.json; echo '{"crashes": []}' > check_vbm_crash_Nopoly_1.json
+$V/bin/python -u vbm_reproducer.py 2>&1 | grep "^case\|^VBM" | grep Multipoly | tee slow4.out
+mv m.bak check_vbm_crash_Multipoly_1.json; mv n.bak check_vbm_crash_Nopoly_1.json
+echo "=== 24 reproducers"
+$V/bin/python -u vbm_reproducer.py 2>&1 | grep "^case\|^VBM" | tee repro.out
+echo "=== Multipoly vs Nopoly"
+$V/bin/python -u compare_methods.py 2>&1
+BAD=$(grep "Multipoly:" slow4.out repro.out | grep -v ": ok" | wc -l)
+echo "Multipoly failures or >120 s: $BAD"
+[ "$BAD" -eq 0 ] && touch PASS && echo PASS
+echo "exit $(date)"
