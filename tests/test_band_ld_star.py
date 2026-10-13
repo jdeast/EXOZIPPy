@@ -131,8 +131,8 @@ def test_two_consumers_wanting_different_stars_raises(monkeypatch):
         band,
         "ld_consumers",
         lambda system: [
-            LDConsumer("transit[A]", 0, 0),
-            LDConsumer("mulensinstrument[OGLE]", 0, 1),
+            LDConsumer("transit[A]", 0, 0, "transit"),
+            LDConsumer("mulensinstrument[OGLE]", 0, 1, "mulens"),
         ],
     )
 

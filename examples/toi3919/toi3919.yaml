@@ -10,9 +10,10 @@
 # filter was written out and the prefix set.
 #
 # Conversion warnings (features of the EXOFASTv2 fit that did not translate):
-#   - the EXOFASTv2 fit used Claret limb-darkening priors; the LD table prior
-#     is not implemented yet, so the limb darkening is constrained by the
-#     transit data alone
+#   - the EXOFASTv2 fit used Claret limb-darkening priors, which were not
+#     implemented when this was converted, so here the limb darkening is
+#     constrained by the transit data alone.  They are now (opt-in,
+#     band.star_constrains_ld): toi3919_claret.yaml is this fit with them.
 #   - prior 'dilute' dropped: explicit dilution priors are not implemented
 #     (EXOZIPPy dilutes transits automatically from the SED flux fractions)
 #   - 'fitdilute' not translated: explicit dilution fitting is not implemented

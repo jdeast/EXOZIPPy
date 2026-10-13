@@ -436,3 +436,55 @@ def test_multi_planet_conversions_point_each_planet_at_its_orbit(
         {"name": "b", "orbit_ndx": 0},
         {"name": "c", "orbit_ndx": 1},
     ]
+
+
+# --------------------------------------------------------------------------
+# The Claret limb-darkening prior -> band.star_constrains_ld (opt-in).
+# --------------------------------------------------------------------------
+def test_the_claret_prior_is_written_as_an_explicit_tie_on_every_band(converted):
+    """
+    Given a driver without /noclaret (EXOFASTv2 applies the Claret prior to
+    every transit band),
+    When it is converted,
+    Then every band block carries star_constrains_ld: true -- EXOZIPPy's tie
+    is opt-in, so the conversion must say so -- and the old "not
+    implemented" warning is gone.
+    """
+    config, _, warnings, _ = converted
+
+    assert config["band"]
+    assert all(b["star_constrains_ld"] is True for b in config["band"])
+    assert not any("Claret" in w for w in warnings)
+
+
+def test_noclaret_leaves_the_tie_at_its_default(tmp_path, monkeypatch):
+    """
+    Given /noclaret,
+    When the driver is converted,
+    Then no band block sets star_constrains_ld: the default (off) is
+    exactly EXOFASTv2's /noclaret, and the choice is reported.
+    """
+    config, _, _, infos = _convert(
+        tmp_path, monkeypatch, _driver_with("/noclaret")
+    )
+
+    assert not any("star_constrains_ld" in b for b in config["band"])
+    assert any("/noclaret" in i for i in infos)
+
+
+def test_a_host_outside_the_tables_gets_the_tie_off_with_a_reason(
+    tmp_path, monkeypatch
+):
+    """
+    Given a driver without /noclaret whose host starts at Teff 3200 K,
+    below the Claret tables' 3500 K,
+    When it is converted,
+    Then every band is written star_constrains_ld: false (the tie would
+    raise at startup) and the conversion warns, naming the band.
+    """
+    config, _, warnings, _ = _convert(
+        tmp_path, monkeypatch, _DRIVER, priors="teff 3200 100\n"
+    )
+
+    assert all(b["star_constrains_ld"] is False for b in config["band"])
+    assert any("teff = 3200" in w and "star_constrains_ld: false" in w for w in warnings)

@@ -13,3 +13,10 @@ def calc_u1_from_kipping(q1, q2):
 def calc_u2_from_kipping(q1, q2):
     """Kipping (2013): u2 = sqrt(q1)*(1 - 2*q2)"""
     return pt.sqrt(q1) * (1.0 - 2.0 * q2)
+
+
+@register_physics
+def calc_ld_offset(u, u_claret):
+    """A limb-darkening coefficient's offset from its Claret table value --
+    the quantity the star_constrains_ld tie puts its Gaussian on."""
+    return u - u_claret

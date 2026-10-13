@@ -812,7 +812,21 @@ def grid_bounded_paths(system):
         fn = getattr(comp, "grid_bound_paths", None)
         if fn is None:
             continue
-        out.update(fn())
+        # Two grids may bound one parameter (the SED's BC grid and the
+        # Claret limb-darkening tables both bound star.feh).  A plain update
+        # would silently keep only the later component's claim; merge
+        # instead -- the binding bounds are the intersection, and the message
+        # names both grids.
+        for path, info in fn().items():
+            prev = out.get(path)
+            if prev is None:
+                out[path] = dict(info)
+                continue
+            out[path] = {
+                "lower": max(prev["lower"], info["lower"]),
+                "upper": min(prev["upper"], info["upper"]),
+                "source": f"{prev['source']} and {info['source']}",
+            }
     return out
 
 

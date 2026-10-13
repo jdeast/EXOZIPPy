@@ -1,0 +1,124 @@
+# TOI-3919 with the Claret limb-darkening tie on every band -- the sibling
+# of toi3919.yaml, built to test band.star_constrains_ld
+# (components/sed/sed.md, "The Claret limb-darkening tie").
+#
+# The EXOFASTv2 fit this example was converted from used the Claret prior
+# (it did not set /noclaret); toi3919.yaml, converted before the tie
+# existed, could not reproduce that.  This one does, with one deliberate
+# difference: EXOZIPPy applies the prior ONCE PER BAND, where EXOFASTv2
+# applied it once per transit FILE -- four times for TESS, twice for Sloan
+# i' (docs/claret_ld_prior_plan.md, A6).  To reproduce EXOFASTv2's counting
+# for a parity run, add to the params file:
+#     band.TESS.du1:   {sigma: 0.025}     # 0.05 / sqrt(4)
+#     band.TESS.du2:   {sigma: 0.025}
+#     band.Sloani.du1: {sigma: 0.0354}    # 0.05 / sqrt(2)
+#     band.Sloani.du2: {sigma: 0.0354}
+#
+# The params file is toi3919.yaml's: it carries EXOFASTv2's converged q1/q2
+# as starts, which outrank the tie's table seed.  Everything below except
+# the prefix and the four star_constrains_ld lines is toi3919.yaml.
+
+run:
+  name: "toi3919"
+
+prefix: "fitresults/toi3919_claret"
+logger_level: INFO   # DEBUG, INFO, or WARNING
+
+star:
+  - name: "A"
+    mist: True
+
+# MIST tracks interpolated at (logmass, initfeh, eep); each
+# constrained quantity gets a Gaussian potential toward the
+# track value with EXOFASTv2's systematic floor as sigma.
+evolutionarymodel:
+  - star: "A"
+    constrain: [feh, radius, teff, age]
+
+sed:
+  file: "toi3919.sed.yaml"
+
+planet:
+  - name: "b"
+
+orbit:
+  - name: "b"
+    primary: ["A"]
+    companion: ["b"]
+  # EXOFASTv2's /fitslope: the reflex of a companion too long-period
+  # to resolve, as a Taylor orbit: orbit.trend.gammadot is the RV slope
+  - name: "trend"
+    type: linear
+    primary: ["A"]
+
+transit:
+  - name: "TESS_UT20190912"
+    file: "n20190912.TESS.TESS.TOI-3919SlimFlat.S16.1800sunbinned.dat"
+    band: "TESS"
+    exptime: 30 # minutes
+    ninterp: 10
+  - name: "TESS_UT20200319"
+    file: "n20200319.TESS.TESS.TOI-3919SlimFlat.S23.1800sunbinned.dat"
+    band: "TESS"
+    exptime: 30 # minutes
+    ninterp: 10
+  - name: "CALOU-0m4_UT20220114"
+    file: "n20220114.R.CALOU-0m4.TOI-3919.dat"
+    band: "R"
+    exptime: 1 # minutes
+    ninterp: 1
+  - name: "TESS_UT20220226"
+    file: "n20220226.TESS.TESS.TOI-3919SlimFlat.S49.120sunbinned.dat"
+    band: "TESS"
+    exptime: 2 # minutes
+    ninterp: 1
+  - name: "TESS_UT20220326"
+    file: "n20220326.TESS.TESS.TOI-3919SlimFlat.S50.120sunbinned.dat"
+    band: "TESS"
+    exptime: 2 # minutes
+    ninterp: 1
+  - name: "KeplerCam_UT20220428"
+    file: "n20220428.Sloani.KeplerCam.TOI-3919.dat"
+    band: "Sloani"
+    exptime: 1 # minutes
+    ninterp: 1
+  - name: "WCO_UT20220428"
+    file: "n20220428.Sloanr.WCO.TOI-3919.dat"
+    band: "Sloanr"
+    exptime: 1 # minutes
+    ninterp: 1
+  - name: "LCO-McD-1m0_UT20230306"
+    file: "n20230306.Sloani.LCO-McD-1m0.TOI-3919.dat"
+    band: "Sloani"
+    exptime: 1 # minutes
+    ninterp: 1
+
+band:
+  - name: "R"
+    filter: "Generic/Cousins.R"   # EXOFASTv2's R; a bare 'R' is ambiguous
+    star_constrains_ld: true
+  - name: "Sloani"
+    filter: "Sloani"
+    star_constrains_ld: true
+  - name: "Sloanr"
+    filter: "Sloanr"
+    star_constrains_ld: true
+  - name: "TESS"
+    filter: "TESS"
+    star_constrains_ld: true
+
+rvinstrument:
+  - name: "TRES"
+    file: "toi3919.TRES.rv"
+
+parameter_file: "toi3919.params.yaml"
+
+# Sampling controls are deliberately NOT translated from EXOFASTv2
+# (maxsteps/nthin/ntemps are DE-MCMC knobs); this block follows EXOZIPPy's
+# HMC best practices instead.
+sampler:
+  method: numpyro      # nuts, numpyro, blackjax, nutpie, ptde, ptde_async
+  tune: 2000
+  draws: 4000
+  target_accept: 0.95
+  recompute_trace: True   # if False and a prefix.nc file exists, load it instead of re-sampling

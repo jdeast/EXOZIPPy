@@ -46,6 +46,44 @@ band:
       default:
         func_name: "calc_u2_from_kipping"
         deps: ["q1", "q2"]
+  # The Claret limb-darkening tie (star_constrains_ld, opt-in per band):
+  # the offset of each coefficient from the Claret table interpolated at the
+  # band's star's (teff, logg, feh).  DERIVED on the tied bands (du2 on the
+  # tied QUADRATIC ones) and inactive elsewhere; u1_claret/u2_claret are
+  # context nodes Band.add_parameter injects (the mulensinstrument.zeropoint
+  # pattern).  The Gaussian below IS the tie, once per band.
+  #
+  # Unlike zeropoint -- which deliberately has NO default mu/sigma, because
+  # its centre and width are facts about the user's own calibration (review
+  # 2.2.21) -- this one has a default, and that is not an inconsistency to
+  # "fix": the centre is computed from the tables, and 0.05 is EXOFASTv2's
+  # width for the tables' own accuracy (exofast_chi2v2.pro), the same kind of
+  # statement as the Torres scatter.  A params entry changes it per band
+  # (band.TESS.du1: {sigma: 0.1}) or for all (band.du1: {sigma: 0.1}).
+  # No bounds: a derived element with bounds gets a barrier, and the
+  # physical region is already enforced on the sampled q1/q2 (or u1).
+  du1:
+    mu: 0.0
+    sigma: 0.05
+    unit: ""
+    internal_unit: ""
+    latex: "u_1 - u_{1,\\rm C}"
+    description: "Linear LD coefficient minus its Claret table value"
+    expressions:
+      default:
+        func_name: "calc_ld_offset"
+        deps: ["u1", "u1_claret"]
+  du2:
+    mu: 0.0
+    sigma: 0.05
+    unit: ""
+    internal_unit: ""
+    latex: "u_2 - u_{2,\\rm C}"
+    description: "Quadratic LD coefficient minus its Claret table value"
+    expressions:
+      default:
+        func_name: "calc_ld_offset"
+        deps: ["u2", "u2_claret"]
   # Constant secondary-eclipse thermal emission, in ppm (EXOFASTv2's
   # ss.band[i].thermal). Off by default (pinned to 0 in Band.register_parameters
   # unless the band sets fitthermal: true) so the transit model is unchanged

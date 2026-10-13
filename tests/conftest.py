@@ -227,6 +227,58 @@ def write_synthetic_mist_grid(
     return mist_root
 
 
+# Synthetic Claret coefficients: LINEAR in every axis, so the trilinear
+# interpolation reproduces them exactly and a test can assert a value
+# without a hand-computed constant of its own (docs/testing.md).
+SYNTHETIC_CLARET = {
+    "a": lambda t, g, z: 0.40 - 2.0e-5 * (t - 5000.0) + 0.01 * (g - 4.0) + 0.02 * z,
+    "b": lambda t, g, z: 0.25 + 1.0e-5 * (t - 5000.0) - 0.01 * (g - 4.0) - 0.01 * z,
+    "u": lambda t, g, z: 0.55 - 3.0e-5 * (t - 5000.0) + 0.01 * (g - 4.0) + 0.01 * z,
+}
+
+
+def write_synthetic_claret_tables(root, bands=("TESS", "V", "I")):
+    """Write Claret limb-darkening tables in the published layout and return
+    the directory -- to be patched in as ``claret_tables.DEFAULT_TABLE_DIR``.
+
+    The real tables are git-ignored (built by
+    models/Claret/generate_claret_tables.py, later fetched from Zenodo), so
+    no test may depend on them.  These span exactly the box
+    (claret_tables.BOX) on the published axes, with the SYNTHETIC_CLARET
+    coefficients; a quadratic table for every band and a linear one for
+    every band that has one (claret_tables.TABLE_BANDS).
+    """
+    import pandas as pd
+
+    from exozippy.models.Claret import claret_tables as ct
+
+    teff = np.arange(3500.0, 10000.0 + 1.0, 250.0)
+    logg = np.arange(2.0, 5.0 + 0.01, 0.5)
+    feh = np.array([-2.0, -1.5, -1.0, -0.5, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, 0.5, 1.0])
+    T, G, Z = np.meshgrid(teff, logg, feh, indexing="ij")
+    os.makedirs(root, exist_ok=True)
+    for band in bands:
+        for law, columns in ct.LAW_COLUMNS.items():
+            if band not in ct.TABLE_BANDS[law]:
+                continue
+            df = pd.DataFrame({"teff": T.ravel(), "logg": G.ravel(), "feh": Z.ravel()})
+            for c in columns:
+                df[c] = SYNTHETIC_CLARET[c](df["teff"], df["logg"], df["feh"])
+            df.attrs["meta"] = {"band": band, "law": law, "synthetic": True}
+            df.to_parquet(ct.table_path(band, law, root), index=False)
+    return root
+
+
+@pytest.fixture
+def synthetic_claret_tables(tmp_path, monkeypatch):
+    """Point every Claret table reader at freshly written synthetic tables."""
+    from exozippy.models.Claret import claret_tables as ct
+
+    root = write_synthetic_claret_tables(tmp_path / "claret")
+    monkeypatch.setattr(ct, "DEFAULT_TABLE_DIR", root)
+    return root
+
+
 # ---------------------------------------------------------------------------
 # Acceptance delta dump (review 3.14.20)
 # ---------------------------------------------------------------------------
