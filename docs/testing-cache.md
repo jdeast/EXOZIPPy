@@ -244,8 +244,8 @@ base/.lock                                    <- guards base/shared
 - At exit -- an `atexit` handler registered at import, i.e. before
   pytensor's own, so it runs AFTER pytensor's ModuleCache exit hook and
   after xdist has stopped the workers -- under the EXCLUSIVE flock,
-  `os.rename` each entry the run created into `base/shared`, then delete the
-  run directory.
+  `os.rename` each entry the run created into `base/shared`, then retire
+  (rename to its dot name), unlock and delete the run directory.
 
 ### Why it is safe, point by point
 
@@ -276,8 +276,13 @@ base/.lock                                    <- guards base/shared
   `alive.lock`, which the kernel drops when the process dies however it
   dies, so "can I take that lock?" is the test. A run directory is built
   under a dot-prefixed name and renamed into place once that lock is held,
-  so a reaper never mistakes a starting run for a dead one; a dot-named
-  directory is judged by its pid. A directory under `runs/` whose name is not
+  so a reaper never mistakes a starting run for a dead one. At exit it is
+  renamed BACK to its dot name while the lock is still held, and only then
+  unlocked and deleted: the removal does not take `base/.lock`, and deleting
+  the published directory in place let another run's reaper find it
+  mid-rmtree with `alive.lock` already gone and abort that whole session. A
+  dot-named directory (starting or retiring) is judged by its pid; one that
+  vanishes between the reaper's listing and its check is skipped. A directory under `runs/` whose name is not
   a run token raises, naming it: nothing but this code writes there.
 - **A run on another host is never reaped.** The token records the host;
   on a base shared over NFS a remote run's liveness cannot be checked from

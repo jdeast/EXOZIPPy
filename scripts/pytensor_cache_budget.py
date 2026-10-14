@@ -692,14 +692,25 @@ def summarize_tree(
 # and pid as well, and a directory whose host is not this one is NEVER reaped:
 # on a base shared over NFS a remote run's liveness cannot be checked from
 # here.
+#
+# A published run directory -- one without the dot prefix -- therefore always
+# has a held-or-droppable alive.lock, in BOTH directions of its life.  It is
+# built under ``.<token>`` and renamed into place once the lock is held, and
+# at exit it is renamed back to ``.<token>`` WHILE the lock is still held,
+# and only then unlocked and deleted.  Deleting it in place raced a reaper:
+# the removal does not take the base lock, so a reaper listing ``runs/``
+# mid-rmtree found a published directory whose alive.lock was already gone
+# and aborted the whole pytest session.  A dot-named directory -- starting or
+# retiring -- is judged by its pid, and needs nothing inside it.
 _SHARED_DIR = "shared"
 _RUNS_DIR = "runs"
 _BASE_LOCK = ".lock"
 _ALIVE_LOCK = "alive.lock"
 # A run directory is created under this prefix and renamed into place once
-# its alive.lock is held, so no reaper ever sees a run directory whose owner
-# has not yet locked it.
-_CREATING_PREFIX = "."
+# its alive.lock is held, and renamed back under it before that lock is
+# dropped at exit, so no reaper ever sees a published run directory whose
+# owner is not holding (or, dead, has released) its lock.
+_UNPUBLISHED_PREFIX = "."
 # pickle's STOP opcode: the last byte of every complete pickle, any protocol.
 _PICKLE_STOP = b"."
 
@@ -727,7 +738,7 @@ def parse_run_token(name: str) -> tuple[int, str]:
     name it cannot parse is something else's directory sitting where the
     suite reaps, and guessing whether it may be deleted is the wrong call.
     """
-    parts = name.lstrip(_CREATING_PREFIX).split("-", 2)
+    parts = name.lstrip(_UNPUBLISHED_PREFIX).split("-", 2)
     if len(parts) != 3 or not parts[1].isdigit() or not parts[2]:
         raise ValueError(
             f"{name!r} under the suite's runs/ directory is not a run "
@@ -748,20 +759,29 @@ def _pid_alive(pid: int) -> bool:
 
 
 def run_state(run_dir: Path, host: str | None = None) -> str:
-    """``"live"``, ``"dead"`` or ``"remote"`` for one run directory."""
+    """``"live"``, ``"dead"``, ``"remote"`` or ``"gone"`` for one run directory.
+
+    ``"gone"``: the directory was listed but its owner has since renamed it
+    (start-up publishing it, exit retiring it) or deleted it.
+    """
     host = socket.gethostname() if host is None else host
     pid, owner_host = parse_run_token(run_dir.name)
     if owner_host != host:
         return "remote"
-    if run_dir.name.startswith(_CREATING_PREFIX):
-        # Its owner has not locked alive.lock yet (or died before it could),
+    if run_dir.name.startswith(_UNPUBLISHED_PREFIX):
+        # Its owner has not locked alive.lock yet, or has retired the
+        # directory at exit and may be deleting it (or died doing either),
         # so the pid is the only evidence there is.
         return "live" if _pid_alive(pid) else "dead"
     try:
         fd = os.open(run_dir / _ALIVE_LOCK, os.O_RDWR)
     except FileNotFoundError as exc:
+        if not run_dir.exists():
+            # Renamed away (retired at exit) between the listing and here.
+            return "gone"
         # create_run_dir locks alive.lock BEFORE renaming the directory into
-        # place, so a published run directory always has one.
+        # place, and remove_run_dir renames it out BEFORE unlocking, so a
+        # published run directory always has one.
         raise RuntimeError(
             f"run directory {run_dir} has no {_ALIVE_LOCK}; it was not made "
             "by create_run_dir -- remove it by hand"
@@ -804,7 +824,7 @@ def create_run_dir(base: Path, token: str | None = None) -> RunDir:
     token = new_run_token() if token is None else token
     runs = base / _RUNS_DIR
     runs.mkdir(parents=True, exist_ok=True)
-    creating = runs / (_CREATING_PREFIX + token)
+    creating = runs / (_UNPUBLISHED_PREFIX + token)
     final = runs / token
     creating.mkdir()
     fd = os.open(creating / _ALIVE_LOCK, os.O_RDWR | os.O_CREAT, 0o644)
@@ -880,7 +900,7 @@ def reap_dead_runs(
             stats.reaped.append(run_dir.name)
         elif state == "live":
             stats.live.append(run_dir.name)
-        else:
+        elif state == "remote":
             stats.remote.append(run_dir.name)
     return stats
 
@@ -1010,13 +1030,23 @@ def promote_run(run: RunDir, shared: Path, platform_name: str) -> PromoteStats:
 
 
 def remove_run_dir(run: RunDir) -> None:
-    """Delete a finished run's directory (its lock must already be closed)."""
-    if run.alive_fd >= 0:
+    """Retire a finished run's directory, drop its liveness lock, delete it.
+
+    The caller must still HOLD the lock: the directory is renamed to its dot
+    name first, so a concurrent reaper (which this does not lock out) sees
+    either a published directory whose lock is held or a dot-named one it
+    judges by pid -- never a published one half deleted.
+    """
+    if run.alive_fd < 0:
         raise RuntimeError(
-            f"refusing to delete {run.path} while this process still holds "
-            "its liveness lock"
+            f"{run.path}: its liveness lock was dropped before the directory "
+            "was retired; remove_run_dir must be called while the run still "
+            "holds it"
         )
-    _rmtree(run.path)
+    retired = run.path.with_name(_UNPUBLISHED_PREFIX + run.path.name)
+    os.rename(run.path, retired)
+    run.close()
+    _rmtree(retired)
 
 
 def enforce_shared_budget(

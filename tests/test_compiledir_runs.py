@@ -352,13 +352,66 @@ def test_promotion_moves_only_new_finished_entries(tmp_path):
         run.close()
 
 
-def test_a_finished_run_dir_is_removed_and_only_after_unlocking(tmp_path):
+def test_a_finished_run_dir_is_removed_and_its_lock_dropped(tmp_path):
     run = budget.create_run_dir(tmp_path)
-    with pytest.raises(RuntimeError, match="liveness lock"):
-        budget.remove_run_dir(run)
-    run.close()
     budget.remove_run_dir(run)
     assert not run.path.exists()
+    assert list((tmp_path / "runs").iterdir()) == []
+    assert run.alive_fd == -1
+
+
+def test_removing_a_run_dir_whose_lock_was_already_dropped_raises(tmp_path):
+    """Unlocking first is the order that raced a reaper: the published
+    directory would sit unlocked, then without its alive.lock, mid-rmtree."""
+    run = budget.create_run_dir(tmp_path)
+    run.close()
+    with pytest.raises(RuntimeError, match="liveness lock was dropped"):
+        budget.remove_run_dir(run)
+
+
+def test_a_reaper_mid_removal_never_sees_a_published_dir_without_its_lock(
+    tmp_path, monkeypatch
+):
+    """The removal does not take the base lock, so another run's reaper can
+    list runs/ while it is deleting. Before the fix it found the published
+    directory with alive.lock already deleted and raised, aborting that
+    other run's whole pytest session."""
+    # Arrange -- run a reaper at the worst moment: alive.lock deleted, the
+    # rest of the directory not yet.
+    run = budget.create_run_dir(tmp_path)
+    _entry(run.path / "gw0" / PLATFORM, "tmpentry")
+    seen = {}
+    real_rmtree = budget._rmtree
+
+    def rmtree_with_a_reaper_in_the_middle(path):
+        (path / "alive.lock").unlink()
+        seen["stats"] = budget.reap_dead_runs(tmp_path)
+        real_rmtree(path)
+
+    monkeypatch.setattr(budget, "_rmtree", rmtree_with_a_reaper_in_the_middle)
+
+    # Act
+    budget.remove_run_dir(run)
+
+    # Assert -- the retiring directory is judged by its (live) pid.
+    assert seen["stats"].live == ["." + run.path.name]
+    assert seen["stats"].reaped == []
+    assert list((tmp_path / "runs").iterdir()) == []
+
+
+def test_a_run_dir_retired_after_the_listing_is_gone_not_foreign(tmp_path):
+    run = budget.create_run_dir(tmp_path)
+    listed = run.path
+    budget.remove_run_dir(run)
+    assert budget.run_state(listed) == "gone"
+
+
+def test_a_published_run_dir_without_its_lock_file_still_raises(tmp_path):
+    run = budget.create_run_dir(tmp_path)
+    run.close()
+    (run.path / "alive.lock").unlink()
+    with pytest.raises(RuntimeError, match="no alive.lock"):
+        budget.run_state(run.path)
 
 
 # ---------------------------------------------------------------------------
