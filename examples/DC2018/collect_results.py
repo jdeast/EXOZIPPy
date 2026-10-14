@@ -20,6 +20,7 @@ Output: a CSV (default dc2018_summary.csv) and a compact stdout table.
 
 import argparse
 import csv
+import re
 import sys
 from pathlib import Path
 
@@ -41,6 +42,32 @@ SUMMARY_VARS = {
     "q": ["planet.log_q"],
     "alpha": ["lens.xalpha", "lens.yalpha"],
 }
+
+
+def match_per_var(per_var, names):
+    """Every `per_var` entry belonging to one of `names`, elements included.
+
+    `<prefix>_summary.txt` names a sampled VECTOR once PER ELEMENT --
+    `lens.log_s[0]`, `lens.log_s[1]` -- while SUMMARY_VARS names the
+    variable.  The exact dict lookup this replaces (`per_var[n] for n in
+    names if n in per_var`) therefore matched only the SCALAR parameters, so
+    `s_rhat`, `s_ess_bulk`, `alpha_rhat` and `alpha_ess_bulk` were silently
+    ABSENT from every row the collector ever produced: no KeyError, no
+    warning, just missing convergence numbers for the two parameters hardest
+    to converge in a binary-lens fit.
+
+    The element index is stripped and ALL matching elements are returned, so
+    the caller's max(r_hat) / min(ess) reduce to the WORST element -- one
+    unconverged element means the parameter is unconverged.  That is already
+    what those reductions meant for the (xalpha, yalpha) pair.
+
+    Matching is on the FULL dotted name, not its last component, so
+    `lens.log_s` cannot collect some other component's `log_s`.
+    """
+    wanted = set(names)
+    return [
+        v for n, v in per_var.items() if re.sub(r"\[\d+\]$", "", n) in wanted
+    ]
 
 
 def collect_event(event_dir):
@@ -86,7 +113,7 @@ def collect_event(event_dir):
         overall, per_var = dc.read_summary_diagnostics(summary)
         row.update(overall)
         for p, names in SUMMARY_VARS.items():
-            entries = [per_var[n] for n in names if n in per_var]
+            entries = match_per_var(per_var, names)
             if not entries:
                 continue
             row[f"{p}_rhat"] = max(e[0] for e in entries)
