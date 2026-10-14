@@ -53,6 +53,8 @@ careful here rather than a reassurance:
 positionally a plain tuple, so nothing had to change to adopt it -- but a new
 call site should say `.err_plus` and be immune.
 
+**Row labels come from `Parameter.report_label`, not `get_display_label`.** They are the same string except for a vector whose elements are not one per instance (`element_owners`; `detrend_coeffs`, one per column), where the display label names instance i -- another file. Those rows read `transit.<owner>.detrend_coeffs[<k>]`, and the LaTeX table puts them under their owner's sub-head with a `_k` subscript (`src/exozippy/components/parameter.md`, "A vector that is not one per instance").
+
 ## The credible-interval width is a setting, and the caption is generated from it
 
 `src/exozippy/reporting.py` holds ONE run-level width, read by

@@ -36,6 +36,7 @@ from exozippy.samplers import convergence
 from exozippy.trace_meta import (
     ROLES_ATTR,
     check_trace_freshness,
+    trace_element_owners,
     report_only_vars,
     restart_aliases,
 )
@@ -88,6 +89,24 @@ def _find_existing(existing_params, comp_key, idx, name, param):
         if key in existing_params:
             return key, existing_params[key]
     return None, None
+
+
+def _owners_block(owners_map):
+    """Header comment naming the file behind each index-form element of a
+    vector whose elements are not one per instance; '' when there is none."""
+    if not owners_map:
+        return ""
+    lines = []
+    for label, owners in sorted(owners_map.items()):
+        comp, param = label.split(".", 1)
+        lines.append(
+            f"# {comp}.<i>.{param} is element i over ALL files (one per "
+            f"column), not file i:"
+        )
+        for i, owner in enumerate(owners):
+            k = owners[:i].count(owner)
+            lines.append(f"#   {comp}.{i}.{param} = {owner}, its column {k}")
+    return "\n".join(lines) + "\n"
 
 
 def _sigma_is_nonzero_number(sigma):
@@ -1016,6 +1035,13 @@ def write_param_file(
     # elements written are still the SAMPLED ones of the aliased variable.
     aliases = restart_aliases(idata)
 
+    # Vectors whose elements are not one per instance (detrend_coeffs: one
+    # per column, over every file).  Their name form `comp.<name>.param`
+    # means ELEMENT i of the instance named i -- another file's column, or a
+    # file with none -- so they are written in the index form, which says
+    # what it means, and the header comment names each element's file.
+    owners_map = trace_element_owners(idata)
+
     for var_name in sampled_vars:
         comp_key, param = var_name.rsplit(".", 1)
         source_name = aliases.get(var_name, var_name)
@@ -1045,7 +1071,13 @@ def write_param_file(
                 continue
             mv_list = [float(np.round(seed_vals[k, i], 8)) for k in range(K)]
             mv = mv_list[0]
-            if instance_names:
+            if var_name in owners_map:
+                # The name form an earlier restart file wrote for element i
+                # still resolves to element i, so it is the existing entry
+                # this one replaces (and whose constraints it carries).
+                name = instance_names[i] if i < len(instance_names) else None
+                out_key = f"{comp_key}.{i}.{param}"
+            elif instance_names:
                 name = instance_names[i] if i < len(instance_names) else str(i)
                 out_key = f"{comp_key}.{name}.{param}"
             elif n_elements == 1:
@@ -1198,7 +1230,10 @@ def write_param_file(
                 if center is not None:
                     val = dict(val)
                     val["mu"] = center
-            output[_normalize_key(key, config)] = val
+            # An index key on an owned vector stays an index key (above).
+            parts = key.split(".")
+            owned = f"{parts[0]}.{parts[-1]}" in owners_map
+            output[key if owned else _normalize_key(key, config)] = val
 
     output_path = Path(output_path)
     with open(output_path, "w") as f:
@@ -1252,6 +1287,7 @@ def write_param_file(
                 f"from this file.\n"
             )
         f.write(_overdisperse_block(K, burnin_diag))
+        f.write(_owners_block(owners_map))
         yaml.dump(output, f, default_flow_style=False, sort_keys=True)
 
     logger.info(f"mkparam: written {output_path}")

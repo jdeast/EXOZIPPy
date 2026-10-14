@@ -1991,7 +1991,7 @@ def _flat_probe_directions(all_params, mult_map, whiten_report):
                 continue
             raw_m = m_phys[i] if i < m_phys.size else np.nan
             if np.isnan(raw_m) or np.isinf(raw_m):
-                flat.append(p.get_display_label(i))
+                flat.append(p.report_label(i))
     return flat
 
 
@@ -2119,7 +2119,7 @@ def inspect_start(
     # Dynamic Width Logic -- over the rows the table will actually print, so
     # a suppressed parameter with a long label cannot widen it for nothing.
     display_labels = [
-        p.get_display_label(i)
+        p.report_label(i)
         for p in auditor.all_params
         if _prints_in_startup_table(p)
         for i in range(np.prod(p.shape).astype(int) if p.shape != () else 1)
@@ -2244,7 +2244,7 @@ def inspect_start(
             if not p.element_is_active(i):
                 continue
 
-            row_label = p.get_display_label(i)
+            row_label = p.report_label(i)
 
             # Parameter.initval is the AUTHORITATIVE start: it is what
             # get_raw_start encodes and what the sampler actually begins from.

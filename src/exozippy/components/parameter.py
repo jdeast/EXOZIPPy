@@ -1179,6 +1179,17 @@ class Parameter:
     # read at wrap-up by diagnostics.cap_alarm_findings via
     # ``cap_saturation``.  Never user-facing.
     cap_alarm: Any = None
+    # Per element: the NAME of the component instance the element belongs
+    # to, for a vector whose elements are not one per instance (a manifest
+    # `shape` override).  The live case is `detrend_coeffs`, one element per
+    # detrend COLUMN over every file (Instrument.add_parameter).  Read by the
+    # REPORTS only -- `report_label`, the LaTeX table's grouping, the trace
+    # stamp mkparam reads.  It deliberately leaves `names` alone: `names` is
+    # how a params file addresses an element (`comp.<names[i]>.param` folds
+    # to `comp.<i>.param`, element i; config.md, "A broadcast key must cover
+    # the WHOLE vector"), and changing it would re-point existing files.
+    # Component-set, never a user's.
+    element_owners: Optional[Sequence[str]] = None
     # Prior terms added from OUTSIDE this Parameter -- a component's
     # pm.Potential -- declared via add_prior_contribution so the reported
     # tables can describe them. See PriorContribution.
@@ -1444,6 +1455,53 @@ class Parameter:
             return f"{prefix}.{index}.{attr}"
 
         return self.label
+
+    def owner_slot(self, index):
+        """``(owner, k, n)`` for element ``index`` of a vector with
+        ``element_owners``: the owning instance's name, the element's
+        position among that instance's elements, and their count.  None when
+        the elements are one per instance."""
+        if self.element_owners is None:
+            return None
+        owners = [str(o) for o in self.element_owners]
+        if len(owners) != self._n_elements():
+            raise ValueError(
+                f"{self.label}: element_owners names {len(owners)} elements "
+                f"but the parameter has {self._n_elements()}"
+            )
+        owner = owners[index]
+        return owner, owners[:index].count(owner), owners.count(owner)
+
+    def report_label(self, index=0):
+        """The label a REPORT prints for element ``index``: results.csv, the
+        startup table, a message naming the element.
+
+        ``get_display_label`` unless the elements are not one per instance
+        (``element_owners``), where that label would name instance ``index``
+        -- a different file's coefficient, or a file with no columns at all.
+        Then it names the owning instance and the element's position within
+        it, ``transit.<owner>.detrend_coeffs[1]``.  That is not a
+        params-file spelling; ``get_display_label`` (and the index form)
+        remain the keys a params file and the diagnostics use.
+        """
+        slot = self.owner_slot(index)
+        if slot is None:
+            return self.get_display_label(index)
+        owner, k, _ = slot
+        parts = self.label.split(".")
+        return f"{parts[0]}.{owner}.{parts[-1]}[{k}]"
+
+    def _owned_symbol(self, index, with_owner):
+        """The table symbol of an owned element: subscripted with the owner
+        (when the rows are not under its sub-head) and with its position
+        among the owner's elements (when it has several)."""
+        owner, k, n = self.owner_slot(index)
+        sub = []
+        if with_owner:
+            sub.append(r"{\rm " + latex_escape(owner) + "}")
+        if n > 1:
+            sub.append(str(k))
+        return self.latex + "_{" + ",".join(sub) + "}" if sub else self.latex
 
     # What to do about an out-of-bounds start, keyed on where the number came
     # from (ConfigManager.initval_source).  The user wrote one of these
@@ -4768,7 +4826,11 @@ class Parameter:
         for i in range(n_elements):
             idx_str = idx_to_words(i) if n_elements > 1 else ""
 
-            if n_elements > 1:
+            if self.element_owners is not None:
+                symbol = self._owned_symbol(
+                    i, with_owner=len(set(self.element_owners)) > 1
+                )
+            elif n_elements > 1:
                 if self.names and i < len(self.names):
                     clean_name = latex_escape(str(self.names[i]))
                     symbol = self.latex + r"_{\rm " + clean_name + r"}"
@@ -4798,8 +4860,13 @@ class Parameter:
         """
         self._require_table_fields()
         idx_str = idx_to_words(index) if self._n_elements() > 1 else ""
+        symbol = (
+            self.latex
+            if self.element_owners is None
+            else self._owned_symbol(index, with_owner=False)
+        )
         return self._table_row(
-            index, self.latex, idx_str, sigfigs, note_mark, mode_suffixes
+            index, symbol, idx_str, sigfigs, note_mark, mode_suffixes
         )
 
     # ---------

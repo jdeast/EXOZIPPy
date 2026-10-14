@@ -1906,6 +1906,19 @@ class Instrument(TimeSystem, Component):
                 entry.setdefault(
                     "internal_to_user_scale", 1.0 / self.detrend_scales
                 )
+                # One element per COLUMN, block-diagonal in file order, so
+                # element j is not instance j.  Without the owners every
+                # report labelled the coefficients by instance position
+                # (a fit whose first files had no detrend columns saw a
+                # later file's airmass terms reported under those files).
+                entry.setdefault(
+                    "element_owners",
+                    [
+                        name
+                        for name, n in zip(self.names, self.n_detrend_per_inst)
+                        for _ in range(n)
+                    ],
+                )
         return super().add_parameter(
             model, param_name, system, context_nodes=context_nodes
         )

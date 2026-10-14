@@ -76,6 +76,13 @@ DIRTY_ATTR = "exozippy_git_dirty"
 # vectors are uniform -- so a reader must treat "missing" as "all sampled",
 # which is what it always meant.
 ROLES_ATTR = "exozippy_element_roles"
+# {label: [owning instance name per element]} for the vectors whose elements
+# are not one per instance (Parameter.element_owners; detrend_coeffs, one
+# element per column).  Read by mkparam, which has no System, so it writes
+# those elements in the index form -- the name form would name instance i,
+# i.e. another file.  Absent on a trace written before owners were stamped,
+# and on a model with no such vector.
+OWNERS_ATTR = "exozippy_element_owners"
 
 # The posterior variables that are Deterministics ONLY so the trace carries a
 # reported derived quantity through a wrap-up that dies (review 2.6.14;
@@ -329,6 +336,41 @@ def element_roles(system) -> Dict[str, Dict[str, List[bool]]]:
     return out
 
 
+def element_owners(system) -> Dict[str, List[str]]:
+    """``{label: element_owners}`` for every built Parameter that has them
+    (see ``Parameter.element_owners``), as plain JSON types."""
+    out: Dict[str, List[str]] = {}
+    get_params = getattr(system, "get_all_parameters", None)
+    if not callable(get_params):
+        return out
+    for p in get_params():
+        if p.element_owners is not None:
+            out[p.label] = [str(o) for o in p.element_owners]
+    return out
+
+
+def trace_element_owners(idata) -> Dict[str, List[str]]:
+    """The ``OWNERS_ATTR`` stamp, or ``{}`` for a trace without one (see the
+    attr's comment).  A stamp that does not parse is this code's own output
+    gone wrong, and raises."""
+    blob = _attrs(idata).get(OWNERS_ATTR)
+    if blob is None:
+        return {}
+    try:
+        owners = json.loads(blob)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"trace attr {OWNERS_ATTR!r} is not a JSON object of per-element "
+            f"owner names: {blob!r}"
+        ) from exc
+    if not isinstance(owners, dict):
+        raise ValueError(
+            f"trace attr {OWNERS_ATTR!r} is not a JSON object of per-element "
+            f"owner names: {blob!r}"
+        )
+    return {str(k): [str(o) for o in v] for k, v in owners.items()}
+
+
 def report_only_vars(idata) -> frozenset:
     """The trace's report-only Deterministics (see ``REPORT_ONLY_ATTR``).
 
@@ -396,6 +438,8 @@ def structural_metadata(source) -> Dict[str, Any]:
     out[UNITS_ATTR] = POSTERIOR_UNITS
     roles = element_roles(source)
     out[ROLES_ATTR] = json.dumps(roles, sort_keys=True) if roles else None
+    owners = element_owners(source)
+    out[OWNERS_ATTR] = json.dumps(owners, sort_keys=True) if owners else None
     report_only = getattr(source, "report_only_labels", None)
     if callable(report_only):
         out[REPORT_ONLY_ATTR] = json.dumps(list(report_only()))

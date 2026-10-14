@@ -293,13 +293,16 @@ def build_csv_output(
             # parameterization (a non-MIST star's EEP), only a bookkeeping
             # value in the vector -- so it gets no row here, in the LaTeX
             # table, or in the startup table.
-            if n_instances == 1:
+            # report_label, not get_display_label: for a vector whose
+            # elements are not one per instance (detrend_coeffs, one per
+            # column) the display label names instance i, i.e. another file.
+            if n_instances == 1 and p.element_owners is None:
                 if p.element_is_active(0):
                     emit(p.label, 0)
             else:
                 for i in range(n_instances):
                     if p.element_is_active(i):
-                        emit(p.get_display_label(i), i)
+                        emit(p.report_label(i), i)
 
     columns = CSV_COLUMNS_MODE if mode_cols else CSV_COLUMNS_PLAIN
     with open(csv_filename, "w", newline="") as f:
@@ -444,8 +447,14 @@ def build_latex_output(
             if multimodal:
                 all_defs.append(p.to_latex_mode_defs())
 
-        n_instances = max(_instance_count(p) for p in printable)
-        _warn_mixed_lengths(comp_label, printable, n_instances)
+        # A vector with element_owners (one element per detrend COLUMN) is
+        # not one-per-instance: it neither sets the instance count nor is a
+        # "short" vector, and its rows go under their owners' sub-heads.
+        per_instance = [p for p in printable if p.element_owners is None]
+        n_instances = max(
+            (_instance_count(p) for p in per_instance), default=1
+        )
+        _warn_mixed_lengths(comp_label, per_instance, n_instances)
 
         if n_instances == 1:
             all_table_lines.append(rf"\sidehead{{{comp_label}:}}" + "\n")
@@ -468,6 +477,20 @@ def build_latex_output(
                 instance_lines = []
                 for p in printable:
                     p_n = _instance_count(p)
+                    if p.element_owners is not None:
+                        for j in range(p_n):
+                            if p.owner_slot(j)[0] != str(
+                                name
+                            ) or not p.element_is_active(j):
+                                continue
+                            instance_lines.append(
+                                p.to_table_line_at(
+                                    j,
+                                    note_mark=_mark_for(p),
+                                    mode_suffixes=mode_suffixes,
+                                )
+                            )
+                        continue
                     # This loop runs to the LONGEST printable vector in the
                     # component, so a shorter one simply has no element here
                     # -- and asking it for one produced a row citing a macro
