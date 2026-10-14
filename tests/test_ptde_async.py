@@ -19,6 +19,7 @@ import pytest
 import xarray as xr
 
 from conftest import requires_fork
+from exozippy.samplers import _common
 from exozippy.samplers.ptde_async import ptde_async_sample
 
 # ---------------------------------------------------------------------------
@@ -654,3 +655,73 @@ def test_hung_slot_is_written_off_while_other_slots_keep_the_queue_busy(
         f"the run took {elapsed:.1f}s, i.e. it stalled on the hung slot "
         f"instead of writing it off"
     )
+
+
+def test_a_pool_recycle_dumps_one_proposal_however_many_were_written_off(
+    caplog,
+):
+    """
+    Given an eval-timeout write-off covering 1400 in-flight evaluations --
+      the shape ptde_async reaches whenever one hung worker backs the queue
+      up, since a timeout tears down the WHOLE pool,
+    When _common.log_eval_timeout reports it,
+    Then exactly ONE proposal is rendered and dumped and the other 1399 are
+      reported as a count.
+
+    The regression: the call site looped over every write-off, rendering
+    each through raw_to_phys and writing ~4 KB of parameters for it.  At one
+    recycle per ~30 s that reached ~1.8 GB per event, written twice (the run
+    log and the scheduler's stdout), and filled a 95 GB home quota in under
+    three hours -- killing all twelve array tasks of an RMDC26 fit array
+    with no traceback, because the traceback could not be written either.
+    """
+    # Arrange
+    calls = []
+
+    def describe():
+        calls.append(1)
+        return {"star.mass": [0.5]}, {"star.logmass_raw": [-0.3]}
+
+    # Act
+    with caplog.at_level(logging.ERROR, logger="exozippy.samplers._common"):
+        _common.log_eval_timeout(
+            logging.getLogger("exozippy.samplers._common"),
+            "PTDE-async",
+            10.0,
+            "rung 20 chain 28",
+            1400,
+            describe,
+        )
+
+    # Assert
+    assert len(calls) == 1, (
+        f"describe() ran {len(calls)} times; rendering every write-off is "
+        f"the CPU half of the same defect"
+    )
+    assert caplog.text.count("physical params:") == 1
+    assert caplog.text.count("raw params:") == 1
+    assert "1399 other in-flight evaluation(s) written off with it" in caplog.text
+    assert "logp call exceeded eval_timeout=10s" in caplog.text
+
+
+def test_a_lone_write_off_is_reported_without_a_phantom_count(caplog):
+    """
+    Given a single timed-out evaluation and no collateral,
+    When _common.log_eval_timeout reports it,
+    Then the message carries no "and N others" clause -- the clause exists to
+      explain a crowd, and "and 0 other" would invent one.
+    """
+    # Arrange / Act
+    with caplog.at_level(logging.ERROR, logger="exozippy.samplers._common"):
+        _common.log_eval_timeout(
+            logging.getLogger("exozippy.samplers._common"),
+            "PTDE-async",
+            10.0,
+            "rung 0 chain 3",
+            1,
+            lambda: ({"star.mass": [0.5]}, {"star.logmass_raw": [-0.3]}),
+        )
+
+    # Assert
+    assert "other in-flight evaluation(s)" not in caplog.text
+    assert "rejecting this proposal." in caplog.text

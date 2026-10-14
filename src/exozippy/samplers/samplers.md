@@ -472,11 +472,41 @@ worth knowing before changing it:
   `warn_serial_eval_timeout` says at startup: there is no process to time out
   against, and in serial mode the evaluation has already completed by the time
   anything could scan for it.
+- **In `ptde_async` the clock starts at SUBMIT, not at execution**, and that
+  makes a too-SHORT `eval_timeout` far more destructive than a too-long one.
+  The sampler keeps `n_slots = n_temps x n_chains` submissions in flight
+  against `cores` workers, so a proposal at the back waits about
+  `n_slots / cores` evaluations before a worker reaches it. Set `eval_timeout`
+  below that wait and EVERY proposal ages out before it runs: the pool is
+  recycled, all `n_slots` are resubmitted, and they age out again -- forever,
+  with no draw ever recorded. RMDC26 job 52549712 did exactly this: 1496 slots
+  (22 rungs x 68 chains) on 32 cores is a 47-deep queue, and against a
+  measured 0.73 s logp that is ~34 s time-in-system, so `eval_timeout: 10`
+  timed out 100% of proposals. Twelve array tasks ran 2.8 h and produced
+  nothing. A livelock guard now warns once after three consecutive recycles
+  that sweep >=90% of slots, with the measured depth and what to raise it to.
+  **Pick `eval_timeout` as a multiple of `(n_slots / cores) x t_logp`, not as
+  an absolute "slow call" figure** -- it exists to bound a hang, which is
+  infinite, so generous costs nothing and stingy costs the whole run.
 - **A timeout tears down the WHOLE pool.** There is no way to kill one hung
   worker in a `multiprocessing.Pool`, so every in-flight evaluation is written
   off and resubmitted with a fresh proposal. A written-off result that arrives
   anyway finds its submission id gone and is dropped, so nothing is ever
   processed twice.
+- **A recycle logs ONE proposal dump, not one per write-off** -- and only in
+  `ptde_async`. Because the whole pool goes down, the write-off set is the
+  hang plus everything that aged out queued behind it; `ptde_async` picks the
+  OLDEST (the plausible culprit), renders just that one, and reports the rest
+  as a count, through `_common.log_eval_timeout`. It used to render all of
+  them through `raw_to_phys` and write ~4 KB apiece PER RECYCLE: ~1.8 GB per
+  event on an RMDC26 fit, written twice (the run log under `prefix` and the
+  scheduler's stdout), which filled a 95 GB home quota in under three hours
+  and killed all twelve array tasks of job 52549712 -- which then ran on for
+  another one to two hours unable to write even the traceback saying why.
+  **`ptde` deliberately does NOT share this**: `_map_logp_timeout` gives each
+  proposal its own deadline, so every index it returns really did run long and
+  is a distinct pathological point; collapsing those would discard evidence.
+  Tests: `test_a_pool_recycle_dumps_one_proposal_however_many_were_written_off`.
 - **ptde_async scans on BOTH the empty-queue and the result path**, paced by a
   wall clock. The scan used to live only inside `except queue.Empty`, a state a
   healthy run essentially never reaches -- so a hung slot froze for the whole
