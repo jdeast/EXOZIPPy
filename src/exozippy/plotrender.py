@@ -316,14 +316,19 @@ def render_spec_groups(spec_groups, filename_prefix="debug"):
     return written
 
 
-def plot_via_specs(component, system, points, filename_prefix="debug"):
+def plot_via_specs(
+    component, system, points, filename_prefix="debug", **plot_data_kwargs
+):
     """The standard ``Component.plot`` body: plot_data per point -> PDFs.
 
     ``points`` may be a single point dict (pre-flight) or a list of posterior
     draws (spaghetti).  A draw whose ``plot_data`` raises is skipped with a
     warning, matching the per-draw tolerance of the old hand-drawn loops --
     except the first (reference) point, whose failure aborts the plot since
-    it supplies the data traces themselves.
+    it supplies the data traces themselves.  ``plot_data_kwargs`` go to
+    every ``plot_data`` call: a component whose charts' layout depends on
+    the point (mulensinstrument's zoom windows) fixes it at the reference
+    point and passes it here, so every draw lands on the same charts.
     """
     if isinstance(points, dict):
         points = [points]
@@ -334,7 +339,9 @@ def plot_via_specs(component, system, points, filename_prefix="debug"):
     spec_groups = []
     for idx, point in enumerate(points):
         try:
-            spec_groups.append(component.plot_data(system, point))
+            spec_groups.append(
+                component.plot_data(system, point, **plot_data_kwargs)
+            )
         except Exception as exc:  # noqa: BLE001 - skip a bad posterior draw
             if idx == 0:
                 raise

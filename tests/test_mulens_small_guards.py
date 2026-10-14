@@ -155,7 +155,11 @@ def test_auto_vbbl_bracket_covers_the_plot_grid(binary_mulensmodel):
     system, _, _ = binary_mulensmodel
     inst = system.mulensinstrument
     method = system.mulensevent.mag_method[0]
-    assert method[1] == "VBM", method
+    # A point source: MulensModel's exact binary point-source solver.  This
+    # read "VBM" until 2026-10, the very method MulensModel refuses on a
+    # source with no rho (every proposal scored NaN on this backend;
+    # tests/test_mulens_lens_plane.py).
+    assert method[1] == "point_source", method
     t_model, _, _ = inst._model_time_grid()
     # The plot grid here happens to sit inside the data (the flat curve
     # seeds a short t_E), so also demand a grid far outside it: the bracket

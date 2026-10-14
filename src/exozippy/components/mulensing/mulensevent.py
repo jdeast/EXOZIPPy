@@ -1388,26 +1388,76 @@ class MulensEvent(Component):
             "pi_E_E": pt.switch(is_physical, self.pi_E_E.value[0], 0.0),
         }
 
-    def _get_binary_mm_params(self, system, index=0):
-        """Params for a binary lens.  ``index`` is the SOURCE slot; the lens
-        bodies are shared by all sources.
+    def mulensmodel_unsupported(self, system):
+        """Why MulensModel cannot represent this event, or None if it can.
+
+        MulensModel carries a point or binary lens, a static or LINEARLY
+        moving companion, and a static source.  A 3+ body lens, a companion
+        on a keplerian orbit (MulensModel's keplerian branch contradicts its
+        own linear one by a sign, conventions.md section 6) and xallarap
+        (wired only through VBM, C25) are outside it.  The ``mulensmodel``
+        backend raises on each; the plots that draw with MulensModel
+        (``MulensInstrument``'s caustic figure and anomaly zooms) skip with
+        this reason.
+        """
+        n_lenses = len(self.lens_bodies)
+        if n_lenses > 2:
+            return f"a {n_lenses}-body lens (MulensModel carries at most 2)"
+        if n_lenses == 2 and system.lens.orbital_motion[0] == "keplerian":
+            return "a lens companion on a keplerian orbit"
+        if self.xal_orbit_idx is not None:
+            return "xallarap (a source orbit)"
+        return None
+
+    def mm_param_list(self, system, index=0):
+        """The MulensModel parameter vector of source slot ``index``, in
+        op.py's positional layout: ``[t_0, u_0, t_E, pi_E_N, pi_E_E]`` +
+        ``[rho]`` (finite source) + ``[s, q, alpha_deg]`` (binary lens) +
+        ``[ds_dt, dalpha_dt_deg]`` (a companion on a ``type: linear``
+        orbit).  ONE builder for the ``mulensmodel`` backend's Ops and the
+        MulensModel plots, so the caustics and trajectory drawn are those of
+        the parameters the fit reads.  Limb darkening is not part of it:
+        the Op caller appends ``u1``.
 
         The derived chain (theta_E, t_E, rho, pi_E) is already referenced
         to the TOTAL lens mass via mlens_total (C13), so the safe
         single-source params pass straight through -- only the companion
-        geometry (s, q, alpha) is added here, indexed by COMPANION
-        (binary = companion 0 = VECTOR ELEMENT 1 of the lens component;
-        element 0 is the masked primary).  q is the q Parameter
-        (physics.calc_q), the same ratio every other consumer reads, not a
-        local recomputation from the mass nodes."""
-        s = self._get_safe_mm_params(system, index)
-        lens = system.lens
-        return {
-            **s,
-            "s": lens.s.value[1],
-            "q": clip_q(lens.q.value[1]),
-            "alpha": self._alpha_deg(system, 0),
-        }
+        geometry (s, q, alpha) is added, indexed by COMPANION (binary =
+        companion 0 = VECTOR ELEMENT 1 of the lens component; element 0 is
+        the masked primary).  q is the q Parameter (physics.calc_q), the
+        same ratio every other consumer reads, not a local recomputation
+        from the mass nodes.
+        """
+        reason = self.mulensmodel_unsupported(system)
+        if reason is not None:
+            raise NotImplementedError(
+                f"[{self.prefix}] MulensModel cannot represent {reason}."
+            )
+        sp = self._get_safe_mm_params(system, index)
+        params = [sp["t_0"], sp["u_0"], sp["t_E"], sp["pi_E_N"], sp["pi_E_E"]]
+        if self.finite_source:
+            params.append(system.source.rho.value[index])
+        if len(self.lens_bodies) == 2:
+            lens = system.lens
+            params.extend(
+                [
+                    lens.s.value[1],
+                    clip_q(lens.q.value[1]),
+                    self._alpha_deg(system, 0),
+                ]
+            )
+            if lens.orbital_motion[0] == "linear":
+                # MulensModel's LINEAR branch is definitional in the same
+                # (ds_dt, dalpha_dt) and takes deg/yr; the rates are the
+                # companion's type: linear orbit's.
+                o = lens.motion_orbit_idx
+                params.extend(
+                    [
+                        system.orbit.ds_dt.value[o],
+                        system.orbit.dalpha_dt.value[o] * _RAD_TO_DEG,
+                    ]
+                )
+        return params
 
     def get_magnification(self, times, obs_pos, system, index=0):
         """Symbolic Paczynski magnification including parallax (PSPL only).
@@ -1705,6 +1755,14 @@ class MulensEvent(Component):
             )
         return ra_deg, dec_deg
 
+    def mm_coords(self, system, index=0):
+        """The frozen line of sight of source slot ``index`` as the
+        coordinate string every MulensModel/VBM Op (and the MulensModel
+        plots) take."""
+        source_ndx = int(self.source_bodies[index][1])
+        ra_deg, dec_deg = self._frozen_op_coords_deg(system, source_ndx)
+        return f"{ra_deg}d {dec_deg}d"
+
     def _resolve_quadratic_ld(self, u2, effective_bandpass):
         """Can the selected backend honour the band's second LD coefficient?
 
@@ -1811,11 +1869,8 @@ class MulensEvent(Component):
         if not self.uses_op(index):
             return self.get_magnification(times, obs_pos, system, index)
 
-        source = system.source
         lens = system.lens
-        source_ndx = int(self.source_bodies[index][1])
-        ra_deg, dec_deg = self._frozen_op_coords_deg(system, source_ndx)
-        coords = f"{ra_deg}d {dec_deg}d"
+        coords = self.mm_coords(system, index)
 
         use_rho = self.finite_source
 
@@ -1905,28 +1960,7 @@ class MulensEvent(Component):
                     "its linear mode by a sign and is not a usable reference"
                     " (conventions.md section 6, measured 2026-08-27)."
                 )
-            bp = self._get_binary_mm_params(system, index)
-            param_list = [
-                bp["t_0"],
-                bp["u_0"],
-                bp["t_E"],
-                bp["pi_E_N"],
-                bp["pi_E_E"],
-            ]
-            if use_rho:
-                param_list.append(source.rho.value[index])
-            param_list.extend([bp["s"], bp["q"], bp["alpha"]])
-            if geometry_series is not None:
-                # MulensModel's LINEAR branch is definitional in the same
-                # (ds_dt, dalpha_dt) and takes deg/yr; the rates are the
-                # companion's type: linear orbit's.
-                o = lens.motion_orbit_idx
-                param_list.extend(
-                    [
-                        system.orbit.ds_dt.value[o],
-                        system.orbit.dalpha_dt.value[o] * _RAD_TO_DEG,
-                    ]
-                )
+            param_list = self.mm_param_list(system, index)
             if effective_bandpass is not None:
                 param_list.append(u1)
             mag_op = BinaryLensMagOp(
@@ -1945,16 +1979,7 @@ class MulensEvent(Component):
                     "use_op (the symbolic path carries xallarap) or use "
                     "finite_source with backend: vbm_direct."
                 )
-            sp = self._get_safe_mm_params(system, index)
-            param_list = [
-                sp["t_0"],
-                sp["u_0"],
-                sp["t_E"],
-                sp["pi_E_N"],
-                sp["pi_E_E"],
-            ]
-            if use_rho:
-                param_list.append(source.rho.value[index])
+            param_list = self.mm_param_list(system, index)
             if effective_bandpass is not None:
                 param_list.append(u1)
             mag_op = MulensMagOp(
@@ -2175,12 +2200,22 @@ class MulensEvent(Component):
         quadrupole test and short-circuits to point source where that is
         safe, which is the "VBM everywhere" cost model above.  The data
         epochs are inside both brackets, so the likelihood is unchanged.
+
+        A POINT source gets ``point_source`` (MulensModel's exact binary
+        point-source solver), the same choice ``op._build_binary_model``
+        makes for the unresolved string.  This emitted ``VBM`` for it too
+        until 2026-10, and MulensModel refuses a finite-source method on a
+        source with no rho: the Op caught the ValueError and returned NaN,
+        so every point-source binary fit on ``backend: mulensmodel`` scored
+        logp = NaN at every proposal (DC2018_128: NaN against vbm_direct's
+        3373.88).  Tests: ``tests/test_mulens_lens_plane.py``.
         """
         if self.mag_method[index] != "auto_vbbl":
             return
         if len(self.lens_bodies) < 2:
             return
-        self.mag_method[index] = [-np.inf, "VBM", np.inf]
+        method = "VBM" if self.finite_source else "point_source"
+        self.mag_method[index] = [-np.inf, method, np.inf]
 
     def compile_plotters(self, model, system):
         pass
