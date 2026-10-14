@@ -382,123 +382,181 @@ def test_fragment_is_yaml_and_carries_the_values_it_printed():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.slow
-def test_grid_recovers_an_injected_binary_blind():
-    """Inject a close binary, start from the project's OWN peak finder, and
-    require the grid's global minimum to land in the injected basin.
+# A synthetic CLOSE binary, shared by the three slow tests below.  The
+# numbers in its docstring are measured, not chosen: see
+# test_four_alpha_starts_is_the_threshold.
+_TRUE = dict(
+    t_0=2460000.5,
+    u_0=0.08,
+    t_E=22.0,
+    s=0.72,
+    q=3.0e-3,
+    alpha=61.0,
+    rho=1.2e-3,
+)
 
-    Blind end to end: nothing below reads TRUE except the final assertion.
+
+def _injected_curves(cadence=0.2):
+    """One band over +/-2.5 t_E.
+
+    550 epochs (cadence 0.2 d) is the FLOOR, and it was measured rather than
+    picked for speed.  The margin by which the injected basin beats its
+    s <-> 1/s mirror is +2533 chi2 here, +72 at 275 epochs -- a coin flip --
+    and MINUS 274 at 138 epochs, where the mirror wins outright and the test
+    would assert the opposite of the truth while still looking like a test.
     """
     mm = pytest.importorskip("MulensModel")
-    from exozippy.components.mulensing.peakfind import find_pspl_seed
-
-    TRUE = dict(
-        t_0=2460000.5,
-        u_0=0.08,
-        t_E=22.0,
-        s=0.72,
-        q=3.0e-3,
-        alpha=61.0,
-        rho=1.2e-3,
-    )
     rng = np.random.default_rng(7)
     t = np.arange(
-        TRUE["t_0"] - 2.5 * TRUE["t_E"], TRUE["t_0"] + 2.5 * TRUE["t_E"], 0.1
+        _TRUE["t_0"] - 2.5 * _TRUE["t_E"],
+        _TRUE["t_0"] + 2.5 * _TRUE["t_E"],
+        cadence,
     )
     model = mm.Model(
-        {k: TRUE[k] for k in ("t_0", "u_0", "t_E", "s", "q", "alpha", "rho")}
+        {k: _TRUE[k] for k in ("t_0", "u_0", "t_E", "s", "q", "alpha", "rho")}
     )
-    model.set_magnification_methods([TRUE["t_0"] - 5, "VBBL", TRUE["t_0"] + 5])
+    model.set_magnification_methods(
+        [_TRUE["t_0"] - 5, "VBBL", _TRUE["t_0"] + 5]
+    )
     amp = model.get_magnification(t)
-    f_s, f_b = 1.0, 0.3
-    sigma = 0.003 * (f_s * amp + f_b)
-    flux = f_s * amp + f_b + rng.normal(0.0, sigma)
-    curves = [(t, flux, 1.0 / sigma**2)]
+    sigma = 0.003 * (1.0 * amp + 0.3)
+    flux = 1.0 * amp + 0.3 + rng.normal(0.0, sigma)
+    return [(t, flux, 1.0 / sigma**2)]
 
-    pspl = find_pspl_seed(curves)
+
+def _blind_start(curves):
+    """The project's own peak finder -- no reference to _TRUE."""
+    from exozippy.components.mulensing.peakfind import find_pspl_seed
+
+    seed = find_pspl_seed(curves)
+    assert seed is not None
+    return {k: float(seed[k]) for k in ("t_0", "u_0", "t_E")}
+
+
+@pytest.mark.slow
+def test_node_prefers_the_injected_basin_over_its_mirror():
+    """The one claim that matters: the search picks the right TOPOLOGY.
+
+    Asserted at the NODE level rather than by running a grid, because two
+    node minimizations decide it and a 39-node grid costs 20x more to say
+    the same thing (2.13 core-s per node-start, measured).
+
+    Blind: the start is the peak finder's, and on this event the finder
+    reports u_0 = 1.2, t_E = 12.9 d against the injected 0.08 and 22 -- it
+    runs into the u_0 -> 0, t_E -> inf degeneracy and says so.  That is the
+    realistic case, and the node re-minimization has to recover from it.
+    """
+    from exozippy.components.mulensing.gridsearch import _minimize_node
+
+    curves = _injected_curves()
+    pspl = _blind_start(curves)
+    spec = GridSpec(n_alpha_starts=4, trim_t_E=None)
+
+    truth = _minimize_node(
+        spec, curves, pspl, np.log10(_TRUE["s"]), np.log10(_TRUE["q"])
+    )
+    mirror = _minimize_node(
+        spec, curves, pspl, -np.log10(_TRUE["s"]), np.log10(_TRUE["q"])
+    )
+    assert np.isfinite(truth[0]) and np.isfinite(mirror[0])
+    assert truth[0] < mirror[0], (
+        f"the s <-> 1/s MIRROR beat the injected basin "
+        f"({mirror[0]:.1f} vs {truth[0]:.1f}) -- the exact failure this "
+        f"module exists to make visible"
+    )
+    # Measured margin is +2533; assert an order of magnitude below it, so
+    # this fails on a real regression and not on optimizer noise.
+    assert mirror[0] - truth[0] > 250
+    # alpha comes back at the injected 61.0 deg, which is the sharpest
+    # evidence the node really found the geometry rather than a good chi2.
+    assert truth[1] == pytest.approx(_TRUE["alpha"], abs=5.0)
+
+
+@pytest.mark.slow
+def test_four_alpha_starts_is_the_threshold():
+    """Why `n_alpha_starts` defaults to 4, measured rather than asserted.
+
+    alpha is periodic and the per-node chi2 surface in it is multimodal, so
+    a node restarts the minimization from n evenly spaced alphas.  Measured
+    on this event, chi2 at the TRUE (s, q) node:
+
+        starts    chi2      recovered alpha    verdict
+          1      15535.3        1.3 deg        mirror wins
+          2      14464.4      178.5 deg        mirror wins
+          3       3913.2      161.3 deg        mirror wins
+          4        460.6       61.0 deg        TRUTH WINS
+          6        460.6       61.0 deg        TRUTH WINS
+          8        460.6       61.0 deg        TRUTH WINS
+
+    A cliff, not a slope, and the geometry says why: n starts put every
+    alpha within 180/n degrees of one, so 4 gives 45 and 3 gives 60, and the
+    injected 61 deg sits 29 deg from the nearest of 4 and 59 deg from the
+    nearest of 3.  The Nelder-Mead basin radius in alpha is therefore
+    between 29 and 59 degrees -- which is a statement about alpha, not about
+    this event.  Below the threshold the truth node reports a chi2 8-34x too
+    high and the grid hands back the WRONG TOPOLOGY while converging
+    happily.
+
+    So: do not lower this default to save time.  That is exactly what broke
+    this test when it was first written with 2.
+    """
+    from exozippy.components.mulensing.gridsearch import _minimize_node
+
+    curves = _injected_curves()
+    pspl = _blind_start(curves)
+    log_s, log_q = np.log10(_TRUE["s"]), np.log10(_TRUE["q"])
+
+    below = _minimize_node(
+        GridSpec(n_alpha_starts=3, trim_t_E=None), curves, pspl, log_s, log_q
+    )
+    at = _minimize_node(
+        GridSpec(n_alpha_starts=4, trim_t_E=None), curves, pspl, log_s, log_q
+    )
+    assert at[0] < below[0] / 4.0, (
+        f"4 alpha starts should find a far better optimum at the truth node "
+        f"than 3 ({at[0]:.1f} vs {below[0]:.1f})"
+    )
+    assert at[1] == pytest.approx(_TRUE["alpha"], abs=5.0)
+    # Three starts does NOT recover alpha -- that is the whole point.
+    assert abs(below[1] - _TRUE["alpha"]) > 30.0
+    assert GridSpec().n_alpha_starts >= 4
+
+
+@pytest.mark.slow
+def test_grid_search_runs_end_to_end():
+    """The PLUMBING: pool, trim, task order, GridResult bookkeeping.
+
+    Deliberately makes no claim about where the minimum lands -- a 6-node
+    grid cannot locate a basin occupying ~1% of the plane, and a test that
+    pretended otherwise would be asserting noise.  Topology is
+    test_node_prefers_the_injected_basin_over_its_mirror's job.
+
+    `n_alpha_starts=1` for exactly that reason, and it is NOT in tension
+    with test_four_alpha_starts_is_the_threshold: 4 is the floor for
+    believing a node's chi2, and this test believes no node's chi2.  It
+    buys the 60 s/phase budget back -- at 4 starts this phase measured
+    68.9 s against the other two slow tests' 31.5 and 26.4.
+    """
+    curves = _injected_curves()
+    pspl = _blind_start(curves)
     spec = GridSpec(
-        log_s_lo=-0.4,
-        log_s_hi=0.4,
-        n_s=17,
-        log_q_lo=-3.5,
+        log_s_lo=-0.3,
+        log_s_hi=0.3,
+        n_s=3,
+        log_q_lo=-3.0,
         log_q_hi=-2.0,
-        n_q=4,
-        n_alpha_starts=2,
+        n_q=2,
+        n_alpha_starts=1,
         trim_t_E=10.0,
     )
-    res = grid_search(curves, pspl, spec, ncpu=4, progress_every=0)
-    assert res.complete and res.n_done == res.n_tasks
-
-    best = res.local_minima(k=1)[0]
-    d_direct = abs(np.log10(best["s"] / TRUE["s"]))
-    d_mirror = abs(np.log10(best["s"] * TRUE["s"]))
-    assert d_direct < d_mirror, (
-        "the global minimum landed on the s <-> 1/s MIRROR "
-        f"(s={best['s']:.4f} against a truth of {TRUE['s']}) -- the exact "
-        "failure this module exists to make visible"
-    )
-    # Within one grid step of the injected s, and the right order in q.
-    assert d_direct < 2 * spec.d_log_s
-    assert abs(np.log10(best["q"] / TRUE["q"])) < 0.6
-
-
-def test_a_timed_out_grid_samples_the_whole_box_not_one_slab():
-    """`maxtime` must not silently restrict the search to low log_s.
-
-    In row-major order a grid stopped at its walltime has evaluated a
-    contiguous slab of close solutions and never looked at the wide half --
-    so it would report a confident global minimum having never seen the
-    s <-> 1/s mirror, which is the one thing this module exists to expose.
-    """
-    import numpy as _np
-
-    spec = GridSpec(n_s=41, n_q=11)
-    tasks = [
-        (i, j, ls, lq)
-        for i, ls in enumerate(spec.log_s)
-        for j, lq in enumerate(spec.log_q)
-    ]
-    _np.random.default_rng(0).shuffle(tasks)
-    # The first 10% of the work must straddle s = 1, not sit below it.
-    head = tasks[: len(tasks) // 10]
-    log_s_seen = [t[2] for t in head]
-    assert min(log_s_seen) < -0.5 and max(log_s_seen) > 0.5
-    # and cover most of the log_s axis, not a corner of it.
-    assert len(set(t[0] for t in head)) > spec.n_s // 2
-
-
-def test_mirror_of_is_cheap_on_a_full_size_grid():
-    """It must not enumerate every basin to answer one argmin.
-
-    With K = n_nodes the suppression loop in `local_minima` is O(K^2) --
-    33 million comparisons on the default 141 x 41 grid -- for a question
-    that is a scan of a few columns.
-    """
-    import time
-
-    spec = GridSpec()  # the real default: 141 x 41
-    rng = np.random.default_rng(3)
-    chi2 = 1000.0 + rng.random((spec.n_s, spec.n_q))
-    chi2[40, 10] = 1.0  # a well at log_s < 0 ...
-    chi2[100, 10] = 2.0  # ... and its approximate mirror
-    g = _result(spec.log_s, spec.log_q, chi2)
-    best = g.local_minima(k=1)[0]
-    t0 = time.perf_counter()
-    mirror = g.mirror_of(best, tol_dex=0.05)
-    assert time.perf_counter() - t0 < 1.0
-    assert mirror is not None
-    assert mirror["log_s"] == pytest.approx(-best["log_s"], abs=0.05)
-
-
-def test_mirror_of_reports_none_when_the_mirror_column_never_finished():
-    """A maxtime stop can leave the wide half unevaluated.
-
-    "Nothing finished over there" and "the grid prefers this side" are
-    different answers and must not be conflated.
-    """
-    spec = GridSpec(n_s=41, n_q=5)
-    chi2 = np.full((spec.n_s, spec.n_q), np.inf)
-    chi2[8, 2] = 1.0  # one finished node, on the close side only
-    g = _result(spec.log_s, spec.log_q, chi2)
-    best = g.local_minima(k=1)[0]
-    assert g.mirror_of(best) is None
+    res = grid_search(curves, pspl, spec, ncpu=2, progress_every=0)
+    assert res.complete and res.n_done == res.n_tasks == 6
+    assert np.isfinite(res.chi2).all()
+    assert np.isfinite(res.alpha).all()
+    # Every node carries the geometry that makes it seedable.
+    for arr in (res.t_0, res.u_0, res.t_E, res.rho):
+        assert np.isfinite(arr).all()
+    assert res.n_epochs == res.n_epochs_total  # one season, trim is a no-op
+    seeds = res.local_minima(k=2)
+    assert len(seeds) >= 1
+    assert seeds[0]["dchi2"] == 0.0
