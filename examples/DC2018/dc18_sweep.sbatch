@@ -41,6 +41,12 @@
 # saved first carries only the sampled ones (review 2.6.14).
 #SBATCH --mem=256G
 #SBATCH --time=2-00:00:00
+# SIGTERM 30 min before the wall, as a second guard behind sampler.maxtime
+# (set in every sweep config with headroom under this limit).  Without it
+# Slurm signals only AT the limit and SIGKILLs moments later, so the sampler
+# never reaches its save path: grid-seeded pilot 194 (2026-10-13) ran the
+# full 48 h, ~40k draws, and wrote nothing.
+#SBATCH --signal=B:TERM@1800
 #SBATCH --output=sweep/dc18_sweep.%A_%a.log
 
 set -euo pipefail
@@ -80,5 +86,22 @@ cfg="${TMPDIR:-/tmp}/DC2018_${ev}_$$.yaml"
 python dc18_set_cores.py "sweep/$ev/DC2018_$ev.yaml" "$cfg" \
     --cores "${SLURM_CPUS_PER_TASK:?SLURM_CPUS_PER_TASK unset}"
 
-exozippy "$cfg"
-echo "exit $?   $(date)"
+# Run in the BACKGROUND and forward SIGTERM.  --signal=B:TERM is delivered to
+# this batch shell, not to exozippy; a foreground child never sees it, and
+# bash defers its own handling until the child exits.  `wait` returns as
+# soon as the trap fires, so it is repeated while the child is still alive
+# -- it needs time to reach its save path, and the exit status reported is
+# the child's own, not the 143 of the interrupted wait.  The `|| rc=$?`
+# matters too: under `set -e` an interrupted wait (>128) would otherwise
+# abort the script before the child had saved anything.
+exozippy "$cfg" &
+child=$!
+trap 'echo "SIGTERM -> forwarding to exozippy ($child)"; kill -TERM "$child" 2>/dev/null' TERM
+rc=0
+wait "$child" || rc=$?
+while kill -0 "$child" 2>/dev/null; do
+    rc=0
+    wait "$child" || rc=$?
+done
+echo "exit $rc   $(date)"
+exit "$rc"

@@ -405,6 +405,15 @@ def main():
     # of them: one constrained parameter agreeing with truth is a
     # coincidence, not a localized solution.
     is_basin = len(inform) >= 2 and len(stayed) >= max(1, len(inform) - 1)
+    # A verdict of ANY kind needs the conditional fit to have localized.  With
+    # fewer than two informative parameters it localized nothing, and `delta`
+    # is then a comparison against a fit that never arrived -- biased low, so
+    # it falls through to (b), which is the verdict a broken discriminator
+    # flatters us with (see this module's docstring).  Measured on DC2018-223:
+    # the short fit reached 105173.1 while a PRODUCTION fit sitting on the
+    # truth reached 105238.18, 65 nats higher, and 223 was still called
+    # "(b) UNRECOVERABLE, the data disfavour truth by 54 nats".
+    basin_claimable = len(inform) >= 2
     print(
         "  -> %d of %d parameters INFORMATIVE (sd < tol); %d of those stayed"
         % (len(inform), len(basin), len(stayed)),
@@ -483,7 +492,20 @@ def main():
             )
             delta += bias
 
-        if is_basin:
+        if not basin_claimable:
+            verdict = "INDETERMINATE"
+            print(
+                ">>> INDETERMINATE: the truth-seeded conditional fit did not "
+                "LOCALIZE (%d of %d parameters informative), so its best lp "
+                "is a lower bound on what truth can reach and delta = %+.1f "
+                "is not evidence of anything.\n"
+                "    NOT (b): 'the short fit found nothing' is not 'the data "
+                "disfavour truth'.  Re-run with a longer --draws/--tune until "
+                "at least two parameters are informative."
+                % (len(inform), len(basin), delta),
+                flush=True,
+            )
+        elif is_basin:
             verdict = "BASIN_OMITTED"
             print(
                 ">>> TRUTH IS A REAL BASIN THAT THE FIT NEVER VISITED -- it "
