@@ -68,8 +68,11 @@ why the converter grew the features it did in the same pull request:
 
 What did not translate (listed at the top of `toi3919.yaml`): the Claret
 limb-darkening priors (the LD table prior is not implemented, so the limb
-darkening is constrained by the transits alone), and `fitdilute=['TESS']`
-with its `dilute` prior (a 0 +/- 0.00047 dilution, i.e. essentially none).
+darkening is constrained by the transits alone).  `fitdilute=['TESS']` is
+translated as meant -- `fitdilute: true` on the four TESS files, with the
+`dilute` prior (0 +/- 0.00047) on the S23 one -- not as EXOFASTv2 ran it:
+`keyword_set(['TESS'])` is 1, so EXOFASTv2 fit the dilution of every
+transit, the ground-based ones included.
 The KeplerCam detrending coefficients in the priors file were start values
 only; the extra columns of every ground-based file are still detrended
 additively, as in EXOFASTv2.

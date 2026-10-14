@@ -994,15 +994,27 @@ def convert(pro_path, outdir, base, priorfile_override=None):
     fitdilute = take("fitdilute")
     seddeblend = take("seddeblend")
     vals = fitdilute if isinstance(fitdilute, list) else [fitdilute]
-    if fitdilute is not None and len(vals) == 1 and isinstance(vals[0], str):
-        # FITDILUTE as a band name (an older spelling): mkss.pro reads ANY
-        # one-element value as the keyword flag, keyword_set(['TESS']) = 1,
-        # so it fits the dilution of EVERY transit.
+    if fitdilute is not None and all(isinstance(v, str) for v in vals):
+        # FITDILUTE as band names (an older spelling): the intent is the
+        # dilution of the transits in those bands.  mkss.pro instead reads a
+        # one-element value as the /fitdilute flag (keyword_set(['TESS'])
+        # is 1) and fits EVERY transit's -- a bug, not translated.
+        names = set(vals)
+        unknown = names - {t["band"] for t in transits}
+        if unknown:
+            warn(
+                f"fitdilute names band(s) {sorted(unknown)} that no transit "
+                f"file is in; ignored"
+            )
+        for t in transits:
+            if t["band"] in names:
+                t["fitdilute"] = True
         info(
-            f"fitdilute={fitdilute!r} -> fitdilute: true on every transit "
-            "(EXOFASTv2 reads a one-element value as the /fitdilute flag)"
+            f"fitdilute={fitdilute!r} -> fitdilute: true on the "
+            f"{'/'.join(sorted(names))} transits only (EXOFASTv2 would "
+            "fit every transit's dilution: keyword_set(['TESS']) is 1)"
         )
-        fitdilute = 1
+        fitdilute = None
     if fitdilute is not None and transits:
         vals = (
             fitdilute

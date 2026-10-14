@@ -542,15 +542,18 @@ def test_seddeblend_rows_are_stars(tmp_path, monkeypatch):
     assert deb == [["A", "B"], None, ["A", "B"]]
 
 
-def test_a_one_band_fitdilute_is_the_flag(tmp_path, monkeypatch):
+def test_a_band_name_fitdilute_fits_only_that_band(tmp_path, monkeypatch):
     """
-    Given fitdilute=['TESS'] (a band-name spelling),
+    Given fitdilute=['TESS'] (the band-name spelling),
     When the driver is converted,
-    Then every transit fits its dilution: mkss.pro reads any one-element
-      value as the keyword flag (keyword_set(['TESS']) is 1).
+    Then only the TESS transit fits its dilution: the converter translates
+      the intent, not mkss.pro's keyword_set(['TESS']) = 1, which fits
+      every transit's.
     """
     config, _, _, infos = _convert(
         tmp_path, monkeypatch, _driver_with("fitdilute=['TESS']")
     )
-    assert all(t["fitdilute"] is True for t in config["transit"])
-    assert any("one-element value" in i for i in infos)
+    fit = {t["band"]: t.get("fitdilute", False) for t in config["transit"]}
+    assert fit.pop("TESS") is True
+    assert fit and not any(fit.values())
+    assert any("TESS transits only" in i for i in infos)
