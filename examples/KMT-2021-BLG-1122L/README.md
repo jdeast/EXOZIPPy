@@ -126,9 +126,10 @@ and the gap is entirely in the stage-1 seeding (`check_mirror4.py`,
 `check_mirror5.py`: deterministic, sign-only, not order-dependent):
 
 - **Review 2.6.33.**  The peak finder's chi2 returns inf unless u_0 > 0,
-  and a HELD u_0 is passed as written, so with the shipped u_0 = -0.4213
-  every candidate is rejected ("found no PSPL solution") while +0.4213
-  fits.  The shipped start is sane only because the finder fails on it.
+  and a HELD u_0 is passed as written, so with the u_0 = -0.4213 of the
+  EARLIER (wrong) mapping every candidate was rejected ("found no PSPL
+  solution") while +0.4213 fit.  That start was sane only because the
+  finder failed on it.
 - **Review 2.6.34.**  For three lens bodies the total-mass relation is not
   registered, so at stage 1 `probe_start` answers t_E / theta_E / rho
   "not derivable" even with every leaf seeded (pi_rel and mu_rel ARE
@@ -139,6 +140,11 @@ and the gap is entirely in the stage-1 seeding (`check_mirror4.py`,
   bootstrap fits that to each file: negative blends, q_source 3.2 and 5.0
   clipped to the bound 2, zeropoints 2 mag off.  The stage-4 start is
   unaffected (the leaves' t_E outranks the hint).
+
+The shipped params now carry the correct mapping with u_0 = +0.138, and
+they seed q_source and err_scale explicitly (from the convention scan's
+optimum), so neither defect reaches the start: the build starts at
+lp 9285, within 10 nats of the optimum.
 
 ## Fit
 
