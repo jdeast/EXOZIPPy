@@ -1163,6 +1163,11 @@ class ConfigManager:
         # by the config list and the evidence is gone, so record it here and
         # check it in resolve(), which is the first place the parameter's real
         # element count exists.  See _check_broadcast_covers_vector.
+        # {internal "comp.<e>.param": user-facing "comp.<owner>.param_<k>"}
+        # for the elements of OWNED vectors (adopt_element_owners), so
+        # export_solution labels them the way the params file spells them.
+        self._owned_display = {}
+
         self._broadcast_param_keys = {
             tuple(str(k).split("."))
             for k in self._raw_user_param_keys
@@ -1886,6 +1891,157 @@ class ConfigManager:
             f"bounds and PRIOR with it.\n"
             f"Write one entry per element instead:\n  "
             + "\n  ".join(spellings)
+        )
+
+    @staticmethod
+    def _owned_element_slots(
+        component_type, param_name, n_elements, names, element_owners
+    ):
+        """``[(j, k), ...]`` per element of a vector with ``element_owners``:
+        the owning instance's INDEX j and the element's position k among that
+        instance's elements.  Raises on owners that do not match the vector
+        or the instance names -- both are the component's own bookkeeping."""
+        owners = [str(o) for o in element_owners]
+        names = [str(n) for n in (names or [])]
+        where = f"{component_type}.{param_name}"
+        if len(owners) != n_elements:
+            raise ValueError(
+                f"{where}: element_owners names {len(owners)} elements but "
+                f"the vector has {n_elements}"
+            )
+        unknown = sorted(set(owners) - set(names))
+        if unknown:
+            raise ValueError(
+                f"{where}: element_owners {unknown} are not instances of "
+                f"'{component_type}' ({names})"
+            )
+        return [
+            (names.index(o), owners[:e].count(o)) for e, o in enumerate(owners)
+        ]
+
+    def adopt_element_owners(
+        self, component_type, param_name, names, element_owners
+    ):
+        """Translate the params-file spelling of an OWNED vector's elements
+        into the internal element-index form, after stage 3 and before the
+        solve.  Called by ``System.prepare`` for every manifest entry that
+        declares ``element_owners`` (Parameter.element_owners).
+
+        A user names element e of such a vector -- ``detrend_coeffs``, one
+        element per detrend COLUMN over every file -- as
+        ``comp.<owner>.param_<k>`` (folded to ``comp.<j>.param_<k>`` by
+        ``standardize_param_names``), because "instance j, its column k" is
+        what it is.  Internally it is ``comp.<e>.param``, the form every
+        reader of ``user_params`` -- ``resolve()``, the relaxation engine's
+        unit/default/bound lookups, the inject-back -- already handles as
+        element e.  Only the user-facing edges carry the owner spelling: the
+        params file (here), ``Parameter.get_display_label`` (results.csv, the
+        startup table, the diagnostics), ``export_solution`` and mkparam.
+
+        The owners are unknown when ``ConfigManager`` is constructed (they
+        come from the data files' columns, stage 1), which is why this is a
+        separate step rather than a branch of ``standardize_param_names``.
+        Idempotent: a second registration pass (a topology revision) finds
+        nothing left to translate.
+        """
+        n_elements = len(element_owners)
+        slots = self._owned_element_slots(
+            component_type, param_name, n_elements, names, element_owners
+        )
+        self._check_owned_spellings(component_type, param_name, names, slots)
+        for e, (j, k) in enumerate(slots):
+            user_key = f"{component_type}.{j}.{param_name}_{k}"
+            internal = f"{component_type}.{e}.{param_name}"
+            self._owned_display[internal] = (
+                f"{component_type}.{names[j]}.{param_name}_{k}"
+            )
+            for store in (self.user_params, self.links):
+                if user_key not in store:
+                    continue
+                if internal in store:
+                    raise ValueError(
+                        f"{component_type}.{param_name}: both {user_key!r} "
+                        f"and the internal {internal!r} are present -- this "
+                        f"ConfigManager's own bookkeeping, not the params "
+                        f"file, is wrong"
+                    )
+                store[internal] = store.pop(user_key)
+
+    def _check_owned_spellings(
+        self, component_type, param_name, names, owned_slots
+    ):
+        """Refuse every params-file key on an owned vector that does not
+        name exactly one of its elements as ``comp.<instance>.param_<k>``.
+
+        ``detrend_coeffs`` has one element per detrend COLUMN over every file
+        (block-diagonal, in file order), so element j is not instance j.  The
+        spelling ``comp.<name>.param`` used to fold to ``comp.<i>.param`` --
+        element i, i.e. column i of the whole vector -- whatever file
+        ``<name>`` was: a key naming one file set another file's coefficient
+        (or, past the last column, nothing), and mkparam wrote restart files
+        that way because the round trip came back to the same slot.  Every
+        spelling that cannot say which file and which column is refused, and
+        the message lists the ones that can (#440):
+
+          * ``comp.<name|i>.param``  -- the old spelling;
+          * ``comp.param`` and ``comp.param_<k>`` -- a broadcast: element j
+            is not instance j, so "every instance" is not "every element";
+          * ``comp.<name|i>.param_<k>`` for a column that instance does not
+            have -- it would otherwise be silently ignored, prior and all.
+
+        Read off the RAW keys, because ``standardize_param_names`` has
+        already folded a name into an index and expanded a broadcast by the
+        time ``user_params`` exists.
+        """
+        raw_keys = getattr(self, "_raw_user_param_keys", set())
+        valid = {
+            f"{component_type}.{names[j]}.{param_name}_{k}"
+            for j, k in owned_slots
+        }
+        valid_idx = set(owned_slots)
+        name_to_idx = {str(n): i for i, n in enumerate(names or [])}
+        suffix = re.compile(rf"{re.escape(param_name)}_(\d+)")
+
+        bad = []
+        for key in sorted(raw_keys):
+            parts = key.split(".")
+            if parts[0] != component_type:
+                continue
+            last = parts[-1]
+            m = suffix.fullmatch(last)
+            if last != param_name and m is None:
+                continue
+            if len(parts) != 3:
+                bad.append(key)
+                continue
+            inst = parts[1]
+            j = int(inst) if inst.isdigit() else name_to_idx.get(inst)
+            if m is None or (j, int(m.group(1))) not in valid_idx:
+                bad.append(key)
+        if not bad:
+            return
+
+        where = f" in {self.param_file}" if self.param_file else ""
+        listed = (
+            "\n  ".join(sorted(valid))
+            if valid
+            else f"(none -- no '{component_type}' instance has one)"
+        )
+        raise ValueError(
+            f"\n!!! '{component_type}.{param_name}' IS NOT ONE ELEMENT PER "
+            f"INSTANCE !!!\n"
+            f"{', '.join(repr(k) for k in bad)}{where} cannot be resolved.  "
+            f"'{component_type}.{param_name}' does not have one element per "
+            f"'{component_type}' entry (detrend coefficients: one per "
+            f"column, over every file), so an element is "
+            f"named by its instance AND its position among that instance's "
+            f"elements: '{component_type}.<instance>.{param_name}_<k>' "
+            f"(the index form '{component_type}.<i>.{param_name}_<k>' works "
+            f"too).  The spelling '{component_type}.<instance>.{param_name}' "
+            f"used to address the column whose global index was the "
+            f"instance's position -- usually another file's -- and a "
+            f"broadcast cannot cover these elements one per instance.\n"
+            f"The elements of this fit are:\n  {listed}"
         )
 
     def resolve(
@@ -3448,6 +3604,8 @@ class ConfigManager:
                         idx_to_name[(comp_key, str(i))] = str(c["name"])
 
         def _display_path(internal_path):
+            if internal_path in self._owned_display:
+                return self._owned_display[internal_path]
             parts = internal_path.split(".")
             if len(parts) == 3 and (parts[0], parts[1]) in idx_to_name:
                 return f"{parts[0]}.{idx_to_name[(parts[0], parts[1])]}.{parts[2]}"

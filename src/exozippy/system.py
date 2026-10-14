@@ -374,6 +374,7 @@ class System(Component):
         # After stage 3: the REPORTED-element invariant, checked before anything is
         # built (see _validate_reported_not_consumed).
         self._validate_reported_not_consumed()
+        self._adopt_element_owners()
 
         # Stage 4: RECONCILIATION (The Solver).  The snapshot is what a
         # second solve must start from: finalize_user_params injects its
@@ -400,6 +401,7 @@ class System(Component):
             for comp in self.active_components.values():
                 comp.register_parameters(self)
             self._validate_reported_not_consumed()
+            self._adopt_element_owners()
             self.config_manager.finalize_user_params()
             for message, paths in self.topology_revisions:
                 logger.warning(
@@ -408,6 +410,27 @@ class System(Component):
                 self.config_manager.record_diagnostic(
                     "warning", message, paths
                 )
+
+    def _adopt_element_owners(self):
+        """Hand every OWNED vector's element owners to the ConfigManager.
+
+        A manifest entry with ``element_owners`` (Parameter.element_owners;
+        ``detrend_coeffs``, one element per detrend column over every file)
+        is spelled ``comp.<owner>.param_<k>`` in a params file, and
+        ``ConfigManager.adopt_element_owners`` validates and translates that
+        into the internal element-index form.  Runs after stage 3 -- the
+        owners come from the data files, so they exist only once the
+        manifests do -- and before the stage-4 solve reads ``user_params``.
+        """
+        for comp in self.active_components.values():
+            for name, raw in getattr(comp, "manifest", {}).items():
+                owners = interpret_manifest_entry(raw).options.get(
+                    "element_owners"
+                )
+                if owners is not None:
+                    self.config_manager.adopt_element_owners(
+                        comp.prefix, name, comp.names, owners
+                    )
 
     def _validate_reported_not_consumed(self):
         """Refuse a manifest where something CONSUMES a reported element.

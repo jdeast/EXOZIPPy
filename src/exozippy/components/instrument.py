@@ -1895,7 +1895,8 @@ class Instrument(TimeSystem, Component):
         It is injected HERE, in the base class, rather than in each child's
         manifest, because all three detrending children (`rvinstrument`,
         `transit`, `mulensinstrument`) write the same
-        ``self.manifest["detrend_coeffs"] = {"shape": ...}`` line and a child
+        ``self.manifest["detrend_coeffs"] = self._detrend_manifest_entry()``
+        line and a child
         that forgot the scale would silently report whitened coefficients.
         ``setdefault`` keeps it overridable and idempotent across the repeat
         ``build_model()`` the GUI does.
@@ -1906,22 +1907,31 @@ class Instrument(TimeSystem, Component):
                 entry.setdefault(
                     "internal_to_user_scale", 1.0 / self.detrend_scales
                 )
-                # One element per COLUMN, block-diagonal in file order, so
-                # element j is not instance j.  Without the owners every
-                # report labelled the coefficients by instance position
-                # (a fit whose first files had no detrend columns saw a
-                # later file's airmass terms reported under those files).
-                entry.setdefault(
-                    "element_owners",
-                    [
-                        name
-                        for name, n in zip(self.names, self.n_detrend_per_inst)
-                        for _ in range(n)
-                    ],
-                )
         return super().add_parameter(
             model, param_name, system, context_nodes=context_nodes
         )
+
+    def _detrend_manifest_entry(self):
+        """The stage-3 manifest entry for ``detrend_coeffs``, shared by every
+        detrending child so none can forget a part of it.
+
+        One element per detrend COLUMN over every file, block-diagonal in
+        file order (``_build_block_detrend``), so element j is not instance
+        j: ``element_owners`` names the file each column belongs to.  It is
+        what spells element e ``<prefix>.<file>.detrend_coeffs_<k>`` in the
+        params file, results.csv, the tables and the restart file (#440;
+        ``Parameter.element_owners``).  Declared here, at stage 3, because
+        ``ConfigManager.adopt_element_owners`` translates the params-file
+        spelling before the stage-4 solve.
+        """
+        return {
+            "shape": (self.total_detrend_cols,),
+            "element_owners": [
+                name
+                for name, n in zip(self.names, self.n_detrend_per_inst)
+                for _ in range(n)
+            ],
+        }
 
     def rows(self, i):
         """Element ``i``'s rows in every concatenated array, as a ``slice``.

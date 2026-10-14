@@ -446,8 +446,28 @@ class Evaluator:
             raise KeyError(f"Unrecognized parameter path '{path}'")
 
         par = self._param_lookup.get(label)
+        if par is None and inst is not None:
+            # A vector whose elements are not one per instance
+            # (Parameter.element_owners; detrend_coeffs) spells its elements
+            # comp.<owner>.param_<k> -- match against the Parameter's own
+            # spellings rather than re-deriving them here.
+            base = parts[2].rpartition("_")[0]
+            owned = self._param_lookup.get(f"{parts[0]}.{base}")
+            if owned is not None and owned.element_owners is not None:
+                for i in range(len(owned.element_owners)):
+                    if path in (
+                        owned.get_display_label(i),
+                        owned.index_key(i),
+                    ):
+                        return owned, i
         if par is None:
             raise KeyError(f"Parameter '{path}' (label '{label}') not found")
+        if par.element_owners is not None:
+            raise KeyError(
+                f"Parameter '{path}': '{label}' does not have one element "
+                f"per instance; address an element by its owner and "
+                f"position, e.g. {par.get_display_label(0)!r}"
+            )
 
         if inst is None:
             elem = 0

@@ -81,7 +81,7 @@ def detrended_rv(tmp_path_factory):
         "star.A.feh": {"initval": 0.0, "sigma": 0.1},
         "orbit.b.period": {"initval": _RV["P"]},
         "orbit.b.tc": {"initval": _RV["tc"]},
-        "rvinstrument.detrend_coeffs": {"initval": 0.5, "sigma": 0},
+        "rvinstrument.HIRES.detrend_coeffs_0": {"initval": 0.5, "sigma": 0},
     }
 
     system = System(config, user_params=user_params)
@@ -410,7 +410,7 @@ def detrended_transit(tmp_path_factory):
         "star.A.feh": {"initval": 0.0, "sigma": 0.1},
         "orbit.b.period": {"initval": _LC["P"]},
         "orbit.b.tc": {"initval": _LC["tc"]},
-        "transit.detrend_coeffs": {"initval": 0.01, "sigma": 0},
+        "transit.TESS.detrend_coeffs_0": {"initval": 0.01, "sigma": 0},
     }
 
     system = System(config, user_params=user_params)
@@ -577,7 +577,7 @@ def detrended_mulens(tmp_path_factory):
         "star.radius": {"sigma": 0.0},
         "star.teff": {"sigma": 0.0},
         "star.feh": {"sigma": 0.0},
-        "mulensinstrument.detrend_coeffs": {
+        "mulensinstrument.OGLE.detrend_coeffs_0": {
             "initval": _MU_COEFF,
             "sigma": 0,
         },
@@ -843,7 +843,7 @@ def detrended_mulens_gp(tmp_path_factory):
         "star.radius": {"sigma": 0.0},
         "star.teff": {"sigma": 0.0},
         "star.feh": {"sigma": 0.0},
-        "mulensinstrument.detrend_coeffs": {
+        "mulensinstrument.OGLE.detrend_coeffs_0": {
             "initval": _MU_COEFF,
             "sigma": 0,
         },

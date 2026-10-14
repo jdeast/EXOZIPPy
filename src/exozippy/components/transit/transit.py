@@ -873,9 +873,7 @@ class Transit(Instrument):
         self._register_robust(self.manifest)
 
         if self.total_detrend_cols > 0:
-            self.manifest["detrend_coeffs"] = {
-                "shape": (self.total_detrend_cols,)
-            }
+            self.manifest["detrend_coeffs"] = self._detrend_manifest_entry()
 
         # Limb darkening comes from the Band component; map each
         # instrument (and each observation) to its band. A transit model

@@ -1712,9 +1712,7 @@ class MulensInstrument(Instrument):
         self._scale_flux_amplitudes(self.manifest, f_total_init)
 
         if self.total_detrend_cols > 0:
-            self.manifest["detrend_coeffs"] = {
-                "shape": (self.total_detrend_cols,)
-            }
+            self.manifest["detrend_coeffs"] = self._detrend_manifest_entry()
 
         # Binary source: one flux ratio q_flux = f_s2/f_s1 per instrument
         # (sources have different colors, so the ratio is chromatic).

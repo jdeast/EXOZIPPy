@@ -79,9 +79,9 @@ ROLES_ATTR = "exozippy_element_roles"
 # {label: [owning instance name per element]} for the vectors whose elements
 # are not one per instance (Parameter.element_owners; detrend_coeffs, one
 # element per column).  Read by mkparam, which has no System, so it writes
-# those elements in the index form -- the name form would name instance i,
-# i.e. another file.  Absent on a trace written before owners were stamped,
-# and on a model with no such vector.
+# those elements as comp.<owner>.param_<k> -- the name form would name
+# instance i, i.e. another file (#440).  Absent on a trace written before
+# owners were stamped, and on a model with no such vector.
 OWNERS_ATTR = "exozippy_element_owners"
 
 # The posterior variables that are Deterministics ONLY so the trace carries a

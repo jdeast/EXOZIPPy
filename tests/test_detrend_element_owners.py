@@ -11,8 +11,9 @@ the restart file seeded them under those names.
 The fixture is the case a length check cannot see: three RV instruments
 and three columns between them (A none, B one, C two), so the vector and
 the config list have the same length and only the OWNERS tell them apart.
-Params-file semantics are deliberately unchanged -- ``rvinstrument.<i>.
-detrend_coeffs`` is column i -- so the pins below use the index form.
+Every surface spells an element ``rvinstrument.<owner>.detrend_coeffs_<k>``:
+the params file (the pins below), results.csv, the restart file; the old
+``rvinstrument.<name>.detrend_coeffs`` raises.
 """
 
 import csv
@@ -34,33 +35,41 @@ from exozippy.trace_meta import (
 )
 
 _PINS = [10.0, 20.0, 30.0]  # m/s per raw unit, element order
+_KEYS = [
+    "rvinstrument.B.detrend_coeffs_0",
+    "rvinstrument.C.detrend_coeffs_0",
+    "rvinstrument.C.detrend_coeffs_1",
+]
 
 
 def _write_rv(path, n_cols, seed):
     rng = np.random.default_rng(seed)
     t = np.sort(2450000.0 + rng.uniform(0.0, 40.0, 30))
-    rv = 50.0 * np.sin(2 * np.pi * (t - 2450004.0) / 8.0) + rng.normal(0, 3, t.size)
+    rv = 50.0 * np.sin(2 * np.pi * (t - 2450004.0) / 8.0) + rng.normal(
+        0, 3, t.size
+    )
     cols = [t, rv, np.full_like(t, 3.0)]
     cols += [1.0 + 0.1 * rng.random(t.size) for _ in range(n_cols)]
     np.savetxt(path, np.column_stack(cols))
 
 
-@pytest.fixture(scope="module")
-def three_instruments(tmp_path_factory):
-    tmp = tmp_path_factory.mktemp("detrend_owners")
+def _three_instrument_config(tmp):
     insts = []
     for i, (name, n_cols) in enumerate((("A", 0), ("B", 1), ("C", 2))):
         path = tmp / f"{name}.rv"
         _write_rv(path, n_cols, seed=i)
         insts.append({"name": name, "file": str(path)})
-    config = {
+    return {
         "run": {"name": "detrend_owners"},
         "star": [{"name": "S", "mist": False}],
         "planet": [{"name": "b"}],
         "orbit": [{"name": "b", "primary": ["S"], "companion": ["b"]}],
         "rvinstrument": insts,
     }
-    user_params = {
+
+
+def _base_params():
+    return {
         "star.S.mass": {"initval": 1.0, "sigma": 0.05},
         "star.S.radius": {"initval": 1.0, "sigma": 0.1},
         "star.S.teff": {"initval": 5800, "sigma": 100},
@@ -68,8 +77,15 @@ def three_instruments(tmp_path_factory):
         "orbit.b.period": {"initval": 8.0},
         "orbit.b.tc": {"initval": 2450004.0},
     }
-    for i, v in enumerate(_PINS):
-        user_params[f"rvinstrument.{i}.detrend_coeffs"] = {"initval": v, "sigma": 0}
+
+
+@pytest.fixture(scope="module")
+def three_instruments(tmp_path_factory):
+    tmp = tmp_path_factory.mktemp("detrend_owners")
+    config = _three_instrument_config(tmp)
+    user_params = _base_params()
+    for key, v in zip(_KEYS, _PINS):
+        user_params[key] = {"initval": v, "sigma": 0}
     system = System(config, user_params=user_params)
     system.prepare()
     system.build_model()
@@ -91,8 +107,11 @@ def test_owners_are_the_files_whose_rows_carry_each_column(three_instruments):
 
     # ACT
     support = [
-        [comp.names[i] for i in range(comp.n_elements)
-         if np.any(comp.detrend_matrix[comp.rows(i), j] != 0)]
+        [
+            comp.names[i]
+            for i in range(comp.n_elements)
+            if np.any(comp.detrend_matrix[comp.rows(i), j] != 0)
+        ]
         for j in range(comp.detrend_matrix.shape[1])
     ]
 
@@ -101,7 +120,9 @@ def test_owners_are_the_files_whose_rows_carry_each_column(three_instruments):
     assert list(p.element_owners) == ["B", "C", "C"]
 
 
-def test_results_csv_labels_each_coefficient_by_its_file(three_instruments, tmp_path):
+def test_results_csv_labels_each_coefficient_by_its_file(
+    three_instruments, tmp_path
+):
     """
     Given the pinned coefficients 10, 20, 30 on columns 0, 1, 2,
     When results.csv is written,
@@ -119,18 +140,19 @@ def test_results_csv_labels_each_coefficient_by_its_file(three_instruments, tmp_
     # ACT
     build_csv_output(system, csv_filename=str(out))
     with open(out) as f:
-        rows = {r[0]: r[1] for r in csv.reader(line for line in f if not line.startswith("#"))}
+        rows = {
+            r[0]: r[1]
+            for r in csv.reader(line for line in f if not line.startswith("#"))
+        }
 
     # ASSERT
     coeffs = {k: float(v) for k, v in rows.items() if "detrend_coeffs" in k}
-    assert coeffs == {
-        "rvinstrument.B.detrend_coeffs[0]": pytest.approx(_PINS[0]),
-        "rvinstrument.C.detrend_coeffs[0]": pytest.approx(_PINS[1]),
-        "rvinstrument.C.detrend_coeffs[1]": pytest.approx(_PINS[2]),
-    }
+    assert coeffs == {k: pytest.approx(v) for k, v in zip(_KEYS, _PINS)}
 
 
-def test_latex_table_puts_coefficients_under_their_owner(three_instruments, tmp_path):
+def test_latex_table_puts_coefficients_under_their_owner(
+    three_instruments, tmp_path
+):
     """
     Given the same system,
     When the deluxetable is written,
@@ -144,19 +166,28 @@ def test_latex_table_puts_coefficients_under_their_owner(three_instruments, tmp_
     p = system.rvinstrument.detrend_coeffs
 
     # ACT
-    build_latex_output(system, var_filename=str(tmp_path / "v.tex"),
-                       table_filename=str(table), caption="x")
+    build_latex_output(
+        system,
+        var_filename=str(tmp_path / "v.tex"),
+        table_filename=str(table),
+        caption="x",
+    )
     text = table.read_text()
 
     # ASSERT
     blocks = {}
     for name in ("A", "B", "C"):
         start = text.index(rf"\textit{{{name}:}}")
-        nxt = [text.index(rf"\textit{{{m}:}}") for m in ("A", "B", "C")
-               if text.index(rf"\textit{{{m}:}}") > start]
-        blocks[name] = text[start:min(nxt) if nxt else len(text)]
-    rows = {n: [ln for ln in b.splitlines() if "Detrending" in ln]
-            for n, b in blocks.items()}
+        nxt = [
+            text.index(rf"\textit{{{m}:}}")
+            for m in ("A", "B", "C")
+            if text.index(rf"\textit{{{m}:}}") > start
+        ]
+        blocks[name] = text[start : min(nxt) if nxt else len(text)]
+    rows = {
+        n: [ln for ln in b.splitlines() if "Detrending" in ln]
+        for n, b in blocks.items()
+    }
     assert [len(rows[n]) for n in "ABC"] == [0, 1, 2]
     assert "c_{1}" in rows["C"][1] and "c_{0}" in rows["C"][0]
     for j, (owner, k) in enumerate((("B", 0), ("C", 0), ("C", 1))):
@@ -186,34 +217,45 @@ def test_owners_are_stamped_on_the_trace(three_instruments):
 
 def _vector_trace(tmp_path, values, owners):
     vals = np.asarray(values, dtype=float)[None, None, :]
-    post = xr.Dataset({
-        "rvinstrument.detrend_coeffs": xr.DataArray(vals, dims=["chain", "draw", "d"]),
-        "rvinstrument.detrend_coeffs_raw": xr.DataArray(vals * 0.1, dims=["chain", "draw", "d"]),
-    })
-    stats = xr.Dataset({"lp": xr.DataArray(np.array([[-1.0]]), dims=["chain", "draw"])})
+    post = xr.Dataset(
+        {
+            "rvinstrument.detrend_coeffs": xr.DataArray(
+                vals, dims=["chain", "draw", "d"]
+            ),
+            "rvinstrument.detrend_coeffs_raw": xr.DataArray(
+                vals * 0.1, dims=["chain", "draw", "d"]
+            ),
+        }
+    )
+    stats = xr.Dataset(
+        {"lp": xr.DataArray(np.array([[-1.0]]), dims=["chain", "draw"])}
+    )
     idata = az.from_dict({"posterior": post, "sample_stats": stats})
-    idata.attrs[OWNERS_ATTR] = json.dumps({"rvinstrument.detrend_coeffs": owners})
+    idata.attrs[OWNERS_ATTR] = json.dumps(
+        {"rvinstrument.detrend_coeffs": owners}
+    )
     path = tmp_path / "trace.nc"
     idata.to_netcdf(str(path))
     return path
 
 
-def test_restart_file_writes_coefficients_in_the_index_form(tmp_path):
+def test_restart_file_writes_coefficients_by_owner_and_position(tmp_path):
     """
     Given a trace whose coefficients are owned B, C, C and an earlier
-      restart file that seeded element 1 under the old name form
-      (`rvinstrument.B.detrend_coeffs`, which resolves to element 1) with a
-      prior,
+      restart file that put a prior on C's first column in the index form
+      (`rvinstrument.2.detrend_coeffs_0`),
     When mkparam writes the next restart file,
-    Then every coefficient is written as `rvinstrument.<i>.detrend_coeffs`
-    with its own value, the old entry's prior is carried onto element 1 and
-    the old key is not repeated, and the header says which file each
-    index belongs to.
+    Then every coefficient is written as `rvinstrument.<owner>.
+    detrend_coeffs_<k>` with its own value, and the old entry's prior is
+    carried onto C's first column without the old key being repeated.
     """
     # ARRANGE
     trace = _vector_trace(tmp_path, [1.5, 2.5, 3.5], ["B", "C", "C"])
     old = tmp_path / "old.params.yaml"
-    old.write_text("rvinstrument.B.detrend_coeffs:\n  initval: 2.0\n  sigma: 0.5\n  mu: 2.0\n")
+    old.write_text(
+        "rvinstrument.2.detrend_coeffs_0:\n  initval: 2.0\n  sigma: 0.5\n"
+        "  mu: 2.0\n"
+    )
     config = {
         "prefix": "fitresults/x",
         "parameter_file": str(old),
@@ -222,13 +264,96 @@ def test_restart_file_writes_coefficients_in_the_index_form(tmp_path):
 
     # ACT
     out = write_param_file(config, base_dir=tmp_path, trace_path=trace)
-    text = out.read_text()
-    written = yaml.safe_load(text)
+    written = yaml.safe_load(out.read_text())
 
     # ASSERT
     coeffs = {k: v for k, v in written.items() if "detrend_coeffs" in k}
-    assert set(coeffs) == {f"rvinstrument.{i}.detrend_coeffs" for i in range(3)}
-    assert [coeffs[f"rvinstrument.{i}.detrend_coeffs"]["initval"] for i in range(3)] == [1.5, 2.5, 3.5]
-    assert coeffs["rvinstrument.1.detrend_coeffs"]["sigma"] == 0.5
-    assert "rvinstrument.1.detrend_coeffs = C, its column 0" in text
-    assert "rvinstrument.2.detrend_coeffs = C, its column 1" in text
+    assert set(coeffs) == set(_KEYS)
+    assert [coeffs[k]["initval"] for k in _KEYS] == [1.5, 2.5, 3.5]
+    assert coeffs["rvinstrument.C.detrend_coeffs_0"]["sigma"] == 0.5
+
+
+def test_restart_file_round_trips(three_instruments, tmp_path):
+    """
+    Given the keys mkparam writes,
+    When they are read back as a params file,
+    Then each pins the element it names -- the display label, the restart
+    key and the params-file key are one spelling.
+    """
+    # ARRANGE
+    system, tmp = three_instruments
+    p = system.rvinstrument.detrend_coeffs
+
+    # ACT
+    labels = [p.get_display_label(i) for i in range(3)]
+
+    # ASSERT
+    assert labels == _KEYS
+    assert [p.index_key(i) for i in range(3)] == [
+        "rvinstrument.1.detrend_coeffs_0",
+        "rvinstrument.2.detrend_coeffs_0",
+        "rvinstrument.2.detrend_coeffs_1",
+    ]
+    np.testing.assert_allclose(p.from_internal(p.initval), _PINS)
+
+
+def test_export_solution_rows_use_the_owner_spelling(three_instruments):
+    """
+    Given the pinned system,
+    When the solve is exported (the GUI's parameter tree),
+    Then each coefficient's row is keyed by its owner and position and
+    carries the parameter's own unit and bounds -- the params-file spelling
+    is translated to the internal element index after stage 3, so the
+    engine still knows which parameter it is.
+    """
+    # ARRANGE
+    system, _ = three_instruments
+    cm = system.config_manager
+
+    # ACT
+    rows = cm.export_solution(derived_params=system.derived_elements())
+    rows = rows.get("parameters", rows)
+    coeffs = {k: v for k, v in rows.items() if "detrend_coeffs" in k}
+
+    # ASSERT
+    assert sorted(coeffs) == sorted(_KEYS)
+    for key, pin in zip(_KEYS, _PINS):
+        assert coeffs[key]["value"] == pytest.approx(pin)
+        assert coeffs[key]["unit"] == "m/s"
+        assert coeffs[key]["upper"] == pytest.approx(1.0e6)
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        # The old spelling: name form folded to GLOBAL column index.
+        "rvinstrument.B.detrend_coeffs",
+        "rvinstrument.1.detrend_coeffs",
+        # Broadcasts: element j is not instance j.
+        "rvinstrument.detrend_coeffs",
+        "rvinstrument.detrend_coeffs_0",
+        # A column the instance does not have (A has none, B has one).
+        "rvinstrument.A.detrend_coeffs_0",
+        "rvinstrument.1.detrend_coeffs_1",
+    ],
+)
+def test_ambiguous_or_missing_spellings_raise(tmp_path, key):
+    """
+    Given a params-file key on detrend_coeffs that does not name exactly
+      one existing column by its file and position,
+    When the system is prepared,
+    Then it RAISES before the start solve, listing the spellings that do --
+    rather than silently applying the value (and any prior) to another
+    file's column, or dropping it.
+    """
+    # ARRANGE
+    config = _three_instrument_config(tmp_path)
+    user_params = _base_params()
+    user_params[key] = {"initval": 1.0, "sigma": 0}
+    system = System(config, user_params=user_params)
+
+    # ACT / ASSERT
+    with pytest.raises(ValueError, match="NOT ONE ELEMENT PER") as err:
+        system.prepare()
+    for valid in _KEYS:
+        assert valid in str(err.value)

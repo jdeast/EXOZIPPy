@@ -293,16 +293,16 @@ def build_csv_output(
             # parameterization (a non-MIST star's EEP), only a bookkeeping
             # value in the vector -- so it gets no row here, in the LaTeX
             # table, or in the startup table.
-            # report_label, not get_display_label: for a vector whose
-            # elements are not one per instance (detrend_coeffs, one per
-            # column) the display label names instance i, i.e. another file.
+            # A vector whose elements are not one per instance
+            # (element_owners; detrend_coeffs, one per column) always gets
+            # its owner-qualified label, even a single element.
             if n_instances == 1 and p.element_owners is None:
                 if p.element_is_active(0):
                     emit(p.label, 0)
             else:
                 for i in range(n_instances):
                     if p.element_is_active(i):
-                        emit(p.report_label(i), i)
+                        emit(p.get_display_label(i), i)
 
     columns = CSV_COLUMNS_MODE if mode_cols else CSV_COLUMNS_PLAIN
     with open(csv_filename, "w", newline="") as f:
