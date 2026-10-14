@@ -50,7 +50,12 @@ def converted(tmp_path, monkeypatch):
 
 
 def _convert(
-    tmp_path, monkeypatch, driver, priors=_PRIORS, priorfile_override=None
+    tmp_path,
+    monkeypatch,
+    driver,
+    priors=_PRIORS,
+    priorfile_override=None,
+    sed="J2M 10.0 0.02 0.02\n",
 ):
     """Convert ``driver`` against _DRIVER's data files and ``priors``."""
     data = tmp_path / "data"
@@ -62,7 +67,7 @@ def _convert(
     ):
         (data / name).write_text("2458484.5 1.0 0.001\n")
     (data / "HIRES.rv").write_text("2458484.5 0.0 5.0\n")
-    (data / "star.sed").write_text("J2M 10.0 0.02 0.02\n")
+    (data / "star.sed").write_text(sed)
     (tmp_path / "fit.pro").write_text(driver)
     (tmp_path / "fit.priors").write_text(priors)
     monkeypatch.setenv("E2Z_TEST_ROOT", str(tmp_path))
@@ -419,6 +424,45 @@ def test_a_transit_header_is_matched_on_its_band(tmp_path, monkeypatch):
     _, params, _, _ = _convert(tmp_path, monkeypatch, _DRIVER, priors=priors)
     assert params["transit.FLWO_UT20190101_Sloanz.baseline"]["initval"] == 1.003
     assert "transit.FLWO_UT20190101_Sloang.baseline" not in params
+
+
+def test_sed_star_columns_become_blends_and_contrasts(tmp_path, monkeypatch):
+    """
+    Given a two-star sed file with readsedfile.pro's star column -- '0,1'
+      (both stars blended) and '0-1' (a contrast, star 0 minus star 1) --
+    When it is converted,
+    Then the blend row is pos: [A, B] and the contrast row pos: [A],
+      neg: [B]; neither is left without a photType, which would fit the
+      contrast's -3.3 as an apparent magnitude.
+    """
+    _convert(
+        tmp_path,
+        monkeypatch,
+        _driver_with("nstars=2"),
+        sed="J2M 10.0 0.02 0.02 0,1\nI -3.3 0.1 0.1 0-1\n",
+    )
+    rows = yaml.safe_load((tmp_path / "out" / "t.sed.yaml").read_text())[
+        "filters"
+    ]
+    assert [r["photType"] for r in rows] == [
+        {"pos": ["A", "B"]},
+        {"pos": ["A"], "neg": ["B"]},
+    ]
+    assert rows[1]["mag"] == -3.3
+
+
+def test_an_unreadable_sed_star_column_drops_the_row(tmp_path, monkeypatch):
+    _, _, warnings, _ = _convert(
+        tmp_path,
+        monkeypatch,
+        _driver_with("nstars=2"),
+        sed="J2M 10.0 0.02 0.02 0,1\nI -3.3 0.1 0.1 0-1-2\n",
+    )
+    rows = yaml.safe_load((tmp_path / "out" / "t.sed.yaml").read_text())[
+        "filters"
+    ]
+    assert len(rows) == 1
+    assert any("row dropped" in w for w in warnings)
 
 
 def test_priorfile_override_replaces_the_drivers(tmp_path, monkeypatch):

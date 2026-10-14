@@ -1644,6 +1644,28 @@ def _translate_sedfile(path, alias_df, nstars, star_names):
         except ValueError:
             warn(f"sed line not understood, skipped: '{raw.strip()}'")
             continue
+        # optional per-row star list (multi-star EXOFASTv2 sed files):
+        # readsedfile.pro's 'a,b' is a blend of stars a and b, and 'a,b-c'
+        # a differential magnitude, -2.5 log10((F_a + F_b) / F_c).  A row
+        # whose list cannot be read is DROPPED: written without its
+        # photType it would be fitted as a blend of every star, so a
+        # contrast (I -3.3 ... 0-1) would become an apparent magnitude.
+        phot = None
+        if len(toks) > 4:
+            try:
+                sides = toks[4].split("-")
+                if len(sides) > 2:
+                    raise ValueError(toks[4])
+                phot = [
+                    [star_names[int(i)] for i in side.split(",")]
+                    for side in sides
+                ]
+            except (ValueError, IndexError):
+                warn(
+                    f"sed star-index column '{toks[4]}' not understood; "
+                    f"row dropped: '{raw.strip()}'"
+                )
+                continue
         svo, ok = _to_svo(band, alias_df)
         if not ok:
             warn(
@@ -1654,17 +1676,11 @@ def _translate_sedfile(path, alias_df, nstars, star_names):
         lines.append(f"      mag: {mag}")
         suffix = f"   # catalog err {cat}" if cat is not None else ""
         lines.append(f"      err: {err}{suffix}")
-        # optional per-row star list (multi-star EXOFASTv2 sed files)
-        if len(toks) > 4:
-            try:
-                idxs = [int(t) for t in toks[4].split(",")]
-                names = [star_names[i] for i in idxs]
-                lines.append("      photType:")
-                lines.append(f"        pos: [{', '.join(names)}]")
-            except (ValueError, IndexError):
-                warn(
-                    f"sed star-index column not understood on: '{raw.strip()}'"
-                )
+        if phot is not None:
+            lines.append("      photType:")
+            lines.append(f"        pos: [{', '.join(phot[0])}]")
+            if len(phot) == 2:
+                lines.append(f"        neg: [{', '.join(phot[1])}]")
         lines.append("")
     return lines
 
