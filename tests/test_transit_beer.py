@@ -683,7 +683,9 @@ def test_beam_diluted_when_sed_dilution_active(tmp_path_factory):
         "band": [
             {"name": "V", "filter": "V", "ld_law": "quadratic", "star_ndx": 0}
         ],
-        "transit": [{"name": "inst0", "file": lc, "band": "V"}],
+        "transit": [
+            {"name": "inst0", "file": lc, "band": "V", "seddeblend": True}
+        ],
         "sed": {"file": str(sed_file)},
     }
     _BEAM_PPM = 4000.0
@@ -766,7 +768,9 @@ def test_ellipsoidal_diluted_when_sed_dilution_active(tmp_path_factory):
                 "fitellip": True,
             }
         ],
-        "transit": [{"name": "inst0", "file": lc, "band": "V"}],
+        "transit": [
+            {"name": "inst0", "file": lc, "band": "V", "seddeblend": True}
+        ],
         "sed": {"file": str(sed_file)},
     }
     _ELLIP = 4000.0

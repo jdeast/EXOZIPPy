@@ -61,8 +61,8 @@ class Transit(Instrument):
         """Read the per-file ``fitdilute:`` / ``seddeblend:`` /
         ``seddeblend_floor:`` keys (at construction).
 
-        ``seddeblend`` is kept RAW here (``None`` when unstated, ``True``,
-        ``False`` or a list of star names): the default and the star names
+        ``seddeblend`` is kept RAW here (``True``, ``False`` -- the
+        default, as in EXOFASTv2 -- or a list of star names): the star names
         resolve only against the star and SED components, in
         ``register_parameters`` (``_resolve_dilution``).  Type errors raise
         now, since each one silently changes the model if guessed at.
@@ -77,8 +77,8 @@ class Transit(Instrument):
                 raise ValueError(
                     f"[{label}] fitdilute must be true or false; got {fit!r}."
                 )
-            deb = c.get("seddeblend", None)
-            if deb is not None and not isinstance(deb, (bool, np.bool_)):
+            deb = c.get("seddeblend", False)
+            if not isinstance(deb, (bool, np.bool_)):
                 if not isinstance(deb, (list, tuple)) or not all(
                     isinstance(x, str) for x in deb
                 ):
@@ -104,9 +104,7 @@ class Transit(Instrument):
                 )
             self.fitdilute.append(bool(fit))
             self.seddeblend_raw.append(
-                deb
-                if deb is None or isinstance(deb, (bool, np.bool_))
-                else list(deb)
+                bool(deb) if isinstance(deb, (bool, np.bool_)) else list(deb)
             )
             self.seddeblend_floor.append(float(floor))
 
@@ -116,18 +114,12 @@ class Transit(Instrument):
 
         Read from RAW configs, for ``SED.photometric_readers`` at stage 3
         (the same ruling as ``Band.ld_consumers``): ``seddeblend: true`` or a
-        star list does, and so does an unstated ``seddeblend`` with more
-        than one star modeled (the default).  Conservative: it answers for
-        every star rather than the named ones.
+        star list does, with more than one star modeled.  Conservative: it
+        answers for every star rather than the named ones.
         """
-        for c in configs:
-            deb = c.get("seddeblend", None)
-            if deb is None:
-                if n_stars > 1:
-                    return True
-            elif deb is not False:
-                return True
-        return False
+        if n_stars < 2:
+            return False
+        return any(c.get("seddeblend", False) is not False for c in configs)
 
     def _resolve_dilution(self, system):
         """Stage 3: which files fit ``dilute``, and which the SED constrains.
@@ -136,9 +128,10 @@ class Transit(Instrument):
         (per file: ``None``, or the sorted star indices whose summed flux
         the SED dilution prediction is taken over, the host included).
 
-        ``seddeblend`` unstated means every modeled star when there is more
-        than one AND an SED to predict their fluxes in the file's band, and
-        nothing otherwise.  Stated ``true`` or a list with no SED, one star,
+        ``seddeblend`` defaults to false, as in EXOFASTv2: deblending is
+        opt-in, since a resolved neighbor or a light curve already deblended
+        upstream (TESS SPOC) must not be diluted again.  ``true`` or a list
+        with no SED, one star,
         or a band the SED has no filter for RAISES: the user asked for a
         constraint the fit cannot apply.  ``seddeblend`` implies
         ``fitdilute``.
@@ -160,19 +153,7 @@ class Transit(Instrument):
             )
             host = int(band.star_indices[band_idx])
             stars = None
-            if raw is None:
-                if n_stars > 1 and sed is not None:
-                    if have_filter:
-                        stars = list(range(n_stars))
-                    else:
-                        logger.warning(
-                            f"[{label}] band filter '{filter_key}' is not "
-                            f"in the SED's BC grid; the SED cannot predict "
-                            f"this file's dilution, so it is not deblended "
-                            f"(set fitdilute: true to fit it freely, or "
-                            f"seddeblend: false to silence this)."
-                        )
-            elif raw is not False:
+            if raw is not False:
                 why = None
                 if sed is None:
                     why = "there is no sed: block to predict the fluxes"
@@ -423,8 +404,7 @@ class Transit(Instrument):
                     "Gaussian prior centered on the SED-predicted flux "
                     "fraction of the other stars in the band, whose width "
                     "propagates seddeblend_floor (EXOFASTv2's SEDDEBLEND). "
-                    "Default: true when more than one star is modeled and "
-                    "the SED covers the band, else false."
+                    "Default false."
                 ),
             },
             {

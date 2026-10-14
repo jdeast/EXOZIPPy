@@ -150,7 +150,9 @@ def test_sed_deblending_dilutes_transit_depth(tmp_path_factory):
         "band": [
             {"name": "V", "filter": "V", "ld_law": "quadratic", "star_ndx": 0}
         ],
-        "transit": [{"name": "inst0", "file": lc, "band": "V"}],
+        "transit": [
+            {"name": "inst0", "file": lc, "band": "V", "seddeblend": True}
+        ],
         "sed": {"file": str(sed_file)},
     }
     params = _params()

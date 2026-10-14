@@ -990,9 +990,7 @@ def convert(pro_path, outdir, base, priorfile_override=None):
     # which an IDL literal writes one STAR per inner list
     # ([[t0, t1, ...], [t0, t1, ...]] is seddeblend[transit, star]); a
     # scalar applies to every transit and star.  SEDDEBLEND implies
-    # FITDILUTE.  EXOZIPPy's own default with several stars and an SED is
-    # to deblend every file from the SED, which EXOFASTv2 never does
-    # unasked, so every file gets an explicit seddeblend when nstars > 1.
+    # FITDILUTE.  Both default off, in EXOFASTv2 and EXOZIPPy alike.
     fitdilute = take("fitdilute")
     seddeblend = take("seddeblend")
     vals = fitdilute if isinstance(fitdilute, list) else [fitdilute]
@@ -1046,14 +1044,6 @@ def convert(pro_path, outdir, base, priorfile_override=None):
                 "seddeblend is set but the fit used mistsedfile=, which "
                 "EXOFASTv2 refuses with SEDDEBLEND (sedfile= only); "
                 "translated anyway -- EXOZIPPy deblends from its own SED"
-            )
-    if nstars > 1:
-        for t in transits:
-            t.setdefault("seddeblend", False)
-        if transits and not any(t["seddeblend"] for t in transits):
-            info(
-                "no SEDDEBLEND -> seddeblend: false on every transit "
-                "(EXOZIPPy would otherwise deblend them from the SED)"
             )
 
     # ---- SED ----------------------------------------------------------
@@ -1793,13 +1783,9 @@ def _emit_config(
                 L.append(f"    splinespace: {t['splinespace']:g} # days")
             if t.get("fitdilute"):
                 L.append("    fitdilute: true")
-            if "seddeblend" in t:
-                deb = t["seddeblend"]
-                if deb is False:
-                    L.append("    seddeblend: false")
-                else:
-                    stars = ", ".join(f'"{x}"' for x in deb)
-                    L.append(f"    seddeblend: [{stars}]")
+            if t.get("seddeblend"):
+                stars = ", ".join(f'"{x}"' for x in t["seddeblend"])
+                L.append(f"    seddeblend: [{stars}]")
         L.append("")
 
     if bands:

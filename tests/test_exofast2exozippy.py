@@ -502,7 +502,7 @@ def test_priorfile_links_become_params_links(tmp_path, monkeypatch):
     When the driver is converted,
     Then width 0 is a hard link, width > 0 a soft link, the blank line
       keeps the dilute lines from being re-pointed onto the TESS file, and
-      every file gets seddeblend: false (EXOFASTv2 did not deblend).
+      no file gets seddeblend (EXOFASTv2 did not deblend).
     """
     config, params, warnings, _ = _convert(
         tmp_path,
@@ -521,7 +521,7 @@ def test_priorfile_links_become_params_links(tmp_path, monkeypatch):
         "sigma": 0.0,
     }
     assert f"{_TESS}.dilute" not in params
-    assert all(t["seddeblend"] is False for t in config["transit"])
+    assert all("seddeblend" not in t for t in config["transit"])
     assert not any("not understood" in w for w in warnings)
 
 
@@ -531,15 +531,15 @@ def test_seddeblend_rows_are_stars(tmp_path, monkeypatch):
       transits 0 and 2 blend both stars, transit 1 only star A),
     When the driver is converted,
     Then transits 0 and 2 deblend [A, B] and transit 1, with no companion,
-      gets seddeblend: false.
+      gets no seddeblend.
     """
     config, _, _, _ = _convert(
         tmp_path,
         monkeypatch,
         _driver_with("nstars=2, seddeblend=[[1,1,1],[1,0,1]]"),
     )
-    deb = [t["seddeblend"] for t in config["transit"]]
-    assert deb == [["A", "B"], False, ["A", "B"]]
+    deb = [t.get("seddeblend") for t in config["transit"]]
+    assert deb == [["A", "B"], None, ["A", "B"]]
 
 
 def test_a_one_band_fitdilute_is_the_flag(tmp_path, monkeypatch):
