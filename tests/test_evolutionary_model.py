@@ -779,6 +779,10 @@ def test_the_component_declares_no_parameters_of_its_own():
     """
     # Arrange
     comp = EvolutionaryModel([{"star": "A"}], None)
+    # load_data (not run here) resolves the stars; register_parameters
+    # declares their track coordinates likelihood-backed (review 3.14.22),
+    # which with none resolved is nothing.
+    comp.star_indices = []
 
     # Act
     comp.register_parameters(system=None)

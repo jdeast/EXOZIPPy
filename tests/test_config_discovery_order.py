@@ -23,6 +23,7 @@ These tests simulate a differently-ordered filesystem by reversing ``rglob``.
 import copy
 import pathlib
 
+import pytest
 import yaml
 
 from exozippy.config import ConfigManager
@@ -128,51 +129,53 @@ def test_no_root_level_default_key_has_two_owners():
     )
 
 
-def test_rank_upgrade_tie_break_is_alphabetical(monkeypatch):
+def test_a_tie_is_split_the_same_whatever_order_the_symbols_iterate_in(
+    monkeypatch,
+):
     """
-    Given two symbols of one VIOLATED relation that tie on provenance rank,
-    When _relax_equation picks the symbol to rewrite (Condition B),
-    Then it rewrites the alphabetically first, not the first iterated.
+    Given two DEFAULT seeds of one relation that disagree with a user value
+      (x = a + b, x pinned),
+    When the relaxation engine settles it with `free_symbols` iterating in
+      the natural order and again in a deliberately reversed one,
+    Then the start is identical: a tie between two seeds of one tier is a
+      minimum-norm split in init_scale units, decided by nothing that
+      depends on the order a set of Symbols happens to iterate in (their
+      hashes include the PYTHONHASHSEED-randomized name).
 
-    Sorting by (rank, name) is what makes that choice reproducible: the
-    candidate list comes from `eq.free_symbols`, a set of Symbols whose hashes
-    include the PYTHONHASHSEED-randomized name string, so on a rank tie an
-    unsorted selection would follow set-iteration order and two processes
-    running identical code would rewrite different parameters.
-
-    This used to be pinned on _attempt_rank_upgrade, which was a dead
-    alternative solve path (deleted 2026-08-18 with the rest of review 5.1.1).
-    The rule is retargeted here, on the live engine, and asserted on the
-    OUTCOME -- which symbol actually moved -- rather than by spying on min().
-    `free_symbols` is monkeypatched to a deliberately non-alphabetical tuple
-    so an unsorted implementation fails every run instead of by luck.
+    Replaces the pin on the old Condition B's alphabetical tie-break, which
+    the KS rule deleted (review 3.14.22): no path string decides anything.
     """
-    # Arrange
     import sympy as sp
 
-    from exozippy.config import PRECEDENCE_DEFAULT
+    def run(reverse):
+        cm = ConfigManager(
+            {"toy.T.x": {"initval": 5.0}},
+            system_config={"toy": [{"name": "T"}]},
+        )
+        cm.base_defaults["toy"] = {
+            n: {"lower": -1e6, "upper": 1e6, "init_scale": s, "initval": 1.0}
+            for n, s in (("x", 1.0), ("a", 1.0), ("b", 3.0))
+        }
+        syms = {n: sp.Symbol(f"toy.0.{n}") for n in "xab"}
+        for s in syms.values():
+            cm.master_symbol_map[str(s)] = s
+        eq = sp.Eq(syms["x"], syms["a"] + syms["b"])
+        if reverse:
+            order = (syms["x"], syms["b"], syms["a"])
+            monkeypatch.setattr(
+                sp.Eq,
+                "free_symbols",
+                property(lambda self: set(order)),
+                raising=False,
+            )
+        cm.all_relations = [eq]
+        cm.set_engine_roles({str(s): "sampled" for s in syms.values()})
+        cm.finalize_user_params()
+        monkeypatch.undo()
+        return dict(cm._last_resolved)
 
-    config, user_params = _dc2018_128_inputs()
-    cm = ConfigManager(copy.deepcopy(user_params), copy.deepcopy(config))
-
-    a_name, b_name = "lens.0.pi_E_E", "lens.0.pi_E_N"
-    a, b = sp.Symbol(a_name), sp.Symbol(b_name)
-    cm.master_symbol_map.setdefault(a_name, a)
-    cm.master_symbol_map.setdefault(b_name, b)
-
-    # Both known, both at the same rank, and the relation is violated: that is
-    # Condition B, whose whole job is to pick the weakest symbol and rewrite it.
-    resolved = {a_name: 1.0, b_name: 2.0}
-    provenance = {a_name: PRECEDENCE_DEFAULT, b_name: PRECEDENCE_DEFAULT}
-    eq = sp.Eq(a, b)
-    monkeypatch.setattr(
-        sp.Eq, "free_symbols", property(lambda self: (b, a)), raising=False
-    )
-
-    # Act
-    changed = cm._relax_equation(eq, resolved, provenance, {}, {}, 1e-6)
-
-    # Assert -- pi_E_E sorts first, so it is the one that moves.
-    assert changed
-    assert resolved[a_name] == 2.0
-    assert resolved[b_name] == 2.0
+    natural, reversed_ = run(False), run(True)
+    assert natural == reversed_
+    # and it IS the split (0.3 / 2.7 of the 3 to absorb), not a single absorber
+    assert natural["toy.0.a"] == pytest.approx(1.3, rel=1e-6)
+    assert natural["toy.0.b"] == pytest.approx(3.7, rel=1e-6)

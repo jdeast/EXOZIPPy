@@ -80,7 +80,7 @@
   "POT:logit_uniform_prior.star.logmass": -1.514996141595653,
   "POT:logit_uniform_prior.star.pm_dec": -2.7725888590032266,
   "POT:logit_uniform_prior.star.pm_ra": -2.772588797980372,
-  "POT:logit_uniform_prior.star.radius": -7.407761198272015,
+  "POT:logit_uniform_prior.star.radius": -7.404782287735378,
   "POT:logit_uniform_prior.star.rv": -2.772588722239781,
   "POT:low_bound.mulensevent.mu_dec_rel": -9.85967654375977e-305,
   "POT:low_bound.mulensevent.mu_dec_rel_geo": -9.85967654375977e-305,
@@ -111,7 +111,7 @@
   "RV:band.u1_raw": -0.9189385332046727,
   "RV:mulensinstrument.err_scale_raw": -6.432569732432707,
   "RV:mulensinstrument.log_f_total_raw": -6.432569732432707,
-  "RV:mulensinstrument.model": 23256.11105792709,
+  "RV:mulensinstrument.model": 23264.714023009026,
   "RV:mulensinstrument.q_source_raw": -6.432569732432707,
   "RV:source.t_0_raw": -0.9189385332046727,
   "RV:source.u_0_raw": -0.9189385332046727,
@@ -122,5 +122,5 @@
   "RV:star.radius_raw": -0.9189385332046727,
   "RV:star.rv_raw": -1.8378770664093453
  },
- "total_logp": 23136.756762929082
+ "total_logp": 23145.362706921544
 }

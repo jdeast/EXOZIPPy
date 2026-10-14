@@ -109,6 +109,10 @@ mulensevent:
     # eval_timeouts within minutes, the same operational signature as
     # log_rho's cap (1e162a1a).  A genuinely nearby lens is exotica the
     # user can override per event.
+    # init_scale: the value its component's add_scale_hint pushes at
+    # stage 3, declared here too so a stage-1 probe -- which runs before
+    # any hint -- has a scale for this sampled leaf (review 3.14.22).
+    init_scale: 0.1
     lower: -4.0
     upper: 1.0
     unit: ""
@@ -139,6 +143,10 @@ mulensevent:
     # Log coordinate: theta_E spans ~1e-2 mas (FFP) to ~10 mas (nearby
     # stellar lens).  NO initval (the mu_rel lesson, 4745cd7e): the
     # engine back-solves the start through theta_E <-> log_theta_E.
+    # init_scale: the value its component's add_scale_hint pushes at
+    # stage 3, declared here too so a stage-1 probe -- which runs before
+    # any hint -- has a scale for this sampled leaf (review 3.14.22).
+    init_scale: 0.1
     lower: -4.0
     upper: 2.0
     unit: ""
@@ -291,6 +299,10 @@ source:
     # with the stellar effective temperature in the config namespace.
     # The LaTeX symbol stays t_eff.  NO initval (the mu_rel lesson,
     # 4745cd7e): the engine back-solves through u0te = u_0 * t_E.
+    # init_scale: the value its component's add_scale_hint pushes at
+    # stage 3, declared here too so a stage-1 probe -- which runs before
+    # any hint -- has a scale for this sampled leaf (review 3.14.22).
+    init_scale: 0.05
     lower: -5000.0
     upper: 5000.0
     unit: "d"

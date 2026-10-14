@@ -549,8 +549,20 @@ class EvolutionaryModel(StellarRelation, Component):
         ``ConfigManager.add_override`` in ``load_data`` (see
         ``_inject_grid_bounds``), which is the channel for a bound on a
         parameter another component owns.
+
+        It does declare which starts its likelihood BACKS (review 3.14.22,
+        Q3): the track's own coordinates -- mass, initial [Fe/H], EEP, and
+        the age it implies.  Those, not the outputs it compares against
+        (radius, Teff), are what a contradiction must not push around: a
+        wrong mass puts the star on the wrong track, and the sampler has to
+        cross the whole grid to recover.  The outputs stay ordinary seeds,
+        so a pinned density, say, is absorbed by the radius.
         """
         self.manifest = {}
+        cm = self.config_manager
+        for si in self.star_indices:
+            for param in ("logmass", "mass", "initfeh", "eep", "age"):
+                cm.declare_likelihood_backed(f"star.{si}.{param}")
 
     # ------------------------------------------------------------------
     # Stage 6

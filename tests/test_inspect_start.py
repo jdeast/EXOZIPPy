@@ -240,7 +240,9 @@ def test_scalar_initval_is_also_left_alone():
     """
     # ARRANGE
     cm = ConfigManager({}, system_config={})
-    p = Parameter(label="toy.x", initval=2.0, lower=0.0, upper=10.0)
+    p = Parameter(
+        label="toy.x", init_scale=1.0, initval=2.0, lower=0.0, upper=10.0
+    )
     with pm.Model(name="model_scalar_initval") as model:
         p.build_pymc()
     system = _Sys(cm, [p])

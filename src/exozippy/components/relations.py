@@ -228,6 +228,30 @@ class StellarRelation:
         """Stage 2: index array linking each instance to its star."""
         self.star_map = np.array(self.star_indices, dtype=int)
 
+    # Which star parameters a constrained quantity's potential backs.  The
+    # mass is sampled as logmass (or derived from it), so both spellings are
+    # declared: the declaration promotes only an actual SEED, whichever of
+    # the two carries it.
+    _BACKED_PARAMS = {
+        "mass": ("logmass", "mass"),
+        "radius": ("radius",),
+        "feh": ("feh",),
+        "teff": ("teff",),
+        "age": ("age",),
+    }
+
+    def _declare_likelihood_backed(self):
+        """Stage 3: tell the relaxation engine which stellar starts this
+        relation's potential makes expensive to move (review 3.14.22, Q3):
+        every quantity an instance constrains, on the star it constrains.
+        They then absorb a contradiction only after every poorly
+        constrained seed has (config.md, "PRECEDENCE_LIKELIHOOD_BACKED")."""
+        cm = self.config_manager
+        for si, quantities in zip(self.star_indices, self.constrain):
+            for q in sorted(quantities):
+                for param in self._BACKED_PARAMS[q]:
+                    cm.declare_likelihood_backed(f"star.{si}.{param}")
+
     # ------------------------------------------------------------------
     # Stage 7 helpers
     # ------------------------------------------------------------------

@@ -235,19 +235,14 @@ def test_seeds_are_skipped_without_user_coordinates():
     # Act: prepare only -- the seeds are decided at stage 3/4
     params = _prepared(config, user_params, build=False)
 
-    # Assert: back to the defaults.yaml value, not a galactic-model number.
-    # Parameter objects only exist once the model is built (stage 6), so
-    # read the resolved start value off the ConfigManager instead.
+    # Assert: no galactic-model seed was pushed.  (The start itself is no
+    # longer the defaults.yaml -3: under the KS relaxation rule, review
+    # 3.14.22, the DEFAULT_WEAK proper motions are the lowest seeds on the
+    # chain and absorb whatever the rest of it implies -- which is the
+    # point of their rank.  What this test guards is the SEED.)
     system = params["__system__"]
-    pm_ra = np.atleast_1d(
-        np.asarray(
-            system.config_manager.resolve("star", "pm_ra", shape=(2,))[
-                "initval"
-            ],
-            float,
-        )
-    )
-    assert pm_ra[1] == pytest.approx(-3.0)
+    pm_hints = [k for k in system.config_manager.hints if ".pm_" in k]
+    assert pm_hints == []
 
     # And the galactic model refuses to build on the unpositioned anchor.
     with pytest.raises(ValueError, match="has no sky position"):

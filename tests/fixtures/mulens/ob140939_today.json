@@ -98,7 +98,7 @@
   "POT:low_bound.mulensevent.mu_ra_rel_geo": -9.85967654375977e-305,
   "POT:low_bound.mulensevent.mu_rel_geo_mag": -0.0035554201902022464,
   "POT:low_bound.mulensevent.mu_rel_mag": -9.85967654375977e-305,
-  "POT:low_bound.mulensevent.pi_rel": -9.85967654375977e-305,
+  "POT:low_bound.mulensevent.pi_rel": -1.8153588702224776e-224,
   "POT:low_bound.mulensevent.t_E": -9.85967654375977e-305,
   "POT:low_bound.mulensevent.theta_E": -9.85967654375977e-305,
   "POT:low_bound.mulensinstrument.f_blend": -1.971935308751954e-304,

@@ -978,12 +978,12 @@ class MulensEvent(Component):
         longer has to invert
         ``mu_rel_mag**2 = mu_ra_rel**2 + mu_dec_rel**2`` -- one equation in
         two unknowns -- by choosing a point on a circle (issue #93).  Where
-        that disagrees with the seeded ``t_E``, Condition B rewrites the
-        lowest-rank symbol in ``t_E = theta_E / |mu_rel_geo|``, which is
-        ``theta_E`` via the lens mass (defaults.yaml, ``PRECEDENCE_DEFAULT``)
-        and distance (``PRECEDENCE_MULENS_LENS_DISTANCE``).  So ``t_E``
-        keeps its measured value, the proper motion keeps the prior's, and
-        the lens mass absorbs the difference -- which is the standard
+        that disagrees with the seeded ``t_E``, the relaxation engine's KS
+        rule (review 3.14.22) holds the data tier and lets a LOWER one
+        absorb ``t_E = theta_E / |mu_rel_geo|``: theta_E through the lens
+        distance (``PRECEDENCE_MULENS_LENS_DISTANCE``) or a defaults.yaml
+        lens mass.  So ``t_E`` keeps its measured value, the proper motion
+        keeps the prior's, and the lens absorbs the difference -- which is the standard
         microlensing chain (a measured t_E plus an assumed mu_rel implies
         theta_E, hence a mass) and is the quantity a light curve genuinely
         cannot pin down.

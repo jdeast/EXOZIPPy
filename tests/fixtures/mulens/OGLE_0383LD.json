@@ -94,7 +94,7 @@
   "POT:logit_uniform_prior.star.pm_dec": -2.7725887253705492,
   "POT:logit_uniform_prior.star.pm_ra": -2.7725887231166317,
   "POT:logit_uniform_prior.star.rv": -2.772588722239781,
-  "POT:low_bound.lens.q": -0.688262236733387,
+  "POT:low_bound.lens.q": -5.6956950572972445e-139,
   "POT:low_bound.lens.s": -9.85967654375977e-305,
   "POT:low_bound.mulensevent.mlens_total": -9.85967654375977e-305,
   "POT:low_bound.mulensevent.mu_dec_rel": -9.85967654375977e-305,
@@ -102,10 +102,10 @@
   "POT:low_bound.mulensevent.mu_ra_rel": -9.85967654375977e-305,
   "POT:low_bound.mulensevent.mu_ra_rel_geo": -9.85967654375977e-305,
   "POT:low_bound.mulensevent.mu_rel_geo_mag": -0.11081455783306547,
-  "POT:low_bound.mulensevent.mu_rel_mag": -2.0052569716418315e-220,
+  "POT:low_bound.mulensevent.mu_rel_mag": -7.978260046034929e-188,
   "POT:low_bound.mulensevent.pi_rel": -9.85967654375977e-305,
-  "POT:low_bound.mulensevent.t_E": -9.85967654375977e-305,
-  "POT:low_bound.mulensevent.theta_E": -9.85967654375977e-305,
+  "POT:low_bound.mulensevent.t_E": -1.6664652241400776e-103,
+  "POT:low_bound.mulensevent.theta_E": -9.804129471312998e-91,
   "POT:low_bound.mulensinstrument.f_blend": -5.915805926255863e-304,
   "POT:low_bound.mulensinstrument.f_source": -4.15888224453977,
   "POT:low_bound.planet.mass": -9.85967654375977e-305,
@@ -135,7 +135,7 @@
   "RV:lens.yalpha_raw": -0.9189385332046727,
   "RV:mulensinstrument.err_scale_raw": -5.513631199228035,
   "RV:mulensinstrument.log_f_total_raw": -5.513631199228035,
-  "RV:mulensinstrument.model": 26832.03609068592,
+  "RV:mulensinstrument.model": 26832.03609068619,
   "RV:mulensinstrument.q_source_raw": -5.513631199228035,
   "RV:planet.log_q_raw": -0.9189385332046727,
   "RV:source.t_0_raw": -0.9189385332046727,
@@ -146,5 +146,5 @@
   "RV:star.pm_ra_raw": -1.8378770664093453,
   "RV:star.rv_raw": -1.8378770664093453
  },
- "total_logp": 26734.53998208352
+ "total_logp": 26735.228244320537
 }

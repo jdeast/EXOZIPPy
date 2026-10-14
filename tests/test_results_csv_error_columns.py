@@ -53,6 +53,7 @@ def _fake_system(comp):
 def _toy_param():
     return Parameter(
         label="toy.x",
+        init_scale=10.0,
         latex="x",
         description="toy parameter",
         initval=10.0,

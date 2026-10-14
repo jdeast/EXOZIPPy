@@ -153,8 +153,11 @@ exclusive pair `fitlogq` / `fitmsini` when the third coordinate arrived
 1. Create `src/exozippy/components/<name>/` with the four standard files.
 2. Set `comp_key` in `symbolic_physics.py` and `prefix` property in the class to match the YAML key.
 3. Declare `self.manifest` in `register_parameters()`. Manifest values: `None` (free parameter, no expression), `"default"` (use `expressions.default` from `defaults.yaml`), or a dict with `"expr_key"` and optional overrides. A dict with no `"expr_key"` is a free parameter carrying options; an `"expr_key"` naming a block the defaults.yaml does not define raises.
-4. Every sampled (non-derived, non-fixed) parameter **must** have `lower` and `upper` in `defaults.yaml`. `init_scale` is recommended but optional (it seeds the whitening probe; missing values fall back to a fraction of the span).
-5. Add the YAML key to example configs to test.
+4. Every sampled (non-derived, non-fixed) parameter **must** have `lower` and `upper` in `defaults.yaml`, and an `init_scale` from some source -- `defaults.yaml`, a component `add_scale_hint`, or one the relaxation engine propagates through the relations; a SAMPLED element with none RAISES at build (review 3.14.22). It seeds the whitening probe, it is the prior width of an unbounded element with no `sigma`, and it is the unit the relaxation engine splits a correction in, so no constant is substituted for a missing one.
+5. Say how the relaxation engine should treat its starts, in the two `defaults.yaml`/stage-3 places that exist for it (rule: `src/exozippy/config.md`, "Precedence, and which value absorbs a discrepancy"):
+   - **`rank:` is a SEED key.** It sets the precedence a parameter's `defaults.yaml` start carries when that start SEEDS anything -- which it does only on a SAMPLED element (on a derived one the value is a fill and moves nothing, so a derived parameter never needs a `rank:` to keep it from pushing back on its inputs). Its value names a level of `config.PRECEDENCE_LADDER` (`rank: DEFAULT_WEAK` for a vague default that should absorb before any other; omit it for `DEFAULT`); a bare number raises. The eight old `rank: 5` entries were all of the "derived, so do not push back" kind and are gone.
+   - **`declare_likelihood_backed(path)`.** If the component adds a stiff likelihood on a parameter (an evolutionary-model mass, the SED's temperature, an empirical relation's mass or radius), declare it in `register_parameters`: that parameter's start then decides at `PRECEDENCE_LIKELIHOOD_BACKED`, so poorly constrained seeds absorb a contradiction before it moves. Declare the coordinates the likelihood pins, not the quantities it merely compares.
+6. Add the YAML key to example configs to test.
 
 ## Referring to a star
 

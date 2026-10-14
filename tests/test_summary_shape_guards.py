@@ -24,6 +24,7 @@ from exozippy.outputs.latex import build_csv_output
 def _param(shape=()):
     return Parameter(
         label="toy.x",
+        init_scale=10.0,
         latex="x",
         description="toy parameter",
         initval=10.0,

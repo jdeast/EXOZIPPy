@@ -157,16 +157,33 @@ def test_register_parameters_declares_no_parameters():
     """
     Given Torres reads only parameters the star already owns,
     When it registers,
-    Then its manifest is empty -- it contributes potentials only.
+    Then its manifest is empty -- it contributes potentials only -- and it
+      declares the mass and radius it predicts likelihood-backed for the
+      relaxation engine (review 3.14.22).
     """
+
+    class _CM:
+        def __init__(self):
+            self.backed = []
+
+        def declare_likelihood_backed(self, path):
+            self.backed.append(path)
+
     # Arrange
     comp = _torres([{"star": "A"}])
+    comp.config_manager = _CM()
 
     # Act
     comp.register_parameters(_FakeSystem())
 
     # Assert
     assert comp.manifest == {}
+    si = comp.star_indices[0]
+    assert set(comp.config_manager.backed) == {
+        f"star.{si}.logmass",
+        f"star.{si}.mass",
+        f"star.{si}.radius",
+    }
 
 
 @pytest.mark.parametrize(

@@ -179,7 +179,11 @@ def test_overconstrained_relation_yields_diagnostic(kelt4_inputs):
     """
     Given mass, radius, and density all set to mutually inconsistent values,
     When validate() runs,
-    Then the over-constrained density relation surfaces as an error diagnostic.
+    Then the density surfaces as a diagnostic naming it.  Since the KS rule
+      (review 3.14.22) it is the DROPPED value -- density is derived, so the
+      user's value on it is kept only if it fits the sampled mass and radius
+      the user also set, and a warning names it -- rather than an error on
+      the relation.
     """
     # Arrange -- density=mass/radius^3 approx 1.7; force an inconsistent 99.
     config, user_params, workdir = kelt4_inputs
@@ -191,9 +195,11 @@ def test_overconstrained_relation_yields_diagnostic(kelt4_inputs):
 
     # Assert
     assert any(
-        d["severity"] == "error" and "density" in d["message"].lower()
+        d.get("kind") == "dropped"
+        and d["severity"] == "warning"
+        and d["param_paths"][0] == "star.0.density"
         for d in diagnostics
-    )
+    ), diagnostics
 
 
 def test_solve_is_repeatable_in_one_process(kelt4_inputs):

@@ -74,19 +74,22 @@ Gsym = sp.Rational(int(round(G * 1e10)), 10000000000)
 RELATIONS = [
     # Mass ratio to the host star.  In log_q mode this back-solves a user's
     # planet.<i>.mass initval (or the K -> mass custom solver's result) into a
-    # log_q start.  In linear mode log_q is never materialized, and because it
-    # carries the lowest rank in this relation (planet/defaults.yaml) it always
-    # absorbs the residual, so the relation cannot perturb mass or star_mass.
+    # log_q start: the mass is DERIVED there, so a user mass is kept and the
+    # sampled log_q absorbs it.  In linear mode log_q is not a parameter, so
+    # its defaults.yaml value is a fill and the relation cannot perturb mass
+    # or star_mass (review 3.14.22; this used to need log_q's `rank: 5`).
     sp.Eq(mass, (10**log_q) * star_mass),
     # Minimum mass.  In msini mode (fitmsini, review 2.14.9) this back-solves a
     # user's planet.<i>.mass initval -- or the K -> mass solver's result --
     # into an msini start, exactly as the log_q relation above does for
-    # log_q.  msini carries rank 5 (planet/defaults.yaml), below mass's 10 and
-    # sini's default, so it is always the symbol Condition B rewrites: where
-    # msini is only reported the relation cannot move mass or cos i.
+    # log_q -- the mass is derived in msini mode.  Where msini is only
+    # reported its defaults.yaml value is a fill, so the relation cannot move
+    # mass or cos i (review 3.14.22; this used to need msini's `rank: 5`).
     sp.Eq(msini, mass * sini),
-    # Bulk Density (rho \propto M / R^3)
-    sp.Eq(density, mass / (radius**THREE)),
+    # Bulk density, the mean density of a sphere, 3 M / (4 pi R^3) -- what
+    # the model's calc_density computes (it read M / R^3 until review
+    # 3.14.22; see star/symbolic_physics.py).
+    sp.Eq(density, sp.Rational(3, 4) / sp.pi * mass / (radius**THREE)),
     # Radius ratio
     sp.Eq(p, radius / star_radius),
     # RV semi-amplitude.  planet.logg has no relation here on purpose:
@@ -110,13 +113,11 @@ RELATIONS = [
     # chord (below) could not be bridged at all, since its inversion needs
     # a/R*.  One definition in the engine replaces both workarounds.
     #
-    # `a`, `ar` and `m_total` carry rank 5 in defaults.yaml so Condition B
-    # always rewrites THEM rather than the mass, radius or period they are
-    # derived from.  That is not a preference, it is the only correct
-    # direction: all three are derived Parameters whose runtime value is their
-    # expression, so a seed on one cannot survive into the model anyway -- and
-    # letting a stale `planet.ar` entry silently move a period would be the
-    # exact inversion the ranking system exists to prevent.
+    # `a`, `ar` and `m_total` are DERIVED Parameters, so under the KS rule
+    # (review 3.14.22) their defaults.yaml values are fills that can never
+    # move the mass, radius or period they are derived from -- what their old
+    # `rank: 5` was there to guarantee.  A user value on one is kept in order,
+    # or dropped and reported; it can never silently move a period.
     #
     # They also make the engine FASTER, which is not the reason for them but is
     # worth knowing: resolving a/R* and (through it) esinw early takes an

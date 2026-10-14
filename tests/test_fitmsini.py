@@ -336,9 +336,15 @@ def test_msini_is_sampled_and_mass_derived(msini_model):
 
 
 def test_a_mass_seed_back_solves_into_msini(msini_model):
-    """Eq(msini, mass * sini) at rank 5: the user's mass seed reaches the
-    sampled coordinate (the ledger start of msini is mass x sin i), while the
-    mass keeps the value the user wrote."""
+    """The user's mass seed reaches the sampled coordinate (the ledger start
+    of msini is mass x sin i), while the mass keeps the value the user wrote.
+
+    This used to rest on msini's `rank: 5` (the old engine's Condition B
+    rewrote the lowest-rank symbol of Eq(msini, mass * sini)).  Under the KS
+    rule (review 3.14.22) it is what the roles say: in msini mode the mass
+    is DERIVED, so the user's mass is a value on a derived element -- kept
+    in order -- and the sampled msini, a mere defaults.yaml seed, is
+    determined from it and its default absorbed."""
     system, model = msini_model
     sini = np.sqrt(1.0 - 0.3**2)
     mass0 = system.planet.mass.to_internal(2.0, index=0)
@@ -367,6 +373,28 @@ def test_a_mass_seed_back_solves_into_msini(msini_model):
         for x in f(*[start[v.name] for v in model.value_vars])
     )
     assert mass == pytest.approx(msini / np.sqrt(1.0 - cosi**2), rel=1e-12)
+
+
+def test_a_reported_msini_never_moves_the_mass_or_cos_i(linear_model):
+    """
+    Given a planet whose mass is SAMPLED (linear mode), so msini is only
+      REPORTED, with the user's mass and cos i in the params file,
+    When the relaxation engine resolves the starts,
+    Then the mass and cos i are exactly the user's and msini is derived from
+      them: msini's defaults.yaml start is a fill on a derived element and
+      can move nothing (review 3.14.22; this, too, used to rest on its
+      `rank: 5`).
+    """
+    system, _model = linear_model
+    cm = system.config_manager
+    mass0 = system.planet.mass.to_internal(2.0, index=0)
+    assert cm._last_resolved["planet.0.mass"] == pytest.approx(
+        mass0, rel=1e-12
+    )
+    assert cm._last_resolved["orbit.0.cosi"] == pytest.approx(0.3, rel=1e-12)
+    assert cm._last_resolved["planet.0.msini"] == pytest.approx(
+        mass0 * np.sqrt(1.0 - 0.3**2), rel=1e-9
+    )
 
 
 def test_no_msini_bounds_leak_onto_reported_msini(linear_model):

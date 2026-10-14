@@ -217,7 +217,9 @@ def test_polish_never_returns_a_worse_seed():
 def _toy_param_model():
     """One bounded parameter whose likelihood mode (7.5) is far from its
     initval (2.0) relative to the 0.01-wide likelihood."""
-    p = Parameter(label="toy.x", initval=2.0, lower=0.0, upper=10.0)
+    p = Parameter(
+        label="toy.x", initval=2.0, lower=0.0, upper=10.0, init_scale=1.0
+    )
     with pm.Model() as model:
         xv = p.build_pymc()
         pm.Potential("like", -0.5 * ((xv - 7.5) / 0.01) ** 2)
@@ -2104,7 +2106,9 @@ class _NoGradPeak(Op):
 
 
 def _rounds_model(initval=2.0):
-    p = Parameter(label="toy.x", initval=initval, lower=0.0, upper=10.0)
+    p = Parameter(
+        label="toy.x", initval=initval, lower=0.0, upper=10.0, init_scale=1.0
+    )
     with pm.Model() as model:
         xv = p.build_pymc()
         pm.Potential("like", _NoGradPeak()(pt.reshape(xv, (1,))))

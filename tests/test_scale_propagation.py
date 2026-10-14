@@ -130,11 +130,10 @@ def test_scaleless_solved_target_does_not_crash_the_engine():
     Given a params entry on a derived parameter (orbit a) whose relation
     parents carry no init_scale from any source,
     When the relaxation engine solves it (stage 4 of prepare),
-    Then the solve completes and the entry simply gets no init_scale.
-
-    The user period entry is load-bearing: an initval with no sigma pins the
-    VALUE at PRECEDENCE_USER while leaving period scale-less, which is what drives
-    the propagated scale rank to zero.
+    Then the solve completes.  It once crashed here (KeyError), then left a
+    scale-less; since review 3.14.22 the scale is propagated from whatever
+    the parents' own inputs carry, and still never written into the user's
+    entry.
     """
     # Arrange
     cm = ConfigManager(
@@ -151,8 +150,10 @@ def test_scaleless_solved_target_does_not_crash_the_engine():
     # Assert: the solve ran and a got a start value ...
     entry = cm.user_params["orbit.0.a"]
     assert entry["initval"] is not None
-    # ... but no preliminary scale, which is the handled state: build_pymc
-    # falls back to a fraction of the bound span and the whitening probe
-    # measures the real scale from the data.
+    # ... and, since review 3.14.22, a preliminary scale PROPAGATED to it
+    # from the sampled parents (logP's, the body masses' through the
+    # m_total solver, whose inputs the engine reads off the call).  It lives
+    # in propagated_scales; nothing is written into the user's entry.
     assert "init_scale" not in entry
-    assert cm.propagated_scales.get("orbit.0.a") is None
+    scale = cm.propagated_scales.get("orbit.0.a")
+    assert scale is not None and np.isfinite(scale) and scale > 0

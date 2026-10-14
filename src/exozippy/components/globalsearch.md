@@ -35,12 +35,12 @@ translation into EXOZIPPy parameters.
 
 Not seeded, each for a reason:
 
-- **a/R\* from the transit duration.** `planet.ar` carries `rank: 5` in its defaults.yaml
-  precisely so the relaxation engine's Condition B always rewrites *it* rather than the
-  period, mass or radius it is derived from -- so a hint there is discarded by design.
-  Forcing it through would invert exactly the direction the ranking system exists to
-  protect: a duration-derived a/R\* silently moving a stellar mass. The duration is
-  reported in the log and by the CLI utility instead.
+- **a/R\* from the transit duration.** `planet.ar` is a DERIVED parameter, and a hint
+  on it would be a data-level seed the relaxation engine honors over the period, mass and
+  radius it is derived from (a hint on a derived element is a seed at its tier, review
+  3.14.22) -- a duration-derived a/R\* silently moving a stellar mass, the inversion
+  provenance exists to prevent. The duration is reported in the log and by the CLI
+  utility instead.
 - **K as a hint.** `planet.K` already gets a data-driven hint from
   `RVInstrument._estimate_k_init`, and for a single circular signal `sqrt(2) * std` IS the
   semi-amplitude exactly. Rather than add a second competing hint on the same parameter

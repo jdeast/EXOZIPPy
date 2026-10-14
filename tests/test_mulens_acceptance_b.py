@@ -434,6 +434,15 @@ def test_ob161003_collapse_reconciles_against_the_presplit_recording():
             expected = _u1_span_narrowing_delta(system)
             if abs(delta - expected) <= COLLAPSE_RTOL * abs(before):
                 continue
+        if name == "POT:low_bound.lens.q" and abs(delta) <= 1e-12:
+            # Not a collapse term either: the soft lower bound on the derived
+            # q takes its PRELIMINARY steepness from q's init_scale, which
+            # the relaxation engine now propagates from the body masses
+            # (review 3.14.22) where none existed before.  The start sits
+            # far from the bound, so the term is ~0 either way (2e-23 nats
+            # recorded); whitening.measure_barrier_scales re-measures it
+            # before any sampling.
+            continue
         if name == renorm_name and abs(delta - expected_renorm) <= max(
             COLLAPSE_RTOL * abs(before), 1e-9
         ):

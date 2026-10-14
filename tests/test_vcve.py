@@ -636,6 +636,13 @@ _TRANSIT_PARAMS = {
     "orbit.0.tc": {"initval": 2459634.3},
     "orbit.0.cosi": {"initval": 0.05},
     "planet.0.radius": {"initval": 1.7},
+    # The start these tests were measured at: e ~ 2e-4 at omega = 45 deg.
+    # Under the old engine it came from the sqrt(e) DEFAULTS (vcve carried
+    # rank 5 and absorbed them); under the KS rule (review 3.14.22) the
+    # sampled vcve's own default seeds instead, so the start is stated here,
+    # as a value on the REPORTED sqrt(e) pair that vcve is back-solved from.
+    "orbit.0.secosw": {"initval": 0.01},
+    "orbit.0.sesinw": {"initval": 0.01},
 }
 
 
@@ -1417,15 +1424,22 @@ def test_each_draw_reports_the_branch_it_was_assigned(vcve_transit_fit):
     rng = np.random.default_rng(5)
     n_chains, n_draws = 2, 60
     raw = {}
+    # The raw spread per coordinate that reproduces the PHYSICAL spread
+    # these draws were written at.  A raw unit is one preliminary init_scale,
+    # and those changed with the KS engine (review 3.14.22): vcve's is its
+    # declared 0.1 rather than 0.0034 propagated from the sqrt(e) defaults
+    # (which it no longer absorbs), and the omega direction's whitening scale
+    # is its declared 0.01 rather than the sigma-1 prior width.
+    raw_sigma = {
+        "orbit.vcve_raw": 0.0335,
+        "orbit.xomega_raw": 100.0,
+        "orbit.yomega_raw": 100.0,
+    }
     for rv in model.free_RVs:
         base = np.asarray(start[model.rvs_to_values[rv].name], dtype=float)
         vals = np.broadcast_to(base, (n_chains, n_draws) + base.shape).copy()
-        if rv.name in {
-            "orbit.vcve_raw",
-            "orbit.xomega_raw",
-            "orbit.yomega_raw",
-        }:
-            vals += rng.normal(0.0, 1.0, size=vals.shape)
+        if rv.name in raw_sigma:
+            vals += rng.normal(0.0, raw_sigma[rv.name], size=vals.shape)
         raw[rv.name] = vals
     idata = az.from_dict({"posterior": raw})
     dets = pm.compute_deterministics(
