@@ -23,7 +23,7 @@ from exozippy.components.component import (
     resolve_star_ref,
 )
 from exozippy.components.parameter import Parameter
-from exozippy.constants import ANG_TO_MICRON_CONST, LOGG_CONST
+from exozippy.constants import ANG_TO_MICRON_CONST
 from exozippy.outputs.prose import get_collector
 
 from ..star.physics import calc_logg_from_logmass, calc_luminosity
@@ -1529,7 +1529,7 @@ class SED(Component):
     # which are the user units for all six).
     FLUX_FRACTION_INPUTS = (
         "teffsed",
-        "logmass",
+        "loggsed",
         "feh",
         "av",
         "radiussed",
@@ -1546,9 +1546,9 @@ class SED(Component):
         ``FLUX_FRACTION_INPUTS`` to a ``{star index: value}`` dict covering
         ``star_indices``.  Same physics as ``_predicted_appmag_node``: the
         flux in the band goes as R^2 Teff^4 10^(0.4 BC) / d^2, BC linearly
-        interpolated on the grid at loggsed (from logmass and radiussed,
-        as star.loggsed is) with coordinates clipped to it, as a start value
-        only needs to be close.
+        interpolated on the grid with coordinates clipped to it, as a start
+        value only needs to be close.  Every input is a relaxation-engine
+        symbol (sed/symbolic_physics.py), so ``probe_start`` reads them all.
         """
         from scipy.interpolate import RegularGridInterpolator as _RGI
 
@@ -1562,14 +1562,9 @@ class SED(Component):
         interp = _RGI(axes, bc_values[..., col])
         flux = {}
         for j in star_indices:
-            loggsed = (
-                LOGG_CONST
-                + values["logmass"][j]
-                - 2.0 * np.log10(values["radiussed"][j])
-            )
             coords = [
                 values["teffsed"][j],
-                loggsed,
+                values["loggsed"][j],
                 values["feh"][j],
                 values["av"][j],
             ]
