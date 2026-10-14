@@ -23,7 +23,7 @@ from exozippy.components.component import (
     resolve_star_ref,
 )
 from exozippy.components.parameter import Parameter
-from exozippy.constants import ANG_TO_MICRON_CONST, LOGG_CONST
+from exozippy.constants import ANG_TO_MICRON_CONST
 from exozippy.outputs.prose import get_collector
 
 from ..star.physics import calc_logg_from_logmass, calc_luminosity
@@ -778,12 +778,6 @@ class SED(Component):
         if self.sedfile is None:
             raise ValueError(f"sed is missing the required 'file' key")
 
-        model_yaml_file = (
-            f"{self.model_root}/{self.sedmodel}/BCs/{self.sedmodel}.grid.yaml"
-        )
-        with open(model_yaml_file, "r") as f:
-            self._model_yaml = yaml.safe_load(f)
-
         self._ensure_model_data()
         self._process_SED_yaml()
 
@@ -859,6 +853,15 @@ class SED(Component):
                 grid["av_pts"],
             ],
             values=grid["bc_values"],
+        )
+        # The same grid as numpy, for start-value solvers that need an SED
+        # prediction before any graph exists (predict_flux_fraction_at).
+        self._bc_grid_np = (
+            [
+                np.asarray(grid[k], dtype=float)
+                for k in ("teff_pts", "logg_pts", "feh_pts", "av_pts")
+            ],
+            np.asarray(grid["bc_values"], dtype=float),
         )
 
     # ------------------------------------------------------------------
@@ -1261,9 +1264,13 @@ class SED(Component):
             ):
                 _mark("blend tie", range(n))
 
-        # 4. transit dilution, 5. absolute astrometry: conservative.
+        # 4. transit seddeblend, 5. absolute astrometry: conservative.
         if in_topology(system, "band") is not None:
-            if _cfgs(in_topology(system, "transit")):
+            from exozippy.components.transit.transit import Transit
+
+            if Transit.sed_reads_dilution(
+                _cfgs(in_topology(system, "transit")), n
+            ):
                 _mark("transit dilution", range(n))
             if any(
                 "band" in c
@@ -1490,16 +1497,82 @@ class SED(Component):
         F_sum = pt.sum(10 ** (-0.4 * m[idx]))
         return -2.5 * pt.log10(F_sum)
 
-    def predict_flux_fraction(self, star_idx, filter_key, system):
+    def predict_flux_fraction(
+        self, star_idx, filter_key, system, star_indices=None
+    ):
         """
-        Fraction of the total flux of all modeled stars contributed by
-        one star in one filter. Used for transit deblending
-        (depth dilution) and the astrometric photocenter fluxfrac.
+        Fraction of the total flux of the stars ``star_indices`` (default:
+        all modeled stars) contributed by one star in one filter. Used for
+        the transit seddeblend prior and the astrometric photocenter
+        fluxfrac.  ``star_indices`` must include ``star_idx``.
         """
         col = self.filter_column(filter_key)
         m = self._predicted_appmag_node(system)[:, col]  # (nstars,)
         F = 10 ** (-0.4 * m)
-        return F[star_idx] / pt.sum(F)
+        if star_indices is None:
+            return F[star_idx] / pt.sum(F)
+        if star_idx not in star_indices:
+            raise ValueError(
+                f"predict_flux_fraction: star {star_idx} is not among "
+                f"star_indices {list(star_indices)}"
+            )
+        idx = np.asarray(list(star_indices), dtype=int)
+        return F[star_idx] / pt.sum(F[idx])
+
+    # Star values predict_flux_fraction_at reads, per star (internal units,
+    # which are the user units for all six).
+    FLUX_FRACTION_INPUTS = (
+        "teffsed",
+        "loggsed",
+        "feh",
+        "av",
+        "radiussed",
+        "distance",
+    )
+
+    def predict_flux_fraction_at(
+        self, star_idx, filter_key, values, star_indices
+    ):
+        """``predict_flux_fraction`` evaluated numerically, with no graph.
+
+        For start-value solvers (the relaxation engine runs at stage 4, long
+        before the SED's nodes exist).  ``values`` maps each name in
+        ``FLUX_FRACTION_INPUTS`` to a ``{star index: value}`` dict covering
+        ``star_indices``.  Same physics as ``_predicted_appmag_node``: the
+        flux in the band goes as R^2 Teff^4 10^(0.4 BC) / d^2, BC linearly
+        interpolated on the grid with coordinates clipped to it, as a start
+        value only needs to be close.  Every input is a relaxation-engine
+        symbol (sed/symbolic_physics.py), so ``probe_start`` reads them all.
+        """
+        from scipy.interpolate import RegularGridInterpolator as _RGI
+
+        if star_idx not in star_indices:
+            raise ValueError(
+                f"predict_flux_fraction_at: star {star_idx} is not among "
+                f"star_indices {list(star_indices)}"
+            )
+        col = self.filter_column(filter_key)
+        axes, bc_values = self._bc_grid_np
+        interp = _RGI(axes, bc_values[..., col])
+        flux = {}
+        for j in star_indices:
+            coords = [
+                values["teffsed"][j],
+                values["loggsed"][j],
+                values["feh"][j],
+                values["av"][j],
+            ]
+            coords = [
+                float(np.clip(c, ax[0], ax[-1])) for c, ax in zip(coords, axes)
+            ]
+            bc = float(interp([coords])[0])
+            flux[j] = (
+                values["radiussed"][j] ** 2
+                * values["teffsed"][j] ** 4
+                * 10 ** (0.4 * bc)
+                / values["distance"][j] ** 2
+            )
+        return flux[star_idx] / sum(flux.values())
 
     # ------------------------------------------------------------------
     # 4) build_likelihood — Normal likelihood over the .sed filter rows
@@ -1746,7 +1819,14 @@ class SED(Component):
         #   _compiled_mag_predictors : (nstars, nfilters) per-star app mags
         #   _compiled_combined_mag   : (nfilters,) blended/diff row mags
         #   _compiled_logg_calc      : (nstars,) loggsed
-        m_star_node = self._predicted_appmag_node(system)[:, : self.nfilters]
+        # In the model's context: with no SED rows and no other reader
+        # (a transit with seddeblend: false), nothing built the magnitude
+        # matrix at stage 7, so it is built here and may have to
+        # materialize star nodes.
+        with model:
+            m_star_node = self._predicted_appmag_node(system)[
+                :, : self.nfilters
+            ]
         loggsed_node = star.loggsed.value
 
         # Retain a symbolic model node so plot_data can derive param_deps
@@ -2474,74 +2554,3 @@ class SED(Component):
                 key=f"{self.prefix}.severed",
                 rank=20.5,
             )
-
-    def _add_prose(self, system):
-        """Declare the modeling-draft sentences next to the terms they describe.
-
-        Not ``StellarRelation._add_relation_prose``: that sentence is built
-        around "the empirical relations of <citation>", and this is a track
-        interpolation with a systematic floor and a reparameterized age prior
-        -- three facts, not one.  The declare-at-the-implementation-site rule
-        is the same (outputs/prose.py).
-        """
-        from ...outputs.prose import get_collector, join_names
-        from ...outputs.texutils import latex_escape
-
-        prose = get_collector(system)
-        stars = [system.star.names[si] for si in self.star_indices]
-        noun = "star" if len(stars) == 1 else "stars"
-        names = join_names(latex_escape(s) for s in stars)
-        filters = join_names(latex_escape(f) for f in self.filters)
-        self.citation = self._model_yaml.get("citation", "")
-
-        prose.add(
-            f"We include observations of {noun} {names} from the following {len(self.filters)} photometric filters: {filters}. ",
-            section="data",
-            key=f"{self.prefix}.filters",
-            rank=21.0,
-        )
-
-        if "MIST" in self.sedmodel:
-            prose.add(
-                f"We model the SED of the {noun} {names} with the {self.sedmodel} "
-                rf"pre-computed bolometric correction tables \citep{{{self.citation}}}. ",
-                section="stellar",
-                key=f"{self.prefix}.sed_model",
-                rank=20.0,
-            )
-        if "NextGen" in self.sedmodel:
-            prose.add(
-                f"We model the SED of the {noun} {names} with pre-computed bolometric "
-                r"correction tables \citep{Eastman:2026bc} "
-                rf"based on the {self.sedmodel} stellar atmospheric models \citep{{{self.citation}}}, "
-                r"which used an $R_V = 3.1$ reddening law \citep{Cardelli:1989}, and "
-                r"SVO filter transmission curves (DEAL WITH CITING THIS LATER). ",
-                section="stellar",
-                key=f"{self.prefix}.sed_model",
-                rank=20.0,
-            )
-
-        prose.add(
-            "When modeling an SED, we include two additional sampled parameters for each star: "
-            r"$R_{\star, \rm SED}$ and $T_{\rm eff, SED}$, which are the stellar radius and effective "
-            "temperature as inferred from the SED. These parameters are linked to the primary stellar parameters via "
-            "a Gaussian penalty whose width is set by an estimation of the systematic uncertainty in measurements of "
-            r"effective temperature and bolometric flux, which is calculated using $R_{\star, \rm SED}$, from the SED. "
-            "By default, these systematic uncertainties are set to 0.02 and 0.024 for "
-            r"$\sigma_{T_{\rm eff, sys}}$ and $\sigma_{F_{\rm Bol, sys}}$, respectively."
-            "We also allow for the possibility that the reported errors on the photometric measurements are "
-            r"underestimated, and include a free parameter, $\sigma_{\rm SED}$ that scales the reported errors. ",
-            section="sampling",
-            key=f"{self.prefix}.floor",
-            rank=21.0,
-        )
-
-        prose.add(
-            "Because EEP is not uniformly distributed in time, we added the "
-            r"$\log|{\rm d}\,{\rm Age}/{\rm d}\,{\rm EEP}|$ Jacobian to the "
-            "log-likelihood, which makes the uniform prior on EEP a uniform "
-            "prior on stellar age. ",
-            section="priors",
-            key=f"{self.prefix}.eep_jacobian",
-            rank=30.0,
-        )

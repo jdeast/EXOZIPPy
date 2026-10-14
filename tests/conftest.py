@@ -169,6 +169,7 @@ def write_synthetic_mist_grid(
     model="MISTv2.5",
     alpha=0.0,
     vvcrit=0.0,
+    at_eep=None,
 ):
     """Write a tiny MIST track grid and return the ``model_root`` for it.
 
@@ -183,15 +184,26 @@ def write_synthetic_mist_grid(
     dEEP_dage is smallest in the middle (the "main sequence"), which is what
     the EEP -> age Jacobian is supposed to reward.
 
+    ``at_eep`` is ``{column: {eep: value}}``: the value every track carries
+    in that column at that EEP, replacing the smooth default -- for pinning
+    the Jacobian's clip against a table defect, or the dragon penalty.
+
     Returns the directory to pass as the component's ``model_root:`` -- the
     ``MIST`` directory itself (``<model_root>/<model>/EEPs``), mirroring
-    ``mist_grid.DEFAULT_MIST_MODEL_ROOT``.
+    ``mist_grid.DEFAULT_MIST_MODEL_ROOT``.  Both file paths come from
+    ``mist_grid`` (``grid_path``, ``grid_yaml_path``), the component's own
+    spelling of them, never a copy (review 4.8.4).
     """
     import pandas as pd
 
+    from exozippy.components.evolutionarymodel import mist_grid
+
     mist_root = os.path.join(os.fspath(root), "MIST")
-    eep_dir = os.path.join(mist_root, model, "EEPs")
-    os.makedirs(eep_dir, exist_ok=True)
+    parquet = mist_grid.grid_path(
+        model=model, alpha=alpha, vvcrit=vvcrit, model_root=mist_root
+    )
+    parquet.parent.mkdir(parents=True, exist_ok=True)
+    at_eep = dict(at_eep or {})
 
     n_eep = len(eeps)
     rows = []
@@ -210,19 +222,21 @@ def write_synthetic_mist_grid(
                         "radius_mist": float(mass) * (1.0 + 3.0 * frac),
                         "teff_mist": 6000.0 * mass**0.5 - 1500.0 * frac,
                         "age_mist": 1.0e9 * (0.1 + 10.0 * frac) / mass**2,
-                        "dEEP_dage": speed,
-                        "here_be_dragons": 0.0,
+                        "dEEP_dage": at_eep.get("dEEP_dage", {}).get(
+                            eep, speed
+                        ),
+                        "here_be_dragons": at_eep.get(
+                            "here_be_dragons", {}
+                        ).get(eep, 0.0),
                     }
                 )
 
-    fname = f"afe_p{abs(alpha) * 10:.0f}_vvcrit{vvcrit:0.1f}.grid.parquet"
-    pd.DataFrame(rows).to_parquet(
-        os.path.join(eep_dir, fname), engine="pyarrow", index=False
-    )
+    pd.DataFrame(rows).to_parquet(parquet, engine="pyarrow", index=False)
     # The component reads <model>.grid.yaml beside the parquet for the prose
     # citation (see models/MIST/MISTv2.5/EEPs/MISTv2.5.grid.yaml); only the
     # keys it consumes are written.
-    with open(os.path.join(eep_dir, f"{model}.grid.yaml"), "w") as f:
+    yaml_path = mist_grid.grid_yaml_path(model=model, model_root=mist_root)
+    with open(yaml_path, "w") as f:
         f.write(f'model: {model}\ncitation: "Dotter:2016, Choi:2016"\n')
     return mist_root
 

@@ -51,19 +51,19 @@ def _approx(value):
     return pytest.approx(value, abs=0.04)
 
 
-def test_the_defaults_are_the_evolutionary_models_three_levels():
+def test_the_bandwidth_default_is_the_evolutionary_models():
     """
-    Given no bandwidth or probabilities,
-    When a Contour is built,
-    Then it keeps the evolutionary model's own contour plot unchanged:
-      bandwidth 0.7 and the 99.7%, 95% and 68% levels, widest first.
+    Given no bandwidth,
+    When a Contour is built with three levels,
+    Then the bandwidth is the evolutionary model's 0.7 and the levels come
+      out in increasing density.  The probabilities have no default: each
+      figure states its own ladder (the MIST plot's exact 1/2/3 sigma).
     """
     rng = np.random.default_rng(4)
     x, y = rng.normal(size=(2, 500))
 
-    contour = Contour(x, y, x_err=1.0, y_err=1.0)
+    contour = Contour(x, y, x_err=1.0, y_err=1.0, probs=(0.997, 0.95, 0.68))
 
     assert contour.bw_method == 0.7
-    assert contour.probs == (0.997, 0.95, 0.68)
     assert len(contour.levels) == 3
     assert list(contour.levels) == sorted(contour.levels)
