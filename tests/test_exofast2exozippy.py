@@ -407,6 +407,20 @@ def test_section_headers_re_point_stale_indices(tmp_path, monkeypatch):
     assert any("names no transit" in w for w in warnings)
 
 
+def test_a_transit_header_is_matched_on_its_band(tmp_path, monkeypatch):
+    """
+    Given priors under '# FLWO UT 2019-01-01 (z')' -- the second of two
+      FLWO files from that night (Sloang is transit 0, Sloanz transit 1),
+      written with the index of the first,
+    When it is converted,
+    Then they land on the z' file, not on the first FLWO file of the night.
+    """
+    priors = "teff 5700 100\n# FLWO UT 2019-01-01 (z')\nf0_0 1.003\n"
+    _, params, _, _ = _convert(tmp_path, monkeypatch, _DRIVER, priors=priors)
+    assert params["transit.FLWO_UT20190101_Sloanz.baseline"]["initval"] == 1.003
+    assert "transit.FLWO_UT20190101_Sloang.baseline" not in params
+
+
 def test_priorfile_override_replaces_the_drivers(tmp_path, monkeypatch):
     """
     Given --priorfile naming another file,

@@ -457,7 +457,9 @@ def _section_index(p, axis, transits, bands, rvs):
     instance.  Its section headers do not drift, so where one parses as a
     label of this prior's axis it decides.  Returns -1 when the header IS
     such a label but names no instance of this conversion (a dataset not in
-    this fit).
+    this fit).  A transit header is matched on its band as well as its
+    telescope and night: two filters observed simultaneously by one
+    telescope (LCO-SAAO-1m0 in g' and i') share the other two.
     """
     sec = p.get("section")
     if not sec:
@@ -467,8 +469,13 @@ def _section_index(p, axis, transits, bands, rvs):
         if not m:
             return None
         tel, date = m.group(1), m.group(2) + m.group(3) + m.group(4)
+        band = m.group(5)
         for i, t in enumerate(transits):
-            if t.get("telescope") == tel and t.get("date") == date:
+            if (
+                t.get("telescope") == tel
+                and t.get("date") == date
+                and band in (t["band"], _EXOFAST_PRETTY_BANDS.get(t["band"]))
+            ):
                 return i
         return -1
     if axis == "band":
