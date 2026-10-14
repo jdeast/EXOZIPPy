@@ -58,7 +58,11 @@ def _track_table(pairs, eeps=EEPS, **overrides):
     """A per-(mass, initfeh, EEP)-row grid table, the shape the parquet has.
 
     Every column the loader reads is present; values are arbitrary but
-    distinct so a mis-indexed reshape shows up.
+    distinct so a mis-indexed reshape shows up -- including across MASS:
+    teff carries a log10(mass) term, so the tracks either side of a mass
+    cell differ and a reversed mass axis fails the interpolation, clamp and
+    index-order tests (review 7.8.1 (a); with every column mass-independent
+    they passed against a reversed axis).  The term is zero at 1 solMass.
     """
     rows = []
     for mass, feh in pairs:
@@ -70,7 +74,7 @@ def _track_table(pairs, eeps=EEPS, **overrides):
                     "EEP": int(eep),
                     "feh_mist": float(feh) + 0.01 * k,
                     "radius_mist": 1.0 + 0.1 * k,
-                    "teff_mist": 5000.0 + 100.0 * k,
+                    "teff_mist": 5000.0 + 100.0 * k + 200.0 * np.log10(mass),
                     "age_mist": 1.0e9 * (k + 1),
                     "dEEP_dage": 1.0e-9 * (k + 1),
                     "here_be_dragons": 0.0,
@@ -310,17 +314,23 @@ def test_an_explicit_model_root_is_never_auto_populated(monkeypatch, tmp_path):
 def test_an_unpublished_model_release_raises(monkeypatch, tmp_path):
     """
     Given only MISTv2.5 is published on Zenodo,
-    When a MISTv1.2 grid is requested and is not on disk,
-    Then it raises pointing at the local build workflow.
+    When a MISTv1.2 grid is requested from the DEFAULT root and is not on
+      disk,
+    Then it raises pointing at the local build workflow, without the
+      explicit-root wording.  This patched DEFAULT_MODEL_ROOT, which the
+      resolver never reads, so it exercised the explicit-root branch and not
+      the one it names (review 7.8.1 (d)).
     """
     # Arrange
-    monkeypatch.setattr(mist_grid, "DEFAULT_MODEL_ROOT", tmp_path / "models")
+    root = tmp_path / "MIST"
+    monkeypatch.setattr(mist_grid, "DEFAULT_MIST_MODEL_ROOT", root)
 
     # Act / Assert
     with pytest.raises(
         FileNotFoundError, match="only 'MISTv2.5' is published"
-    ):
-        mist_grid._resolve_grid_file("MISTv1.2", 0.0, 0.0, tmp_path / "models")
+    ) as err:
+        mist_grid._resolve_grid_file("MISTv1.2", 0.0, 0.0, root)
+    assert "never auto-populated" not in str(err.value)
 
 
 def test_the_v25_filename_is_not_reimplemented_here():
@@ -547,6 +557,9 @@ def test_the_dense_array_is_indexed_by_mass_then_feh_then_eep():
     np.testing.assert_allclose(grid["eep_pts"], [1.0, 2.0, 3.0])
     feh = grid["values"][:, :, :, mist_grid.OUTPUT_INDEX["feh_mist"]]
     np.testing.assert_allclose(feh[0, 1, :], [0.5, 0.51, 0.52])
+    teff = grid["values"][:, :, :, mist_grid.OUTPUT_INDEX["teff_mist"]]
+    np.testing.assert_allclose(teff[0, 0, :], [5000.0, 5100.0, 5200.0])
+    np.testing.assert_allclose(teff[1, 0, :], [5200.0, 5300.0, 5400.0])
 
 
 def test_ages_are_converted_to_gyr():
@@ -2105,3 +2118,588 @@ def test_the_kiel_chart_declares_its_summary_window_and_age_marks(built):
     for mark in hints["marks"]:
         assert t_lo <= mark["x"] <= t_hi and g_lo <= mark["y"] <= g_hi
         assert mark["text"].endswith(" Gyr")
+
+
+# ----------------------------------------------------------------------
+# The built potentials' VALUES (review 7.8.1 (b), (f))
+# ----------------------------------------------------------------------
+
+# Every track's dEEP_dage at EEP 300 is +2**32 (the generator's sentinel)
+# and at EEP 605 is effectively zero (an interpolated sign flip): the two
+# defects the Jacobian's clip exists for.  EEP 605 also carries a dragon
+# flag of 2.
+_DEFECT_AT_EEP = {
+    "dEEP_dage": {300: 2.0**32, 605: 1e-40},
+    "here_be_dragons": {605: 2.0},
+}
+
+
+@pytest.fixture(scope="module")
+def defect_root(tmp_path_factory):
+    from conftest import write_synthetic_mist_grid
+
+    return write_synthetic_mist_grid(
+        tmp_path_factory.mktemp("mist_defects"), at_eep=_DEFECT_AT_EEP
+    )
+
+
+def _potentials_at_start(model_root, eep, block=None):
+    """Each named potential's value at the start of a one-star system whose
+    EEP starts at ``eep``, plus the system and model."""
+    from exozippy.system import System
+
+    config = {
+        "sampler": {"draws": 10},
+        "star": [{"name": "A"}],
+        "evolutionarymodel": [
+            {"star": "A", "model_root": model_root, **(block or {})}
+        ],
+    }
+    system = System(config, {"star.A.eep": {"initval": float(eep)}})
+    system.prepare()
+    model = system.build_model()
+    point = model.initial_point()
+    names = [p.name for p in model.potentials] + [
+        f"evolutionarymodel.{q}_pred" for q in ("feh", "radius")
+    ]
+    values = model.compile_fn(
+        model.replace_rvs_by_values([model[n] for n in names]), point_fn=True
+    )(point)
+    return dict(zip(names, (np.asarray(v) for v in values))), system
+
+
+def test_the_built_jacobian_clips_a_sentinel_derivative(defect_root):
+    """
+    Given a grid whose dEEP_dage is +2**32 at EEP 300,
+    When the model's own eep_age_jacobian potential is evaluated with the
+      star starting there,
+    Then it is -log(DEEP_DAGE_MAX), the clip -- not -log(2**32).
+
+    The clip used to be tested only against a copy of its formula in this
+    file, so reverting the model to a bare floor left the tests green.
+    """
+    values, _ = _potentials_at_start(defect_root, 300.0)
+
+    assert float(values["evolutionarymodel.eep_age_jacobian"]) == (
+        pytest.approx(-np.log(DEEP_DAGE_MAX), rel=1e-6)
+    )
+
+
+def test_the_built_jacobian_clips_a_vanishing_derivative(defect_root):
+    """
+    Given a grid whose dEEP_dage is ~0 at EEP 605,
+    When the model's eep_age_jacobian is evaluated with the star there,
+    Then it is -log(DEEP_DAGE_MIN): a bounded reward, not the +69 nats a
+      1e-30 floor paid for landing on a table defect.
+    """
+    values, _ = _potentials_at_start(defect_root, 605.0)
+
+    assert float(values["evolutionarymodel.eep_age_jacobian"]) == (
+        pytest.approx(-np.log(DEEP_DAGE_MIN), rel=1e-6)
+    )
+
+
+def test_user_floors_and_dragon_weight_reach_the_built_potentials(
+    defect_root,
+):
+    """
+    Given a block setting feh_floor 0.1 (absolute dex), radius_floor 0.05
+      (a fraction of the prediction) and dragon_penalty_weight 3, with the
+      star starting on a dragon flag of 2,
+    When the built potentials are evaluated at the start,
+    Then feh_prior is the NORMALIZED Gaussian with sigma 0.1 dex,
+      radius_prior has sigma 0.05 x the predicted radius, and the dragon
+      penalty is -3 x 2.
+
+    Pins normalize=True and the absolute-dex feh sigma (nothing evaluated a
+    `*_prior` value before), and the three keys through a config rather than
+    set as attributes.
+    """
+    block = {
+        "feh_floor": 0.1,
+        "radius_floor": 0.05,
+        "dragon_penalty_weight": 3.0,
+    }
+    values, system = _potentials_at_start(defect_root, 605.0, block)
+    star = system.star
+    feh = float(np.ravel(star.feh.initval)[0])
+    radius = float(np.ravel(star.radius.initval)[0])
+    feh_pred = float(np.ravel(values["evolutionarymodel.feh_pred"])[0])
+    radius_pred = float(np.ravel(values["evolutionarymodel.radius_pred"])[0])
+    sigma_r = 0.05 * radius_pred
+
+    assert float(values["evolutionarymodel.feh_prior"]) == pytest.approx(
+        -0.5 * ((feh - feh_pred) / 0.1) ** 2 - np.log(0.1), rel=1e-9
+    )
+    assert float(values["evolutionarymodel.radius_prior"]) == pytest.approx(
+        -0.5 * ((radius - radius_pred) / sigma_r) ** 2 - np.log(sigma_r),
+        rel=1e-9,
+    )
+    assert float(values["evolutionarymodel.dragon_penalty"]) == pytest.approx(
+        -3.0 * 2.0, rel=1e-6
+    )
+
+
+def test_a_user_floor_replaces_the_default_only_for_its_own_instance(
+    model_root,
+):
+    """
+    Given two stars, A with radius_floor 0.2 and B with the default,
+    When the model is built,
+    Then A's floor is 0.2 and B's is the mass-dependent default -- and the
+      vector is assembled with set_subtensor, so B's default carries no
+      pt.where branch (review 2.8.14, CLAUDE.md's where-trap rule).
+    """
+    from pytensor.graph.traversal import ancestors
+    from pytensor.scalar.basic import Switch
+    from pytensor.tensor.elemwise import Elemwise
+
+    from exozippy.system import System
+
+    system = System(
+        {
+            "sampler": {"draws": 10},
+            "star": [{"name": "A"}, {"name": "B"}],
+            "evolutionarymodel": [
+                {"star": "A", "model_root": model_root, "radius_floor": 0.2},
+                {"star": "B", "model_root": model_root},
+            ],
+        },
+        {},
+    )
+    system.prepare()
+    system.build_model()
+    comp = system.active_components["evolutionarymodel"]
+    default = physics.calc_mist_percent_error(
+        pt.as_tensor_variable([1.0, 2.0])
+    )
+
+    floor = comp._floor_vector(comp.radius_floor, default)
+
+    np.testing.assert_allclose(
+        floor.eval(),
+        [0.2, float(physics.calc_mist_percent_error(2.0).eval())],
+    )
+    assert not any(
+        v.owner is not None
+        and isinstance(v.owner.op, Elemwise)
+        and isinstance(v.owner.op.scalar_op, Switch)
+        for v in ancestors([floor])
+    )
+
+
+def test_a_user_entry_frees_a_pinned_unmodeled_star(model_root):
+    """
+    Given two stars and a block naming only A,
+    When B's eep is left alone, and again when the params file gives it a
+      prior,
+    Then B's eep is pinned the first time and sampled the second: the pin
+      goes through the override channel, which layers UNDER the params file.
+    """
+    from exozippy.system import System
+
+    def eep_sampled(user_params):
+        system = System(
+            {
+                "sampler": {"draws": 10},
+                "star": [{"name": "A"}, {"name": "B"}],
+                "evolutionarymodel": [{"star": "A", "model_root": model_root}],
+            },
+            user_params,
+        )
+        system.prepare()
+        system.build_model()
+        return system.star.eep.is_sampled.tolist()
+
+    assert eep_sampled({}) == [True, False]
+    freed = {"star.B.eep": {"initval": 400.0, "sigma": 50.0}}
+    assert eep_sampled(freed) == [True, True]
+
+
+def test_a_star_asking_for_both_models_warns_through_prepare(
+    model_root, caplog
+):
+    """
+    Given a star with `parsec: True` (and `mist:` at its True default),
+    When a system tying it to the tracks is prepared,
+    Then it warns that PARSEC is ignored -- through System.prepare, not only
+      by calling the check directly.
+    """
+    from exozippy.system import System
+
+    system = System(
+        {
+            "sampler": {"draws": 10},
+            "star": [{"name": "A", "parsec": True}],
+            "evolutionarymodel": [{"star": "A", "model_root": model_root}],
+        },
+        {},
+    )
+    with caplog.at_level(logging.WARNING):
+        system.prepare()
+
+    assert "only the MIST tracks are implemented, so PARSEC is ignored" in (
+        caplog.text
+    )
+
+
+def test_a_start_off_the_grid_is_refused_at_the_grids_bounds(model_root):
+    """
+    Given a user initfeh start of 0.8 dex on a grid spanning [-0.5, 0.5],
+    When the model is built,
+    Then the build refuses the start against the GRID's extent, which
+      reached star.initfeh through add_override.
+
+    This component used to carry a `_warn_outside_grid` that was meant to
+    name itself as the bound's source first; it ran in build_likelihood,
+    after stage 6 had already refused the start, so it could never fire and
+    was removed.
+    """
+    from exozippy.system import System
+
+    system = System(
+        {
+            "sampler": {"draws": 10},
+            "star": [{"name": "A"}],
+            "evolutionarymodel": [{"star": "A", "model_root": model_root}],
+        },
+        {"star.A.initfeh": {"initval": 0.8}},
+    )
+    system.prepare()
+
+    with pytest.raises(
+        ValueError,
+        match=r"star\.A\.initfeh: start 0\.8 dex is outside its bounds "
+        r"\[-0\.5, 0\.5\]",
+    ):
+        system.build_model()
+
+
+def test_load_mist_grid_end_to_end_on_a_defective_grid(tmp_path, caplog):
+    """
+    Given a grid parquet on disk with a missing (mass, initfeh) track, a
+      hydrogen-exhausted feh_mist = 30.0 row, and a run of +1 yr bumped
+      duplicate ages,
+    When load_mist_grid reads it,
+    Then the hole is trimmed with a warning, the 30.0 survives unchanged,
+      the bumped tail is flagged here_be_dragons, and the interpolator
+      evaluates.  Each was tested only on _assemble_grid / the trim alone.
+    """
+    eeps = (1, 2, 3, 4, 5)
+    pairs = [(m, f) for m in (1.0, 2.0, 3.0) for f in (0.0, 0.5, 1.0)]
+    df = _track_table(pairs[:-1], eeps=eeps)  # no (3.0, 1.0) track
+    track = (df["mass"] == 1.0) & (df["initfeh"] == 0.0)
+    df.loc[track, "age_mist"] = [1.0e9, 2.0e9, 3.0e9, 3.0e9 + 1.0, 3.0e9 + 2.0]
+    df.loc[track & (df["EEP"] == 5), "feh_mist"] = (
+        mist_grid.FEH_HYDROGEN_EXHAUSTED
+    )
+    root = tmp_path / "MIST"
+    path = mist_grid.grid_path(model_root=root)
+    path.parent.mkdir(parents=True)
+    df.to_parquet(path, engine="pyarrow", index=False)
+
+    with caplog.at_level(logging.WARNING):
+        grid = mist_grid.load_mist_grid(model_root=root)
+
+    assert "trimmed to a complete rectangle" in caplog.text
+    dropped = grid["dropped"]
+    assert dropped["dropped_mass"] + dropped["dropped_initfeh"] in (
+        [3.0],
+        [1.0],
+    )
+    assert grid["logmass_pts"][0] == 0.0 and grid["initfeh_pts"][0] == 0.0
+    out = mist_grid.OUTPUT_INDEX
+    values = grid["values"]
+    assert values[0, 0, 4, out["feh_mist"]] == mist_grid.FEH_HYDROGEN_EXHAUSTED
+    # The two bumped duplicates (EEPs 4, 5) are the unresolved tail.
+    assert np.all(values[0, 0, 3:, out["here_be_dragons"]] > 0)
+    assert np.all(values[0, 0, :3, out["here_be_dragons"]] == 0)
+    point = pt.as_tensor_variable(np.array([[0.1, 0.25, 2.5]]))
+    assert np.all(np.isfinite(grid["interpolator"].evaluate(point).eval()))
+
+
+# ----------------------------------------------------------------------
+# The grid's metadata yaml and the prose (reviews 4.8.4, 2.8.13 (i))
+# ----------------------------------------------------------------------
+
+
+def test_the_grid_yaml_sits_beside_the_grids_it_describes():
+    """
+    Given a MIST model release,
+    When the paths of its grid parquet and its metadata yaml are asked for,
+    Then both are in the same EEPs/ directory, spelled once in mist_grid
+      (load_data used to hand-build the yaml path).
+    """
+    root = Path("/models/MIST")
+    parquet = mist_grid.grid_path(model="MISTv2.5", model_root=root)
+    yaml_path = mist_grid.grid_yaml_path(model="MISTv2.5", model_root=root)
+
+    assert yaml_path == root / "MISTv2.5" / "EEPs" / "MISTv2.5.grid.yaml"
+    assert yaml_path.parent == parquet.parent
+    assert mist_grid.grid_yaml_path(model_root=None).parent == (
+        mist_grid.grid_path(model_root=None).parent
+    )
+
+
+def test_each_model_release_is_cited_for_its_own_stars(tmp_path):
+    """
+    Given two stars whose instances name grids with different citations,
+    When the model is built,
+    Then the draft cites each model's papers for its own star -- a single
+      attribute overwritten per instance cited only the last one.
+    """
+    from conftest import write_synthetic_mist_grid
+    from exozippy.outputs.prose import get_collector
+    from exozippy.system import System
+
+    root_a = write_synthetic_mist_grid(tmp_path / "a")
+    root_b = write_synthetic_mist_grid(tmp_path / "b", model="MISTv9.9")
+    yaml_b = mist_grid.grid_yaml_path(model="MISTv9.9", model_root=root_b)
+    yaml_b.write_text('model: MISTv9.9\ncitation: "Eastman:2019"\n')
+    system = System(
+        {
+            "sampler": {"draws": 10},
+            "star": [{"name": "A"}, {"name": "B"}],
+            "evolutionarymodel": [
+                {"star": "A", "model_root": root_a},
+                {"star": "B", "model_root": root_b, "model": "MISTv9.9"},
+            ],
+        },
+        {},
+    )
+    system.prepare()
+    system.build_model()
+
+    text = " ".join(s.text for s in get_collector(system).sentences())
+    assert (
+        r"We modeled the star A with the MISTv2.5 evolutionary tracks "
+        r"\citep{Dotter:2016, Choi:2016} and the star B with the MISTv9.9 "
+        r"evolutionary tracks \citep{Eastman:2019}, interpolating"
+    ) in text
+
+
+def test_a_grid_yaml_without_a_citation_raises(tmp_path):
+    """
+    Given a model tree whose grid yaml has no `citation:`,
+    When the component loads it,
+    Then it raises naming the file rather than citing nothing.
+    """
+    from conftest import write_synthetic_mist_grid
+    from exozippy.system import System
+
+    root = write_synthetic_mist_grid(tmp_path)
+    mist_grid.grid_yaml_path(model_root=root).write_text("model: MISTv2.5\n")
+    system = System(
+        {
+            "sampler": {"draws": 10},
+            "star": [{"name": "A"}],
+            "evolutionarymodel": [{"star": "A", "model_root": root}],
+        },
+        {},
+    )
+
+    with pytest.raises(ValueError, match="MISTv2.5.grid.yaml has no"):
+        system.prepare()
+
+
+# ----------------------------------------------------------------------
+# Failures surface (reviews 2.8.11, 1.8.8 (b), (c))
+# ----------------------------------------------------------------------
+
+
+def test_a_kiel_compile_failure_raises_instead_of_dropping_the_chart(
+    model_root, monkeypatch
+):
+    """
+    Given the Kiel node fails to compile,
+    When the model is built,
+    Then the build raises -- it used to log a warning and ship the fit with
+      no Kiel PDF, GUI chart or paper figure.
+    """
+    import pytensor
+
+    from exozippy.system import System
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("kiel compile exploded")
+
+    system = System(
+        {
+            "sampler": {"draws": 10},
+            "star": [{"name": "A"}],
+            "evolutionarymodel": [{"star": "A", "model_root": model_root}],
+        },
+        {},
+    )
+    system.prepare()
+    model = system.build_model()
+    comp = system.active_components["evolutionarymodel"]
+    monkeypatch.setattr(pytensor, "function", broken)
+
+    with pytest.raises(RuntimeError, match="kiel compile exploded"):
+        comp.compile_plotters(model, system)
+
+
+def test_a_summary_shorter_than_the_star_vector_raises():
+    """
+    Given a vector summary with one element,
+    When the second star's error bars are read,
+    Then it raises naming the parameter: that is an upstream bookkeeping
+      bug, not "no posterior yet" (which stays None -> no bars).
+    """
+    plotter = MISTPlot.__new__(MISTPlot)
+    s0 = SimpleNamespace(err_minus=1.0, err_plus=2.0)
+    param = SimpleNamespace(summary=[s0], label="star.teff")
+
+    with pytest.raises(IndexError, match="star.teff"):
+        plotter._fit_error_bars(param, 1)
+
+
+def test_a_contour_failure_surfaces_its_own_exception(model_root, monkeypatch):
+    """
+    Given drawing the contours fails,
+    When the contour PDF is written,
+    Then the caller sees THAT exception -- the figure used to be created
+      inside the try, so `finally: plt.close(fig)` raised UnboundLocalError
+      and masked it.
+    """
+    from exozippy.components.evolutionarymodel import plot as mist_plot
+
+    system, _comp, points = _two_star_posterior(model_root)
+    plotter = MISTPlot(system, points)
+
+    def broken(*args, **kwargs):
+        raise np.linalg.LinAlgError("singular KDE")
+
+    monkeypatch.setattr(mist_plot, "_draw_contours", broken)
+    values = plotter._points_compiled_values()
+
+    with pytest.raises(np.linalg.LinAlgError, match="singular KDE"):
+        plotter.plot_contours(values, 0, filename_prefix="unused")
+
+
+# ----------------------------------------------------------------------
+# Two stars, end to end (reviews 1.8.8, 7.8.1 (g))
+# ----------------------------------------------------------------------
+
+
+def _two_star_posterior(model_root, n=40):
+    """A built two-star system with a distributed posterior of ``n`` draws
+    in which star B's Teff varies most, and those draws as plot
+    points (internal units, the shape run.py's get_draws hands plot)."""
+    import xarray as xr
+
+    from exozippy.system import System
+
+    system = System(
+        {
+            "sampler": {"draws": 10},
+            "star": [{"name": "A"}, {"name": "B"}],
+            "evolutionarymodel": [
+                {"star": "A", "model_root": model_root},
+                {"star": "B", "model_root": model_root},
+            ],
+        },
+        {"star.B.mass": {"initval": 1.5}},
+    )
+    system.prepare()
+    system.build_model()
+    comp = system.active_components["evolutionarymodel"]
+    rng = np.random.default_rng(1)
+    for param in system.plot_params:
+        user = np.atleast_1d(param.from_internal(param.initval)).astype(float)
+        draws = np.repeat(user[..., None], n, axis=-1)
+        # Every coordinate jitters, so MIST's (Teff, logg) has a 2-D
+        # density to contour; B's Teff jitters most.
+        draws *= 1.0 + 0.002 * rng.standard_normal(draws.shape)
+        if param is system.star.teff:
+            draws[1] *= 1.0 + 0.01 * rng.standard_normal(n)
+        param.posterior = xr.DataArray(draws, dims=("element", "sample"))
+    fit_logg = comp.posterior_kiel_samples(system)
+    system.star.logg.posterior = xr.DataArray(
+        np.stack([fit_logg[s]["fit"][1] for s in ("A", "B")]),
+        dims=("element", "sample"),
+    )
+    for param in (system.star.teff, system.star.logg):
+        param.ensure_summary()
+    points = [
+        {
+            p.label: p.to_internal(p.posterior.values[:, i])
+            for p in system.plot_params
+        }
+        for i in range(n)
+    ]
+    return system, comp, points
+
+
+def test_a_two_star_plot_writes_each_stars_charts_with_its_own_bars(
+    model_root, tmp_path
+):
+    """
+    Given two stars on the tracks with a posterior,
+    When plot() runs on its draws,
+    Then each star gets its own Kiel and contour PDF, and each Kiel chart's
+      fitted mark carries THAT star's posterior interval -- the multi-star
+      path drew zero-length bars, raised in the contours, and named stars
+      by instance index (review 1.8.8).
+    """
+    system, comp, points = _two_star_posterior(model_root)
+    prefix = str(tmp_path / "fit")
+
+    comp.plot(system, points, filename_prefix=prefix)
+
+    pdfs = sorted(f.name for f in tmp_path.iterdir() if f.suffix == ".pdf")
+    assert pdfs == [
+        "fit_evolutionarymodel_contours_star_A.pdf",
+        "fit_evolutionarymodel_contours_star_B.pdf",
+        "fit_kiel_A.pdf",
+        "fit_kiel_B.pdf",
+    ]
+    charts = {c.meta["file_tag"]: c for c in comp.plot_data(system, points[0])}
+    teff = system.star.teff.summary
+    for k, name in enumerate(("A", "B")):
+        (fit,) = [
+            t
+            for t in charts[f"kiel_{name}"].traces
+            if t.name.endswith("fit value")
+        ]
+        assert fit.name.startswith(f"Star {name} ")
+        np.testing.assert_allclose(
+            np.ravel(fit.xerr), [teff[k].err_minus, teff[k].err_plus]
+        )
+    assert abs(teff[1].err_plus) > abs(teff[0].err_plus) > 0
+
+
+def test_the_contours_follow_the_draws_plot_was_handed(
+    model_root, tmp_path, monkeypatch
+):
+    """
+    Given a posterior of 40 draws and a subset of 2 (what run.py's per-mode
+      loop hands plot() for one mode),
+    When plot() draws the contours,
+    Then they are made from the compiled Kiel node at exactly those 2
+      draws, not at the whole distributed posterior -- per-mode contour
+      plots drew the COMBINED posterior (review 1.8.8 (a)).
+    """
+    system, comp, points = _two_star_posterior(model_root)
+    subset = points[:2]
+    seen = []
+    monkeypatch.setattr(
+        MISTPlot,
+        "plot_contours",
+        lambda self, values, star_idx, filename_prefix: seen.append(values),
+    )
+
+    comp.plot(system, subset, filename_prefix=str(tmp_path / "fit"))
+
+    expected = np.stack(
+        [
+            np.atleast_2d(
+                comp._compiled_kiel(*comp._point_to_plot_params(p, system))
+            )
+            for p in subset
+        ]
+    )
+    assert len(seen) == 2  # once per star
+    for values in seen:
+        np.testing.assert_allclose(np.stack(values), expected)

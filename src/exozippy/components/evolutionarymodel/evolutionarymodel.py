@@ -218,6 +218,11 @@ class EvolutionaryModel(StellarRelation, Component):
         self.age_floor = []
         self.dragon_penalty_weight = []
         self._grids = []
+        # Per instance, for the prose: two instances may name different
+        # model releases, and a single attribute overwritten in this loop
+        # cited only the last one (review 2.8.13 (i)).
+        self.models = []
+        self._citations = {}
 
         for i, (c, nm) in enumerate(zip(self.config, self.names)):
             star_idx = self._resolve_star(system, nm, c.get("star"))
@@ -243,25 +248,17 @@ class EvolutionaryModel(StellarRelation, Component):
             if model_root is None:
                 model_root = mist_grid.DEFAULT_MIST_MODEL_ROOT
 
+            model = c.get("model", "MISTv2.5")
             grid = mist_grid.load_mist_grid(
-                model=c.get("model", "MISTv2.5"),
+                model=model,
                 alpha=float(c.get("alpha", 0.0)),
                 vvcrit=float(c.get("vvcrit", 0.0)),
                 model_root=model_root,
             )
             self._grids.append(grid)
-
-            # for use in prose later
-            self.model = c.get("model", "MISTv2.5")
-            self.model_root = model_root
-
-            import yaml
-
-            model_yaml_file = (
-                f"{self.model_root}/{self.model}/EEPs/{self.model}.grid.yaml"
-            )
-            with open(model_yaml_file, "r") as f:
-                self._model_yaml = yaml.safe_load(f)
+            self.models.append(model)
+            if model not in self._citations:
+                self._citations[model] = self._read_citation(model, model_root)
 
             star_name = system.star.names[star_idx]
             self._inject_grid_bounds(star_name, grid)
@@ -283,6 +280,26 @@ class EvolutionaryModel(StellarRelation, Component):
             )
 
         self._pin_unmodeled_stars(system)
+
+    def _read_citation(self, model, model_root):
+        """The ``citation:`` of ``model``'s grid yaml, for the prose.
+
+        Every published grid yaml carries one; a yaml without it is a
+        broken model tree, so it raises naming the file rather than citing
+        nothing.
+        """
+        import yaml
+
+        path = mist_grid.grid_yaml_path(model=model, model_root=model_root)
+        with open(path, "r") as f:
+            meta = yaml.safe_load(f)
+        if not meta or not meta.get("citation"):
+            raise ValueError(
+                f"[{self.prefix}] {path} has no 'citation:' key; every "
+                f"evolutionary-model grid yaml must name the papers its "
+                f"tracks come from."
+            )
+        return meta["citation"]
 
     def _check_star_opted_in(self, system, nm, star_idx):
         """Reject a block naming a star that opted out, or asked for PARSEC.
@@ -570,44 +587,21 @@ class EvolutionaryModel(StellarRelation, Component):
         return pt.stack(rows)
 
     def _floor_vector(self, user_floors, default_tensor):
-        """Per-instance systematic floor: the user's, else the default."""
-        given = np.array(
-            [np.nan if f is None else float(f) for f in user_floors],
-            dtype=float,
-        )
-        return pt.where(
-            pt.as_tensor_variable(np.isnan(given)),
-            default_tensor,
-            as_float_vector(np.nan_to_num(given, nan=0.0)),
-        )
+        """Per-instance systematic floor: the user's, else the default.
 
-    def _warn_outside_grid(self, system):
-        """Warn per instance whose star STARTS off the grid it will query.
-
-        The bounds injected in ``load_data`` already keep the sampler inside
-        the grid, so this fires only when the START is outside them -- which
-        ``build_pymc`` turns into a hard error, and this warning names the
-        component responsible for the bound before that happens.  Per-instance
-        ranges because two instances may name different grids.
+        Assembled with ``set_subtensor`` over the statically known
+        user-floored instances, not ``pt.where`` (CLAUDE.md's where-trap
+        rule): ``default_tensor`` is a function of the sampled mass, and
+        ``where`` would still route its gradient through the elements a
+        user floor replaced (review 2.8.14).
         """
-        for param, key, unit in (
-            ("logmass", "logmass_pts", " dex(solMass)"),
-            ("initfeh", "initfeh_pts", " dex"),
-            ("eep", "eep_pts", ""),
-        ):
-            self._warn_outside_range(
-                system,
-                getattr(system.star, param),
-                [float(np.min(g[key])) for g in self._grids],
-                [float(np.max(g[key])) for g in self._grids],
-                message=(
-                    "star '{star}' starts at {value:.4g}" + unit + ", "
-                    f"outside this instance's MIST grid's {param} axis "
-                    "([{low:.4g}, {high:.4g}]). That extent is a hard bound "
-                    f"on star.{param} (the interpolator extrapolates "
-                    "meaninglessly past it), so the start has to move."
-                ),
-            )
+        idx = [i for i, f in enumerate(user_floors) if f is not None]
+        if not idx:
+            return default_tensor
+        return pt.set_subtensor(
+            default_tensor[np.asarray(idx, dtype=int)],
+            as_float_vector([float(user_floors[i]) for i in idx]),
+        )
 
     def build_likelihood(self, model, system):
         if not self.n_elements:
@@ -619,10 +613,6 @@ class EvolutionaryModel(StellarRelation, Component):
 
         star = system.star
         smap = self.star_map_tensor
-
-        # Deferred to stage 6: the relaxation engine (stage 3) has run by now,
-        # so these initvals are the ones the sampler will actually start from.
-        self._warn_outside_grid(system)
 
         pred = self._interpolate(system)
 
@@ -866,18 +856,17 @@ class EvolutionaryModel(StellarRelation, Component):
             axis=-1,
         )
 
-        try:  # noqa: SIM105 - the except body logs
-            self._compiled_kiel = pytensor.function(
-                inputs=[p.value for p in system.plot_params],
-                outputs=self._kiel_node,
-                on_unused_input="ignore",
-            )
-        except Exception as exc:  # noqa: BLE001 - a plot must not kill a fit
-            logger.warning(
-                f"[{self.prefix}] Kiel-diagram plotter failed to compile "
-                f"({exc}); the evolutionary-model chart will be skipped."
-            )
-            self._compiled_kiel = None
+        # Not wrapped in a skip-on-failure: the inputs are system.plot_params
+        # and the outputs are nodes of the model just built, so a compile
+        # failure means that graph is broken, not the data -- and this runs
+        # at build time, before any sampling it could cost.  The catch it
+        # replaced shipped a broken chart as a missing PDF, GUI chart and
+        # paper figure behind one warning (review 2.8.11).
+        self._compiled_kiel = pytensor.function(
+            inputs=[p.value for p in system.plot_params],
+            outputs=self._kiel_node,
+            on_unused_input="ignore",
+        )
 
     def plot_data(self, system, point=None):
         """The Kiel Chart of every star at ``point`` (``[]`` without one).
@@ -977,14 +966,17 @@ class EvolutionaryModel(StellarRelation, Component):
         used to be a private copy here differing only in legend handling,
         which now lives upstream (review 4.11.7).  The contour plot is a
         bespoke posterior-only matplotlib diagnostic, like a corner plot,
-        and is not a Chart, so it does not reach the GUI or the draft.
+        and is not a Chart, so it does not reach the GUI or the draft; it
+        contours ``points``, the draws this call was handed.
         """
         from exozippy.plotrender import render_spec_groups
 
         plotter = MISTPlot(system, points)
         render_spec_groups(plotter.kiel_spec_groups(), filename_prefix)
         if plotter._posteriorBool:
-            values = plotter._get_posterior_compiled_values()
+            # The caller's draws, not the distributed posterior: a per-mode
+            # call contours its own mode (review 1.8.8 (a)).
+            values = plotter._points_compiled_values()
             for star_idx in range(self.n_elements):
                 plotter.plot_contours(
                     values, star_idx, filename_prefix=filename_prefix
@@ -1005,12 +997,21 @@ class EvolutionaryModel(StellarRelation, Component):
         prose = get_collector(system)
         stars = [system.star.names[si] for si in self.star_indices]
         noun = "star" if len(stars) == 1 else "stars"
-        names = join_names(latex_escape(s) for s in stars)
-        self.citation = self._model_yaml.get("citation", "")
+
+        # One clause per model release, in first-named order: instances may
+        # name different ones, and each cites its own grid yaml.
+        clauses = []
+        for model in dict.fromkeys(self.models):
+            group = [s for s, m in zip(stars, self.models) if m == model]
+            clauses.append(
+                f"the {'star' if len(group) == 1 else 'stars'} "
+                f"{join_names(latex_escape(s) for s in group)} with the "
+                f"{latex_escape(model)} evolutionary tracks "
+                rf"\citep{{{self._citations[model]}}}"
+            )
 
         prose.add(
-            f"We modeled the {noun} {names} with the {self.model} evolutionary "
-            rf"tracks \citep{{{self.citation}}}, interpolating the grid "
+            f"We modeled {join_names(clauses)}, interpolating the grid "
             r"in initial mass, initial [Fe/H], and equivalent "
             r"evolutionary point (EEP) to predict the current "
             r"[Fe/H], radius, effective temperature, and age. ",
