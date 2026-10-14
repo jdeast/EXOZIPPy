@@ -12,8 +12,15 @@ ONE SEED OR K?  Deliberately both, because which works best is open (JDE
 2026-10-04).  `--n-seeds 1` writes the global minimum as scalar initvals.
 `--n-seeds K` writes the K best DISTINCT local minima as a joint multi-seed
 start set, which `mkparam`'s P4 path already consumes, with
-`overdisperse: false` because these are K separate MODES rather than K draws
-from one posterior that still need scattering (samplers.md).
+`overdisperse: true`: these are K separate MODES, and each one still wants
+scattering (samplers.md, "The params file DECLARES whether its seeds want
+dispersing").  `false` means "already dispersed posterior draws": every chain
+starts EXACTLY on its round-robin seed, so 82 chains on 5 points give DE
+difference vectors spanning at most 3 of ~41 directions, and the population
+can only leave that subspace by the 1e-4 jitter.  This script wrote `false`
+until 2026-10-14, and every grid-seeded pilot (069, 163, 194) started that
+way; the sampler warned at init and Rhat read low on chains that could
+barely move.
 
 DISTINCT matters: adjacent nodes of one basin are not K modes.  Candidates
 are suppressed within `--min-sep` nodes of an already-accepted one, so K
@@ -161,9 +168,9 @@ def main():
             "# event %d, %d seed(s), min-sep %d nodes."
             % (ev, len(seeds), a.min_sep),
             "#",
-            "# These are K separate MODES off a (s,q) grid, not K draws from",
-            "# one posterior, so they do NOT want scattering.",
-            "overdisperse: false" if len(seeds) > 1 else "overdisperse: true",
+            "# These are K separate MODES off a (s,q) grid, each of which still",
+            "# wants scattering -- NOT already-dispersed posterior draws.",
+            "overdisperse: true",
             "",
         ]
         names = NAMES
