@@ -437,6 +437,10 @@ runbook -- what the cache is, how it is bounded, how to reclaim space, and how t
 a run honestly -- is in `docs/testing-cache.md`. Read that before changing anything
 about the compile cache or the suite's timing.
 
+On the Hydra SGE cluster, run the suite on a compute node with
+`qsub scripts/run_tests.job` (`qsub -v ARGS="..." scripts/run_tests.job` for a targeted
+run); it keeps the compile cache off the NFS home, whose client drops the cache's locks.
+
 ### Where the time actually goes (measured 2026-08-25, review item 6.13.1)
 
 One `--durations=0` run, 3105 passed / 3 skipped, **6715 worker-seconds** of measured
