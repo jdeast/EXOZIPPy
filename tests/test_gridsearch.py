@@ -465,3 +465,40 @@ def test_a_timed_out_grid_samples_the_whole_box_not_one_slab():
     assert min(log_s_seen) < -0.5 and max(log_s_seen) > 0.5
     # and cover most of the log_s axis, not a corner of it.
     assert len(set(t[0] for t in head)) > spec.n_s // 2
+
+
+def test_mirror_of_is_cheap_on_a_full_size_grid():
+    """It must not enumerate every basin to answer one argmin.
+
+    With K = n_nodes the suppression loop in `local_minima` is O(K^2) --
+    33 million comparisons on the default 141 x 41 grid -- for a question
+    that is a scan of a few columns.
+    """
+    import time
+
+    spec = GridSpec()  # the real default: 141 x 41
+    rng = np.random.default_rng(3)
+    chi2 = 1000.0 + rng.random((spec.n_s, spec.n_q))
+    chi2[40, 10] = 1.0  # a well at log_s < 0 ...
+    chi2[100, 10] = 2.0  # ... and its approximate mirror
+    g = _result(spec.log_s, spec.log_q, chi2)
+    best = g.local_minima(k=1)[0]
+    t0 = time.perf_counter()
+    mirror = g.mirror_of(best, tol_dex=0.05)
+    assert time.perf_counter() - t0 < 1.0
+    assert mirror is not None
+    assert mirror["log_s"] == pytest.approx(-best["log_s"], abs=0.05)
+
+
+def test_mirror_of_reports_none_when_the_mirror_column_never_finished():
+    """A maxtime stop can leave the wide half unevaluated.
+
+    "Nothing finished over there" and "the grid prefers this side" are
+    different answers and must not be conflated.
+    """
+    spec = GridSpec(n_s=41, n_q=5)
+    chi2 = np.full((spec.n_s, spec.n_q), np.inf)
+    chi2[8, 2] = 1.0  # one finished node, on the close side only
+    g = _result(spec.log_s, spec.log_q, chi2)
+    best = g.local_minima(k=1)[0]
+    assert g.mirror_of(best) is None

@@ -584,21 +584,47 @@ class GridResult:
         return out
 
     def mirror_of(self, seed, tol_dex=0.05):
-        """The seed in this grid that is `seed`'s s <-> 1/s mirror, or None.
+        """The best node at `seed`'s s <-> 1/s mirror, or None.
 
-        The close/wide degeneracy is the reason this module exists, so
-        "did the grid see BOTH sides" is a first-class question rather than
-        something a caller should re-derive from log_s arrays.
+        The close/wide degeneracy is the reason this module exists, so "did
+        the grid see BOTH sides, and by how much does it prefer one" is a
+        first-class question rather than something a caller re-derives from
+        log_s arrays.
+
+        Scans the mirror COLUMN directly rather than enumerating every basin
+        and looking for one near -log_s: with K = n_nodes the suppression
+        loop is O(K^2), which on the default 141 x 41 grid is 33 million
+        comparisons for an answer that is one argmin over a few columns.
+
+        Returns None when the mirror lies off the grid or no node within
+        `tol_dex` of it ever finished -- which is the honest answer, and not
+        the same as "the grid prefers this side".
         """
         target = -float(seed["log_s"])
-        best, best_d = None, np.inf
-        for cand in self.local_minima(k=self.chi2.size):
-            d = abs(cand["log_s"] - target)
-            if d < best_d:
-                best, best_d = cand, d
-        if best is None or best_d > tol_dex:
+        near = np.flatnonzero(np.abs(self.log_s - target) <= tol_dex)
+        if near.size == 0:
             return None
-        return best
+        block = self.chi2[near, :]
+        if not np.isfinite(block).any():
+            return None
+        flat = np.nanargmin(np.where(np.isfinite(block), block, np.inf))
+        bi, bj = np.unravel_index(flat, block.shape)
+        i = int(near[bi])
+        j = int(bj)
+        best = float(np.nanmin(self.chi2[np.isfinite(self.chi2)]))
+        return {
+            "log_s": float(self.log_s[i]),
+            "log_q": float(self.log_q[j]),
+            "s": float(10.0 ** self.log_s[i]),
+            "q": float(10.0 ** self.log_q[j]),
+            "alpha": float(self.alpha[i, j]),
+            "t_0": float(self.t_0[i, j]),
+            "u_0": float(self.u_0[i, j]),
+            "t_E": float(self.t_E[i, j]),
+            "rho": float(self.rho[i, j]),
+            "chi2": float(self.chi2[i, j]),
+            "dchi2": float(self.chi2[i, j]) - best,
+        }
 
     def to_npz(self, path):
         np.savez_compressed(
