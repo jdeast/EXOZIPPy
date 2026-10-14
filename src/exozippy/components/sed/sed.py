@@ -860,6 +860,15 @@ class SED(Component):
             ],
             values=grid["bc_values"],
         )
+        # The same grid as numpy, for start-value solvers that need an SED
+        # prediction before any graph exists (predict_flux_fraction_at).
+        self._bc_grid_np = (
+            [
+                np.asarray(grid[k], dtype=float)
+                for k in ("teff_pts", "logg_pts", "feh_pts", "av_pts")
+            ],
+            np.asarray(grid["bc_values"], dtype=float),
+        )
 
     # ------------------------------------------------------------------
     # The ONE place a row's magnitude system is applied (review 1.9.1).
@@ -1261,9 +1270,13 @@ class SED(Component):
             ):
                 _mark("blend tie", range(n))
 
-        # 4. transit dilution, 5. absolute astrometry: conservative.
+        # 4. transit seddeblend, 5. absolute astrometry: conservative.
         if in_topology(system, "band") is not None:
-            if _cfgs(in_topology(system, "transit")):
+            from exozippy.components.transit.transit import Transit
+
+            if Transit.sed_reads_dilution(
+                _cfgs(in_topology(system, "transit")), n
+            ):
                 _mark("transit dilution", range(n))
             if any(
                 "band" in c
@@ -1490,16 +1503,87 @@ class SED(Component):
         F_sum = pt.sum(10 ** (-0.4 * m[idx]))
         return -2.5 * pt.log10(F_sum)
 
-    def predict_flux_fraction(self, star_idx, filter_key, system):
+    def predict_flux_fraction(
+        self, star_idx, filter_key, system, star_indices=None
+    ):
         """
-        Fraction of the total flux of all modeled stars contributed by
-        one star in one filter. Used for transit deblending
-        (depth dilution) and the astrometric photocenter fluxfrac.
+        Fraction of the total flux of the stars ``star_indices`` (default:
+        all modeled stars) contributed by one star in one filter. Used for
+        the transit seddeblend prior and the astrometric photocenter
+        fluxfrac.  ``star_indices`` must include ``star_idx``.
         """
         col = self.filter_column(filter_key)
         m = self._predicted_appmag_node(system)[:, col]  # (nstars,)
         F = 10 ** (-0.4 * m)
-        return F[star_idx] / pt.sum(F)
+        if star_indices is None:
+            return F[star_idx] / pt.sum(F)
+        if star_idx not in star_indices:
+            raise ValueError(
+                f"predict_flux_fraction: star {star_idx} is not among "
+                f"star_indices {list(star_indices)}"
+            )
+        idx = np.asarray(list(star_indices), dtype=int)
+        return F[star_idx] / pt.sum(F[idx])
+
+    # Star values predict_flux_fraction_at reads, per star (internal units,
+    # which are the user units for all six).
+    FLUX_FRACTION_INPUTS = (
+        "teffsed",
+        "logmass",
+        "feh",
+        "av",
+        "radiussed",
+        "distance",
+    )
+
+    def predict_flux_fraction_at(
+        self, star_idx, filter_key, values, star_indices
+    ):
+        """``predict_flux_fraction`` evaluated numerically, with no graph.
+
+        For start-value solvers (the relaxation engine runs at stage 4, long
+        before the SED's nodes exist).  ``values`` maps each name in
+        ``FLUX_FRACTION_INPUTS`` to a ``{star index: value}`` dict covering
+        ``star_indices``.  Same physics as ``_predicted_appmag_node``: the
+        flux in the band goes as R^2 Teff^4 10^(0.4 BC) / d^2, BC linearly
+        interpolated on the grid at loggsed (from logmass and radiussed,
+        as star.loggsed is) with coordinates clipped to it, as a start value
+        only needs to be close.
+        """
+        from scipy.interpolate import RegularGridInterpolator as _RGI
+
+        if star_idx not in star_indices:
+            raise ValueError(
+                f"predict_flux_fraction_at: star {star_idx} is not among "
+                f"star_indices {list(star_indices)}"
+            )
+        col = self.filter_column(filter_key)
+        axes, bc_values = self._bc_grid_np
+        interp = _RGI(axes, bc_values[..., col])
+        flux = {}
+        for j in star_indices:
+            loggsed = (
+                LOGG_CONST
+                + values["logmass"][j]
+                - 2.0 * np.log10(values["radiussed"][j])
+            )
+            coords = [
+                values["teffsed"][j],
+                loggsed,
+                values["feh"][j],
+                values["av"][j],
+            ]
+            coords = [
+                float(np.clip(c, ax[0], ax[-1])) for c, ax in zip(coords, axes)
+            ]
+            bc = float(interp([coords])[0])
+            flux[j] = (
+                values["radiussed"][j] ** 2
+                * values["teffsed"][j] ** 4
+                * 10 ** (0.4 * bc)
+                / values["distance"][j] ** 2
+            )
+        return flux[star_idx] / sum(flux.values())
 
     # ------------------------------------------------------------------
     # 4) build_likelihood — Normal likelihood over the .sed filter rows
@@ -1746,7 +1830,14 @@ class SED(Component):
         #   _compiled_mag_predictors : (nstars, nfilters) per-star app mags
         #   _compiled_combined_mag   : (nfilters,) blended/diff row mags
         #   _compiled_logg_calc      : (nstars,) loggsed
-        m_star_node = self._predicted_appmag_node(system)[:, : self.nfilters]
+        # In the model's context: with no SED rows and no other reader
+        # (a transit with seddeblend: false), nothing built the magnitude
+        # matrix at stage 7, so it is built here and may have to
+        # materialize star nodes.
+        with model:
+            m_star_node = self._predicted_appmag_node(system)[
+                :, : self.nfilters
+            ]
         loggsed_node = star.loggsed.value
 
         # Retain a symbolic model node so plot_data can derive param_deps

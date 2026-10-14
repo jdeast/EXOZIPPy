@@ -356,8 +356,18 @@ def parse_priorfile(path):
     2022-04-28 (i')``), which names the instance independently of the
     ``_N`` index -- see ``_section_index``.
 
+    A VALUE that is another parameter's name LINKS the two (mkss.pro:
+    ``prior.value = findvariable(ss, entries[1])``): ``dilute_1 dilute_0 0``
+    fixes dilute_1 to dilute_0 at every step, a positive width is a
+    Gaussian tie, no width a starting value only.  Such a line comes back
+    with ``value`` None and ``link`` = ``(name, index)`` of the target.
+
+    A blank line ENDS a section: mkprior.pro writes the instance blocks
+    first and the linked/extra priors after a blank line, and those must
+    not be re-pointed by the last block's header.
+
     Returns a list of dicts with keys name, index, value, width, lower,
-    upper, start, section.
+    upper, start, section, link.
     """
     priors = []
     section = None
@@ -368,14 +378,27 @@ def parse_priorfile(path):
             continue
         line = raw.split("#", 1)[0].strip()
         if not line:
+            if not stripped:
+                section = None
             continue
         toks = line.split()
         name = toks[0].lower()
+        link = None
+        if len(toks) > 1 and re.match(r"^[a-z_]\w*$", toks[1], re.I):
+            try:
+                _prior_float(toks[1])
+            except ValueError:
+                target = toks[1].lower()
+                tm = re.match(r"^(.*)_(\d+)$", target)
+                link = (tm.group(1), int(tm.group(2))) if tm else (target, 0)
+                toks = [toks[0], "nan"] + toks[2:]
         try:
             vals = [_prior_float(t) for t in toks[1:6]]
         except ValueError:
             warn(f"priorfile line not understood, skipped: '{raw.strip()}'")
             continue
+        if link is not None:
+            vals[0] = None
         if not vals:
             warn(f"priorfile line has no value, skipped: '{raw.strip()}'")
             continue
@@ -399,6 +422,7 @@ def parse_priorfile(path):
                 upper=upper,
                 start=start,
                 section=section,
+                link=link,
             )
         )
     return priors
@@ -519,6 +543,7 @@ PRIOR_MAP = {
     # --- per transit file ---
     "variance": ("transit", "transit.{n}.jitter_variance", 1.0),
     "f0": ("transit", "transit.{n}.baseline", 1.0),
+    "dilute": ("transit", "transit.{n}.dilute", 1.0),
     # --- per RV telescope ---
     "gamma": ("telescope", "rvinstrument.{n}.gamma", 1.0),
     "jittervar": ("telescope", "rvinstrument.{n}.jitter_variance", 1.0),
@@ -530,6 +555,41 @@ PRIOR_MAP = {
     "quad": ("trend", "orbit.{n}.gammaddot", 2.0),
 }
 
+
+def _link_target(p, axis_names, repointed, name, scale):
+    """The EXOZIPPy path a linked prior's VALUE names, or None (warned).
+
+    The target's ``_N`` is the priorfile's; if the target's own prior line
+    was re-pointed by its section header, the link follows it.  A link
+    across a unit conversion (scale) is refused rather than rescaled:
+    EXOZIPPy reads a link in the TARGET's unit.
+    """
+    tname, tidx = p["link"]
+    label = f"{name}_{p['index']} {tname}_{tidx}"
+    if tname not in PRIOR_MAP:
+        warn(
+            f"linked prior '{label}': '{tname}' is not a parameter this "
+            "converter maps; dropped -- add the link by hand"
+        )
+        return None
+    taxis, ttemplate, tscale = PRIOR_MAP[tname]
+    if tscale != scale:
+        warn(
+            f"linked prior '{label}' links parameters in different units; "
+            "dropped -- add the link by hand"
+        )
+        return None
+    tidx = repointed.get((tname, tidx), tidx)
+    tnames = axis_names[taxis]
+    if tidx >= len(tnames):
+        warn(
+            f"linked prior '{label}': '{tname}_{tidx}' indexes past the "
+            f"last {taxis} instance; dropped"
+        )
+        return None
+    return ttemplate.format(n=tnames[tidx])
+
+
 # Priors EXOFASTv2 accepts but EXOZIPPy has no home for (yet).
 # Priors that only exist on a star fitted with an evolutionary model
 # (star.mist: True materializes them); dropped under /nomist.
@@ -540,8 +600,6 @@ PRIOR_UNSUPPORTED = {
     "(evolutionarymodel 'alpha:' selects a grid instead)",
     "vsini": "map it to orbit.<planet>.vsini by hand if fitting RM",
     "reflect": "reflected-light phase curves are not implemented",
-    "dilute": "explicit dilution priors are not implemented (EXOZIPPy "
-    "dilutes transits automatically from the SED flux fractions)",
     "ttv": "per-transit TTVs are not implemented",
     "tiv": "per-transit inclination variations are not implemented",
     "tdeltav": "per-transit depth variations are not implemented",
@@ -713,9 +771,6 @@ UNSUPPORTED_KEYWORDS = {
     "fehsedfloor": "EXOZIPPy's SED reads star.feh directly -- there is no "
     "separate SED metallicity for a floor to tie back to it",
     "fitreflect": "reflected-light phase curves are not implemented",
-    "fitdilute": "explicit dilution fitting is not implemented (EXOZIPPy "
-    "dilutes transits automatically from the SED when several "
-    "stars are modeled)",
     "fitbeam": "Doppler beaming is not implemented",
     "fitellip": "ellipsoidal variations are not implemented",
     "fitphase": "phase-curve fitting is not implemented",
@@ -929,6 +984,78 @@ def convert(pro_path, outdir, base, priorfile_override=None):
         ):
             info(f"'splinespace={val}' is moot: no transit sets fitspline")
 
+    # ---- dilution (FITDILUTE / SEDDEBLEND, mkss.pro) -------------------
+    # FITDILUTE: a scalar applies to every transit, an array is per transit
+    # (sorted-filename order).  SEDDEBLEND: an NTRAN x NSTARS byte array,
+    # which an IDL literal writes one STAR per inner list
+    # ([[t0, t1, ...], [t0, t1, ...]] is seddeblend[transit, star]); a
+    # scalar applies to every transit and star.  SEDDEBLEND implies
+    # FITDILUTE.  EXOZIPPy's own default with several stars and an SED is
+    # to deblend every file from the SED, which EXOFASTv2 never does
+    # unasked, so every file gets an explicit seddeblend when nstars > 1.
+    fitdilute = take("fitdilute")
+    seddeblend = take("seddeblend")
+    vals = fitdilute if isinstance(fitdilute, list) else [fitdilute]
+    if fitdilute is not None and len(vals) == 1 and isinstance(vals[0], str):
+        # FITDILUTE as a band name (an older spelling): mkss.pro reads ANY
+        # one-element value as the keyword flag, keyword_set(['TESS']) = 1,
+        # so it fits the dilution of EVERY transit.
+        info(
+            f"fitdilute={fitdilute!r} -> fitdilute: true on every transit "
+            "(EXOFASTv2 reads a one-element value as the /fitdilute flag)"
+        )
+        fitdilute = 1
+    if fitdilute is not None and transits:
+        vals = (
+            fitdilute
+            if isinstance(fitdilute, list)
+            else [fitdilute] * len(transits)
+        )
+        if len(vals) != len(transits) or not all(
+            isinstance(v, (int, float)) for v in vals
+        ):
+            raise ValueError(
+                f"fitdilute={fitdilute!r}: give one 0/1 per transit file "
+                f"({len(transits)}, sorted-filename order) or a scalar"
+            )
+        for t, v in zip(transits, vals):
+            if v:
+                t["fitdilute"] = True
+    if seddeblend is not None and transits:
+        if isinstance(seddeblend, list):
+            rows = (
+                seddeblend if isinstance(seddeblend[0], list) else [seddeblend]
+            )
+            if len(rows) != nstars or any(
+                len(r) != len(transits) for r in rows
+            ):
+                raise ValueError(
+                    f"seddeblend={seddeblend!r} must be NTRAN x NSTARS "
+                    f"({len(transits)} x {nstars}): one inner list per star"
+                )
+            for i, t in enumerate(transits):
+                stars = [star_names[j] for j in range(nstars) if rows[j][i]]
+                # One star is no blend: nothing for the SED to deblend.
+                if len(stars) > 1:
+                    t["seddeblend"] = stars
+        elif seddeblend:
+            for t in transits:
+                t["seddeblend"] = list(star_names)
+        if kw.get("mistsedfile") and not kw.get("sedfile"):
+            warn(
+                "seddeblend is set but the fit used mistsedfile=, which "
+                "EXOFASTv2 refuses with SEDDEBLEND (sedfile= only); "
+                "translated anyway -- EXOZIPPy deblends from its own SED"
+            )
+    if nstars > 1:
+        for t in transits:
+            t.setdefault("seddeblend", False)
+        if transits and not any(t["seddeblend"] for t in transits):
+            info(
+                "no SEDDEBLEND -> seddeblend: false on every transit "
+                "(EXOZIPPy would otherwise deblend them from the SED)"
+            )
+
     # ---- SED ----------------------------------------------------------
     sed_yaml_name = None
     sedfile = take("sedfile")
@@ -1061,8 +1188,22 @@ def convert(pro_path, outdir, base, priorfile_override=None):
     mann_ks = {}  # star index -> (ks, ks_err, ks_offset_initval)
     ld_priors = {}  # band name -> {"u1": prior, "u2": prior}
 
+    # Links go last, so a target's own prior has been re-pointed (by its
+    # section header) before a link to it is resolved.
+    priors = [p for p in priors if not p.get("link")] + [
+        p for p in priors if p.get("link")
+    ]
+    repointed = {}  # (name, priorfile index) -> instance index
+
     for p in priors:
         name = p["name"]
+        if p.get("link") and name in ("u1", "u2", "appks"):
+            warn(
+                f"linked prior '{name}_{p['index']}' -> "
+                f"'{p['link'][0]}_{p['link'][1]}' not translated: {name} has "
+                "no single EXOZIPPy parameter to link; add it by hand"
+            )
+            continue
         # u1/u2 need special handling: EXOZIPPy samples Kipping q1/q2 and
         # derives u1/u2, so start values must be inverted onto q1/q2
         # (initvals on derived parameters are ignored). Collect per band
@@ -1134,8 +1275,10 @@ def convert(pro_path, outdir, base, priorfile_override=None):
             continue
 
         axis, template, scale = PRIOR_MAP[name]
+        orig_index = p["index"]
         if not _reindex_from_section(p, axis, transits, bands, rvs):
             continue
+        repointed[(name, orig_index)] = p["index"]
         names = axis_names[axis]
         if not names:
             warn(
@@ -1152,10 +1295,46 @@ def convert(pro_path, outdir, base, priorfile_override=None):
 
         n = names[p["index"]]
         path = template.format(n=n)
+        if name == "dilute":
+            t = transits[p["index"]]
+            if not (t.get("fitdilute") or t.get("seddeblend")):
+                warn(
+                    f"prior '{name}_{p['index']}' dropped: transit "
+                    f"{t['name']} does not fit its dilution (fitdilute=0), "
+                    "so EXOFASTv2 ignored it too"
+                )
+                continue
         fields = {}
-        value = p["value"] * scale
         width = None if p["width"] is None else p["width"] * abs(scale)
         start = None if p["start"] is None else p["start"] * scale
+        if p.get("link"):
+            target = _link_target(p, axis_names, repointed, name, scale)
+            if target is None:
+                continue
+            fields["initval"] = target
+            if width is not None and width >= 0:
+                fields["sigma"] = width
+            if p["lower"] is not None:
+                fields["lower"] = p["lower"] * abs(scale)
+            if p["upper"] is not None:
+                fields["upper"] = p["upper"] * abs(scale)
+            kind = (
+                "hard link (width 0)"
+                if width == 0
+                else "soft link (Gaussian tie)"
+                if width is not None and width > 0
+                else "start value only"
+            )
+            tname, tidx = p["link"]
+            param_entries.append(
+                (
+                    path,
+                    fields,
+                    f"{name}_{orig_index} {tname}_{tidx}: {kind}",
+                )
+            )
+            continue
+        value = p["value"] * scale
         if width is not None and width > 0:
             fields["mu"] = value
             fields["sigma"] = width
@@ -1308,6 +1487,8 @@ def convert(pro_path, outdir, base, priorfile_override=None):
             "width=0 -> fixed (sigma: 0),",
             "no width -> starting value only; a 5th column overrides the "
             "starting value.",
+            "A parameter NAME as the value links the two: width 0 -> hard "
+            "link, width>0 -> Gaussian tie.",
         ]
         (outdir / f"{base}.params.yaml").write_text(
             _emit_params_yaml(param_entries, header)
@@ -1610,6 +1791,15 @@ def _emit_config(
                 L.append("    fitspline: true")
             if "splinespace" in t:
                 L.append(f"    splinespace: {t['splinespace']:g} # days")
+            if t.get("fitdilute"):
+                L.append("    fitdilute: true")
+            if "seddeblend" in t:
+                deb = t["seddeblend"]
+                if deb is False:
+                    L.append("    seddeblend: false")
+                else:
+                    stars = ", ".join(f'"{x}"' for x in deb)
+                    L.append(f"    seddeblend: [{stars}]")
         L.append("")
 
     if bands:

@@ -660,7 +660,7 @@ def test_beam_diluted_when_sed_dilution_active(tmp_path_factory):
     (tc + period/4 -- away from any transit/eclipse, where beam is
     extremal and is the only active BEER term),
     Then the beam deviation from baseline equals the UNDILUTED beam term
-    times the system's own transit.dilution factor (0.5), not the bare
+    times the system's own 1 - transit.dilute factor (0.5), not the bare
     undiluted term.
 
     Regression test for the PR-review fix that folds beam into the
@@ -703,12 +703,14 @@ def test_beam_diluted_when_sed_dilution_active(tmp_path_factory):
         "orbit.0.sesinw": {"initval": 0.0, "sigma": 0.0},
         "planet.0.radius": {"initval": 1.7},
         "planet.0.beam": {"initval": _BEAM_PPM, "sigma": 0.0},
+        # Start the SED-deblended dilution at the SED's own 0.5.
+        "transit.0.dilute": {"initval": 0.5},
     }
 
     system = System(config, user_params=params)
     system.prepare()
     model = system.build_model()
-    assert "transit.dilution" in model.named_vars
+    assert "transit.dilute_sed" in model.named_vars
 
     with model:
         point = system.get_internal_point(model, system.get_raw_start(model))
@@ -718,18 +720,8 @@ def test_beam_diluted_when_sed_dilution_active(tmp_path_factory):
     idx = _nearest_index(times, t_quad)
     t_actual = times[idx]
 
-    dil_fn = pytensor.function(
-        [],
-        model.named_vars["transit.dilution"],
-        givens=[
-            (v, np.asarray(point[v.name]))
-            for v in model.free_RVs
-            if v.name in point
-        ],
-        on_unused_input="ignore",
-        mode="FAST_COMPILE",
-    )
-    dil = float(dil_fn()[0])
+    # The flux factor is 1 - dilute (exofast_tran.pro:157).
+    dil = 1.0 - system.transit._point_value(point, system.transit.dilute, 0)
     assert dil == pytest.approx(0.5, abs=1e-6)
 
     phase = 2.0 * np.pi * (t_actual - _TC) / _PERIOD
@@ -794,6 +786,8 @@ def test_ellipsoidal_diluted_when_sed_dilution_active(tmp_path_factory):
         "orbit.0.sesinw": {"initval": 0.0, "sigma": 0.0},
         "planet.0.radius": {"initval": 1.7},
         "band.V.ellipsoidal": {"initval": _ELLIP, "sigma": 0.0},
+        # Start the SED-deblended dilution at the SED's own 0.5.
+        "transit.0.dilute": {"initval": 0.5},
     }
 
     system = System(config, user_params=params)

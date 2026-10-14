@@ -133,8 +133,10 @@ def test_sed_deblending_dilutes_transit_depth(tmp_path_factory):
     Given a two-star system with an SED (no catalog rows; the band's V
     filter feeds the BC grid) and a transit instrument on star A,
     When the model is built,
-    Then a transit.dilution Deterministic exists and, with two
-    identical stars, evaluates to 0.5 at the initial point.
+    Then the file fits transit.inst0.dilute, and the SED's prediction
+    transit.dilute_sed (the other star's flux fraction) is 0.5 for two
+    identical stars.  The SED constrains the dilution; it does not set it
+    (tests/test_transit_dilute.py).
     """
     d = tmp_path_factory.mktemp("transit_deblend")
     lc = _write_lc(d / "lc.dat")
@@ -166,7 +168,7 @@ def test_sed_deblending_dilutes_transit_depth(tmp_path_factory):
     system.prepare()
     model = system.build_model()
 
-    assert "transit.dilution" in model.named_vars
+    assert "transit.dilute_sed" in model.named_vars
 
     ip = model.initial_point()
     logp = model.compile_logp()(ip)
@@ -176,7 +178,7 @@ def test_sed_deblending_dilutes_transit_depth(tmp_path_factory):
 
     dil_fn = pytensor.function(
         [],
-        model.named_vars["transit.dilution"],
+        model.named_vars["transit.dilute_sed"],
         givens=[
             (rv, np.asarray(ip[rv.name]))
             for rv in model.free_RVs

@@ -18,6 +18,21 @@ transit:
     internal_unit: ""
     latex: "F_0"
     description: "Relative flux baseline"
+  dilute:
+    # EXOFASTv2's DILUTE (A_D): the fraction of the aperture's flux from
+    # sources other than the host, so the model is
+    # baseline * ((transit - 1) * (1 - dilute) + 1).  Exists only where a
+    # file sets fitdilute or seddeblend (Transit.register_parameters); the
+    # bounds are EXOFASTv2's (exofast_chi2v2.pro rejects |dilute| >= 1).
+    # Negative is legal: a light curve that was over-deblended upstream.
+    lower: -1.0
+    upper: 1.0
+    initval: 0.0
+    init_scale: 0.01
+    unit: ""
+    internal_unit: ""
+    latex: "A_D"
+    description: "Dilution from neighboring stars"
   jitter_variance:
     # Because the light curve is normalized to ~1, a variance of 1 is a
     # 100%-of-signal noise term, which follows our conservative uniform
