@@ -262,6 +262,26 @@ def test_mirror_of_finds_the_close_wide_partner():
     assert mirror["chi2"] > best["chi2"]
 
 
+def test_mirror_of_does_not_return_the_seed_as_its_own_mirror():
+    """A seed near s = 1 is within `tol_dex` of its own mirror.
+
+    RMDC26 event 096's best node, s = 0.9676, came back as its own mirror
+    at dchi2 = +0.0, which reads as an exact close/wide degeneracy the grid
+    never measured.  The mirror window overlaps the seed's own basin, so the
+    answer is None -- not the seed, and not the far slope of its basin.
+    """
+    log_s = np.linspace(-0.5, 0.5, 71)
+    log_q = np.linspace(-5.5, -1.5, 21)
+    S, Q = np.meshgrid(log_s, log_q, indexing="ij")
+    chi2 = 1000.0 - 400.0 * np.exp(
+        -(((S + 0.0143) / 0.03) ** 2) - (((Q + 3.5) / 0.25) ** 2)
+    )
+    g = _result(log_s, log_q, chi2)
+    best = g.local_minima(k=1)[0]
+    assert abs(best["log_s"]) < 0.03
+    assert g.mirror_of(best) is None
+
+
 def test_mirror_of_returns_none_when_the_mirror_is_off_the_grid():
     """A box that does not reach -log_s has no mirror to report.
 
