@@ -81,6 +81,11 @@ transit.TESS_UT20190912.baseline:
 transit.TESS_UT20200319.jitter_variance:
   initval: 6.29464750558384e-07
 
+transit.TESS_UT20200319.dilute:
+  initval: 0.0
+  mu: 0.0
+  sigma: 0.00047478
+
 transit.TESS_UT20200319.baseline:
   initval: 1.0006378623525243
 

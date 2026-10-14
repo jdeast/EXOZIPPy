@@ -17,13 +17,22 @@ _STAR_ONLY = {"star": [{"name": "A"}]}
 _STAR_AND_SED = {"star": [{"name": "A"}], "sed": {"file": "unused.sed"}}
 
 
+# The star parameters only an SED declares (Star.register_parameters'
+# `sed` branch), every one a relaxation-engine symbol (JDE 2026-10-14).
+_SED_ONLY = (
+    ".teffsed",
+    ".radiussed",
+    ".loggsed",
+    ".luminositysed",
+    ".fbolsed",
+    ".fbol",
+    ".av",
+)
+
+
 def _sed_symbols(system_config):
     cm = ConfigManager({}, system_config=system_config)
-    return {
-        path
-        for path in cm.master_symbol_map
-        if path.endswith(".teffsed") or path.endswith(".radiussed")
-    }
+    return {path for path in cm.master_symbol_map if path.endswith(_SED_ONLY)}
 
 
 def _relations_mentioning_sed(system_config):
@@ -31,10 +40,7 @@ def _relations_mentioning_sed(system_config):
     return [
         rel
         for rel in cm.all_relations
-        if any(
-            s.name.endswith(".teffsed") or s.name.endswith(".radiussed")
-            for s in rel.free_symbols
-        )
+        if any(s.name.endswith(_SED_ONLY) for s in rel.free_symbols)
     ]
 
 
@@ -65,14 +71,15 @@ def test_a_config_with_an_sed_block_still_gets_them():
     """
     Given the same system plus a sed: block,
     When the ConfigManager loads the relation files,
-    Then teffsed and radiussed are registered and their defaulting
-      relations are present -- the conditioning must not disable the
-      feature it is guarding.
+    Then every SED star parameter is registered and their relations
+      (teffsed, radiussed, loggsed, luminositysed, fbolsed, fbol) are
+      present -- the conditioning must not disable the feature it is
+      guarding.
     """
     # ARRANGE / ACT
     symbols = _sed_symbols(_STAR_AND_SED)
     relations = _relations_mentioning_sed(_STAR_AND_SED)
 
     # ASSERT
-    assert symbols == {"star.0.teffsed", "star.0.radiussed"}
-    assert len(relations) == 2
+    assert symbols == {f"star.0{s}" for s in _SED_ONLY}
+    assert len(relations) == 6

@@ -13,7 +13,9 @@ reads the emitted YAML back:
     absolute prefix kept out of the EXOFASTv2 fit's own directory;
   - /fitslope and /fitquad as a Taylor orbit (orbit type linear/quadratic),
     and a priors.final's section headers re-pointing priors written for a
-    different set of data files.
+    different set of data files;
+  - FITDILUTE / SEDDEBLEND and dilute priors, and priorfile LINKS
+    (``age_1 age 0``) as params-file links.
 """
 
 import pytest
@@ -436,3 +438,122 @@ def test_multi_planet_conversions_point_each_planet_at_its_orbit(
         {"name": "b", "orbit_ndx": 0},
         {"name": "c", "orbit_ndx": 1},
     ]
+
+
+# Transits in sorted-filename order: 0 FLWO Sloang, 1 FLWO Sloanz, 2 TESS.
+_FLWO_G = "transit.FLWO_UT20190101_Sloang"
+_FLWO_Z = "transit.FLWO_UT20190101_Sloanz"
+_TESS = "transit.TESS_UT20200101"
+
+
+def test_fitdilute_and_a_dilute_prior_translate(tmp_path, monkeypatch):
+    """
+    Given fitdilute=[0,0,1] and a 'dilute_2 0 0.02' prior on one star,
+    When the driver is converted,
+    Then only the TESS file fits its dilution, the prior lands on it as a
+      Gaussian, no seddeblend is written (one star) and nothing about
+      dilution is reported as untranslated.
+    """
+    config, params, warnings, _ = _convert(
+        tmp_path,
+        monkeypatch,
+        _driver_with("fitdilute=[0,0,1]"),
+        priors=_PRIORS + "dilute_2 0 0.02\n",
+    )
+    by_name = {t["name"]: t for t in config["transit"]}
+    assert by_name["TESS_UT20200101"]["fitdilute"] is True
+    assert "fitdilute" not in by_name["FLWO_UT20190101_Sloang"]
+    assert all("seddeblend" not in t for t in config["transit"])
+    assert params[f"{_TESS}.dilute"] == {
+        "initval": 0.0,
+        "mu": 0.0,
+        "sigma": 0.02,
+    }
+    assert not any("dilut" in w for w in warnings)
+
+
+def test_a_dilute_prior_on_an_unfit_transit_is_dropped(tmp_path, monkeypatch):
+    _, params, warnings, _ = _convert(
+        tmp_path, monkeypatch, _DRIVER, priors=_PRIORS + "dilute_0 0 0.02\n"
+    )
+    assert f"{_FLWO_G}.dilute" not in params
+    assert any("does not fit its dilution" in w for w in warnings)
+
+
+_LINKED_PRIORS = """\
+# star 0
+age 4.4
+# star 1
+age_1 age 0
+initfeh_1 initfeh_0 0.1
+# TESS UT 2020-01-01 (TESS)
+variance_2 1e-6
+
+dilute_0 0 0.02
+dilute_1 dilute_0 0
+"""
+
+
+def test_priorfile_links_become_params_links(tmp_path, monkeypatch):
+    """
+    Given two stars, fitdilute=[1,1,0] and EXOFASTv2's linked prior lines
+      ('age_1 age 0', 'initfeh_1 initfeh_0 0.1', 'dilute_1 dilute_0 0'),
+      the dilute block after a blank line below a transit's section,
+    When the driver is converted,
+    Then width 0 is a hard link, width > 0 a soft link, the blank line
+      keeps the dilute lines from being re-pointed onto the TESS file, and
+      no file gets seddeblend (EXOFASTv2 did not deblend).
+    """
+    config, params, warnings, _ = _convert(
+        tmp_path,
+        monkeypatch,
+        _driver_with("nstars=2, fitdilute=[1,1,0]"),
+        priors=_LINKED_PRIORS,
+    )
+    assert params["star.B.age"] == {"initval": "star.A.age", "sigma": 0.0}
+    assert params["star.B.initfeh"] == {
+        "initval": "star.A.initfeh",
+        "sigma": 0.1,
+    }
+    assert params[f"{_FLWO_G}.dilute"]["sigma"] == 0.02
+    assert params[f"{_FLWO_Z}.dilute"] == {
+        "initval": f"{_FLWO_G}.dilute",
+        "sigma": 0.0,
+    }
+    assert f"{_TESS}.dilute" not in params
+    assert all("seddeblend" not in t for t in config["transit"])
+    assert not any("not understood" in w for w in warnings)
+
+
+def test_seddeblend_rows_are_stars(tmp_path, monkeypatch):
+    """
+    Given seddeblend=[[1,1,1],[1,0,1]] (IDL: one inner list per STAR, so
+      transits 0 and 2 blend both stars, transit 1 only star A),
+    When the driver is converted,
+    Then transits 0 and 2 deblend [A, B] and transit 1, with no companion,
+      gets no seddeblend.
+    """
+    config, _, _, _ = _convert(
+        tmp_path,
+        monkeypatch,
+        _driver_with("nstars=2, seddeblend=[[1,1,1],[1,0,1]]"),
+    )
+    deb = [t.get("seddeblend") for t in config["transit"]]
+    assert deb == [["A", "B"], None, ["A", "B"]]
+
+
+def test_a_band_name_fitdilute_fits_only_that_band(tmp_path, monkeypatch):
+    """
+    Given fitdilute=['TESS'] (the band-name spelling),
+    When the driver is converted,
+    Then only the TESS transit fits its dilution: the converter translates
+      the intent, not mkss.pro's keyword_set(['TESS']) = 1, which fits
+      every transit's.
+    """
+    config, _, _, infos = _convert(
+        tmp_path, monkeypatch, _driver_with("fitdilute=['TESS']")
+    )
+    fit = {t["band"]: t.get("fitdilute", False) for t in config["transit"]}
+    assert fit.pop("TESS") is True
+    assert fit and not any(fit.values())
+    assert any("TESS transits only" in i for i in infos)

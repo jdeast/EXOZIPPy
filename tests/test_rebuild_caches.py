@@ -69,29 +69,6 @@ def _prepared(lc_path):
     return system
 
 
-def test_build_likelihood_drops_a_stale_dilution_node(lc_path):
-    """
-    Given a component carrying a dilution node from an earlier model,
-    When build_likelihood runs,
-    Then the stale node is gone before anything can reference it.
-
-    A sentinel stands in for the earlier model's Deterministic: what
-    matters is that the cache is cleared unconditionally at the top of the
-    build, not what happened to be in it.
-    """
-    system = _prepared(lc_path)
-    sentinel = object()
-    system.transit._dilution_node = sentinel
-
-    model = system.build_model()
-
-    assert system.transit._dilution_node is not sentinel
-    # This topology has one star, so no dilution is built at all.
-    assert system.star.n_elements == 1
-    assert system.transit._dilution_node is None
-    assert model is not None
-
-
 @pytest.mark.slow
 def test_a_second_build_on_one_system_scores_the_same(lc_path):
     """

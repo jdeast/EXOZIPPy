@@ -203,3 +203,17 @@ Optional, per data file, off by default -- with no `likelihood:` key the model i
 
 Tests: `tests/test_robust_likelihood.py`.
 
+## Transit dilution (`fitdilute`, `seddeblend`; EXOFASTv2's DILUTE)
+
+**Dilution is a parameter, `transit.<name>.dilute`, and the SED constrains it rather than setting it** (JDE 2026-10-13). It is EXOFASTv2's A_D, the fraction of the aperture's flux from sources other than the host, applied exactly as `exofast_tran.pro:157` does: `F0*((model - 1)*(1 - A_D) + 1)`, so the transit, eclipse, thermal, reflection, beaming and ellipsoidal deviations are all scaled by `1 - A_D`. Bounds `[-1, 1]` (EXOFASTv2's); negative is an over-deblended light curve.
+
+Per file:
+
+- `fitdilute: true` fits `dilute` with no SED term -- constrained only by the data and whatever the params file says (a prior, or a link such as EXOFASTv2's `dilute_1 dilute_0 0`, i.e. `transit.<b>.dilute: {initval: transit.<a>.dilute, sigma: 0}`). Against a free baseline it is nearly degenerate with the depth; give it a prior.
+- `seddeblend: true | false | [star names]` names the stars blended in the aperture (the host is always included) and implies `fitdilute`. The SED predicts `A_D = F_other / (F_host + F_other)` in the file's band, and `dilute` gets a Gaussian there whose width propagates a fractional error `seddeblend_floor` (default 0.02, EXOFASTv2's `sed_frac_uncertainty`) on each star's flux: `sigma = sqrt(2) * floor * A_D * (1 - A_D)` (`exofast_multised.pro`'s `deblend_uncertainty`). Unlike EXOFASTv2's chi2 term, the potential keeps `-log(sigma)`, because sigma tracks sampled stellar parameters (the house convention, `SED._fractional_floor_logp`). The prediction is reported as the Deterministic `transit.dilute_sed`.
+- **Default:** neither, as in EXOFASTv2, and `dilute` does not exist (JDE 2026-10-14). Several stars and an SED alone dilute nothing: deblending is opt-in per file, because a neighbor resolved by the file's aperture, or a light curve already deblended upstream (SPOC PDCSAP is deblended against TIC neighbors), must not be diluted again.
+- **Start:** a seddeblend file's `dilute` starts at the starting SED model's prediction -- `Transit._hint_dilute_from_sed` reads the stars' starts with `probe_start` and evaluates `SED.predict_flux_fraction_at` -- as a PRECEDENCE_DERIVED_DATA hint, so a user `initval` or link wins.
+
+A `seddeblend` the fit cannot apply (no `sed:` block, one star, a band the SED has no filter for, an unknown star name, or only the host) raises.
+
+**Which EXOFASTv2 this follows, and a bug it does not reproduce.** Two EXOFASTv2 versions differ here. The floor above is the development version's (`sed/exofast_multised.pro`, not yet on EXOFASTv2's public master); public master (8b9d94d2) puts the term in `exofast_chi2v2.pro` with `sigma = 0.05 * A_D`. The development version also has a bug: a transit with `FITDILUTE` but no `SEDDEBLEND` companion still gets the SED term, toward the wrong value -- an empty `where(seddeblend[i,*])` returns -1, and IDL's `-1` subscript is the LAST star, so `F_other` is the last star's flux (`A_D = 0.5` exactly for a one-star fit, at sigma ~ 0.007). Public master guards that case. Separately, EXOFASTv2 reads a one-element `FITDILUTE` (e.g. the band name `['TESS']`) as the `/fitdilute` flag for EVERY transit (`keyword_set(['TESS'])` is 1); the converter translates the intent, `fitdilute: true` on the files in the named bands only. Tests: `tests/test_transit_dilute.py`, `tests/test_exofast2exozippy.py`.
