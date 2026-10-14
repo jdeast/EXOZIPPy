@@ -15,6 +15,7 @@ import pytest
 from test_runner import (  # noqa: E402  (tests/ is on sys.path via conftest)
     REACH_SAMPLING_TIMEOUT,
     _poll_until,
+    _poll_while_progressing,
     _write_ptde_config,
     kelt4_workdir,
 )
@@ -29,19 +30,26 @@ from exozippy.gui import TERMINAL_PHASES, runner
 #   REACH_SAMPLING_TIMEOUT (360 s, from test_runner)  subprocess + imports +
 #       model build + a COLD pytensor compile + tune + 100 draws
 #   SNAPSHOT_TIMEOUT       30 s   file-visibility lag only (see below)
-#   GRACEFUL_EXIT_TIMEOUT  240 s  wrap-up: save trace + reports/plots
+#   GRACEFUL_STALL_TIMEOUT 180 s  wrap-up may go this long with NO new console
+#                                 output before the test calls it hung
+#   GRACEFUL_EXIT_CEILING  720 s  ...and this long in total, however busy
 #   FORCE_EXIT_TIMEOUT     30 s   reaping a process already sent SIGKILL
 #
+# The graceful wait is progress-aware rather than a fixed budget for the
+# reason given in test_run_endpoints.py (#369): per-mode outputs cost ~66 s
+# each, and how many modes this short stochastic fit finds is a coin flip.
+#
 # Worst case, counting the ~50 s that handle.stop(force=True) itself blocks for
-# (graceful_timeout 30 + kill_timeout 10 + 10): 360 + 30 + 240 + 50 + 30 + 50 +
-# 30 = 790 s < 900 s. Warm, the whole test measures 57-81 s.
+# (graceful_timeout 30 + kill_timeout 10 + 10): 360 + 30 + 720 + 50 + 30 + 50 +
+# 30 = 1270 s < 1320 s. Warm, the whole test measures 57-81 s.
 SNAPSHOT_TIMEOUT = 30.0
-GRACEFUL_EXIT_TIMEOUT = 240.0
+GRACEFUL_STALL_TIMEOUT = 180.0
+GRACEFUL_EXIT_CEILING = 720.0
 FORCE_EXIT_TIMEOUT = 30.0
 
 
 @pytest.mark.slow
-@pytest.mark.timeout(900)
+@pytest.mark.timeout(1320)
 def test_run_lifecycle_status_snapshot_and_graceful_stop(
     kelt4_workdir, tmp_path
 ):
@@ -105,16 +113,23 @@ def test_run_lifecycle_status_snapshot_and_graceful_stop(
         # 3. graceful stop (single SIGINT) as early as possible -> the run
         # wraps up on its own (saves the partial trace, writes reports) and
         # exits on a terminal phase, without a premature force escalation.
-        # Wrap-up is ~20-30 s warm (trace save + report/plot generation, which
-        # compiles its own pytensor plotters); 240 s is ~8x that, room for a
-        # cold compile cache, and still leaves the escalation below inside the
-        # 900 s mark.
+        # Wrap-up is ~20-30 s warm for one mode but ~66 s more per extra
+        # mode, so the wait follows the child's console log rather than a
+        # clock (see the budget table above).
         handle.stop(force=False)
-        ended = _poll_until(
-            lambda: not handle.is_alive(), timeout=GRACEFUL_EXIT_TIMEOUT
+
+        def _console_size():
+            path = handle.console_path
+            return os.path.getsize(path) if os.path.exists(path) else 0
+
+        ended, stall = _poll_while_progressing(
+            lambda: not handle.is_alive(),
+            _console_size,
+            stall_timeout=GRACEFUL_STALL_TIMEOUT,
+            ceiling=GRACEFUL_EXIT_CEILING,
         )
         if not ended:
-            forced.append("graceful stop timed out; escalated to force")
+            forced.append(f"graceful stop stalled ({stall}); escalated")
             handle.stop(force=True)
             handle.wait(timeout=FORCE_EXIT_TIMEOUT)
     finally:
