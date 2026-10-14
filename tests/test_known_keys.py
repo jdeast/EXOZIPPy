@@ -721,6 +721,9 @@ def test_a_valid_subkey_is_not_reported_but_a_typo_still_is():
         def get_display_label(self, i):
             return "star.A.teff"
 
+        def index_key(self, i):
+            return "star.0.teff"
+
     entry = {k: 1 for k in config_mod.USER_PARAM_KEYS}
     entry["intival"] = 5800
 
@@ -777,6 +780,9 @@ def test_an_engine_consumed_key_is_not_reported_but_a_lookalike_typo_is():
 
         def get_display_label(self, i):
             return "star.A.teff"
+
+        def index_key(self, i):
+            return "star.0.teff"
 
     class _FakeCM:
         relation_symbol_paths = {"source.0.rho"}

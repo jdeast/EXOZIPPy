@@ -1179,6 +1179,19 @@ class Parameter:
     # read at wrap-up by diagnostics.cap_alarm_findings via
     # ``cap_saturation``.  Never user-facing.
     cap_alarm: Any = None
+    # Per element: the NAME of the component instance the element belongs
+    # to, for a vector whose elements are not one per instance (a manifest
+    # `shape` override).  The live case is `detrend_coeffs`, one element per
+    # detrend COLUMN over every file (Instrument.add_parameter).  Such an
+    # element is spelled `comp.<owner>.param_<k>` EVERYWHERE -- params file,
+    # restart file, results.csv, the startup table -- k being its position
+    # among its owner's elements (`get_display_label`).  Internally element e
+    # is still `comp.<e>.param`: ConfigManager.adopt_element_owners
+    # translates the user spelling into that form after stage 3, and refuses
+    # `comp.<name|i>.param`, which names an instance, not an element (#440).
+    # A manifest option, declared at stage 3 (Instrument.
+    # _detrend_manifest_entry); component-set, never a user's.
+    element_owners: Optional[Sequence[str]] = None
     # Prior terms added from OUTSIDE this Parameter -- a component's
     # pm.Potential -- declared via add_prior_contribution so the reported
     # tables can describe them. See PriorContribution.
@@ -1429,11 +1442,27 @@ class Parameter:
         return present
 
     def get_display_label(self, index=0):
+        """Element ``index``'s user-facing key: the params-file spelling, the
+        results.csv row, the startup-table row.
+
+        An element of a vector that is one per instance is
+        ``comp.<names[index]>.param``.  An element of a vector with
+        ``element_owners`` (``detrend_coeffs``, one per COLUMN over every
+        file) is ``comp.<owner>.param_<k>``: the owning instance and the
+        element's position among that instance's elements.  Naming instance
+        ``index`` there would name another file's coefficient, or a file with
+        no columns at all (#440).
+        """
         parts = self.label.split(".")
         # If it's something like 'star.radius' (len 2) -> 'star.0.radius'
         # If it's already 'inst.gamma' -> 'inst.EXPERT.gamma'
         prefix = parts[0]
         attr = parts[-1]
+
+        slot = self.owner_slot(index)
+        if slot is not None:
+            owner, k, _ = slot
+            return f"{prefix}.{owner}.{attr}_{k}"
 
         if self.names and index < len(self.names):
             return f"{prefix}.{self.names[index]}.{attr}"
@@ -1444,6 +1473,55 @@ class Parameter:
             return f"{prefix}.{index}.{attr}"
 
         return self.label
+
+    def index_key(self, index=0):
+        """Element ``index``'s INDEX-form params-file key, the spelling
+        ``standardize_param_names`` folds every name form into:
+        ``comp.<index>.param``, or ``comp.<j>.param_<k>`` for an element of
+        a vector with ``element_owners`` (j the owning instance's index).
+        The diagnostics match a params-file key against this and
+        ``get_display_label``, so the two must describe the same element.
+        """
+        parts = self.label.split(".")
+        slot = self.owner_slot(index)
+        if slot is None:
+            return f"{parts[0]}.{index}.{parts[-1]}"
+        owner, k, _ = slot
+        names = [str(n) for n in (self.names or [])]
+        if owner not in names:
+            raise ValueError(
+                f"{self.label}: element {index} is owned by {owner!r}, which "
+                f"is not one of the component's instances {names}"
+            )
+        return f"{parts[0]}.{names.index(owner)}.{parts[-1]}_{k}"
+
+    def owner_slot(self, index):
+        """``(owner, k, n)`` for element ``index`` of a vector with
+        ``element_owners``: the owning instance's name, the element's
+        position among that instance's elements, and their count.  None when
+        the elements are one per instance."""
+        if self.element_owners is None:
+            return None
+        owners = [str(o) for o in self.element_owners]
+        if len(owners) != self._n_elements():
+            raise ValueError(
+                f"{self.label}: element_owners names {len(owners)} elements "
+                f"but the parameter has {self._n_elements()}"
+            )
+        owner = owners[index]
+        return owner, owners[:index].count(owner), owners.count(owner)
+
+    def _owned_symbol(self, index, with_owner):
+        """The table symbol of an owned element: subscripted with the owner
+        (when the rows are not under its sub-head) and with its position
+        among the owner's elements (when it has several)."""
+        owner, k, n = self.owner_slot(index)
+        sub = []
+        if with_owner:
+            sub.append(r"{\rm " + latex_escape(owner) + "}")
+        if n > 1:
+            sub.append(str(k))
+        return self.latex + "_{" + ",".join(sub) + "}" if sub else self.latex
 
     # What to do about an out-of-bounds start, keyed on where the number came
     # from (ConfigManager.initval_source).  The user wrote one of these
@@ -4768,7 +4846,11 @@ class Parameter:
         for i in range(n_elements):
             idx_str = idx_to_words(i) if n_elements > 1 else ""
 
-            if n_elements > 1:
+            if self.element_owners is not None:
+                symbol = self._owned_symbol(
+                    i, with_owner=len(set(self.element_owners)) > 1
+                )
+            elif n_elements > 1:
                 if self.names and i < len(self.names):
                     clean_name = latex_escape(str(self.names[i]))
                     symbol = self.latex + r"_{\rm " + clean_name + r"}"
@@ -4798,8 +4880,13 @@ class Parameter:
         """
         self._require_table_fields()
         idx_str = idx_to_words(index) if self._n_elements() > 1 else ""
+        symbol = (
+            self.latex
+            if self.element_owners is None
+            else self._owned_symbol(index, with_owner=False)
+        )
         return self._table_row(
-            index, self.latex, idx_str, sigfigs, note_mark, mode_suffixes
+            index, symbol, idx_str, sigfigs, note_mark, mode_suffixes
         )
 
     # ---------

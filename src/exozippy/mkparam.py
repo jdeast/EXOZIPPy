@@ -38,6 +38,7 @@ from exozippy.trace_meta import (
     check_trace_freshness,
     report_only_vars,
     restart_aliases,
+    trace_element_owners,
 )
 from exozippy.yamlio import load_yaml
 
@@ -1016,6 +1017,14 @@ def write_param_file(
     # elements written are still the SAMPLED ones of the aliased variable.
     aliases = restart_aliases(idata)
 
+    # Vectors whose elements are not one per instance (detrend_coeffs: one
+    # per column, over every file).  Element i is written as
+    # `comp.<owner>.param_<k>` -- its owning instance and its position among
+    # that instance's elements -- the one spelling ConfigManager.resolve
+    # accepts for it (#440; the old `comp.<name_i>.param` named instance i,
+    # i.e. another file, and now raises).
+    owners_map = trace_element_owners(idata)
+
     for var_name in sampled_vars:
         comp_key, param = var_name.rsplit(".", 1)
         source_name = aliases.get(var_name, var_name)
@@ -1045,7 +1054,25 @@ def write_param_file(
                 continue
             mv_list = [float(np.round(seed_vals[k, i], 8)) for k in range(K)]
             mv = mv_list[0]
-            if instance_names:
+            key_param = param
+            key_idx = i
+            if var_name in owners_map:
+                owners = owners_map[var_name]
+                if (
+                    len(owners) != n_elements
+                    or owners[i] not in instance_names
+                ):
+                    raise ValueError(
+                        f"mkparam: the trace's element owners for "
+                        f"{var_name!r} ({owners}) do not match its "
+                        f"{n_elements} elements and the config's "
+                        f"'{comp_key}' instances {instance_names}"
+                    )
+                name = owners[i]
+                key_idx = instance_names.index(name)
+                key_param = f"{param}_{owners[:i].count(name)}"
+                out_key = f"{comp_key}.{name}.{key_param}"
+            elif instance_names:
                 name = instance_names[i] if i < len(instance_names) else str(i)
                 out_key = f"{comp_key}.{name}.{param}"
             elif n_elements == 1:
@@ -1060,7 +1087,7 @@ def write_param_file(
                 out_key = f"{comp_key}.{i}.{param}"
 
             existing_key, existing_entry = _find_existing(
-                existing_params, comp_key, i, name, param
+                existing_params, comp_key, key_idx, name, key_param
             )
             if existing_key:
                 consumed_existing.add(existing_key)
