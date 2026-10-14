@@ -942,7 +942,12 @@ def seed_fragment(
         "# parameter').  To convey a t_E, seed the leaves it derives from.",
     ]
     for k, why in SEED_DERIVED.items():
-        vals = ", ".join("%.6g" % s[k] for s in seeds if k in s)
+        # Skip a value the grid did not record.  A grid written before it
+        # kept rho per node has none, and "nan" in a comment reads as a
+        # measurement that came out nan rather than one never made.
+        vals = ", ".join(
+            "%.6g" % s[k] for s in seeds if k in s and np.isfinite(s[k])
+        )
         if vals:
             lines.append("#   %s = %s -- measured: %s" % (k, why, vals))
     lines += [
