@@ -362,17 +362,33 @@ class MulensInstrument(Instrument):
         consumes: a lens orbit under `orbital_motion: keplerian` and a
         source orbit under xallarap (`Orbit._lens_keplerian_orbits` /
         `_lens_xallarap_orbits`, the predicates that decide those orbits'
-        sky coordinates).  The default timing rank: the light curve times
-        such an orbit through the binary's rotation across the event, not
-        through an eclipse."""
+        sky coordinates), with a documented APPROXIMATION of the timing
+        information each carries.
+
+        The light curve times such an orbit through the rotation of the
+        binary (or the source's reflex) across the event, and the exact
+        sensitivity ``d flux / d phase`` needs the magnification model,
+        which stage 3 does not have.  It is taken to be of order the
+        point's own excursion from the light curve's median, ``|F_i -
+        median(F)|``, per radian of orbital phase: a caustic structure
+        rotated by a radian changes the magnification by of order the
+        magnification itself, and an unmagnified point carries nothing.
+        So a point's information is ``(2 pi / P)^2 ((F_i - median) /
+        sigma_i)^2`` -- in flux units of its own file, against its own
+        errors, so files never need a common flux scale.
+        """
         targets = orbit._lens_keplerian_orbits(
             system
         ) | orbit._lens_xallarap_orbits(system)
+        seed = orbit.timing_seed
         out = {}
         for i in range(self.n_elements):
-            epochs = self.dataset_epochs(i)
+            t = self.dataset_times(i)
+            f = np.asarray(self.flux[self.rows(i)], dtype=float)
+            snr2 = ((f - np.median(f)) / self.dataset_errors(i)) ** 2
             for o in sorted(targets):
-                out.setdefault(int(o), []).append(epochs)
+                rate = 2.0 * np.pi / seed.period[o]
+                out.setdefault(int(o), []).append((t, rate**2 * snr2, "phase"))
         return out
 
     def load_data(self, system):
