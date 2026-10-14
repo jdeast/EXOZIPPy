@@ -1,7 +1,5 @@
-import matplotlib.pyplot as plt
 import numpy as np
 import scipy.stats as stats
-from matplotlib.colors import to_rgba
 
 
 class Contour:
@@ -11,24 +9,28 @@ class Contour:
         y,
         x_err,
         y_err,
+        probs,
         bw_method=0.7,
-        probs=(0.997, 0.95, 0.68),
-        **kwargs,
     ):
-        """``bw_method`` is ``scipy.stats.gaussian_kde``'s (a factor, or
-        "scott"/"silverman"); ``probs`` are the enclosed probabilities to
-        contour, largest first, so ``levels`` comes out in the increasing
-        density order ``contour`` wants.  The defaults are the evolutionary
-        model's own contour plot, which they leave unchanged."""
+        """A Gaussian-KDE density of the draws ``(x, y)`` on a 100 x 100
+        grid reaching 3 ``x_err`` / ``y_err`` past them, and the density
+        levels enclosing ``probs`` of it (highest-density regions).
+
+        ``probs`` are the enclosed probabilities to contour, largest first,
+        so ``levels`` comes out in the increasing density order ``contour``
+        wants; no default, because each figure states its own ladder.
+        ``bw_method`` is ``scipy.stats.gaussian_kde``'s (a factor, or
+        "scott"/"silverman"); the 0.7 default is the evolutionary model's
+        contour plot's.  Drawing is the caller's: the
+        evolutionary model's contour PDF
+        (``components/evolutionarymodel/plot.py``) and the summary figure
+        each style their own."""
         self.x = x
         self.y = y
         self.x_err = x_err
         self.y_err = y_err
         self.bw_method = bw_method
         self.probs = tuple(probs)
-
-        for key, value in kwargs.items():
-            setattr(self, key, value)
 
         self.X, self.Y, self.Z, self.levels = self._generate_contours()
 
@@ -86,84 +88,3 @@ class Contour:
         ]
 
         return X, Y, Z, levels
-
-
-def plot_contours(
-    groups,
-    xlabel=r"$T_{\rm{eff}}$ (K)",
-    ylabel=r"$\log g$ (cgs)",
-    figsize=(7, 6),
-):
-
-    fig, ax = plt.subplots(figsize=figsize)
-    _xmin, _xmax, _ymin, _ymax = None, None, None, None
-    _xerr, _yerr = None, None
-
-    for g in groups:
-        if isinstance(g, Contour):
-            color = g.color if hasattr(g, "color") else "blue"
-            alpha = g.alpha if hasattr(g, "alpha") else 0.05
-            linewidth = g.linewidth if hasattr(g, "linewidth") else 2
-            size = g.size if hasattr(g, "size") else 35
-            label = g.label if hasattr(g, "label") else None
-
-            ax.scatter(
-                g.x,
-                g.y,
-                s=size,
-                color=to_rgba(color, alpha),
-                label=label,
-                zorder=3,
-            )
-
-            contour_alphas = [
-                0.25,
-                0.5,
-                0.75,
-            ]  # Different alpha values for different confidence levels
-            rgba_colors_contours = [
-                to_rgba(color, alpha=a) for a in contour_alphas
-            ]
-
-            cf = ax.contourf(
-                g.X,
-                g.Y,
-                g.Z,
-                levels=g.levels + [g.Z.max()],
-                colors=rgba_colors_contours,
-            )
-            cl = ax.contour(
-                g.X,
-                g.Y,
-                g.Z,
-                levels=g.levels,
-                colors=rgba_colors_contours,
-                linewidths=linewidth,
-            )
-
-            # update the axis limits based on the data
-            _xmin = g.x.min() if _xmin is None else min(_xmin, g.x.min())
-            _xmax = g.x.max() if _xmax is None else max(_xmax, g.x.max())
-            _ymin = g.y.min() if _ymin is None else min(_ymin, g.y.min())
-            _ymax = g.y.max() if _ymax is None else max(_ymax, g.y.max())
-
-            # update the axis limits based on the errors
-            _xerr = g.x_err if _xerr is None else max(_xerr, g.x_err)
-            _yerr = g.y_err if _yerr is None else max(_yerr, g.y_err)
-
-    # Set axis limits
-    ax.set_xlim(_xmin - 3 * _xerr, _xmax + 3 * _xerr)
-    ax.set_ylim(_ymin - 3 * _yerr, _ymax + 3 * _yerr)
-
-    # Set axis labels
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel(ylabel)
-    leg = ax.legend(loc="upper left")
-
-    for handle in leg.legend_handles:
-        handle.set_alpha(0.8)
-
-    ax.invert_xaxis()
-    ax.invert_yaxis()
-
-    return fig, ax

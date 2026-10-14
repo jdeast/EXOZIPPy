@@ -1,7 +1,6 @@
 import numpy as np
 
 
-@staticmethod
 def _extend_window(window, values, margin):
     """``window`` widened so every finite value sits ``margin`` inside it.
 
@@ -20,7 +19,6 @@ def _extend_window(window, values, margin):
     return lo, hi
 
 
-@staticmethod
 def _padded_range(arrays, pad_frac):
     """``[min, max]`` over ``arrays``, with ``pad_frac`` breathing room.
 

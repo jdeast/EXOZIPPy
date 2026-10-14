@@ -235,6 +235,45 @@ def test_a_backed_block_does_not_warn_that_nothing_reads_the_track(
     assert hits == []
 
 
+def test_an_unbacked_block_warns_that_nothing_reads_the_track(
+    caplog, monkeypatch
+):
+    """
+    Given an evolutionarymodel block that NO registered component backs (the
+      component's module withheld from discovery, as when it fails to load
+      or predates the block),
+    When the star component registers its parameters,
+    Then it warns that the opted-in stars' track coordinates are sampled
+      with nothing reading them, naming those stars.
+
+    The positive half of the test above (review 7.8.1 (e)): with only the
+    negative one, deleting the warning outright stayed green.
+    """
+    import exozippy.system as system_module
+    from exozippy.components.factory import discover_components
+
+    registry = {
+        k: v
+        for k, v in discover_components().items()
+        if k != "evolutionarymodel"
+    }
+    monkeypatch.setattr(system_module, "discover_components", lambda: registry)
+    config = _config(
+        [{"name": "A"}, {"name": "B", "mist": False}], evolutionary=True
+    )
+
+    with caplog.at_level("WARNING", logger="exozippy"):
+        System(config, {}).prepare()
+
+    hits = [
+        r.getMessage()
+        for r in caplog.records
+        if "no such component is registered" in r.getMessage()
+    ]
+    assert len(hits) == 1
+    assert "track coordinates of A (initfeh, eep)" in hits[0]
+
+
 @pytest.mark.parametrize("name", sorted(TRACK_DEFAULTS))
 def test_track_parameters_resolve_to_their_defaults(name, model_root):
     """
