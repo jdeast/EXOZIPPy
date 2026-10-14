@@ -45,20 +45,37 @@ def _one(task):
     chi2_pl = g._node(
         (ev, 0, 0, log_s, _LOG_Q_POINT_LENS, "W149", 12, 0, 5.0, "nm")
     )[3]
-    return ev, chi2_pl - chi2_truth, truth["rho"] / np.sqrt(truth["q"]), truth["q"]
+    return (
+        ev,
+        chi2_pl - chi2_truth,
+        truth["rho"] / np.sqrt(truth["q"]),
+        truth["q"],
+    )
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--events", default="events.txt", help="one event per line")
+    ap.add_argument(
+        "--events", default="events.txt", help="one event per line"
+    )
     ap.add_argument("--out", default="truth_detect.tsv")
-    ap.add_argument("--data-dir", default=None,
-                    help="2018DataChallenge tree (default $DC18_DATA)")
-    ap.add_argument("--threshold", type=float, default=10.0,
-                    help="dchi2 below which an event is flagged (JDE "
-                         "2026-10-12: 10 now, 5 once the pipeline works)")
-    ap.add_argument("--ncpu", type=int,
-                    default=int(os.environ.get("SLURM_CPUS_PER_TASK", "16")))
+    ap.add_argument(
+        "--data-dir",
+        default=None,
+        help="2018DataChallenge tree (default $DC18_DATA)",
+    )
+    ap.add_argument(
+        "--threshold",
+        type=float,
+        default=10.0,
+        help="dchi2 below which an event is flagged (JDE "
+        "2026-10-12: 10 now, 5 once the pipeline works)",
+    )
+    ap.add_argument(
+        "--ncpu",
+        type=int,
+        default=int(os.environ.get("SLURM_CPUS_PER_TASK", "16")),
+    )
     args = ap.parse_args()
 
     g._FREE_RHO[0] = True
@@ -90,8 +107,11 @@ def main():
                 flag = "   <- NOT DETECTABLE"
             else:
                 flag = ""
-            print("%03d  dchi2=%10.1f  rho/sqrt(q)=%7.3f%s"
-                  % (ev, dchi2, r, flag), flush=True)
+            print(
+                "%03d  dchi2=%10.1f  rho/sqrt(q)=%7.3f%s"
+                % (ev, dchi2, r, flag),
+                flush=True,
+            )
 
 
 if __name__ == "__main__":
