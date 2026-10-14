@@ -1636,7 +1636,9 @@ def describe_proposal(prop, raw_to_phys, raw_var_names, out_var_names):
     return phys_params, raw_params
 
 
-def log_eval_timeout(logger, prefix, eval_timeout, where, n_timed_out, describe):
+def log_eval_timeout(
+    logger, prefix, eval_timeout, where, n_timed_out, describe
+):
     """Log ONE eval-timeout diagnostic for a batch of written-off proposals.
 
     `describe` is a zero-argument callable rendering the culprit as the

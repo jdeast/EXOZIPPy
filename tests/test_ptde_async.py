@@ -700,7 +700,9 @@ def test_a_pool_recycle_dumps_one_proposal_however_many_were_written_off(
     )
     assert caplog.text.count("physical params:") == 1
     assert caplog.text.count("raw params:") == 1
-    assert "1399 other in-flight evaluation(s) written off with it" in caplog.text
+    assert (
+        "1399 other in-flight evaluation(s) written off with it" in caplog.text
+    )
     assert "logp call exceeded eval_timeout=10s" in caplog.text
 
 
