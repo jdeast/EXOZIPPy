@@ -64,11 +64,6 @@ orbit.b.secosw:
 orbit.b.sesinw:
     initval: 0.09205694
 
-band.TESS.q1:
-    initval: 0.21843849
-band.TESS.q2:
-    initval: 0.75153453
-
 band.TESS.u1:
   initval: 0.4169
   sigma: 0.05
