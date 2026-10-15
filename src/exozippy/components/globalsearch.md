@@ -42,7 +42,7 @@ Not seeded, each for a reason:
   provenance exists to prevent. The duration is reported in the log and by the CLI
   utility instead.
 - **K as a hint.** The planet's mass already gets a data-driven start from
-  `RVInstrument._estimate_k_init` (`Planet._push_rv_mass_hints` converts it into a start on the SAMPLED mass coordinate -- msini, mass or log_q -- at the seeded P, e, cos i and host mass, never a hint on the derived `planet.K`: K and the mass are one quantity, so a user mass supersedes the estimate and the orbit's angles never absorb it; JDE 2026-10-14), and for a single circular signal `sqrt(2) * std` IS the
+  `RVInstrument._estimate_k_init` (`Planet._push_rv_mass_hints`: a hint on `planet.K` that only the DEFAULT_WEAK mass coordinate absorbs, superseded by any user mass -- K and the mass are one quantity, JDE 2026-10-14), and for a single circular signal `sqrt(2) * std` IS the
   semi-amplitude exactly. Rather than add a second competing hint on the same parameter
   (planet's is pushed at stage 2 and would overwrite a stage-1a one regardless), the LS
   fit's amplitude replaces `self.k_init` at the source and flows through the existing

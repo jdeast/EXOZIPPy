@@ -327,8 +327,8 @@ class RVInstrument(Instrument):
         semi-amplitude.
 
         The semi-amplitude is not pushed as a hint: it REPLACES
-        ``self.k_init``, which ``Planet._push_rv_mass_hints`` turns into a
-        start on the sampled mass coordinate at stage 3.  One channel, one number --
+        ``self.k_init``, which ``Planet._push_rv_mass_hints`` turns into the
+        ``planet.K`` hint at stage 3.  One channel, one number --
         and the sinusoid fit is the better estimator of the two, since
         ``sqrt(2) * std`` counts the noise variance as signal.
         """

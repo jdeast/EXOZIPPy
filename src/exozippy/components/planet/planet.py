@@ -1,6 +1,5 @@
 import logging
 
-import astropy.units as u
 import numpy as np
 import pymc as pm
 import pytensor.tensor as pt
@@ -551,32 +550,39 @@ class Planet(Component):
     _MASS_KEYS = ("mass", "msini", "log_q", "K")
 
     def _push_rv_mass_hints(self, system, k_ms):
-        """Seed each RV planet's SAMPLED mass coordinate from the RV
-        semi-amplitude estimate `k_ms` (m/s), at the data tier.
+        """Seed each RV planet's mass from the RV semi-amplitude estimate
+        `k_ms` (m/s), at the data tier -- and only its mass.
 
         K and the mass are one quantity as far as the starts go (JDE
-        2026-10-14).  A hint on the DERIVED planet.K would be a second
-        statement about it, and the relaxation engine reconciles the two by
-        moving whatever default seeds K reads -- under the precedence rule
-        (review 3.14.22) that is the orbit's cos i or its e/omega, a face-on
-        or eccentric start: harmless for an RV fit, catastrophic for a
-        transit fit, which then no longer transits.  So the estimate is
-        converted HERE, once, into the coordinate actually sampled (msini
-        under m sin i coordinates, the mass for a linear one, log_q for a
-        log_q one), through K = 2 pi a sin i (m / M) / (P sqrt(1 - e^2)) at
-        the starts the engine would give P, e, cos i and the host mass now
-        (``probe_start``).  The correction then never reaches the orbit's
-        angles, and the seed sits at the same data tier the K hint had.
+        2026-10-14).  The estimate is a hint on the DERIVED planet.K, and
+        under the precedence rule (review 3.14.22) the relaxation engine
+        reconciles it with the model by moving the LOWEST-tier seeds K
+        reads.  The sampled mass coordinate is DEFAULT_WEAK (planet.mass in
+        linear coordinates, planet.msini in m sin i ones, both in
+        defaults.yaml), below the orbit's cos i, e/omega and the host mass,
+        so the mass alone absorbs it, at the P, e, sin i and host mass of
+        the final solve -- the exact conversion, done by the engine, with no
+        stage-3 guess at those starts.  (Converting here instead was tried:
+        ``probe_start`` at stage 3 does not know which elements are derived,
+        and its e moved off the default -- to 1.000006 under the init_scale
+        noise test -- so the converted mass was not the stage-4 one.)
 
-        A user value on any mass coordinate (or on K) SUPERSEDES the
-        estimate, as a higher tier does on the same element: no hint is
-        pushed, and the supersession is recorded in the solve diagnostics.
+        Where that ordering cannot hold the estimate is not pushed:
+
+        * a user value on any mass coordinate, or on K, SUPERSEDES it, as a
+          higher tier does on the same element -- otherwise the only seeds
+          left to move would be the orbit's angles (a face-on or eccentric
+          start: harmless for an RV fit, catastrophic for a transit fit,
+          which then no longer transits).  Recorded in the solve
+          diagnostics (``supersede_hint``).
+        * a log_q planet (``fitlogq: true`` beside RVs) samples a DEFAULT
+          log_q, which would share the correction with cos i; it is logged.
+
         Only planets on Keplerian orbits carry the K relation.
         """
         cm = self.config_manager
         orbit = system.active_components["orbit"]
         up = cm.user_params
-        k_internal = (k_ms * u.m / u.s).to_value(u.solRad / u.d)
         for i in range(self.n_elements):
             o = int(self.orbit_map[i])
             if orbit.types[o] != "keplerian":
@@ -600,56 +606,16 @@ class Planet(Component):
                     "are one quantity; the user's value is used",
                 )
                 continue
-            starts = cm.probe_start(
-                [
-                    f"orbit.{o}.period",
-                    f"orbit.{o}.ecc",
-                    f"orbit.{o}.cosi",
-                    f"{self.prefix}.{i}.m_total",
-                    f"{self.prefix}.{i}.mass",
-                ]
-            )
-            missing = [p for p, s in starts.items() if not s.derivable]
-            if missing:
-                raise ValueError(
-                    f"[{self.prefix}.{nm}] cannot convert the RV "
-                    f"semi-amplitude estimate into a mass start: no start "
-                    f"for {missing} at stage 3."
+            if self.mass_parameterizations[i] == "log_q":
+                logger.info(
+                    f"[{self.prefix}.{nm}] the RV semi-amplitude estimate "
+                    f"({k_ms:.4g} m/s) is not used as a start: this planet "
+                    "samples log_q, whose default start would share the "
+                    "correction with the orbit's cos i.  Seed planet.mass "
+                    "or planet.log_q to start from the RV amplitude."
                 )
-            period = starts[f"orbit.{o}.period"].value
-            ecc = starts[f"orbit.{o}.ecc"].value
-            sini = np.sqrt(1.0 - starts[f"orbit.{o}.cosi"].value ** 2)
-            m_host = (
-                starts[f"{self.prefix}.{i}.m_total"].value
-                - starts[f"{self.prefix}.{i}.mass"].value
-            )
-            if not (period > 0 and 0 <= ecc < 1 and sini > 0 and m_host > 0):
-                raise ValueError(
-                    f"[{self.prefix}.{nm}] the starts the RV mass seed "
-                    f"converts through are unphysical: P = {period} d, "
-                    f"e = {ecc}, sin i = {sini}, host mass = {m_host} "
-                    f"solMass."
-                )
-            # K = 2 pi KEPLER_CONST sin i m (m_host + m)^(-2/3) P^(-1/3)
-            #     / sqrt(1 - e^2), solved for m by fixed point (m << m_host
-            # converges in a few steps; a stellar companion in a dozen).
-            amp = k_internal * np.sqrt(1.0 - ecc**2) * period ** (1.0 / 3.0)
-            amp /= 2.0 * np.pi * KEPLER_CONST * sini
-            m = amp * m_host ** (2.0 / 3.0)
-            for _ in range(50):
-                m_new = amp * (m_host + m) ** (2.0 / 3.0)
-                if abs(m_new - m) <= 1e-12 * m_new:
-                    m = m_new
-                    break
-                m = m_new
-            mode = self.mass_parameterizations[i]
-            if mode == "msini":
-                path, value = f"{self.prefix}.{i}.msini", m * sini
-            elif mode == "linear":
-                path, value = f"{self.prefix}.{i}.mass", m
-            else:
-                path, value = f"{self.prefix}.{i}.log_q", np.log10(m / m_host)
-            cm.add_hint(path, float(cm.from_internal(path, value)))
+                continue
+            cm.add_hint(f"{self.prefix}.{i}.K", k_ms)
 
     def _resolve_mass_parameterization(self, system):
         """Pick the sampled mass coordinate (stage 3, topology known).
