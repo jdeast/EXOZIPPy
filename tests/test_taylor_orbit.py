@@ -162,14 +162,6 @@ def test_a_trend_beside_a_planet_adds_to_the_keplerian(tmp_path):
         "orbit.b.period": {"initval": 7.43},
         "orbit.b.tc": {"initval": 2459650.0},
         "planet.b.mass": {"initval": 3.0},
-        # The RVs hold a trend and no planet, so RVInstrument's data-derived
-        # K hint is ~0; under the KS relaxation rule (review 3.14.22) that
-        # DATA seed is held and the default inclination absorbs the user's
-        # 3 Mjup -- a face-on start with no Keplerian signal.  This test is
-        # about the matrix columns, so the geometry is stated.
-        "orbit.b.cosi": {"initval": 0.0},
-        "orbit.b.secosw": {"initval": 0.0},
-        "orbit.b.sesinw": {"initval": 0.0},
         "orbit.trend.gammadot": {"initval": 0.8},
     }
     system, model = _system(cfg, params)

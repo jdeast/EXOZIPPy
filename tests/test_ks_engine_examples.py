@@ -157,3 +157,65 @@ def test_a_pinned_t_E_is_delivered_by_the_built_model(monkeypatch):
     assert "mulensevent.t_E" not in {f["key"] for f in findings}
     pinned = system.config_manager._last_resolved["mulensevent.0.t_E"]
     assert built["mulensevent.t_E"] == pytest.approx(pinned, rel=1e-6)
+
+
+def test_a_user_planet_mass_supersedes_the_rv_k_estimate_not_cos_i(
+    monkeypatch,
+):
+    """
+    Given examples/kelt4 kelt4_rv+transit+sed (transit + RVs) with the
+      user's cos i removed, so the orbit's inclination is a default seed,
+    When the planet mass is pinned at 5 Mjup -- several times what the RV
+      semi-amplitude estimate implies -- and the starts are solved,
+    Then the start is the user's mass, cos i is exactly what it is with no
+      mass pin at all (the planet still transits), and the solve
+      diagnostics say the K estimate was superseded.  K and the planet mass
+      are one quantity (JDE 2026-10-14): the RV estimate seeds the sampled
+      mass coordinate, never the orbit's angles, and a user mass replaces
+      it outright.  Before, the K hint sat on the derived planet.K at the
+      data tier, and the only defaults that could reconcile it with the
+      user's mass were cos i and e/omega -- a face-on start that no longer
+      transits.
+    """
+
+    def no_cosi(params):
+        params.pop("orbit.b.cosi")
+        return params
+
+    def no_cosi_mass(params):
+        params = no_cosi(params)
+        params["planet.b.mass"] = {"initval": 5.0}
+        return params
+
+    free = _prepare(
+        monkeypatch, "kelt4", "kelt4_rv+transit+sed.yaml", no_cosi
+    ).config_manager
+    pinned = _prepare(
+        monkeypatch, "kelt4", "kelt4_rv+transit+sed.yaml", no_cosi_mass
+    ).config_manager
+
+    # without a mass pin the RV estimate seeds the mass, and not at 5 Mjup
+    mass_free = free.from_internal(
+        "planet.0.mass", free._last_resolved["planet.0.mass"]
+    )
+    assert mass_free != pytest.approx(5.0, rel=0.5)
+    assert not any(d.get("kind") == "superseded" for d in free.diagnostics)
+
+    mass = pinned.from_internal(
+        "planet.0.mass", pinned._last_resolved["planet.0.mass"]
+    )
+    assert mass == pytest.approx(5.0, rel=1e-9)
+    cosi = pinned._last_resolved["orbit.0.cosi"]
+    assert cosi == free._last_resolved["orbit.0.cosi"]
+    for key in ("orbit.0.ecc", "orbit.0.omega"):
+        assert pinned._last_resolved[key] == pytest.approx(
+            free._last_resolved[key], abs=1e-12
+        )
+    impact = pinned._last_resolved["planet.0.ar"] * cosi
+    assert impact < 1.0  # it transits
+    superseded = [
+        d for d in pinned.diagnostics if d.get("kind") == "superseded"
+    ]
+    assert [d["param_paths"] for d in superseded] == [
+        ["planet.0.K", "planet.b.mass"]
+    ]

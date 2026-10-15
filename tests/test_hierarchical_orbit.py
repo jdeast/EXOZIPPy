@@ -217,24 +217,8 @@ def hier_system(tmp_path_factory):
         {"name": "BCrel", "file": str(f_bc), "mode": "rel", "orbit": "BC"},
         {"name": "ABCrel", "file": str(f_abc), "mode": "rel", "orbit": "A-BC"},
     ]
-    # The fake RVs are pure noise, so RVInstrument's data-derived K hint for
-    # planet b is ~0 against the 0.1 solMass the params state.  Under the KS
-    # relaxation rule (review 3.14.22) that hint is a DATA seed, held above
-    # every default, and the only defaults that can reconcile it with the
-    # user's mass are orbit b's inclination and eccentricity -- a face-on
-    # start, or an eccentric one.  The subject here is the mass and scale
-    # bookkeeping, so the orbit's geometry is stated: K is then fixed by user
-    # values and the hint is absorbed.
-    params = _hier_params()
-    params.update(
-        {
-            "orbit.b.cosi": {"initval": 0.05},
-            "orbit.b.secosw": {"initval": 0.0},
-            "orbit.b.sesinw": {"initval": 0.0},
-        }
-    )
     with pytensor.config.change_flags(mode="FAST_COMPILE"):
-        system = System(config, user_params=params)
+        system = System(config, user_params=_hier_params())
         system.prepare()
         model = system.build_model()
     return system, model

@@ -327,8 +327,8 @@ class RVInstrument(Instrument):
         semi-amplitude.
 
         The semi-amplitude is not pushed as a hint: it REPLACES
-        ``self.k_init``, which ``Planet.register_parameters`` already turns
-        into the ``planet.K`` hint at stage 2.  One channel, one number --
+        ``self.k_init``, which ``Planet._push_rv_mass_hints`` turns into a
+        start on the sampled mass coordinate at stage 3.  One channel, one number --
         and the sinusoid fit is the better estimator of the two, since
         ``sqrt(2) * std`` counts the noise variance as signal.
         """
@@ -400,7 +400,7 @@ class RVInstrument(Instrument):
             )
         if np.isfinite(signal.amplitude) and signal.amplitude > 0.0:
             logger.info(
-                "[%s] planet.K start moved from %.4g to %.4g m/s (the "
+                "[%s] RV semi-amplitude estimate moved from %.4g to %.4g m/s (the "
                 "Lomb-Scargle sinusoid's semi-amplitude replaces "
                 "sqrt(2) x scatter).",
                 self.prefix,

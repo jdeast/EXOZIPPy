@@ -1226,6 +1226,10 @@ class ConfigManager:
         # API (solve_api.py) without parsing log text.  Populated only when
         # the engine detects a contradiction; empty for a clean solve.
         self.diagnostics = []
+        # Data-derived starts a component withheld because a user value
+        # states the same quantity (supersede_hint); re-emitted into
+        # `diagnostics` on every solve.
+        self.superseded_hints = []
 
         # Snapshots of the last relaxation solve (seed 0, which is solved
         # last in finalize_user_params).  Exposed via export_solution() so a
@@ -3032,6 +3036,14 @@ class ConfigManager:
         # runs once per seed and appends contradictions here; _record_diagnostic
         # dedupes so repeated seeds do not multiply identical entries.
         self.diagnostics = []
+        for path, value, by, why in self.superseded_hints:
+            self._record_diagnostic(
+                "info",
+                f"{path}: the data-derived start {value:.6g} was not used "
+                f"-- {by} supersedes it ({why}).",
+                [path, by],
+                kind="superseded",
+            )
 
         flat_params = {}
         name_to_index = {}
@@ -3411,6 +3423,21 @@ class ConfigManager:
                 f"Whitening scales are now measured directly from the data at "
                 f"startup; remove init_scale from your params file."
             )
+
+    def supersede_hint(self, path, value, by, why):
+        """Record that a component did NOT push its data-derived start for
+        `path` (value `value`, user unit) because the user's `by` states
+        the same quantity (``Planet._push_rv_mass_hints``: an RV
+        semi-amplitude estimate against a user planet mass).  It is the
+        same-element rule -- a higher tier replaces a lower one outright --
+        applied by the component that knows two paths are one quantity;
+        the relaxation engine never sees the estimate.  Reported in the
+        solve diagnostics (kind "superseded"), which finalize_user_params
+        resets, so the record lives here and is re-emitted on every solve.
+        """
+        entry = (path, value, by, why)
+        if entry not in self.superseded_hints:
+            self.superseded_hints.append(entry)
 
     def record_diagnostic(self, severity, message, param_paths):
         """Public face of ``_record_diagnostic`` for a caller outside the

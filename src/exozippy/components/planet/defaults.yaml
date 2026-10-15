@@ -81,14 +81,15 @@ planet:
     initval: 1.0
     # Same as mass's: at the sin i ~ 1 start the two coordinates coincide.
     init_scale: 0.1
-    # No `rank:` (review 3.14.22).  Its old rank 5 relied on Condition B
-    # rewriting the lowest-rank symbol of Eq(msini, mass * sini).  Under the
-    # KS rule the roles carry it: where msini is REPORTED this initval is a
-    # fill, so the relation can never move mass or cos i; where msini is
-    # SAMPLED, mass is derived, so a user planet.<i>.mass is a value on a
-    # derived element -- kept in order and back-solved into msini -- and the
-    # K -> mass solver's answer reaches msini the same way.  Pinned by
-    # tests/test_fitmsini.py (both modes).
+    # DEFAULT_WEAK, like mass's: where msini is SAMPLED, a user
+    # planet.<i>.mass (derived there) or the RV mass seed is a statement
+    # about the planet's mass, and it must move this vague 1 Mjup start, not
+    # the orbit's default cos i -- which the minimum-norm split inside one
+    # tier would otherwise share it with, turning a transit fit face-on
+    # (JDE 2026-10-14: K and mass/msini are one quantity).  Where msini is
+    # REPORTED this initval is a fill and moves nothing.  Pinned by
+    # tests/test_fitmsini.py and tests/test_ks_engine_examples.py.
+    rank: DEFAULT_WEAK
     unit: "jupiterMass"
     internal_unit: "solMass"
     latex: "M_P\\sin{i}"

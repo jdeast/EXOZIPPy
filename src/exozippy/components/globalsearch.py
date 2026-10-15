@@ -73,8 +73,9 @@ Deliberately NOT seeded, and each for a reason worth not rediscovering:
   duration-derived a/R\\* silently moving a stellar mass, which is exactly the
   inversion provenance exists to prevent.  The duration is reported in the
   log and by the CLI utility instead.
-- **K from the Lomb-Scargle sinusoid.**  ``planet.K`` already gets a
-  data-driven hint, from ``RVInstrument._estimate_k_init``, and for a single
+- **K from the Lomb-Scargle sinusoid.**  The planet's mass already gets a
+  data-driven start from ``RVInstrument._estimate_k_init`` (converted
+  into the sampled mass coordinate, ``Planet._push_rv_mass_hints``), and for a single
   circular signal ``sqrt(2) * std`` IS the semi-amplitude exactly.  Rather
   than add a second competing hint on the same parameter (planet's is pushed
   at stage 2 and would overwrite a stage-1a one regardless), the LS fit's
