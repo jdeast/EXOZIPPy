@@ -164,6 +164,17 @@ def ensure_model_data(model: str, model_root: Path | str = DEFAULT_MODEL_ROOT):
     )
 
 
+def fetch_all() -> None:
+    """Fetch every published model-spectra grid into its default place.
+
+    The owner hook for the ``nextgen_spectra`` record
+    (``zenodo_assets.OWNERS``): the pre-fetch that ``zenodo
+    .fetch_every_record`` runs before the test suite and in CI.
+    """
+    for model in _MODEL_DATA:
+        ensure_model_data(model)
+
+
 def _load_spectra(
     model: str, model_root: Path
 ) -> tuple[pd.DataFrame, np.ndarray]:

@@ -300,6 +300,18 @@ def ensure_tables(
     return [dest_dir / n for n in names]
 
 
+def fetch_all() -> List[Path]:
+    """Fetch every published table into DEFAULT_TABLE_DIR.
+
+    The owner hook for the ``claret_ld_tables`` record
+    (``zenodo_assets.OWNERS``): the pre-fetch that ``zenodo
+    .fetch_every_record`` runs before the test suite and in CI. The
+    record's MANIFEST.txt and README.md are not fetched; no reader opens
+    them.
+    """
+    return ensure_tables(None)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog=FETCH_COMMAND,

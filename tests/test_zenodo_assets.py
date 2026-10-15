@@ -172,6 +172,23 @@ def test_the_registry_is_internally_consistent():
     assert len(set(md5s)) == len(md5s)
 
 
+def test_every_record_has_an_owner_that_can_fetch_it():
+    """
+    Given every registered record,
+    When its owner (zenodo_assets.OWNERS) is imported,
+    Then it exists and exposes a callable fetch_all(), and OWNERS names no
+    record that is not registered -- so the prewarm and CI's download cache,
+    which zenodo.fetch_every_record drives from this table, cover every
+    record by construction.
+    """
+    import importlib
+
+    assert set(zenodo_assets.OWNERS) == set(RECORDS)
+    for name, owner in zenodo_assets.OWNERS.items():
+        module = importlib.import_module(owner)
+        assert callable(getattr(module, "fetch_all", None)), (name, owner)
+
+
 def test_the_registry_cannot_be_mutated_through_a_lookup():
     """
     Given the registry,

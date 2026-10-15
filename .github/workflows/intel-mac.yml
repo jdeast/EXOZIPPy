@@ -61,6 +61,11 @@ jobs:
     # cap produces no result at all -- the mistake Windows CI made.
     timeout-minutes: 90
 
+    # The machine-level Zenodo download cache, named so the restore step
+    # below and utilities/zenodo.py agree on it (see tests.yml).
+    env:
+      EXOZIPPY_CACHE_DIR: "~/.cache/exozippy"
+
     strategy:
       fail-fast: false
       matrix:
@@ -97,29 +102,21 @@ jobs:
           clang --version || true
           python -c "import platform; print(platform.platform(), platform.machine())"
 
-      # Same Zenodo spectra and astropy ephemeris caches as tests.yml, with
-      # the SAME keys -- cache entries are not scoped per-OS and both
-      # payloads are platform-independent data files, so this job is usually
-      # a hit populated by the Linux matrix. Only the full-suite path reads
-      # them; restoring on the smoke path is a few wasted seconds and keeps
-      # the two paths' setup identical.
-      #
-      # Keep the paths in sync with bc_grid.DEFAULT_MODEL_ROOT by hand --
-      # see the long comment in tests.yml for why that has bitten before.
-      - name: Cache the Zenodo model spectra
-        uses: actions/cache@v6
+      # tests.yml's Zenodo download cache (the machine-level cache every
+      # loader fills, md5-named entries), RESTORE ONLY: its macOS entry is
+      # saved by tests.yml's master runs, which fetch every record, so this
+      # job is a hit and never downloads from Zenodo. The data is
+      # platform-independent, so the Apple-silicon entry serves Intel too.
+      # This job pip-installs the package, so the loaders' destinations are
+      # in site-packages; the conftest prewarm links every record in from
+      # the restored cache before the suite. See the comment in tests.yml.
+      - name: Restore the Zenodo download cache
+        uses: actions/cache/restore@v6
         with:
-          path: |
-            src/exozippy/models/NextGen/BCs/NextGen.spectra.csv
-            src/exozippy/models/NextGen/BCs/NextGen.wavelength.csv
-          key: nextgen-spectra-p2-7a2b81333f6a5bfccd4cbc07bdea6648
-
-      # Same BC-table cache as tests.yml, same key -- see the comment there.
-      - name: Cache the Zenodo BC tables
-        uses: actions/cache@v6
-        with:
-          path: src/exozippy/models/NextGen/BCs/*.bc.parquet
-          key: nextgen-bc-tables-p1-${{ hashFiles('src/exozippy/utilities/zenodo_assets.py') }}
+          path: ~/.cache/exozippy/downloads
+          key: zenodo-downloads-p1-${{ runner.os }}-${{ hashFiles('src/exozippy/utilities/zenodo_assets.py') }}
+          restore-keys: |
+            zenodo-downloads-p1-${{ runner.os }}-
 
       - name: Cache the astropy ephemeris kernel
         uses: actions/cache@v6

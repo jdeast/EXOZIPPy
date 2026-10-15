@@ -75,6 +75,13 @@ jobs:
     permissions:
       contents: read
       actions: write
+
+    # Where utilities/zenodo.py keeps its machine-level download cache. Set
+    # rather than left to the XDG default so the cache steps below name the
+    # same directory the code fills (zenodo.py expands the ~). Same
+    # filesystem as the checkout, so the loaders hard-link, not copy.
+    env:
+      EXOZIPPY_CACHE_DIR: "~/.cache/exozippy"
     strategy:
       # Do not cancel the other combinations when one fails. When a new Python
       # breaks something, "3.14 failed and everything else was cancelled" tells
@@ -194,83 +201,123 @@ jobs:
       - name: Install dependencies
         run: poetry install --extras gui --no-interaction
 
-      # The SED tests need ~250 MB of NextGen model spectra that
-      # ensure_model_data() fetches from Zenodo on first use, caching into the
-      # checkout -- which is fresh in every job, so without this EVERY matrix
-      # combination re-downloads it. That is ~1.3 GB per run pulled from a free
-      # academic host, and it is why two consecutive Dependabot PRs went red on
-      # `HTTPError: HTTP Error 504: Gateway Time-out` in tests that had nothing
-      # to do with their diffs.
+      # EVERY ZENODO DOWNLOAD IS CACHED, ONCE PER PIN CHANGE, IN ONE ENTRY.
       #
-      # The key embeds the md5 pinned in utilities/zenodo_assets.py (record
-      # "nextgen_spectra"), so it is correct by construction: change the
-      # data, change the key. Keep it in sync if that pin ever moves.
+      # The data files the code fetches from Zenodo on first use -- the
+      # NextGen spectra (~250 MB), the NextGen BC tables (~96 MB), the MIST
+      # EEP grid (~128 MB) and the Claret limb-darkening tables (~1.5 MB),
+      # every record in utilities/zenodo_assets.py -- are git-ignored, and a
+      # CI checkout is fresh, so without a cache every job of every run
+      # re-downloads them from a free academic host. That is both rude and
+      # fragile: two Dependabot PRs went red on `HTTP Error 504: Gateway
+      # Time-out`, and a trickling 128 MB MIST download ran a test into its
+      # 600 s pytest-timeout on two runners at once.
       #
-      # The PATH is NOT correct by construction, and has to be kept in sync by
-      # hand with bc_grid.DEFAULT_MODEL_ROOT (= src/exozippy/models). It was
-      # not. This block originally read src/exozippy/components/sed/models/
-      # NextGen, correct when it was written (#29, 2026-07-28 13:46) and
-      # stranded three hours later when the "Changed models/filters directory
-      # structure" branch merged and moved the tree (2026-07-28 16:36).
+      # WHAT IS CACHED is the machine-level download cache that
+      # utilities/zenodo.py keeps behind every loader ($EXOZIPPY_CACHE_DIR/
+      # downloads, set explicitly in this job's env so nothing guesses the
+      # path), NOT the destination files in the tree. Its entries are named
+      # <md5>-<filename>, so:
+      #   * a restore can never overwrite a tracked file, and no path here
+      #     has to be kept in sync with any loader's destination (the old
+      #     per-path steps did, and one sat restoring 132 MB into a directory
+      #     nothing read for months after a tree move);
+      #   * the destination is wherever the code under test reads -- the
+      #     checkout here, site-packages for the pip-installed jobs below --
+      #     because the loaders hard-link it in from the cache themselves.
       #
-      # Nothing caught it, and the failure mode is worth understanding because
-      # it looks healthy from the outside. actions/cache neither warns nor
-      # fails on a path the code does not read: the pre-restructure entry kept
-      # reporting "Cache hit ... not saving cache" on every job, restoring
-      # 132 MB into a directory nothing opens, while the SED tests downloaded
-      # the spectra from Zenodo again -- exactly the load this block exists to
-      # remove. Restoring also refreshes the entry's last-accessed time, so it
-      # never aged out either: a self-sustaining zombie.
+      # THE KEY hashes utilities/zenodo_assets.py, the one file that holds
+      # every pin, so a new pin is a new entry by construction. restore-keys
+      # falls back to the previous entry for this OS: its md5-named files are
+      # still right for every record that did not change, so a pin change
+      # downloads only the changed record. (An edit to that file's prose also
+      # makes a new entry; it costs one restore-and-save, no download.)
       #
-      # The key carries a `p2` generation marker because a cache entry stores
-      # the paths it was SAVED with. Repointing `path:` alone would still hit
-      # the old entry and still unpack it at the old location; the key has to
-      # change for a new entry to be written at the new one.
-      #
-      # The path names the two DOWNLOADED files, not their directory. The
-      # directory also holds TRACKED files (NextGen.grid.yaml, plot.py), and a
-      # cache is restored after checkout and overwrites what it finds, so
-      # caching the directory would let a stale entry silently revert one --
-      # with a key that would not change when the tracked file did, so it
-      # would never self-heal. (The BC tables there used to be tracked too;
-      # they are now Zenodo downloads with their own cache step below.)
-      #
-      # The other Zenodo asset, the 128 MB MIST EEP grid (models/MIST/eep_grid
-      # .py, same fetch_assets core), is deliberately not cached: the only
-      # test that touches it monkeypatches _EEP_GRID_ASSETS and EEP_GRID_DIR,
-      # so CI never downloads it. Add it here if that ever changes.
-      - name: Cache the Zenodo model spectra
-        uses: actions/cache@v6
+      # SAVED ONLY FROM MASTER, for the scoping reason in the compile-cache
+      # comment below: an entry saved on a PR branch is visible only to that
+      # PR, so master must populate the one entry every PR restores. Saved
+      # right after the fetch step, BEFORE the suite, so a failing test can
+      # never stop it being saved -- and only if that fetch succeeded, so a
+      # Zenodo outage on master cannot freeze an incomplete entry under an
+      # immutable key. The fetch is the registry-driven pre-fetch
+      # (zenodo.fetch_every_record), so the entry holds every record whichever
+      # tests this shard runs.
+      - name: Restore the Zenodo download cache
+        id: zenodo-cache
+        uses: actions/cache/restore@v6
         with:
-          path: |
-            src/exozippy/models/NextGen/BCs/NextGen.spectra.csv
-            src/exozippy/models/NextGen/BCs/NextGen.wavelength.csv
-          key: nextgen-spectra-p2-7a2b81333f6a5bfccd4cbc07bdea6648
+          path: ~/.cache/exozippy/downloads
+          key: zenodo-downloads-p1-${{ runner.os }}-${{ hashFiles('src/exozippy/utilities/zenodo_assets.py') }}
+          restore-keys: |
+            zenodo-downloads-p1-${{ runner.os }}-
 
-      # The NextGen BC tables (~96 MB, 14 parquet files) are Zenodo downloads
-      # too since they left the repository (the wheel had grown past PyPI's
-      # 100 MB limit): utilities/zenodo_assets.py pins them and
-      # models/NextGen/bc_tables.py fetches the
-      # ones a test reads, and tests/conftest.py fetches them all once before
-      # the suite. Cached for the same reason as the spectra.
-      #
-      # The KEY hashes utilities/zenodo_assets.py, the file that holds the
-      # pins (review 4.9.2), so a new version of the table set (new pins)
-      # is a new entry by construction; an edit to any other record's pins
-      # or to that file's prose costs one re-download, nothing worse.
-      # The PATH is a glob of the downloaded tables only -- every
-      # *.bc.parquet there is git-ignored, so nothing tracked can be
-      # reverted by a restore -- and, like the spectra path, has to be kept
-      # in sync with bc_tables.BC_TABLE_DIR by hand.
-      - name: Cache the Zenodo BC tables
-        uses: actions/cache@v6
+      # Puts every registered record in place through the machine cache: a
+      # hard link per file when the restore above hit, a download otherwise.
+      # The log says which, per file ("Linked ... from the shared cache" vs
+      # "Downloading ... from Zenodo"). continue-on-error because a Zenodo
+      # outage must not decide the suite's verdict here: the conftest prewarm
+      # tries again, and each test that reads a missing file fails with the
+      # loader's own error. Its OUTCOME gates the save below.
+      - name: Fetch every Zenodo record
+        id: zenodo-fetch
+        continue-on-error: true
+        run: poetry run python scripts/zenodo_ci_cache.py fetch
+
+      # Drops the files no current pin names (the superseded versions a
+      # restore-keys fallback carried in, lock files), so the new entry does
+      # not grow by one stale file per pin change.
+      - name: Prune the Zenodo download cache before saving it
+        if: >-
+          github.event_name == 'push' && github.ref == 'refs/heads/master' &&
+          steps.zenodo-fetch.outcome == 'success' &&
+          steps.zenodo-cache.outputs.cache-hit != 'true'
+        run: poetry run python scripts/zenodo_ci_cache.py prune
+
+      # Every master job of this OS races to save the same key; the first
+      # wins and the rest log "unable to reserve" -- harmless, hence
+      # continue-on-error (cache housekeeping never decides a verdict).
+      - name: Save the Zenodo download cache
+        if: >-
+          github.event_name == 'push' && github.ref == 'refs/heads/master' &&
+          steps.zenodo-fetch.outcome == 'success' &&
+          steps.zenodo-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v6
         with:
-          path: src/exozippy/models/NextGen/BCs/*.bc.parquet
-          key: nextgen-bc-tables-p1-${{ hashFiles('src/exozippy/utilities/zenodo_assets.py') }}
+          path: ~/.cache/exozippy/downloads
+          key: ${{ steps.zenodo-cache.outputs.cache-primary-key }}
+
+      # The entry for the previous pins is superseded once the new one is
+      # saved (only the newest is ever wanted), and the pre-p1 per-path
+      # entries (nextgen-spectra-*, nextgen-bc-tables-*) are dead outright.
+      # Left alone they would only age out of the 10 GB budget after a week
+      # unread. One job per OS, and only after a complete fetch, so the
+      # entry this deletes in favor of is known to be saveable.
+      - name: Drop superseded Zenodo download caches
+        if: >-
+          github.event_name == 'push' && github.ref == 'refs/heads/master' &&
+          steps.zenodo-fetch.outcome == 'success' &&
+          matrix.shard == 1 && matrix.python-version == '3.12'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KEEP: ${{ steps.zenodo-cache.outputs.cache-primary-key }}
+          PREFIX: zenodo-downloads-p1-${{ runner.os }}-
+        run: |
+          set -euo pipefail
+          for prefix in "$PREFIX" nextgen-spectra- nextgen-bc-tables-; do
+            gh cache list --key "$prefix" --limit 100 --json key \
+              --jq '.[].key' | while read -r key; do
+              if [ -n "$key" ] && [ "$key" != "$KEEP" ]; then
+                echo "deleting superseded cache: $key"
+                gh cache delete "$key" || true
+              fi
+            done
+          done
 
       # The mulensing component sets astropy's solar-system ephemeris to
       # "jpl", which downloads the ~115 MB de430 kernel into ~/.astropy/cache
-      # on first use. Same failure mode as the Zenodo spectra above: a slow
+      # on first use. Same failure mode as the Zenodo downloads above: a slow
       # JPL server turned into URLError failures across the suite (nightlies
       # of 2026-07-29 and 2026-07-31). The kernel file never changes, so a
       # static key is correct; bump it only if the ephemeris name in
@@ -299,7 +346,7 @@ jobs:
       #   * The repository-wide cache budget is 10 GB and GitHub evicts
       #     least-recently-ACCESSED to stay under it. A compiledir is a few
       #     hundred MB per matrix combination, so saving one on every PR run
-      #     would churn several GB a day and put the Zenodo spectra (132 MB)
+      #     would churn several GB a day and put the Zenodo downloads (~0.5 GB)
       #     and the ephemeris kernel (115 MB) above at risk of eviction --
       #     trading a 5-minute cache for a 250 MB download. Restricting writes
       #     to master pushes caps the churn at one set per merge.
@@ -680,6 +727,8 @@ jobs:
     # a red run opened.
     env:
       ISSUE_TITLE: "Nightly: suite fails against freshly resolved dependencies"
+      # The machine-level Zenodo download cache; see the matrix job.
+      EXOZIPPY_CACHE_DIR: "~/.cache/exozippy"
 
     steps:
       - uses: actions/checkout@v7
@@ -699,24 +748,18 @@ jobs:
           python -m pip install --upgrade pip
           pip install ".[gui]" --group dev
 
-      # Same Zenodo spectra cache as the other jobs -- see the comment there,
-      # including why this path has to be kept in sync with
-      # bc_grid.DEFAULT_MODEL_ROOT by hand. Shares their key, so this job is
-      # usually a cache hit populated by them.
-      - name: Cache the Zenodo model spectra
-        uses: actions/cache@v6
+      # The matrix job's Zenodo download cache, restore only -- see the
+      # comment there. This job pip-installs the package, so the loaders'
+      # destinations are in site-packages, not the checkout; the machine
+      # cache does not care, which is why it is the one thing cached. The
+      # conftest prewarm links every record in from it before the suite.
+      - name: Restore the Zenodo download cache
+        uses: actions/cache/restore@v6
         with:
-          path: |
-            src/exozippy/models/NextGen/BCs/NextGen.spectra.csv
-            src/exozippy/models/NextGen/BCs/NextGen.wavelength.csv
-          key: nextgen-spectra-p2-7a2b81333f6a5bfccd4cbc07bdea6648
-
-      # Same BC-table cache as the matrix job -- see the comment there.
-      - name: Cache the Zenodo BC tables
-        uses: actions/cache@v6
-        with:
-          path: src/exozippy/models/NextGen/BCs/*.bc.parquet
-          key: nextgen-bc-tables-p1-${{ hashFiles('src/exozippy/utilities/zenodo_assets.py') }}
+          path: ~/.cache/exozippy/downloads
+          key: zenodo-downloads-p1-${{ runner.os }}-${{ hashFiles('src/exozippy/utilities/zenodo_assets.py') }}
+          restore-keys: |
+            zenodo-downloads-p1-${{ runner.os }}-
 
       # Same astropy ephemeris-kernel cache as the matrix job -- see the
       # comment there.
