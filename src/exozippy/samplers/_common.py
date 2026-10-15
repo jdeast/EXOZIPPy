@@ -1636,6 +1636,51 @@ def describe_proposal(prop, raw_to_phys, raw_var_names, out_var_names):
     return phys_params, raw_params
 
 
+def log_eval_timeout(
+    logger, prefix, eval_timeout, where, n_timed_out, describe
+):
+    """Log ONE eval-timeout diagnostic for a batch of written-off proposals.
+
+    `describe` is a zero-argument callable rendering the culprit as the
+    (physical, raw) pair `describe_proposal` returns.  It is called exactly
+    once, here, so a caller that used to render every write-off now pays for
+    one.
+
+    FOR THE ASYNC SAMPLER ONLY, and deliberately so.  `ptde_async` scans its
+    in-flight set on a wall clock, and a timeout there tears down the WHOLE
+    pool: there is no way to kill one hung worker, so every evaluation
+    queued behind the hang ages past `eval_timeout` and is written off
+    alongside it.  Only the oldest is evidence; the rest are collateral,
+    identical in kind and silent about the hang.  `ptde` is NOT the same
+    shape -- `_map_logp_timeout` gives each proposal its own deadline, so
+    every index it returns really did run long and really is a distinct
+    pathological point worth dumping.  Routing it through here would throw
+    those away, which is why it still logs per proposal.
+
+    WHY ONLY ONE IS DUMPED.  Dumping each collateral write-off
+    rendered ~1400 proposals through `raw_to_phys` and wrote ~4 KB apiece
+    PER RECYCLE -- about 1.8 GB per event over one RMDC26 run, written
+    TWICE (the run log under `prefix` and the scheduler's stdout).  That
+    filled a 95 GB home quota in under three hours and killed all twelve
+    array tasks of job 52549712, which then ran on for another one to two
+    hours unable to write so much as the traceback saying why.  The count
+    is what carries the information the other dumps did not.
+    """
+    phys_params, raw_params = describe()
+    others = (
+        f" and {n_timed_out - 1} other in-flight evaluation(s) written off "
+        f"with it"
+        if n_timed_out > 1
+        else ""
+    )
+    logger.error(
+        f"{prefix}: logp call exceeded eval_timeout={eval_timeout:.0f}s "
+        f"at {where} -- rejecting this proposal{others}.\n"
+        f"  physical params: {phys_params}\n"
+        f"  raw params: {raw_params}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Start-population generation + ensemble plots
 # ---------------------------------------------------------------------------

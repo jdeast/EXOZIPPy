@@ -9,6 +9,7 @@ import pytensor.tensor as pt
 
 from exozippy.components.instrument import Instrument
 from exozippy.components.limbdark import quad_limb_darkened_flux
+from exozippy.components.parameterization import pin_unselected
 from exozippy.outputs.prose import get_collector
 from exozippy.outputs.texutils import latex_escape
 
@@ -38,9 +39,6 @@ class Transit(Instrument):
                 "limb darkening)."
             )
         self.total_detrend_cols = 0
-        # SED depth-dilution node, built once by build_likelihood and
-        # reused by compile_plotters.
-        self._dilution_node = None
         # Light-travel-time (Roemer delay) correction, per file (see
         # components/ltt.py) -- on by default (Jason's decision: transit/rm/
         # astrometry on, rv/mulens off; matches EXOFASTv2). Per-file, not a
@@ -52,6 +50,186 @@ class Transit(Instrument):
             [bool(c.get("light_travel_time", True)) for c in self.config]
         )
         self._load_spline_config()
+        self._load_dilution_config()
+
+    # EXOFASTv2's sed_frac_uncertainty (exofast_multised.pro): the fractional
+    # systematic error on each star's SED-predicted band flux, propagated to
+    # the floor on the SED's dilution prediction.
+    DEFAULT_SEDDEBLEND_FLOOR = 0.02
+
+    def _load_dilution_config(self):
+        """Read the per-file ``fitdilute:`` / ``seddeblend:`` /
+        ``seddeblend_floor:`` keys (at construction).
+
+        ``seddeblend`` is kept RAW here (``True``, ``False`` -- the
+        default, as in EXOFASTv2 -- or a list of star names): the star names
+        resolve only against the star and SED components, in
+        ``register_parameters`` (``_resolve_dilution``).  Type errors raise
+        now, since each one silently changes the model if guessed at.
+        """
+        self.fitdilute = []
+        self.seddeblend_raw = []
+        self.seddeblend_floor = []
+        for i, c in enumerate(self.config):
+            label = f"{self.prefix}[{self.names[i]}]"
+            fit = c.get("fitdilute", False)
+            if not isinstance(fit, (bool, np.bool_)):
+                raise ValueError(
+                    f"[{label}] fitdilute must be true or false; got {fit!r}."
+                )
+            deb = c.get("seddeblend", False)
+            if not isinstance(deb, (bool, np.bool_)):
+                if not isinstance(deb, (list, tuple)) or not all(
+                    isinstance(x, str) for x in deb
+                ):
+                    raise ValueError(
+                        f"[{label}] seddeblend must be true, false or a "
+                        f"list of star names; got {deb!r}."
+                    )
+            floor = c.get("seddeblend_floor", self.DEFAULT_SEDDEBLEND_FLOOR)
+            if (
+                isinstance(floor, (bool, np.bool_))
+                or not isinstance(floor, (int, float, np.integer, np.floating))
+                or not np.isfinite(floor)
+                or floor <= 0
+            ):
+                raise ValueError(
+                    f"[{label}] seddeblend_floor must be a positive "
+                    f"fractional flux error (e.g. 0.02); got {floor!r}."
+                )
+            if "seddeblend_floor" in c and deb is False:
+                logger.warning(
+                    f"[{label}] seddeblend_floor is set but seddeblend is "
+                    f"false; there is no SED constraint for it to floor."
+                )
+            self.fitdilute.append(bool(fit))
+            self.seddeblend_raw.append(
+                bool(deb) if isinstance(deb, (bool, np.bool_)) else list(deb)
+            )
+            self.seddeblend_floor.append(float(floor))
+
+    @staticmethod
+    def sed_reads_dilution(configs, n_stars):
+        """Whether any transit config asks the SED for a dilution.
+
+        Read from RAW configs, for ``SED.photometric_readers`` at stage 3
+        (the same ruling as ``Band.ld_consumers``): ``seddeblend: true`` or a
+        star list does, with more than one star modeled.  Conservative: it
+        answers for every star rather than the named ones.
+        """
+        if n_stars < 2:
+            return False
+        return any(c.get("seddeblend", False) is not False for c in configs)
+
+    def _resolve_dilution(self, system):
+        """Stage 3: which files fit ``dilute``, and which the SED constrains.
+
+        Sets ``self.dilute_fit`` (bool per file) and ``self.deblend_stars``
+        (per file: ``None``, or the sorted star indices whose summed flux
+        the SED dilution prediction is taken over, the host included).
+
+        ``seddeblend`` defaults to false, as in EXOFASTv2: deblending is
+        opt-in, since a resolved neighbor or a light curve already deblended
+        upstream (TESS SPOC) must not be diluted again.  ``true`` or a list
+        with no SED, one star,
+        or a band the SED has no filter for RAISES: the user asked for a
+        constraint the fit cannot apply.  ``seddeblend`` implies
+        ``fitdilute``.
+        """
+        band = system.band
+        star = getattr(system, "star", None)
+        star_names = list(star.names) if star is not None else []
+        n_stars = len(star_names)
+        sed = getattr(system, "sed", None)
+        self.dilute_fit = []
+        self.deblend_stars = []
+        for i in range(self.n_elements):
+            label = f"{self.prefix}[{self.names[i]}]"
+            raw = self.seddeblend_raw[i]
+            band_idx = int(self.band_map[i])
+            filter_key = band.filter_mist[band_idx]
+            have_filter = bool(
+                sed is not None and filter_key and sed.has_filter(filter_key)
+            )
+            host = int(band.star_indices[band_idx])
+            stars = None
+            if raw is not False:
+                why = None
+                if sed is None:
+                    why = "there is no sed: block to predict the fluxes"
+                elif n_stars < 2:
+                    why = "only one star is modeled"
+                elif not have_filter:
+                    why = (
+                        f"band filter '{filter_key}' is not in the SED's "
+                        f"BC grid"
+                    )
+                if why:
+                    raise ValueError(
+                        f"[{label}] seddeblend is set but {why}. Use "
+                        f"fitdilute: true to fit the dilution without the "
+                        f"SED."
+                    )
+                if raw is True:
+                    stars = list(range(n_stars))
+                else:
+                    unknown = [n for n in raw if n not in star_names]
+                    if unknown:
+                        raise ValueError(
+                            f"[{label}] seddeblend names unknown star(s) "
+                            f"{unknown}; the stars are {star_names}."
+                        )
+                    stars = sorted({star_names.index(n) for n in raw} | {host})
+            if stars is not None and stars == [host]:
+                raise ValueError(
+                    f"[{label}] seddeblend names only the host star "
+                    f"'{star_names[host]}'; list the stars whose light is "
+                    f"blended with it, or set seddeblend: false."
+                )
+            self.deblend_stars.append(stars)
+            self.dilute_fit.append(bool(self.fitdilute[i] or stars))
+
+    def _hint_dilute_from_sed(self, system):
+        """Start each seddeblend file's ``dilute`` at the SED's prediction.
+
+        The stars' SED inputs are read with ``probe_start`` (the stage 1-3
+        reader, ``config.md``), the predicted A_D = 1 - F_host / sum F is
+        evaluated numerically (``SED.predict_flux_fraction_at``) and pushed
+        as a PRECEDENCE_DERIVED_DATA hint, so a user ``initval`` or link on
+        the file's dilute still wins.  A star input the engine cannot reach
+        leaves the defaults.yaml start of 0, with a warning.
+        """
+        sed = system.sed
+        band = system.band
+        inputs = sed.FLUX_FRACTION_INPUTS
+        stars = sorted({j for st in self.deblend_stars if st for j in st})
+        paths = [f"star.{j}.{name}" for j in stars for name in inputs]
+        probed = self.config_manager.probe_start(paths)
+        missing = [p for p in paths if probed[p].value is None]
+        if missing:
+            logger.warning(
+                f"[{self.prefix}] cannot start dilute at the SED prediction: "
+                f"no start for {missing}; it starts at 0 and the seddeblend "
+                f"prior pulls it in."
+            )
+            return
+        values = {
+            name: {j: float(probed[f"star.{j}.{name}"].value) for j in stars}
+            for name in inputs
+        }
+        for i, st in enumerate(self.deblend_stars):
+            if not st:
+                continue
+            band_idx = int(self.band_map[i])
+            frac = sed.predict_flux_fraction_at(
+                int(band.star_indices[band_idx]),
+                band.filter_mist[band_idx],
+                values,
+                st,
+            )
+            self.config_manager.add_hint(
+                f"{self.prefix}.{i}.dilute", 1.0 - frac
+            )
 
     def _load_spline_config(self):
         """Read the per-file ``fitspline:`` / ``splinespace:`` keys (at
@@ -201,6 +379,46 @@ class Transit(Instrument):
             cls._label_config_schema(),
             cls._gp_config_schema(),
             cls._likelihood_config_schema(),
+            {
+                "key": "fitdilute",
+                "kind": "option",
+                "accepts": [True, False],
+                "required": False,
+                "doc": (
+                    "Fit this file's dilution transit.<name>.dilute, the "
+                    "fraction of the aperture's flux from other sources "
+                    "(EXOFASTv2's FITDILUTE). With no seddeblend it is "
+                    "constrained only by the data and any params-file "
+                    "prior or link. Default false (implied by seddeblend)."
+                ),
+            },
+            {
+                "key": "seddeblend",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Stars blended in this file's aperture: true (all), "
+                    "false (none), or a list of star names (the host is "
+                    "always included). Fits transit.<name>.dilute with a "
+                    "Gaussian prior centered on the SED-predicted flux "
+                    "fraction of the other stars in the band, whose width "
+                    "propagates seddeblend_floor (EXOFASTv2's SEDDEBLEND). "
+                    "Default false."
+                ),
+            },
+            {
+                "key": "seddeblend_floor",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Fractional systematic error on each star's "
+                    "SED-predicted band flux, propagated to the width of "
+                    "the seddeblend prior (EXOFASTv2's "
+                    "SED_FRAC_UNCERTAINTY). Default 0.02."
+                ),
+            },
             {
                 "key": "fitspline",
                 "kind": "option",
@@ -374,26 +592,65 @@ class Transit(Instrument):
             )
         return block
 
-    # An eclipse times its conjunction (Component.epochs_constraining).
-    epoch_timing_rank = 2
-
     def epochs_constraining(self, system, orbit):
-        """Every light curve's epochs on every orbit with a planet companion.
+        """Every light curve's epochs on every planet's orbit, with the
+        transit-timing information each carries.
 
         Every transit file models every planet (the assumption
         ``Orbit._transit_only`` and ``orbit.occultation_datasets`` make), so
-        each file times each orbit whose companion group holds one.
+        each file times each planet's orbit.  The information is Carter et
+        al. (2008)'s, spread over the points between first and fourth
+        contact of the seeded ephemeris (``timing.transit_information``),
+        with the transit's depth, duration and ingress from the stage-3
+        seeds (``Orbit.seeded_transit_shape``) and the errors relative to
+        the file's baseline flux -- rescaled to the light curve's own
+        point-to-point scatter (``timing.error_scale``), because that is
+        the noise the fit's jitter will find, and a file whose quoted
+        errors are off would otherwise be misweighted by the square of the
+        error (measured: `examples/kelt17`'s MVRC errors are 1.7x too
+        small; `examples/hat3`'s TESS S16 errors 1.2x too large).
+        Occultations are not counted: their
+        timing information is smaller by the depth ratio squared.
         """
-        planet_orbits = [
-            i
-            for i in range(orbit.n_elements)
-            if any(t == "planet" for t, _ in orbit.companion_bodies[i])
+        from ..orbit import timing
+
+        # No planet block: nothing transits, and the build refuses the
+        # config later with its own message.
+        planets = system.active_components.get("planet")
+        if planets is None:
+            return {}
+        shapes = [
+            orbit.seeded_transit_shape(system, j)
+            for j in range(planets.n_elements)
         ]
+        seed = orbit.timing_seed
         out = {}
         for i in range(self.n_elements):
-            epochs = self.dataset_epochs(i)
-            for o in planet_orbits:
-                out.setdefault(int(o), []).append(epochs)
+            t = self.dataset_times(i)
+            sigma = (
+                self.dataset_errors(i)
+                * timing.error_scale(
+                    np.asarray(self.flux[self.rows(i)], dtype=float),
+                    self.dataset_errors(i),
+                )
+                / self.baseline_init[i]
+            )
+            exptime = self.exptime_min[i] / 1440.0
+            per_orbit = {}
+            for o, depth, T, tau in shapes:
+                w = timing.transit_information(
+                    t,
+                    sigma,
+                    seed.tc[o],
+                    seed.period[o],
+                    depth,
+                    T,
+                    tau,
+                    exptime=exptime,
+                )
+                per_orbit[o] = per_orbit.get(o, 0.0) + w
+            for o, w in per_orbit.items():
+                out.setdefault(int(o), []).append((t, w, "conjunction"))
         return out
 
     def _seed_from_bls(self, system):
@@ -616,9 +873,7 @@ class Transit(Instrument):
         self._register_robust(self.manifest)
 
         if self.total_detrend_cols > 0:
-            self.manifest["detrend_coeffs"] = {
-                "shape": (self.total_detrend_cols,)
-            }
+            self.manifest["detrend_coeffs"] = self._detrend_manifest_entry()
 
         # Limb darkening comes from the Band component; map each
         # instrument (and each observation) to its band. A transit model
@@ -644,6 +899,18 @@ class Transit(Instrument):
             [name_to_idx[n] for n in self.band_names], dtype=int
         )
         self.obs_band_map = self.band_map[self.inst_map]
+
+        # Dilution (EXOFASTv2's DILUTE): a parameter only where a file fits
+        # it, through the OPT-IN pin so the others cost nothing and a
+        # params-file prior on one still frees it.  Absent everywhere, the
+        # parameter does not exist and the model is undiluted.
+        self._resolve_dilution(system)
+        if any(self.dilute_fit):
+            self.manifest["dilute"] = pin_unselected(
+                self.n_elements, self.dilute_fit
+            )
+            if any(self.deblend_stars):
+                self._hint_dilute_from_sed(system)
 
     def _hint_baseline(self):
         """Push each light curve's median flux as a PRECEDENCE_DERIVED_DATA hint.
@@ -682,56 +949,53 @@ class Transit(Instrument):
                 continue
             self.config_manager.add_hint(f"{self.prefix}.{i}.baseline", val)
 
-    def _build_dilution(self, system):
-        """
-        Per-instrument SED-predicted depth dilution factor
-        F_host / sum_j F_j in the instrument's band, as a (n_elements,)
-        tensor (Deterministic "transit.dilution" for diagnostics), or
-        None if no instrument's band filter is in the SED's BC grid.
-        Instruments whose band filter is unavailable get dilution 1.
+    def _add_sed_deblend_prior(self, system):
+        """Stage 7: the SED constraint on ``dilute`` (EXOFASTv2's SEDDEBLEND).
 
-        The cache is per BUILD, not per component: ``build_likelihood``
-        clears it with an inline ``self._dilution_node = None`` at the top of
-        stage 7 (the general seam is ``Component.per_build_caches`` /
-        ``reset_build_caches``, which ``System.build_model`` runs before
-        stage 5; this cache does not use it because nothing reads the node
-        before stage 7 -- see ``components.md``).  Components persist on the
-        System and a second ``system.build_model()`` is supported (the GUI
-        does it), so a cache that outlived the model handed the second
-        build's likelihood a Deterministic belonging to the FIRST model --
-        either a crash at logp compile or, worse, a silently stale dilution.
-        Within one build the cache is still wanted: the node is asked for
-        twice (the group loop and the beam term) and must be one node.
-        """
-        if getattr(self, "_dilution_node", None) is not None:
-            return self._dilution_node
+        For each file with ``deblend_stars``, the SED predicts the dilution
+        from the stars' band fluxes, ``A_D = F_other / (F_host + F_other)``,
+        and ``dilute`` gets a Gaussian centered on it.  Its width propagates
+        a fractional error ``seddeblend_floor`` on each of F_host and F_other
+        (exofast_multised.pro's deblend_uncertainty):
 
+            sigma = sqrt(2) * floor * F_host * F_other / (F_host + F_other)^2
+                  = sqrt(2) * floor * A_D * (1 - A_D)
+
+        sigma tracks sampled stellar parameters, so the potential keeps its
+        -log(sigma) term (the house convention, ``SED._fractional_floor_logp``).
+        The prediction is kept as the Deterministic ``transit.dilute_sed``,
+        one entry per deblended file, for diagnostics.
+        """
+        idx = [i for i, st in enumerate(self.deblend_stars) if st]
+        if not idx:
+            return
         sed = system.sed
         band = system.band
-        dils = []
-        any_diluted = False
-        for i in range(self.n_elements):
+        preds, sigmas = [], []
+        for i in idx:
             band_idx = int(self.band_map[i])
             filter_key = band.filter_mist[band_idx]
-            if filter_key and sed.has_filter(filter_key):
-                host = int(band.star_indices[band_idx])
-                dils.append(
-                    sed.predict_flux_fraction(host, filter_key, system)
-                )
-                any_diluted = True
-            else:
-                logger.warning(
-                    f"transit {self.names[i]}: band filter '{filter_key}' "
-                    f"is not in the SED's BC grid; no depth deblending "
-                    f"applied for this instrument."
-                )
-                dils.append(pt.constant(1.0, dtype="float64"))
-        if not any_diluted:
-            return None
-        self._dilution_node = pm.Deterministic(
-            f"{self.prefix}.dilution", pt.stack(dils)
+            host = int(band.star_indices[band_idx])
+            frac_host = sed.predict_flux_fraction(
+                host, filter_key, system, star_indices=self.deblend_stars[i]
+            )
+            a_d = 1.0 - frac_host
+            preds.append(a_d)
+            sigmas.append(
+                np.sqrt(2.0) * self.seddeblend_floor[i] * a_d * frac_host
+            )
+        pred = pm.Deterministic(f"{self.prefix}.dilute_sed", pt.stack(preds))
+        sigma = pt.stack(sigmas)
+        dilute = self.dilute.value[np.asarray(idx, dtype=int)]
+        pm.Potential(
+            f"{self.prefix}.seddeblend",
+            pt.sum(-0.5 * pt.sqr((dilute - pred) / sigma) - pt.log(sigma)),
         )
-        return self._dilution_node
+        self.dilute.add_prior_contribution(
+            r"$\mathcal{N}(\mathrm{SED}, \sigma_{\rm sys})$",
+            text="Normal(SED, sigma_sys)",
+            elements=idx,
+        )
 
     def _lc_model(self, system, t, blocks):
         """The transit model on times ``t`` -- THE expression, built once.
@@ -900,13 +1164,15 @@ class Transit(Instrument):
         )
         beam_active = "beam" in planets.manifest
 
-        # 3b. SED deblending (EXOFASTv2 parity): with more than one
-        # modeled star, only the host contributes the transit, so the
-        # observed depth is diluted by dil = F_host / sum_j F_j in the
-        # instrument's band (host = the band's star_ndx).
+        # 3b. Dilution (EXOFASTv2's exofast_tran.pro:157,
+        # f0*((model-1)*(1-dilute)+1)): a fraction ``dilute`` of the
+        # aperture's flux comes from other sources, so every deviation from
+        # the baseline is scaled by 1 - dilute.  The SED constrains dilute
+        # where seddeblend asks it to (_add_sed_deblend_prior); it does not
+        # set it.
         dil_inst = None
-        if hasattr(system, "sed") and system.star.n_elements > 1:
-            dil_inst = self._build_dilution(system)
+        if "dilute" in self.manifest:
+            dil_inst = 1.0 - self.dilute.value
         # Flat per-observation dilution for the post-loop beam term below
         # (EXOFASTv2 parity -- see the beam comment past the group loop).
         dil_obs_flat = None
@@ -1253,12 +1519,7 @@ class Transit(Instrument):
         return blocks
 
     def build_likelihood(self, model, system):
-        # Stage 7 is once per BUILD, and a second system.build_model() on one
-        # System is supported (the GUI does it), so every cached NODE has to
-        # be dropped here.  A dilution node that outlived its model was handed
-        # to the second build's likelihood -- a crash at logp compile, or a
-        # silently stale dilution.
-        self._dilution_node = None
+        self._add_sed_deblend_prior(system)
 
         time = pm.Data("transit_time", self.time)
         flux = pm.Data("transit_data", self.flux)

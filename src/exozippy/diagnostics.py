@@ -232,8 +232,7 @@ class ModelAuditor:
             for i in range(n):
                 used_keys.add(p.get_display_label(i))
                 # Add index fallback (star.0.radius)
-                parts = p.label.split(".")
-                used_keys.add(f"{parts[0]}.{i}.{parts[-1]}")
+                used_keys.add(p.index_key(i))
 
         unused_items = []
 
@@ -398,8 +397,7 @@ class ModelAuditor:
             n = int(np.prod(p.shape)) if p.shape != () else 1
             for i in range(n):
                 index.setdefault(p.get_display_label(i), (p, i))
-                parts = p.label.split(".")
-                index.setdefault(f"{parts[0]}.{i}.{parts[-1]}", (p, i))
+                index.setdefault(p.index_key(i), (p, i))
             index.setdefault(p.label, (p, 0))
 
         targets = []

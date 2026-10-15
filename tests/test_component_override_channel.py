@@ -393,7 +393,10 @@ def test_neither_injection_can_reach_probe_derivable(tmp_path):
     for fields in cm.param_overrides.values():
         assert set(fields) <= {"lower", "upper"}
 
-    system.prepare()
+    # Probed at stage 1, where a seeder asks: after prepare() every start
+    # is injected back into user_params, so every path reads as derivable.
+    # av is a relaxation-engine leaf (sed/symbolic_physics.py) with only a
+    # defaults.yaml value, so the bounds must leave it at that rank.
     derivable = cm.probe_derivable(
         [f"star.0.{p}" for p in _GRID] + ["star.0.teff"]
     )

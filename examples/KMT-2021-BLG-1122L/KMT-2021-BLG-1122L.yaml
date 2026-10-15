@@ -45,65 +45,91 @@ band:
   - name: "I"
     filter: "Generic/Cousins.I"
     ld_law: "linear"
+  - name: "V"
+    filter: "Generic/Bessell.V"
+    ld_law: "linear"
 
-# No catalog photometry: the empty-filter SED block still ties each light
-# curve's calibrated baseline f_source to the SED-predicted source I mag
-# through the per-lightcurve zeropoint prior in the params file.
+# No catalog photometry: the empty-filter SED block ties each light curve's
+# source flux to the SED-predicted source magnitude in its band through the
+# per-lightcurve zeropoint prior in the params file.  With I AND V curves the
+# tie measures the source's colour, which with the A_V prior (params file)
+# fixes theta_*, and with it theta_E = theta_*/rho.  I alone left theta_*
+# free and the first acceptance fit's distances drifted to ~100 pc.
 sed:
   file: "KMT-2021-BLG-1122L.sed.yaml"
 
-# KMTNet pySIS I-band light curves (field BLG14, 1 hr cadence), from the
-# KMTNet event page -- see prepare_data.py for the download and the
-# three-column conversion.  Han+2023 fit these three I-band data sets.
+# KMTNet pySIS light curves (field BLG14), read as NATIVE DIFFERENCE FLUX
+# (prepare_data.py).  pySIS's mag column is referenced to a fixed 20.0 mag
+# (flux 1584.9 at zp 28) at every site, not to this star's baseline, so a
+# magnitude file has a fictitious total flux and the q_source <= 2 bound is
+# applied against it.  Here each instrument instead gets an explicit
+# reference_mag well above any epoch's flux (I 16.0, V 19.0 at zp 28): the
+# reference only shifts f_blend, which nothing reads (sed_constrains_blend
+# is off), while f_source -- the brightening's amplitude, which the SED tie
+# reads -- does not depend on it.  Han+2023 fit the three I curves; the V
+# curves (26/114/50 points) add the source colour.
 mulensinstrument:
   - name: "KMTC14"
-    file: "n20210603.I.KMTC14.pys"
+    file: "n20210603.I.KMTC14.dia"
+    data_format: dia
+    reference_mag: 16.0
     band: "I"
-    magsys: Vega   # pySIS instrumental I, KMT system (see the zeropoint prior)
+    magsys: Vega   # pySIS instrumental, zp 28 (see the zeropoint prior)
 
   - name: "KMTS14"
-    file: "n20210603.I.KMTS14.pys"
+    file: "n20210603.I.KMTS14.dia"
+    data_format: dia
+    reference_mag: 16.0
     band: "I"
     magsys: Vega
 
   - name: "KMTA14"
-    file: "n20210603.I.KMTA14.pys"
+    file: "n20210603.I.KMTA14.dia"
+    data_format: dia
+    reference_mag: 16.0
     band: "I"
+    magsys: Vega
+
+  - name: "KMTC14V"
+    file: "n20210603.V.KMTC14.dia"
+    data_format: dia
+    reference_mag: 19.0
+    band: "V"
+    magsys: Vega
+
+  - name: "KMTS14V"
+    file: "n20210603.V.KMTS14.dia"
+    data_format: dia
+    reference_mag: 19.0
+    band: "V"
+    magsys: Vega
+
+  - name: "KMTA14V"
+    file: "n20210603.V.KMTA14.dia"
+    data_format: dia
+    reference_mag: 19.0
+    band: "V"
     magsys: Vega
 
 parameter_file: "KMT-2021-BLG-1122L.params.yaml"
 
 sampler:
-  method: ptde          # synchronous PTDE, the recommended default (PR #376); the triple-lens VBM Op has no gradient
+  method: ptde          # synchronous PTDE (#376); the triple-lens VBM Op has no gradient.  Not ptde_async.
   n_temps: auto
-  # T_max 20, not the usual 200: at T_max 200 (25 rungs) the fourth launch
-  # (job 15506690) hit a hung VBM call in 34 of its first 70 steps, all on
-  # rungs 15-24 (T >~ 25), each costing the 10 s eval_timeout plus a pool
-  # recycle -- the hangs cost more than the sampling.  The hottest rungs
-  # roam the three-body geometry into the kernel's failure tail (review
-  # 2.6.35); a ladder that stops at T = 20 stays out of it.  The start is
-  # the convention-scan winner, so deep tempering is not what this fit
-  # needs.
-  T_max: 20
+  T_max: 200
   tune: 5000
   draws: 20000
   nthin: 1
   recompute_trace: True
-  eval_timeout: 10
+  # 60 s, not 10: with VBMicrolensing 5.6.1 a few three-body calls at
+  # s < 0.2 or > 3 still take minutes (fixed by valboz/VBMicrolensing#75,
+  # unreleased; run under a venv carrying it, see the README).
+  eval_timeout: 60
   store_hot_chains: True
-  # The DE seed polish has NO eval_timeout (run.md: a config-vocabulary
-  # ruling), and VBM's three-body MultiMag2 aborts its worker ("double free
-  # or corruption") on a small fraction of DE-style proposals: the first
-  # acceptance fit (job 15506216) hung forever at 60/64 proposals back with
-  # zero CPU.  The sampling phase scores a dead worker's call -inf after
-  # eval_timeout and recycles the pool, so skip the polish and let PTDE do
-  # that work.
+  # The DE seed polish has NO eval_timeout (run.md), so one slow kernel
+  # call stalls it (review 2.6.35): off.
   seed_polish: false
-  # Every rung's start population is a copy of the T=1 one at the T=1
-  # dispersion (3 probe-scales) rather than the auto 3*sqrt(T): the start
-  # population is scored serially in the main process with no timeout
-  # (review 2.6.36), and the auto dispersion at T >= 10 jittered the
-  # three-body geometry into a VBM call that never returned -- the third
-  # launch (job 15506232) sat 95 minutes at one core after "PTDE init rung
-  # 9".  Rungs 1-8 at factors 3-7 scored ~2000 proposals without one.
+  # Every rung starts at the T=1 dispersion: the start population is scored
+  # serially with no timeout (review 2.6.36), and the auto 3*sqrt(T) took an
+  # hour per hot rung.  The hot rungs disperse during tuning anyway.
   start_dispersion: 3.0

@@ -57,11 +57,13 @@ transit:
     band: "TESS"
     exptime: 30 # minutes
     ninterp: 10
+    fitdilute: true
   - name: "TESS_UT20200319"
     file: "n20200319.TESS.TESS.TOI-3919SlimFlat.S23.1800sunbinned.dat"
     band: "TESS"
     exptime: 30 # minutes
     ninterp: 10
+    fitdilute: true
   - name: "CALOU-0m4_UT20220114"
     file: "n20220114.R.CALOU-0m4.TOI-3919.dat"
     band: "R"
@@ -72,11 +74,13 @@ transit:
     band: "TESS"
     exptime: 2 # minutes
     ninterp: 1
+    fitdilute: true
   - name: "TESS_UT20220326"
     file: "n20220326.TESS.TESS.TOI-3919SlimFlat.S50.120sunbinned.dat"
     band: "TESS"
     exptime: 2 # minutes
     ninterp: 1
+    fitdilute: true
   - name: "KeplerCam_UT20220428"
     file: "n20220428.Sloani.KeplerCam.TOI-3919.dat"
     band: "Sloani"

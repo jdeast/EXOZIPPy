@@ -1,0 +1,38 @@
+# DC2018 static 2L1S events whose TRUE planet is UNDETECTABLE in the data,
+# REMOVED from the grid-seeded sweep at the CURRENT threshold (JDE 2026-10-12).
+#
+# Criterion: dchi2_truth = chi2(point lens) - chi2(EXACT truth) < 10, where
+# both are minimized over (t_0, u_0, t_E, alpha) with rho optimized, the
+# point lens being q = 1e-8 at the truth's s.  A planet the data cannot
+# distinguish from a point lens cannot be recovered by any search, so these
+# are not tests of the method.  Measured by job 52114785 (dc18_truth_detect.py).
+#
+# THRESHOLDS -- k = 3 extra parameters (s, q, alpha):
+#   CURRENT   dchi2 < 10   (2.35 sigma, p = 0.019)  -> 7 removed, 23 kept
+#   PLANNED   dchi2 <  5   (1.37 sigma, p = 0.17)   -> 5 removed, 25 kept
+#             relax to 5 once the pipeline is working well at 10 (JDE).
+#   for reference: 3 sigma at k = 3 is dchi2 = 14.16 (9.00 only at k = 1).
+# Deliberately LENIENT: a false positive costs one fit, while a high bar
+# discards recoverable planets.  The opposite of events_moving.txt, where
+# a high bar is the conservative choice.  The sigma labels assume Wilks'
+# theorem, which planet detection violates (q -> 0 is a boundary; s, alpha
+# unidentifiable there), so they are optimistic; fine for choosing test
+# cases, not for claiming detections.
+#
+# NOTE the measured distribution is BIMODAL: every event is <= 8.4 or
+# >= 230.7, so any threshold in between gives the same cut.  At 10 the only
+# marginal case is event 025 (8.4); relaxing to 5 restores it and 092 (5.2).
+#
+# rho/sqrt(q) is NOT a substitute (tried 2026-10-11, wrong both ways): it
+# says the caustic is resolvable IF the source crosses it, not that the
+# trajectory comes near it.  It flags 152 (dchi2 731, detectable) and misses
+# 193/226/107/92/25.
+#
+# event  dchi2_truth  rho_over_sqrtq   q_true
+193          -1.31         0.0585   4.048e-05
+131          -0.25         5.6449   2.077e-06
+226           0.02         0.0199   7.150e-04
+107           1.50         0.1260   3.000e-05
+047           3.12         1.1077   8.446e-06
+092           5.23         0.0747   6.394e-05
+025           8.41         0.0662   6.555e-05

@@ -253,6 +253,22 @@ def grid_path(
     return model_root / model / "EEPs" / fname
 
 
+def grid_yaml_path(
+    model: str = "MISTv2.5",
+    model_root: Path | str = DEFAULT_MIST_MODEL_ROOT,
+) -> Path:
+    """Path to ``<model>.grid.yaml``, the metadata (citation, url, axes)
+    beside every (alpha, vvcrit) parquet of one model release.
+
+    The sibling of :func:`grid_path`, so the directory layout is spelled
+    once: the yaml is in the same ``EEPs/`` directory as the grids.
+    ``model_root=None`` means the default, as there.
+    """
+    return grid_path(model=model, model_root=model_root).parent / (
+        f"{model}.grid.yaml"
+    )
+
+
 # ---------------------------------------------------------------------
 # Trimming to a complete (mass, initfeh) rectangle
 # ---------------------------------------------------------------------

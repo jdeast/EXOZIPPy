@@ -11,19 +11,38 @@ exercised here.
 
 ## Data
 
-KMTNet pySIS photometry of the three sites, I band only, from the KMTNet
-event page (`KMT{A,C,S}14_I.pysis`; the V-band files are kept for the
-record but not fitted).  `prepare_data.py` writes the `.pys` files the
-config reads: HJD' + 2450000, magnitude, error.
+KMTNet pySIS photometry of the three sites, I and V, from the KMTNet event
+page (`KMT{A,C,S}14_{I,V}.pysis`).  `prepare_data.py` writes the `.dia`
+files the config reads with `data_format: dia`: the NATIVE difference flux,
+not the pySIS mag column.  That column satisfies
+`mag = 28.0 - 2.5 log10(1584.9 - dflux)` at every site to 3e-5 mag: the
+reference 1584.9 is 20.0 mag at zp 28, a fixed pipeline reference rather
+than this star's baseline, so a magnitude file has a fictitious total flux
+(review 2.2.22).  Each instrument instead states an explicit
+`reference_mag` (I 16.0, V 19.0) above every epoch's flux; the reference
+only shifts the blend, which nothing reads.  Rows with `fwhm <= 0` (pySIS's
+failed-PSF flag) are dropped: they included points 1-9 mag above baseline
+with small errors, one at 11.4 mag with sigma 0.16.
 
-| file | site | points |
-|---|---|---|
-| n20210603.I.KMTC14.pys | CTIO | 1346 |
-| n20210603.I.KMTS14.pys | SAAO | 676 |
-| n20210603.I.KMTA14.pys | SSO | 412 |
+| file | site | band | points |
+|---|---|---|---|
+| n20210603.I.KMTC14.dia | CTIO | I | 1303 |
+| n20210603.I.KMTS14.dia | SAAO | I | 663 |
+| n20210603.I.KMTA14.dia | SSO | I | 385 |
+| n20210603.V.KMTC14.dia | CTIO | V | 114 |
+| n20210603.V.KMTS14.dia | SAAO | V | 50 |
+| n20210603.V.KMTA14.dia | SSO | V | 26 |
 
-Coordinates (J2000) 17:35:51.10 -28:26:47.22, (l, b) = (-0.72, +2.08), from
-the event page; pinned on all four stars in the params file.
+Han+2023 modelled ~1435 pySIS I points (their cuts are not stated) and
+used pyDIA only for the source colour; with 2351 I points we fit about
+60% more, which is why our error scales sit near 1.5-2.3 rather than 1.
+
+The V curves give the source colour; with the A_V prior (5.3 +/- 0.3 from
+Han's A_I = 3.3) that fixes theta_*, and with it theta_E = theta_*/rho.
+With I alone theta_* was free and the distances drifted to ~100 pc.
+
+Coordinates (J2000) 17:35:51.10 -28:26:47.22, (l, b) = (-0.720, +2.076),
+from the event page, matching Han Sect. 2; pinned on all four stars.
 
 ## Table of record
 
@@ -47,52 +66,31 @@ theta_E = 0.50 mas, mu_rel = 12.4 mas/yr, theta_* = 1.26 uas.
 
 ## Mapping the published solution onto EXOZIPPy's coordinates
 
-Han's parameterization and EXOZIPPy's (conventions.md) differ in three
-places, and the paper states the sense of none of them, so all three were
-decided empirically by `check_start.py`: 32 combinations of
-(alpha rule in {alpha + 180, 180 - alpha, alpha, -alpha}) x (u_0 sign) x
-(alpha_3 = alpha_2 +/- psi) x (origin shift off/on), each evaluated as a
-start state on the shipped data and ranked by the data logp
-(`check_start.json`, job 15506210 on commit a05449bf).
+Han's text does not state the sense of alpha or psi or the origin of
+(t_0, u_0) (Sect. 3; Fig. 4 centres the coordinates on the M1-M2
+"effective position").  The mapping was therefore decided by an OPTIMIZED
+scan on the cleaned model (`scan_conventions_opt.py`): 48 candidates =
+alpha rule {alpha + 180, 180 - alpha, alpha, -alpha} x u_0 sign x
+alpha_3 = alpha_2 +/- psi x s normalization {s, s*k, s/k} with
+k = sqrt(1 + q_2 + q_3).  Each candidate's geometry is pinned and every
+other parameter Powell-optimized; the light-curve term decides.
 
-| rank | alpha rule | u_0 sign | alpha_3 | origin | alpha_2 (deg) | alpha_3 (deg) | t_0 (HJD') | u_0 | data logp - best |
-|---|---|---|---|---|---|---|---|---|---|
-| 1 | 180 - a | - | alpha_2 + psi | COM | 48.68 | 127.92 | 9370.609 | -0.4213 | 0 |
-| 2 | a | - | alpha_2 - psi | COM | 131.32 | 52.08 | 9369.843 | -0.4213 | -12,770 |
-| 3 | -a | - | alpha_2 - psi | COM | -131.32 | -210.56 | 9374.593 | -0.1139 | -19,564 |
-| 4 | a + 180 | - | alpha_2 + psi | COM | 311.32 | 390.56 | 9365.859 | -0.1139 | -20,418 |
-| 5 | -a | - | alpha_2 - psi | none | -131.32 | -210.56 | 9370.226 | -0.1260 | -46,520 |
-| 10 | 180 - a | - | alpha_2 + psi | none | 48.68 | 127.92 | 9370.226 | -0.1260 | -120,153 |
-| 32 | (worst) | | | | | | | | -20,875,006 |
+    alpha_EXOZIPPy = -alpha_Han,   alpha_3 = alpha_2 - psi,   u_0 as published
 
-The winner is unambiguous, with the runner-up 12,770 nats behind.  But
-it is a convention discriminator, not a fit: the likelihood is Gaussian in
-FLUX, so its 2434-point normalization is +47,273 nats and the winner's data
-logp of -417 at the committed start (`check_chi2.py`) is chi2 = 95,381, 39
-per point (CTIO 48, SAAO 39, SSO 11), against the paper's 1399.8/1425 on
-its own, larger, data set.  Rounded published values, a caustic-crossing
-source at rho = 2.5e-3 and the two-sigma-rounded origin translation are
-enough to put the crossings off by more than their own width; the DE seed
-polish at the start of the fit gained 43,742 nats in 400 sweeps.  The
-three rules:
+(or its exact mirror: +alpha_Han, alpha_2 + psi, -u_0), with s, q, t_E
+and rho as published.  Light-curve term 9424; the best other candidate
+reaches 7659.  At the optimum: t_E 14.73 d, theta_E 0.491 mas,
+rho 0.0025, D_L 6.57 kpc, D_S 8.68 kpc, masses 0.45 / 0.24 / 0.11 Msun --
+Table 2 and Sect. 5 recovered.  t_0 sits at 2459374.59, +4.37 d from
+Han's, the translation from the M1-M2 effective-position origin to
+EXOZIPPy's centre of mass of all three bodies.
 
-1. **alpha_EXOZIPPy = 180 deg - alpha_Han** (the Jung+2017 sense, NOT the
-   alpha + 180 that conventions.md C21 records for Zang+2023), combined
-   with **u_0 < 0**.  The pair is a convention choice, not a measurement:
-   the exact mirror (+u_0, both alphas negated) is the same light curve.
-2. **alpha_3 = alpha_2 + psi**: psi is counter-clockwise in the same sense
-   as alpha.
-3. **The origin must be translated.**  Han's origin is the "effective
-   position" of the M1-M2 pair (the binary centre of magnification: the
-   primary displaced by q_2 / ((1 + q_2) s_2) toward M2); EXOZIPPy's is the
-   centre of mass of all three bodies (C13; `op.py`, `pos -= m @ pos`).
-   The translation D = COM - EFF = (-0.026, -0.295) theta_E in the
-   trajectory frame moves the closest approach to t_0' = t_0 - D_tau t_E
-   (+0.383 d) and u_0' = u_0 + D_u (-0.126 -> -0.421).  Without it the
-   best convention is 46,500 nats worse (rank 5), and the winner's own
-   angles sit at rank 10.
-
-The params file carries the winner with every mapping commented.
+The earlier `check_start.py` scan picked 180 - alpha with +psi and -u_0.
+It scored STARTING POINTS on outlier-laden magnitude files with a broken
+flux bootstrap, and its winner was an artefact; every fit launched from it
+(the first acceptance fit included) sat in the wrong solution, with
+unphysical distances and error scales of 3-7.  `check_start.py` and
+`check_mirror*.py` are kept as the record.
 
 ## What the triple path needed that a binary does not (review 8.6.13)
 
@@ -128,9 +126,10 @@ and the gap is entirely in the stage-1 seeding (`check_mirror4.py`,
 `check_mirror5.py`: deterministic, sign-only, not order-dependent):
 
 - **Review 2.6.33.**  The peak finder's chi2 returns inf unless u_0 > 0,
-  and a HELD u_0 is passed as written, so with the shipped u_0 = -0.4213
-  every candidate is rejected ("found no PSPL solution") while +0.4213
-  fits.  The shipped start is sane only because the finder fails on it.
+  and a HELD u_0 is passed as written, so with the u_0 = -0.4213 of the
+  EARLIER (wrong) mapping every candidate was rejected ("found no PSPL
+  solution") while +0.4213 fit.  That start was sane only because the
+  finder failed on it.
 - **Review 2.6.34.**  For three lens bodies the total-mass relation is not
   registered, so at stage 1 `probe_start` answers t_E / theta_E / rho
   "not derivable" even with every leaf seeded (pi_rel and mu_rel ARE
@@ -141,6 +140,11 @@ and the gap is entirely in the stage-1 seeding (`check_mirror4.py`,
   bootstrap fits that to each file: negative blends, q_source 3.2 and 5.0
   clipped to the bound 2, zeropoints 2 mag off.  The stage-4 start is
   unaffected (the leaves' t_E outranks the hint).
+
+The shipped params now carry the correct mapping with u_0 = +0.138, and
+they seed q_source and err_scale explicitly (from the convention scan's
+optimum), so neither defect reaches the start: the build starts at
+lp 9285, within 10 nats of the optimum.
 
 ## Fit
 
@@ -210,16 +214,20 @@ reproducers all pass and the 6000-proposal stress test shows 0 crashes
 under either method, one multi-minute call per 6000 (rejected by the
 sampler's eval timeout).  Results in `vbmfix_results/`.
 
-Acceptance fit: job 15507641 under the fixed kernel
-(`KMT-2021-BLG-1122L_vbmfix.job`: the venv's python, T_max 200 and the
-auto start dispersion restored, no seed polish, bounded separations),
-started 2026-10-06.  The fix is also INSTALLED in Hydra's shared exozippy
-env (JDE's ruling, `vbm_fix_install2.job`: a wheel built from the fork
-with the env's conda-forge g++ 14 into the user site-packages that the
-env's python resolves first; markers named VBMICROLENSING_FIX_COMMIT.txt
-record the commit, because the package still reports 5.6 and any
-reinstall would silently restore the crashing wheel).  The shipped
-config keeps the T_max 20 / start_dispersion 3.0 workarounds until the
-fix is released upstream.  RESULTS:
-(filled in when it lands -- posterior vs Table 2 through the mappings
-above, and the lens masses under the IMF and galactic priors).
+**Status 2026-10-12.**  VBMicrolensing 5.6.1 (PyPI) contains the crash
+fix (valboz/VBMicrolensing#74) and EXOZIPPy pins it (#428).  The Multipoly
+slow tail (minutes per call at s < 0.2 or > 3) is fixed by
+valboz/VBMicrolensing#75, not yet released.  The acceptance fit
+(`KMT-2021-BLG-1122L_sync_slowtail.job`) therefore runs the SYNCHRONOUS
+`ptde` sampler under a venv with #75 (`~/vbm_slowtail_venv`), T_max 200,
+start dispersion 3.0, no seed polish; the async job and its fork-build
+venv are retired.  The rejected-call guard in the magnification Op (#415)
+removes the collapsed-theta_E proposals that used to stall it.
+
+An outlier mixture (`likelihood: hogg`) was tried as a diagnostic and is
+NOT used: on the wrong geometries it wrote off about half the I points in
+the anomaly window, which would hide exactly the misfit that exposed the
+mapping error.
+
+RESULTS: (filled in when the fit lands -- posterior vs Table 2, and the
+lens masses under the IMF and galactic priors).

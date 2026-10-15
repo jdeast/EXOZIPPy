@@ -19,7 +19,7 @@ from exozippy.skyframe import observer_sky_offset
 
 from ..parameterization import pin_unselected
 from ..sed.magsys import AB, parse_magsys
-from . import peakfind
+from . import mmplot, peakfind
 from .physics import (
     RHO_FLOOR,
     S_FLOOR,
@@ -42,6 +42,25 @@ def _raw_initval(user_params, key, default=None):
     if isinstance(val, (list, tuple)):
         val = val[0] if val else default
     return val
+
+
+def mag_to_flux(mag, mag_err):
+    """Magnitudes -> (flux, sigma_flux), the one conversion in the package.
+
+    Exact for the value.  The error is the first-order propagation evaluated
+    at the OBSERVED flux, so sigma stays a DATA CONSTANT: evaluating it at
+    the model flux instead would make sigma a function of the parameters and
+    bias the fit toward faint models.
+
+    This is module scope rather than inline in `load_data` because the
+    offline tools that have to see the data exactly as the model does --
+    the (s, q) mode finder in `gridsearch.py`, which reads the same files
+    without building a System -- would otherwise each carry their own copy
+    of these two lines, and a copy that drifts is a search optimizing a
+    different chi2 from the fit it seeds.
+    """
+    flux = 10.0 ** (-0.4 * np.asarray(mag))
+    return flux, (np.log(10.0) / 2.5) * flux * np.maximum(mag_err, 0.0)
 
 
 class _BootstrapGeometry:
@@ -362,17 +381,33 @@ class MulensInstrument(Instrument):
         consumes: a lens orbit under `orbital_motion: keplerian` and a
         source orbit under xallarap (`Orbit._lens_keplerian_orbits` /
         `_lens_xallarap_orbits`, the predicates that decide those orbits'
-        sky coordinates).  The default timing rank: the light curve times
-        such an orbit through the binary's rotation across the event, not
-        through an eclipse."""
+        sky coordinates), with a documented APPROXIMATION of the timing
+        information each carries.
+
+        The light curve times such an orbit through the rotation of the
+        binary (or the source's reflex) across the event, and the exact
+        sensitivity ``d flux / d phase`` needs the magnification model,
+        which stage 3 does not have.  It is taken to be of order the
+        point's own excursion from the light curve's median, ``|F_i -
+        median(F)|``, per radian of orbital phase: a caustic structure
+        rotated by a radian changes the magnification by of order the
+        magnification itself, and an unmagnified point carries nothing.
+        So a point's information is ``(2 pi / P)^2 ((F_i - median) /
+        sigma_i)^2`` -- in flux units of its own file, against its own
+        errors, so files never need a common flux scale.
+        """
         targets = orbit._lens_keplerian_orbits(
             system
         ) | orbit._lens_xallarap_orbits(system)
+        seed = orbit.timing_seed
         out = {}
         for i in range(self.n_elements):
-            epochs = self.dataset_epochs(i)
+            t = self.dataset_times(i)
+            f = np.asarray(self.flux[self.rows(i)], dtype=float)
+            snr2 = ((f - np.median(f)) / self.dataset_errors(i)) ** 2
             for o in sorted(targets):
-                out.setdefault(int(o), []).append(epochs)
+                rate = 2.0 * np.pi / seed.period[o]
+                out.setdefault(int(o), []).append((t, rate**2 * snr2, "phase"))
         return out
 
     def load_data(self, system):
@@ -510,13 +545,7 @@ class MulensInstrument(Instrument):
                 df = df.iloc[:, :3]
 
             if fmt not in ("flux", "dia"):
-                # Magnitudes -> flux.  Exact for the value; the error is the
-                # first-order propagation evaluated at the OBSERVED flux, so
-                # sigma stays a data constant (using the model flux instead
-                # would make sigma a function of the parameters and bias the
-                # fit toward faint models).
-                f = 10.0 ** (-0.4 * f)
-                e = (np.log(10.0) / 2.5) * f * np.maximum(e, 0.0)
+                f, e = mag_to_flux(f, e)
 
             per_file.append((t, f, e, df))
 
@@ -1696,9 +1725,7 @@ class MulensInstrument(Instrument):
         self._scale_flux_amplitudes(self.manifest, f_total_init)
 
         if self.total_detrend_cols > 0:
-            self.manifest["detrend_coeffs"] = {
-                "shape": (self.total_detrend_cols,)
-            }
+            self.manifest["detrend_coeffs"] = self._detrend_manifest_entry()
 
         # Binary source: one flux ratio q_flux = f_s2/f_s1 per instrument
         # (sources have different colors, so the ratio is chromatic).
@@ -2765,6 +2792,34 @@ class MulensInstrument(Instrument):
             on_unused_input="ignore",
         )
 
+        # The event geometry the zoom windows are framed on (source 0's
+        # t_0/u_0, t_E, and rho for a finite source), and -- where
+        # MulensModel can carry the event -- each source's MulensModel
+        # parameter vector, from the ONE builder the mulensmodel backend's
+        # Ops use (MulensEvent.mm_param_list), for the anomaly windows and
+        # the caustic figure (mmplot.py).
+        event = system.mulensevent
+        safe = event._get_safe_mm_params(system, 0)
+        geometry = [safe["t_0"], safe["u_0"], safe["t_E"]]
+        if event.finite_source:
+            geometry.append(system.source.rho.value[0])
+        self._compiled_peak_geometry = pytensor.function(
+            inputs=param_symbols,
+            outputs=pt.stack(geometry),
+            on_unused_input="ignore",
+        )
+        self._mm_unsupported = event.mulensmodel_unsupported(system)
+        self._compiled_mm_params = None
+        if self._mm_unsupported is None:
+            self._compiled_mm_params = pytensor.function(
+                inputs=param_symbols,
+                outputs=[
+                    pt.stack(event.mm_param_list(system, j))
+                    for j in range(self._n_sources)
+                ],
+                on_unused_input="ignore",
+            )
+
         # Per-file GP conditional-mean evaluators (no-op without a gp: key).
         self._compile_gp_plotters(system)
 
@@ -2953,9 +3008,10 @@ class MulensInstrument(Instrument):
             "baseline_ref": baseline_ref,
         }
 
-    def plot_data(self, system, point=None):
-        """GUI/PDF charts: the aligned delta-mag lightcurve, plus a zoom
-        copy (x_range +/-3 tE) when t_0/t_E seeds are known.
+    def plot_data(self, system, point=None, zoom_windows=None):
+        """GUI/PDF charts: the aligned delta-mag lightcurve, plus zoomed
+        copies onto the peak and onto each anomaly (``zoom_windows``, as
+        returned by ``zoom_windows()``; computed at ``point`` when omitted).
 
         The chart is drawn in magnitudes even though the fit is in flux -- that
         is the convention these curves are read in -- so any point whose (in
@@ -3029,21 +3085,27 @@ class MulensInstrument(Instrument):
                 )
             ]
 
-        t_model, t0, tE = self._model_time_grid()
+        t_model, _, _ = self._model_time_grid()
         unique_observers, _, inst_obs_loc = self._observer_groups()
-        # Skowron geocentric deviations for each unique observer over the
-        # model grid -- the single obs_pos convention both the symbolic PSPL
-        # path and the MulensModel/VBM Ops consume.
-        obs_model_pos = {
-            obs_loc: self._abs_to_delta(
-                t_model,
-                self.get_observer_position(t_model, observer_location=obs_loc),
-            )
-            for obs_loc in unique_observers
-        }
         param_values = self._point_to_plot_params(point, system)
         aln = self._flux_alignment(param_values)
         align = aln["align"]
+        if zoom_windows is None:
+            zoom_windows = self.zoom_windows(system, point)
+
+        def observer_positions(t_grid):
+            # Skowron geocentric deviations for each unique observer over a
+            # model grid -- the single obs_pos convention both the symbolic
+            # PSPL path and the MulensModel/VBM Ops consume.
+            return {
+                obs_loc: self._abs_to_delta(
+                    t_grid,
+                    self.get_observer_position(
+                        t_grid, observer_location=obs_loc
+                    ),
+                )
+                for obs_loc in unique_observers
+            }
 
         node = getattr(self, "_model_flux_node", None)
         # The detrend correction and the GP conditional mean reach the chart
@@ -3057,43 +3119,51 @@ class MulensInstrument(Instrument):
             if lbl not in deps
         ]
 
-        traces = []
-        for i, name, grid_mask in self._plot_model_layout(t_model):
-            obs_loc = inst_obs_loc[i]
-            t_i = t_model[grid_mask]
-            try:
-                # Instrument i's own likelihood expression (its f_source,
-                # f_blend and q_flux; its observer's magnification, so
-                # parallax between sites is preserved), mapped onto the
-                # reference flux system by the same `align` as i's data.  The
-                # model comes back as a FLUX and is converted through the same
-                # `_flux_to_mag` + `baseline_ref` the data traces use -- so a
-                # non-positive model flux becomes a NaN gap, exactly as a
-                # non-positive datum does, instead of the ~75 mag spike the
-                # old in-graph 1e-30 clamp drew (review 1.6.4).
-                y_model = align(
-                    self._compiled_model_flux(
-                        t_i,
-                        obs_model_pos[obs_loc][grid_mask],
+        def model_traces(t_grid, obs_pos):
+            """The model curves (``_plot_model_layout``) on ``t_grid``."""
+            out = []
+            for i, name, grid_mask in self._plot_model_layout(t_grid):
+                obs_loc = inst_obs_loc[i]
+                t_i = t_grid[grid_mask]
+                try:
+                    # Instrument i's own likelihood expression (its
+                    # f_source, f_blend and q_flux; its observer's
+                    # magnification, so parallax between sites is
+                    # preserved), mapped onto the reference flux system by
+                    # the same `align` as i's data.  The model comes back as
+                    # a FLUX and is converted through the same
+                    # `_flux_to_mag` + `baseline_ref` the data traces use --
+                    # so a non-positive model flux becomes a NaN gap,
+                    # exactly as a non-positive datum does, instead of the
+                    # ~75 mag spike the old in-graph 1e-30 clamp drew
+                    # (review 1.6.4).
+                    y_model = align(
+                        self._compiled_model_flux(
+                            t_i,
+                            obs_pos[obs_loc][grid_mask],
+                            i,
+                            *param_values,
+                        ),
                         i,
-                        *param_values,
-                    ),
-                    i,
+                    )
+                except Exception as e:
+                    logger.warning(f"Model eval failed for '{name}': {e}")
+                    continue
+                out.append(
+                    Trace(
+                        name=name,
+                        role="model",
+                        kind="line",
+                        x=t_i,
+                        y=y_model,
+                        node=node,
+                        style={"series_index": int(i)},
+                    )
                 )
-            except Exception as e:
-                logger.warning(f"Model eval failed for '{name}': {e}")
-                continue
-            traces.append(
-                Trace(
-                    name=name,
-                    role="model",
-                    kind="line",
-                    x=t_i,
-                    y=y_model,
-                    node=node,
-                    style={"series_index": int(i)},
-                )
-            )
+            return out
+
+        obs_model_pos = observer_positions(t_model)
+        traces = model_traces(t_model, obs_model_pos)
 
         # One "physical + GP" curve per light curve that requested a GP.
         # The GP is additive in that instrument's own FLUX (that is the space
@@ -3114,6 +3184,7 @@ class MulensInstrument(Instrument):
             gp_at_data = self.detrend_corrected_signal(
                 self.gp_mean_at_data(system, point), point
             )
+        gp_traces = []
         for i in gp_files:
             try:
                 if self.detrend_grid_exact(i):
@@ -3136,7 +3207,7 @@ class MulensInstrument(Instrument):
                     f"GP model eval failed for '{self.names[i]}': {e}"
                 )
                 continue
-            traces.append(
+            gp_traces.append(
                 Trace(
                     name=f"{self.names[i]} model+GP",
                     role="model",
@@ -3155,6 +3226,7 @@ class MulensInstrument(Instrument):
         flux_corrected, err_corrected = self.detrend_corrected(
             self.flux, self.err, point
         )
+        data_traces = []
         for i in range(self.n_elements):
             mask = self.inst_map == i
             flux_i = flux_corrected[mask]
@@ -3164,7 +3236,7 @@ class MulensInstrument(Instrument):
             # NaN wherever the aligned flux is not positive.
             lo = delta_mag - align(flux_i + err_i, i)
             hi = align(flux_i - err_i, i) - delta_mag
-            traces.append(
+            data_traces.append(
                 Trace(
                     name=self.names[i],
                     role="data",
@@ -3191,7 +3263,7 @@ class MulensInstrument(Instrument):
                 + (
                     " The two sources' flux ratio is fitted per instrument, "
                     "so each instrument's own model is drawn over its data "
-                    "in that instrument's colour."
+                    "in that instrument's color."
                     if self._n_sources > 1
                     else ""
                 )
@@ -3205,42 +3277,291 @@ class MulensInstrument(Instrument):
                 title=title,
                 xlabel="Time [BJD]",
                 ylabel="mag - mag$_0$",
-                traces=traces,
+                traces=traces + gp_traces + data_traces,
                 param_deps=deps,
                 y_inverted=True,
                 meta=meta,
             )
         ]
-        if t0 is not None and tE is not None:
+
+        # The zooms: the peak, then each anomaly (zoom_windows).  Each gets
+        # its OWN dense model grid -- the full chart's grid spans +/-5 t_E,
+        # far too coarse for an anomaly lasting hours -- and a y range
+        # framed on what lies inside the window, since a renderer
+        # autoscaling y would span the whole light curve.
+        zooms = [
+            (
+                "lightcurve_zoom",
+                "mulens_zoom",
+                "peak",
+                zoom_windows["peak"],
+                "As the previous figure, zoomed onto the peak of the event.",
+            )
+        ]
+        for k, window in enumerate(zoom_windows["anomalies"], start=1):
+            zooms.append(
+                (
+                    f"lightcurve_anomaly{k}",
+                    f"mulens_anomaly{k}",
+                    f"anomaly {k}",
+                    window,
+                    "As the previous figure, zoomed onto an anomaly: a "
+                    "stretch of the light curve where the lens model "
+                    "departs from its effective single lens by more than "
+                    f"{mmplot.ANOMALY_Z:g} times the photometric errors.",
+                )
+            )
+        for chart_id, tag, label, (lo, hi), caption in zooms:
+            t_zoom = np.linspace(lo, hi, ZOOM_GRID_POINTS)
+            zoom_models = model_traces(t_zoom, observer_positions(t_zoom))
             specs.append(
                 Chart(
-                    id=f"{self.prefix}.lightcurve_zoom",
+                    id=f"{self.prefix}.{chart_id}",
                     component=comp_id,
-                    title=f"{title} (zoom)",
+                    title=f"{title} ({label})",
                     xlabel="Time [BJD]",
                     ylabel="mag - mag$_0$",
-                    traces=traces,
+                    traces=zoom_models + gp_traces + data_traces,
                     param_deps=deps,
                     y_inverted=True,
-                    x_range=[t0 - 3.0 * tE, t0 + 3.0 * tE],
-                    meta=dict(
-                        meta,
-                        file_tag="mulens_zoom",
-                        caption=(
-                            "As the previous figure, zoomed to "
-                            r"$t_0 \pm 3\,t_E$."
-                        ),
-                    ),
+                    x_range=[lo, hi],
+                    y_range=_window_y_range(zoom_models + data_traces, lo, hi),
+                    meta=dict(meta, file_tag=tag, caption=caption),
                 )
             )
         return specs
 
-    def plot(self, system, points, filename_prefix="debug"):
-        """Render the lightcurve (+zoom) PDFs from plot_data specs.
+    def zoom_windows(self, system, point):
+        """The light-curve zooms at ``point``: ``{"peak": (lo, hi),
+        "anomalies": [(lo, hi), ...]}`` in BJD.
 
-        The specs are the single description of these plots -- the GUI draws
-        the same ones via plotly (see plotrender.py's module docstring).
+        The peak zoom is ``t_0 +/- mmplot.peak_half_width`` -- a few u_0 t_E
+        (a few rho t_E for a resolved source), not the old +/-3 t_E, which
+        was barely narrower than the full chart.  The anomalies are the
+        stretches where a binary lens departs from its effective single lens by
+        more than ``mmplot.ANOMALY_Z`` errors at the data epochs
+        (``_anomaly_windows``).
+
+        ``plot`` computes these ONCE, at the reference point, and every
+        posterior draw is drawn into the same windows, so the spaghetti of
+        one chart shares one x range.  The GUI (``plot_data`` with no
+        windows) recomputes them at each point.
+        """
+        param_values = self._point_to_plot_params(point, system)
+        geometry = np.asarray(
+            self._compiled_peak_geometry(*param_values), dtype=float
+        )
+        t0, u0, tE = geometry[:3]
+        rho = geometry[3] if geometry.size > 3 else None
+        half = mmplot.peak_half_width(tE, u0, rho)
+        peak = (float(t0 - half), float(t0 + half))
+        return {
+            "peak": peak,
+            "anomalies": self._anomaly_windows(system, param_values, tE, peak),
+        }
+
+    def _note_once(self, key, message):
+        """Log a plot-time INFO line once per instance (the plots run at
+        every posterior draw)."""
+        noted = self.__dict__.setdefault("_plot_notes", set())
+        if key not in noted:
+            noted.add(key)
+            logger.info(f"[{self.prefix}] {message}")
+
+    def _anomaly_windows(self, system, param_values, tE, peak):
+        """Where the companion shows in the data (mmplot.anomaly_windows).
+
+        At every data epoch, with that epoch's own observer, the departure
+        of the binary-lens magnification from its effective single lens along
+        the same trajectory (mmplot.single_lens_magnification), in units of
+        the epoch's error: ``z = f_source,i |A - A_1| / sigma`` (can the
+        data see it?), and relative, ``|A - A_1|/A_1`` (how strong a
+        feature of the model is it?).  Both are
+        MulensModel's, from the fit's own parameter vector.  The errors are
+        the file's, before err_scale, and limb darkening is left out: this
+        frames a figure, nothing more.
+
+        A point lens has no anomaly; a 2+ source event and the topologies
+        MulensModel cannot represent get no anomaly zooms (logged once).
+        """
+        event = system.mulensevent
+        if len(event.lens_bodies) == 1:
+            return []
+        if self._mm_unsupported is not None:
+            self._note_once(
+                "anomalies",
+                "no anomaly zooms: they are located with MulensModel, which "
+                f"cannot represent {self._mm_unsupported}.",
+            )
+            return []
+        if self._n_sources != 1:
+            self._note_once(
+                "anomalies",
+                "no anomaly zooms: they are located for a single source "
+                f"only (this event has {self._n_sources}).",
+            )
+            return []
+        pvec = self._compiled_mm_params(*param_values)[0]
+        named = mmplot.unpack(pvec, event.finite_source, 2)
+        model = mmplot.build_model(
+            pvec,
+            event.mm_coords(system, 0),
+            event.mag_method[0],
+            event.finite_source,
+            2,
+            event.t0_par[0],
+        )
+        fs_vec, _ = self._compiled_flux(*param_values)
+        fs_vec = np.atleast_1d(np.asarray(fs_vec, dtype=float))
+        cache = {}
+        z = np.full(self.time.shape, np.nan)
+        departure = np.full(self.time.shape, np.nan)
+        for i in range(self.n_elements):
+            rows = self.rows(i)
+            t_i = self.time[rows]
+            obs_i = self.observer_pos[rows]
+            A = mmplot.magnification(model, t_i, obs_i, cache)
+            x, y = mmplot.trajectory(model, t_i, obs_i, cache)
+            A1 = mmplot.single_lens_magnification(x, y, named)
+            z[rows] = np.abs(fs_vec[i] * (A - A1)) / self.err[rows]
+            departure[rows] = np.abs(A - A1) / A1
+        return mmplot.anomaly_windows(self.time, z, departure, tE, peak)
+
+    def _plot_lens_plane(self, system, point, windows, filename_prefix):
+        """``{prefix}_mulens_caustics.pdf``: the caustics and the source
+        trajectory, drawn by MulensModel (mmplot.draw_lens_plane), with each
+        instrument's epochs marked on the trajectory in that instrument's
+        color and one zoomed panel per anomaly window.
+
+        Drawn at the reference point only: the caustic of one draw.  Not a
+        Chart -- a bespoke matplotlib diagnostic, like the corner plots
+        (outputs.md) -- so neither the GUI nor the paper draft carries it.
+        """
+        event = system.mulensevent
+        if self._mm_unsupported is not None:
+            self._note_once(
+                "caustics",
+                "no caustic/trajectory figure: it is drawn with MulensModel, "
+                f"which cannot represent {self._mm_unsupported}.",
+            )
+            return None
+        from exozippy import plot_theme
+
+        param_values = self._point_to_plot_params(point, system)
+        n_lenses = len(event.lens_bodies)
+        models, named = [], []
+        for j, pvec in enumerate(self._compiled_mm_params(*param_values)):
+            models.append(
+                mmplot.build_model(
+                    pvec,
+                    event.mm_coords(system, j),
+                    event.mag_method[j],
+                    event.finite_source,
+                    n_lenses,
+                    event.t0_par[0],
+                )
+            )
+            named.append(mmplot.unpack(pvec, event.finite_source, n_lenses))
+
+        # The trajectory line: the chart's model grid, densified through
+        # the peak and every anomaly so a zoomed panel is not drawn as a
+        # chord between two grid points.
+        t_model, _, _ = self._model_time_grid()
+        pieces = [t_model, np.linspace(*windows["peak"], ZOOM_GRID_POINTS)]
+        pieces += [
+            np.linspace(lo, hi, ZOOM_GRID_POINTS)
+            for lo, hi in windows["anomalies"]
+        ]
+        t_traj = np.unique(np.concatenate(pieces))
+        unique_observers, _, _ = self._observer_groups()
+        observers = [
+            (
+                obs_loc,
+                t_traj,
+                self._abs_to_delta(
+                    t_traj,
+                    self.get_observer_position(
+                        t_traj, observer_location=obs_loc
+                    ),
+                ),
+            )
+            for obs_loc in unique_observers
+        ]
+        data_tracks = []
+        for i in range(self.n_elements):
+            rows = self.rows(i)
+            color = plot_theme.resolve("data", i, self._data_trace_style(i))
+            data_tracks.append(
+                (
+                    self.names[i],
+                    color["color"],
+                    self.time[rows],
+                    self.observer_pos[rows],
+                )
+            )
+        title = f"Lens plane: {getattr(system, 'name', '')}"
+        if n_lenses == 2 and named[0]["linear_motion"]:
+            title += f" (caustic at t0_par = {event.t0_par[0]:.2f})"
+        return mmplot.draw_lens_plane(
+            f"{filename_prefix}_mulens_caustics.pdf",
+            models,
+            named,
+            caustic_epoch=event.t0_par[0],
+            observers=observers,
+            data_tracks=data_tracks,
+            peak_window=windows["peak"],
+            windows=windows["anomalies"],
+            title=title,
+        )
+
+    def plot(self, system, points, filename_prefix="debug"):
+        """Render the lightcurve PDFs (full, peak zoom, one per anomaly)
+        from plot_data specs, and the MulensModel caustic figure.
+
+        The specs are the single description of the light-curve plots --
+        the GUI draws the same ones via plotly (see plotrender.py's module
+        docstring).  The zoom windows are taken at the reference point
+        (``points[0]``) and shared by every draw (``zoom_windows``).
         """
         from exozippy.plotrender import plot_via_specs
 
-        plot_via_specs(self, system, points, filename_prefix=filename_prefix)
+        if isinstance(points, dict):
+            points = [points]
+        if not points:
+            return
+        windows = self.zoom_windows(system, points[0])
+        plot_via_specs(
+            self,
+            system,
+            points,
+            filename_prefix=filename_prefix,
+            zoom_windows=windows,
+        )
+        self._plot_lens_plane(system, points[0], windows, filename_prefix)
+
+
+# Model points per zoomed light-curve window (and per window of the caustic
+# figure's trajectory line).  Each zoom evaluates the model on its own grid
+# at every posterior draw, and on a finite-source binary that is the
+# expensive call, so it is kept to what a window needs: 500 points across
+# even a 10-day anomaly is one per 30 min, and the windows of a sharp
+# crossing are hours wide.
+ZOOM_GRID_POINTS = 500
+
+
+def _window_y_range(traces, lo, hi):
+    """Ascending y limits framing what the traces draw inside [lo, hi]:
+    the model curves and the data points (not their error bars, which for
+    faint epochs would stretch the axis over nothing), padded 8%."""
+    vals = []
+    for tr in traces:
+        x = np.asarray(tr.x, dtype=float)
+        y = np.asarray(tr.y, dtype=float)
+        sel = (x >= lo) & (x <= hi) & np.isfinite(y)
+        vals.append(y[sel])
+    v = np.concatenate(vals) if vals else np.array([])
+    if v.size == 0:
+        return None
+    y_lo, y_hi = float(v.min()), float(v.max())
+    pad = 0.08 * (y_hi - y_lo) or 0.01
+    return [y_lo - pad, y_hi + pad]

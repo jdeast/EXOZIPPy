@@ -20,13 +20,15 @@ from pathlib import Path
 
 import pytest
 import yaml
+from test_runner import _poll_while_progressing  # tests/ is on sys.path
 
 from exozippy.gui import TERMINAL_PHASES
+from exozippy.gui.runner import _CONSOLE_SUFFIX
 
 EXAMPLE_DIR = Path(__file__).parent.parent / "examples" / "kelt4"
 
 # Poll budgets for the slow end-to-end test at the bottom. Their sum must sit
-# comfortably UNDER that test's @pytest.mark.timeout(900): if the guard fires
+# comfortably UNDER that test's @pytest.mark.timeout(1260): if the guard fires
 # first, pytest-timeout kills the test instead of letting the poll report what
 # it was waiting for (and under xdist that used to surface as a nameless dead
 # worker). Warm, that test measures 52-84 s end to end; a cold pytensor compile
@@ -36,17 +38,29 @@ EXAMPLE_DIR = Path(__file__).parent.parent / "examples" / "kelt4"
 #
 #   REACH_SAMPLING_TIMEOUT 360 s  subprocess + imports + model build + a COLD
 #                                 pytensor compile + tune + 100 draws
-#   GRACEFUL_EXIT_TIMEOUT  240 s  wrap-up: save partial trace + reports/plots
-#                                 (~20-30 s warm, so ~8x headroom)
+#   GRACEFUL_STALL_TIMEOUT 180 s  wrap-up may go this long with NO new console
+#                                 output before the test calls it hung
+#   GRACEFUL_EXIT_CEILING  720 s  ...and this long in total, however busy
 #   FORCE_EXIT_TIMEOUT      45 s  only reached after stop(force=True), which
 #                                 itself blocks ~50 s through second-SIGINT and
 #                                 SIGKILL; the terminal phase is then written
 #                                 (or synthesized by RunHandle.status) at once
 #
+# The graceful wait is progress-aware, not a fixed budget (#369). Wrap-up is
+# ~20-30 s for a single-mode fit, but the 137-draw stochastic fit sometimes
+# finds several modes and the per-mode outputs cost ~66 s EACH, so any fixed
+# budget turns the mode count into a coin flip: three modes overran 240 s, the
+# test force-killed a healthy wrap-up and reported `error`. The product itself
+# never times a graceful stop out -- only this test escalates -- so the test
+# keeps waiting while the child's console log grows (each mode logs a line as
+# it finishes, and the slowest observed silent stretch is one ~66 s mode) and
+# escalates only on a stall or at the ceiling.
+#
 # Worst case, counting the ~50 s each force stop blocks internally:
-# 360 + 240 + 50 + 45 + 50 = 745 s < 900 s.
+# 360 + 720 + 50 + 45 + 50 = 1225 s < 1260 s.
 REACH_SAMPLING_TIMEOUT = 360.0
-GRACEFUL_EXIT_TIMEOUT = 240.0
+GRACEFUL_STALL_TIMEOUT = 180.0
+GRACEFUL_EXIT_CEILING = 720.0
 FORCE_EXIT_TIMEOUT = 45.0
 POLL_INTERVAL = 0.5
 
@@ -476,7 +490,7 @@ def test_utilities_schema_form_roundtrip(client):
 
 
 @pytest.mark.slow
-@pytest.mark.timeout(900)
+@pytest.mark.timeout(1260)
 def test_endpoint_run_lifecycle_start_sampling_stop(kelt4_workdir, tmp_path):
     """
     Given the run endpoints backed by the real subprocess runner,
@@ -536,7 +550,17 @@ def test_endpoint_run_lifecycle_start_sampling_stop(kelt4_workdir, tmp_path):
             final_status.update(st)
             return st["phase"] if st.get("phase") in TERMINAL_PHASES else None
 
-        final_phase = _poll_until(_terminal, timeout=GRACEFUL_EXIT_TIMEOUT)
+        console = Path(str(out_prefix) + _CONSOLE_SUFFIX)
+
+        def _console_size():
+            return console.stat().st_size if console.exists() else 0
+
+        final_phase, stall = _poll_while_progressing(
+            _terminal,
+            _console_size,
+            stall_timeout=GRACEFUL_STALL_TIMEOUT,
+            ceiling=GRACEFUL_EXIT_CEILING,
+        )
         escalated = final_phase is None
         if escalated:
             client.post("/api/run/stop", json={"force": True})
@@ -545,8 +569,7 @@ def test_endpoint_run_lifecycle_start_sampling_stop(kelt4_workdir, tmp_path):
         client.post("/api/run/stop", json={"force": True})
 
     how = (
-        f"graceful stop timed out after {GRACEFUL_EXIT_TIMEOUT}s and was "
-        "force-escalated"
+        f"graceful stop was force-escalated ({stall})"
         if escalated
         else "graceful stop was honored"
     )

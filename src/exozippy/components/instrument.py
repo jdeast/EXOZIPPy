@@ -1895,7 +1895,8 @@ class Instrument(TimeSystem, Component):
         It is injected HERE, in the base class, rather than in each child's
         manifest, because all three detrending children (`rvinstrument`,
         `transit`, `mulensinstrument`) write the same
-        ``self.manifest["detrend_coeffs"] = {"shape": ...}`` line and a child
+        ``self.manifest["detrend_coeffs"] = self._detrend_manifest_entry()``
+        line and a child
         that forgot the scale would silently report whitened coefficients.
         ``setdefault`` keeps it overridable and idempotent across the repeat
         ``build_model()`` the GUI does.
@@ -1909,6 +1910,28 @@ class Instrument(TimeSystem, Component):
         return super().add_parameter(
             model, param_name, system, context_nodes=context_nodes
         )
+
+    def _detrend_manifest_entry(self):
+        """The stage-3 manifest entry for ``detrend_coeffs``, shared by every
+        detrending child so none can forget a part of it.
+
+        One element per detrend COLUMN over every file, block-diagonal in
+        file order (``_build_block_detrend``), so element j is not instance
+        j: ``element_owners`` names the file each column belongs to.  It is
+        what spells element e ``<prefix>.<file>.detrend_coeffs_<k>`` in the
+        params file, results.csv, the tables and the restart file (#440;
+        ``Parameter.element_owners``).  Declared here, at stage 3, because
+        ``ConfigManager.adopt_element_owners`` translates the params-file
+        spelling before the stage-4 solve.
+        """
+        return {
+            "shape": (self.total_detrend_cols,),
+            "element_owners": [
+                name
+                for name, n in zip(self.names, self.n_detrend_per_inst)
+                for _ in range(n)
+            ],
+        }
 
     def rows(self, i):
         """Element ``i``'s rows in every concatenated array, as a ``slice``.
@@ -1947,22 +1970,14 @@ class Instrument(TimeSystem, Component):
         lo, hi = self.row_ranges[i]
         return slice(lo, hi)
 
-    def dataset_epochs(self, i):
-        """File ``i``'s observation epochs and their weights, for
-        ``Component.epochs_constraining``.
+    def dataset_times(self, i):
+        """File ``i``'s observation epochs (BJD_TDB days), for
+        ``Component.epochs_constraining``."""
+        return np.asarray(self.time[self.rows(i)], dtype=float)
 
-        Every epoch counts once.  The weights are a GUESS at the timing
-        information and say so: the information a point carries on an
-        orbit's phase is (d model / d t)^2 / sigma^2, which needs the
-        model's amplitude and shape (an RV semi-amplitude, a transit's
-        ingress) -- none of which the relaxation engine has solved at stage
-        3, where the sampled epoch has to be chosen.  Equal weights make the
-        center the mean epoch of the data, which is all the integer epoch
-        needs; the epoch the posterior itself prefers is computed exactly
-        after sampling (``orbit.t0``).
-        """
-        t = np.asarray(self.time[self.rows(i)], dtype=float)
-        return t, np.ones_like(t)
+    def dataset_errors(self, i):
+        """File ``i``'s error bars, in the unit of its model."""
+        return np.asarray(self.err[self.rows(i)], dtype=float)
 
     # ------------------------------------------------------------------
     # Shared plotting helpers

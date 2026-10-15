@@ -296,6 +296,16 @@ def test_a_nan_raw_coordinate_already_makes_logp_nan(binary_system):
 # ---------------------------------------------------------------------------
 
 
+def _mm_entry(system, name):
+    """Entry ``name`` (q or alpha) of source 0's MulensModel param vector,
+    in op.py's layout: [t_0, u_0, t_E, pi_E_N, pi_E_E] + [rho] + [s, q,
+    alpha_deg]."""
+    event = system.mulensevent
+    offset = 5 + (1 if event.finite_source else 0)
+    position = {"s": 0, "q": 1, "alpha": 2}[name]
+    return event.mm_param_list(system, 0)[offset + position]
+
+
 def test_binary_mm_params_q_is_the_q_parameter_clipped(binary_system):
     """
     Given the MulensModel-backend param builder,
@@ -311,7 +321,7 @@ def test_binary_mm_params_q_is_the_q_parameter_clipped(binary_system):
     lens = system.lens
     event = system.mulensevent
 
-    built = event._get_binary_mm_params(system, index=0)["q"]
+    built = _mm_entry(system, "q")
     # Element 1: companion slot 0.  Element 0 is the masked primary, whose
     # q is the pinned bookkeeping 1.0.
     expected = clip_q(lens.q.value[1])
@@ -354,7 +364,7 @@ def test_alpha_deg_has_one_implementation(binary_system):
     legacy = pt.arctan2(lens.yalpha.value[1], lens.xalpha.value[1]) * (
         180.0 / np.pi
     )
-    from_params = event._get_binary_mm_params(system, index=0)["alpha"]
+    from_params = _mm_entry(system, "alpha")
 
     rvs = list(model.value_vars)
     ip = model.initial_point()
@@ -388,7 +398,7 @@ def test_no_call_site_re_derives_q_or_alpha():
       copy-paste without failing here.
     """
     for fn in (
-        MulensEvent._get_binary_mm_params,
+        MulensEvent.mm_param_list,
         MulensEvent.get_magnification_op,
     ):
         src = inspect.getsource(fn)

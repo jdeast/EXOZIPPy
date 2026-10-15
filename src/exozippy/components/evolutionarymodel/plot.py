@@ -5,8 +5,9 @@ logger = logging.getLogger(__name__)
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.colors import to_rgba
 
-from exozippy.outputs.contour_plot import Contour, plot_contours
+from exozippy.outputs.contour_plot import Contour
 
 # exozippy local imports
 from exozippy.outputs.plot_helper_functions import (
@@ -14,6 +15,7 @@ from exozippy.outputs.plot_helper_functions import (
     _padded_range,
 )
 from exozippy.outputs.texutils import latex_escape
+from exozippy.reporting import SIGMA_WIDTHS
 
 
 class MISTPlot:
@@ -103,18 +105,25 @@ class MISTPlot:
         guard turned the list into 0.0) and raised in the contours (review
         1.8.8).  This is the one reader.
         """
-        summary = getattr(param, "summary", None)
+        summary = param.summary
         if summary is None:
             return None
         if isinstance(summary, (list, tuple)):
-            return summary[index] if index < len(summary) else None
+            # A summary list shorter than the star vector is a bookkeeping
+            # bug upstream, not "no posterior yet" (review 1.8.8 (c)).
+            if index >= len(summary):
+                raise IndexError(
+                    f"{param.label}: posterior summary has {len(summary)} "
+                    f"element(s), asked for element {index}."
+                )
+            return summary[index]
         return summary
 
     def _fit_error_bars(self, param, star_index):
         """``(err_minus, err_plus)`` of the reported value for one star,
         ``(0.0, 0.0)`` before a posterior (the pre-flight plot)."""
         summary = self._summary_at(param, star_index)
-        if summary is None or not hasattr(summary, "err_minus"):
+        if summary is None:
             return 0.0, 0.0
         return float(summary.err_minus), float(summary.err_plus)
 
@@ -141,14 +150,12 @@ class MISTPlot:
         posterior's medians there.  Fixing that means giving ``Component.plot``
         a mode argument, which is a change to every component's signature.
         """
-        cached = getattr(self.evolutionarymodel, "_reported_kiel_cache", None)
+        cached = self.evolutionarymodel._reported_kiel_cache
         if cached is not None:
             return cached
-        if getattr(self.evolutionarymodel, "_compiled_kiel", None) is None:
-            return None
 
         point = {}
-        for param in getattr(self.system, "plot_params", []):
+        for param in self.system.plot_params:
             post = getattr(param, "posterior", None)
             if post is None:
                 continue
@@ -304,10 +311,7 @@ class MISTPlot:
         """
         from exozippy.chart import Chart, Trace
 
-        if (
-            point is None
-            or getattr(self.evolutionarymodel, "_compiled_kiel", None) is None
-        ):
+        if point is None:
             return []
 
         kiel = np.atleast_2d(
@@ -630,14 +634,33 @@ class MISTPlot:
     ################## contour plot #################
     ######## will only trigger after sampling #######
 
+    def _compiled_values_at(self, points):
+        """The compiled Kiel node, ``(n_instances, len(KIEL_COLUMNS))``, at
+        each of ``points`` (dicts of INTERNAL values keyed by label, the
+        shape ``plot_data`` takes)."""
+        return [
+            np.atleast_2d(
+                self.evolutionarymodel._compiled_kiel(
+                    *self.evolutionarymodel._point_to_plot_params(
+                        p, self.system
+                    )
+                )
+            )
+            for p in points
+        ]
+
     def _get_posterior_compiled_values(self, max_draws=None):
         """The compiled Kiel node at every distributed posterior draw -- or,
         with ``max_draws``, at that many evenly spaced ones (a contour does
-        not need tens of thousands of draws, and each is a compiled call)."""
+        not need tens of thousands of draws, and each is a compiled call).
 
-        ndraws = self.system.plot_params[0].posterior.values.shape[:][
-            -1
-        ]  # should take shape (nstars, ndraws)
+        This is the COMBINED posterior ``System.distribute_posterior``
+        attached to the Parameters, which is what the system summary figure
+        wants.  The contour PDF does not use it: that follows the draws the
+        caller handed ``plot`` (``_points_compiled_values``), so a per-mode
+        figure contours its own mode.
+        """
+        ndraws = self.system.plot_params[0].posterior.values.shape[-1]
         draws = range(ndraws)
         if max_draws is not None and ndraws > max_draws:
             draws = np.unique(
@@ -646,103 +669,154 @@ class MISTPlot:
         post_points = []
         for i in draws:
             post_point = {}
-            for param in getattr(self.system, "plot_params", []):
-                post = getattr(param, "posterior", None)
-                values = getattr(post, "values", None)
-                if values is not None:
-                    post_point[param.label] = param.to_internal(values[:, i])
-
-            post_points.append(post_point)
-
-        values = [
-            np.atleast_2d(
-                self.evolutionarymodel._compiled_kiel(
-                    *self.evolutionarymodel._point_to_plot_params(
-                        p, self.system
+            for param in self.system.plot_params:
+                post = param.posterior
+                if post is not None:
+                    post_point[param.label] = param.to_internal(
+                        post.values[:, i]
                     )
-                )
-            )
-            for p in post_points
-        ]
+            post_points.append(post_point)
+        return self._compiled_values_at(post_points)
 
-        return values
+    def _points_compiled_values(self):
+        """The compiled Kiel node at each point the caller passed to
+        ``plot`` -- the draws the contour PDF describes.
+
+        These, not the distributed posterior, because run.py's per-mode
+        loop hands ``plot`` one mode's draws: contouring the Parameters'
+        posterior drew the COMBINED posterior on every per-mode figure
+        (review 1.8.8 (a)).
+        """
+        points = self.points
+        if isinstance(points, dict):
+            points = [points]
+        return self._compiled_values_at(points)
+
+    # The contour PDF's enclosed probabilities, widest first: a fixed 1/2/3
+    # sigma ladder, the exact Gaussian widths.  Deliberately NOT the
+    # run-level `reporting: {credible_interval:}`, which sets the width the
+    # TABLES quote; a contour plot draws a ladder of levels, like a corner
+    # plot, and its levels say which in the legend-free shading (review
+    # 2.11.23).
+    CONTOUR_PROBS = tuple(SIGMA_WIDTHS[n] for n in (3, 2, 1))
 
     def plot_contours(self, values, star_idx, filename_prefix="debug"):
-
+        """The posterior contours of instance ``star_idx``'s fitted and MIST
+        (Teff, logg) over ``values`` (``_points_compiled_values``), written
+        as ``{prefix}_evolutionarymodel_contours_star_<star>.pdf``.  Returns
+        the paths written."""
         star = self.system.star
         star_index = self.evolutionarymodel.star_indices[star_idx]
         star_name = star.names[star_index]
 
+        def column(name):
+            return np.array(
+                [v[star_idx, self.KIEL_INDEX[name]] for v in values]
+            )
+
+        # Each density's grid is sized by its own draws' spread, as the
+        # summary figure's is.  Sizing MIST's by the systematic floor put a
+        # posterior much narrower than the floor into one or two cells of a
+        # +/-3-floor grid, so the 99.7% and 95% levels came out equal and
+        # matplotlib refused the contour.  The floors and the fit's
+        # interval still frame the axes (the pads below).
+        def contour(x, y):
+            return Contour(
+                x=x,
+                y=y,
+                x_err=np.std(x),
+                y_err=np.std(y),
+                probs=self.CONTOUR_PROBS,
+            )
+
+        fitted = contour(column("teff_fit"), column("logg_fit"))
+        mist = contour(column("teff_mist"), column("logg_mist"))
         # The larger side of the fitted point's posterior interval, per star
-        # (see _summary_at for why this is not `.summary.err_minus`).
-        sigma_teff_fit = max(self._fit_error_bars(star.teff, star_index))
-        sigma_logg_fit = max(self._fit_error_bars(star.logg, star_index))
-
-        # global fit values
-        teff_fit = np.array(
-            [v[star_idx, self.KIEL_INDEX["teff_fit"]] for v in values]
-        ).T
-        logg_fit = np.array(
-            [v[star_idx, self.KIEL_INDEX["logg_fit"]] for v in values]
-        ).T
-
-        fitted_contours = Contour(
-            x=teff_fit,
-            y=logg_fit,
-            x_err=sigma_teff_fit,
-            y_err=sigma_logg_fit,
-            color=self.MIST_PLOT_COLORS["fit_contour"],
-            label="Model Parameters",
+        # (see _summary_at for why this is not `.summary.err_minus`), and
+        # the largest systematic floor over the draws.
+        fit_pad = (
+            max(self._fit_error_bars(star.teff, star_index)),
+            max(self._fit_error_bars(star.logg, star_index)),
+        )
+        mist_pad = (
+            np.max(np.abs(column("sigma_teff_mist"))),
+            np.max(np.abs(column("sigma_logg_mist"))),
         )
 
-        # MIST model parameters
-        sigma_teff_mist = np.max(
-            np.abs(
-                [
-                    v[star_idx, self.KIEL_INDEX["sigma_teff_mist"]]
-                    for v in values
-                ]
-            )
-        )
-        sigma_logg_mist = np.max(
-            np.abs(
-                [
-                    v[star_idx, self.KIEL_INDEX["sigma_logg_mist"]]
-                    for v in values
-                ]
-            )
-        )
-
-        # mist values
-        teff_mist = np.array(
-            [v[star_idx, self.KIEL_INDEX["teff_mist"]] for v in values]
-        ).T
-        logg_mist = np.array(
-            [v[star_idx, self.KIEL_INDEX["logg_mist"]] for v in values]
-        ).T
-
-        mist_contours = Contour(
-            x=teff_mist,
-            y=logg_mist,
-            x_err=sigma_teff_mist,
-            y_err=sigma_logg_mist,
-            color=self.MIST_PLOT_COLORS["mist_contour"],
-            label="MIST Model Parameters",
-        )
-
-        written = []
-
+        # Created before the try, so a KDE or save failure inside it is the
+        # exception the caller sees -- with the figure made inside, a failure
+        # before the assignment raised UnboundLocalError from `finally`
+        # instead (review 1.8.8 (b)).
+        fig, ax = plt.subplots(figsize=(7, 6))
         try:
-            fig, ax = plot_contours([mist_contours, fitted_contours])
-
+            _draw_contours(
+                ax,
+                [
+                    (
+                        mist,
+                        self.MIST_PLOT_COLORS["mist_contour"],
+                        "MIST Model Parameters",
+                        mist_pad,
+                    ),
+                    (
+                        fitted,
+                        self.MIST_PLOT_COLORS["fit_contour"],
+                        "Model Parameters",
+                        fit_pad,
+                    ),
+                ],
+            )
             fig.tight_layout()
-            id = f"{self.evolutionarymodel.prefix}.contours.star.{star_name}"
-            tag = id.replace(".", "_")
+            tag = f"{self.evolutionarymodel.prefix}.contours.star.{star_name}"
+            tag = tag.replace(".", "_")
             path = f"{filename_prefix}_{tag}.pdf"
             fig.savefig(path)
-            written.append(path)
-
         finally:
             plt.close(fig)
+        return [path]
 
-        return written
+
+# Shading of the contour PDF's filled levels, widest to narrowest.
+_CONTOUR_FILL_ALPHAS = (0.25, 0.5, 0.75)
+
+
+def _draw_contours(ax, entries):
+    """Draw each ``(Contour, color, label, (x_pad, y_pad))`` on a Kiel
+    axis: the draws as faint points, the filled and outlined density
+    levels, axes framed at 3 x the largest pad past the draws and both
+    reversed (the Kiel convention).
+
+    Lives here, not in ``outputs/contour_plot``: the labels and the
+    inverted axes are this diagram's, and ``Contour`` itself is shared with
+    the summary figure (review 4.11.7 (b)).
+    """
+    xs, ys, x_errs, y_errs = [], [], [], []
+    for g, color, label, (x_pad, y_pad) in entries:
+        if len(g.levels) != len(_CONTOUR_FILL_ALPHAS):
+            raise ValueError(
+                f"_draw_contours: {label} has {len(g.levels)} levels, "
+                f"{len(_CONTOUR_FILL_ALPHAS)} fill shades."
+            )
+        ax.scatter(
+            g.x, g.y, s=35, color=to_rgba(color, 0.05), label=label, zorder=3
+        )
+        shades = [to_rgba(color, alpha=a) for a in _CONTOUR_FILL_ALPHAS]
+        ax.contourf(
+            g.X, g.Y, g.Z, levels=g.levels + [g.Z.max()], colors=shades
+        )
+        ax.contour(g.X, g.Y, g.Z, levels=g.levels, colors=shades, linewidths=2)
+        xs.append(g.x)
+        ys.append(g.y)
+        x_errs.append(x_pad)
+        y_errs.append(y_pad)
+
+    x, y = np.concatenate(xs), np.concatenate(ys)
+    ax.set_xlim(x.min() - 3 * max(x_errs), x.max() + 3 * max(x_errs))
+    ax.set_ylim(y.min() - 3 * max(y_errs), y.max() + 3 * max(y_errs))
+    ax.set_xlabel(r"$T_{\rm{eff}}$ (K)")
+    ax.set_ylabel(r"$\log g$ (cgs)")
+    leg = ax.legend(loc="upper left")
+    for handle in leg.legend_handles:
+        handle.set_alpha(0.8)
+    ax.invert_xaxis()
+    ax.invert_yaxis()

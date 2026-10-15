@@ -1,0 +1,23 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 2
+#$ -q mThM.q
+#$ -l use_himem=TRUE
+#$ -cwd
+#$ -j y
+#$ -N kmtscan
+#$ -t 1-48
+#$ -tc 24
+#$ -o scan_opt/scan.$JOB_ID.$TASK_ID.log
+# Review 7.6.4: the 48-candidate optimized convention scan (JDE 2026-10-12).
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor_kmtscan_$SGE_TASK_ID"
+export OMP_NUM_THREADS=1
+cd $HOME/python/EXOZIPPy/examples/KMT-2021-BLG-1122L
+echo "commit $(git -C $HOME/python/EXOZIPPy rev-parse --short HEAD) task $SGE_TASK_ID  $(date)"
+$HOME/vbm_slowtail_venv/bin/python -u scan_conventions_opt.py $SGE_TASK_ID 6000 2>&1 | grep -v "DEBUG\|^\[\|Warning\|warn"
+echo "exit $?   $(date)"

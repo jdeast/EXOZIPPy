@@ -160,6 +160,7 @@ def _transit_config(lc_file, sed_file):
                 "band": "V",
                 "exptime": 30.0,
                 "ninterp": 4,
+                "seddeblend": True,
             }
         ],
         "sed": {"file": sed_file},
@@ -187,7 +188,10 @@ def _transit_params():
         "band.V.thermal": {"initval": _THERMAL_PPM, "sigma": 0.0},
         "band.V.reflect": {"initval": _REFLECT_PPM, "sigma": 0.0},
         "band.V.ellipsoidal": {"initval": _ELLIP_PPM, "sigma": 0.0},
-        "transit.detrend_coeffs": {"initval": 0.002, "sigma": 0},
+        "transit.inst0.detrend_coeffs_0": {"initval": 0.002, "sigma": 0},
+        # Start the SED-deblended dilution at the SED's own 0.5, so the
+        # parity checks run with the dilution really on.
+        "transit.0.dilute": {"initval": 0.5},
     }
 
 
@@ -218,7 +222,10 @@ def transit_everything_on(tmp_path_factory):
     lc_dense = _write_lc(d / "dense.dat", t_dense, rng)
     dense = _build(_transit_config(lc_dense, str(sed_file)), _transit_params())
 
-    assert "transit.dilution" in model.named_vars  # dilution really is on
+    assert "transit.dilute_sed" in model.named_vars  # dilution really is on
+    assert system.transit._point_value(
+        point, system.transit.dilute, 0
+    ) == pytest.approx(0.5)
     assert system.transit.ninterp == [4]
     return system, model, point, dense
 
@@ -449,7 +456,11 @@ def _kelt17_split(tmp_path, n_rm=40, dense=False, tc_epoch=None):
     params["planet.c.mass"] = {"initval": 3.0}
     # One coefficient per (instrument, column); a nonzero pinned value so
     # the detrend term is live on both files.
-    params["rvinstrument.detrend_coeffs"] = {"initval": 0.001, "sigma": 0}
+    for inst in ("TRES_RM", "TRES_ORB"):
+        params[f"rvinstrument.{inst}.detrend_coeffs_0"] = {
+            "initval": 0.001,
+            "sigma": 0,
+        }
 
     cwd = os.getcwd()
     try:

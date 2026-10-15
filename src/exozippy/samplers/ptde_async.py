@@ -420,6 +420,10 @@ def ptde_async_sample(
     n_hop_accept = [0]
     n_ladder_adapts = [0]  # re-spacing MEASUREMENTS, moved or not
     n_eval_timeouts = [0]
+    # Livelock guard state: consecutive recycles that swept essentially every
+    # slot, and whether we have said so.  See _enforce_eval_timeout.
+    n_sweeping_recycles = [0]
+    warned_livelock = [False]
     n_nan_logp = [0]  # NaN logps returned, every rung (review 2.4.23)
     n_swap_discards = [0]  # in-flight proposals invalidated by a swap
     rung_times = [[] for _ in range(n_temps)]
@@ -696,21 +700,61 @@ def ptde_async_sample(
         if not stale:
             return False
         n_eval_timeouts[0] += len(stale)
-        for sid in stale:
-            sk, si, stale_prop, _, _ = in_flight_meta[sid]
-            phys_params, raw_params = _common.describe_proposal(
+        # LIVELOCK GUARD.  eval_timeout is measured from SUBMIT (the t0 stamped
+        # in _submit), not from the moment a worker picks the proposal up, and
+        # this sampler keeps n_slots submissions in flight against
+        # actual_cores workers.  A proposal at the back of that queue waits
+        # roughly (n_slots / actual_cores) evaluations before it even starts,
+        # so an eval_timeout SHORTER THAN THAT WAIT ages out every proposal
+        # before it runs: the pool is recycled, all n_slots are resubmitted,
+        # and they age out again, forever, with no draw ever recorded.
+        # RMDC26 job 52549712 did exactly this -- 1496 slots on 32 cores (a
+        # 47-deep queue) with eval_timeout=10s against a ~0.7 s logp, so
+        # time-in-system was far past 10 s and the timeout rate was 100%.
+        # Twelve array tasks ran 2.8 h and produced not one draw.  A genuine
+        # hang -- what eval_timeout is FOR -- writes off the hang plus
+        # whatever is queued behind it and then clears; only a too-short
+        # timeout sweeps essentially everything over and over, which is what
+        # this watches for.  Warn once rather than raise: the draws so far are
+        # worth more than a clean exit, and maxtime still bounds the run.
+        if len(stale) >= 0.9 * n_slots:
+            n_sweeping_recycles[0] += 1
+        else:
+            n_sweeping_recycles[0] = 0
+        if n_sweeping_recycles[0] >= 3 and not warned_livelock[0]:
+            warned_livelock[0] = True
+            depth = n_slots / max(actual_cores, 1)
+            logger.warning(
+                f"PTDE-async: eval_timeout={eval_timeout:.0f}s wrote off "
+                f"{len(stale)}/{n_slots} in-flight evaluations on "
+                f"{n_sweeping_recycles[0]} consecutive pool recycles -- "
+                f"essentially all of them, repeatedly.  That is not a hung "
+                f"worker: it is a timeout shorter than the QUEUE WAIT.  The "
+                f"clock starts when a proposal is submitted, and {n_slots} "
+                f"slots against {actual_cores} core(s) means one waits about "
+                f"{depth:.0f} evaluations before a worker reaches it.  This "
+                f"run will recycle forever and record nothing.  Raise "
+                f"eval_timeout well above {depth:.0f} x (one logp call), or "
+                f"cut n_temps/n_chains to shorten the queue."
+            )
+        # The OLDEST stale submission is the one plausibly hung; everything
+        # else aged out queued behind it.  _common.log_eval_timeout says why
+        # only that one is rendered and dumped.
+        culprit = min(stale, key=lambda sid: in_flight_meta[sid][3])
+        sk, si, stale_prop, _, _ = in_flight_meta[culprit]
+        _common.log_eval_timeout(
+            logger,
+            "PTDE-async",
+            eval_timeout,
+            f"rung {sk} chain {si}",
+            len(stale),
+            lambda: _common.describe_proposal(
                 layout.unpack(stale_prop),
                 raw_to_phys,
                 raw_var_names,
                 out_var_names,
-            )
-            logger.error(
-                f"PTDE-async: logp call exceeded "
-                f"eval_timeout={eval_timeout:.0f}s at rung {sk} "
-                f"chain {si} — rejecting this proposal.\n"
-                f"  physical params: {phys_params}\n"
-                f"  raw params: {raw_params}"
-            )
+            ),
+        )
         # Write off EVERY in-flight submission (the pool recycle kills the
         # workers running them). A written-off result that nevertheless
         # arrives (it raced us through the queue) finds its sub_id gone and
