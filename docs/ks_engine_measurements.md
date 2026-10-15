@@ -16,6 +16,93 @@ periastron, review 1.1.9), `overdet` (ob170114 with its source proper motions
 removed and t_E/pi_E pinned, review 8.6.15), `density` (hat3_mist with its
 mass and radius pins replaced by a density pin of 2.6 g/cm3).
 
+## How the engine is judged
+
+The relaxation engine is judged by how well it RECOVERS THE USER'S START
+-- whether the model is built at the values the params file states --
+not by how well that start fits the data (JDE 2026-10-15).  The measure
+is `ModelAuditor.check_user_starts`: every user value compared with the
+value the compiled model starts at (requested vs produced); a miss is a
+user value the start does not reproduce.  A low start logp from faithful
+seeds is a question about the seeds or the fit, not about the engine; the
+start logp tables further down are kept as secondary context only.
+
+### Missed user starts, master 4e123970 vs this PR
+
+Each config is measured with its own branch's `examples/`.  This PR
+changes the params files of `ob09020`, `ob09020_linear`,
+`KMT-2019-BLG-1806` and `kelt17` (published values, see their READMEs);
+with ob09020's old pins the rule missed 2 (it dropped the theta_E and
+pi_E_E the masses and distances cannot give), against master's 5.
+
+| config | master: missed user starts | this PR |
+|---|---|---|
+| astrometry_sim/simbinary | 0 | 0 |
+| DC2018_128/DC2018_128 (rank22) | 0 | 0 |
+| DC2018_128/DC2018_128 | 0 | 0 |
+| GaiaBH1/gaiabh1 | 0 | 0 |
+| galactic_model/gm | 0 | 0 |
+| gj1214/gj1214 | 0 | 0 |
+| hat3/hat3 | 2 (TESS.u1, TESS.u2) | 2 (TESS.u1, TESS.u2) |
+| hat3/hat3_mist (density) | 1 (A.density) | 0 |
+| hat3/hat3_mist | 0 | 0 |
+| hat3/hat3_mist_claret | 0 | 0 |
+| hat3/hat3_staronly | 0 | 0 |
+| hat3/hat3_transitonly | 0 | 0 |
+| hd80606/hd80606 | 0 | 0 |
+| hd80606/hd80606_rvonly | 0 | 0 |
+| hd80606/hd80606_transitonly | 0 | 0 |
+| HIP1349/hip1349 | 0 | 0 |
+| kb180087_obj3/kb180087_obj3 | 0 | 0 |
+| kelt17/kelt17 | 0 | 0 |
+| kelt17/kelt17_all | 1 (b.p) | 1 (b.p) |
+| kelt17/kelt17_dt | 1 (b.p) | 1 (b.p) |
+| kelt17/kelt17_fast | 0 | 0 |
+| kelt17/kelt17_rm | 1 (b.p) | 1 (b.p) |
+| kelt4/kelt4 | 0 | 0 |
+| kelt4/kelt4_rv+transit+sed | 0 | 0 |
+| kelt4/kelt4_rvonly | 0 | 0 |
+| KMT-2019-BLG-1806/KMT-2019-BLG-1806 | 1 (t_E) | 0 |
+| KMT-2021-BLG-1122L/KMT-2021-BLG-1122L | 0 | 0 |
+| ob07224/ob07224 | 3 (pi_E_E, pi_E_N, Source.rho) | 2 (pi_E_E, pi_E_N) |
+| ob08092/ob08092 | 1 (t_E) | 0 |
+| ob09020/ob09020 | 5 (pi_E_E, pi_E_N, t_E, theta_E, Source.rho) | 0 |
+| ob09020/ob09020_linear | 5 (pi_E_E, pi_E_N, t_E, theta_E, Source.rho) | 0 |
+| ob140939/ob140939 | 0 | 0 |
+| ob140939/ob140939_today | 0 | 0 |
+| ob161003/ob161003 | 0 | 0 |
+| ob161045/ob161045 | 0 | 0 |
+| ob170114/ob170114 (overdet) | 3 (pi_E_E, pi_E_N, t_E) | 0 |
+| ob170114/ob170114 | 0 | 0 |
+| ob170114/ob170114 (tp) | 0 | 0 |
+| ogle0383/OGLE_0383LD | 1 (t_E) | 0 |
+| theophylline/theophylline | 0 | 0 |
+| toi3919/toi3919 | 0 | 0 |
+| toi3919/toi3919_claret | 0 | 0 |
+| wasp18/wasp18 | 0 | 0 |
+
+The misses left on this PR are the params files' own: hat3's TESS
+limb-darkening starts contradict master's new u1/u2 priors (both
+branches); kelt17_all/_dt/_rm pin a radius ratio their other pins do not
+give; ob07224 pins a pi_E its masses and distances do not give.  Each is
+a statement about the seeds, reported by name.
+
+### Derived vs published, ob09020
+
+At the shipped starts (`examples/ob09020/README.md` gives every seed's
+source):
+
+- Keplerian: t_0, u_0, rho, q, t_E = 76.900 d, theta_E, pi_E and
+  alpha_0 = 189.080 deg are all reproduced exactly.  The one difference
+  is s_0 = 0.42633 against Skowron+2011's 0.4294 (-0.7%): in this model
+  s_0 is derived from Yee+2016's orbit and D_L with theta_E, so it is an
+  inconsistency between the two papers, not an unsolved relation.
+- Linear: s_0 = 0.4294, alpha_0 = 189.08 deg, ds/dt = 0.04294 r_E/yr,
+  dalpha/dt = -131.78 deg/yr, t_E = 76.9 d and q = 0.273 are all exact;
+  start logp +47,696.
+
+## Start logp (secondary context)
+
 ## A. Start logp, one column per state
 
 Cells: start logp (change from master), `m` = check_user_starts misses,
