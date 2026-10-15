@@ -253,32 +253,40 @@ exozippy-fetch-claret-tables = "exozippy.models.Claret.claret_tables:main"
 packages = [{include = "exozippy", from = "src"}]
 version = "0.0.0"
 
-[tool.poetry.group.dev.dependencies]
-ipdb = ">=0.13.13,<0.14.0"
-pytest = ">=9.0.3,<10.0.0"
-pre-commit = ">=4.6.2,<5.0.0"
-ipykernel = ">=7.2.0,<8.0.0"
-scipy-stubs = ">=1.18.1.0,<2.0.0.0"
-pandas-stubs = "=3.0.5.260730"
-pytest-timeout = "^2.4.0"
-pytest-xdist = ">=3.0"
-# pydl.pydlutils.bspline is what the vendored reference
-# tests/third_party/keplersplinev2.py fits its spline with; test-only.
-pydl = ">=1.0.1,<2.0.0"
-# fastapi.testclient.TestClient is built on httpx, which fastapi does NOT pull
-# in (it lives behind fastapi[standard]). It used to be present only by
-# accident, as a transitive dep of something else; a `poetry sync` removed it
-# and every GUI endpoint test errored at fixture setup. Declared here so the
-# test environment is reproducible rather than lucky.
-httpx = ">=0.27,<1.0"
-
-# For scripts/find_redundant_tests.py only -- nothing in the suite imports
-# them, and no CI job runs them. Kept as dev deps rather than an extra because
-# the analysis is a periodic investigation, not part of any build: it wants a
-# whole-suite run with per-test coverage contexts (about +33% on top of the
-# suite, measured), which is not something to do on every commit.
-coverage = ">=7.16.0,<8.0"
-pytest-cov = ">=6.0,<8.0"
+# The development tools: test harness, pre-commit, stubs. A PEP 735
+# dependency group rather than [tool.poetry.group.dev] so ONE list serves both
+# installers: `poetry install` includes it by default (Poetry >= 2.2), and
+# pip >= 25.1 takes it with `pip install -e ".[gui]" --group dev`. A group, not
+# an extra, because it never reaches the published metadata: `pip install
+# exozippy[dev]` from PyPI would install a test harness with no tests to run.
+[dependency-groups]
+dev = [
+    "ipdb>=0.13.13,<0.14.0",
+    "pytest>=9.0.3,<10.0.0",
+    "pre-commit>=4.6.2,<5.0.0",
+    "ipykernel>=7.2.0,<8.0.0",
+    "scipy-stubs>=1.18.1.0,<2.0.0.0",
+    "pandas-stubs==3.0.5.260730",
+    "pytest-timeout>=2.4.0,<3.0.0",
+    "pytest-xdist>=3.0",
+    # pydl.pydlutils.bspline is what the vendored reference
+    # tests/third_party/keplersplinev2.py fits its spline with; test-only.
+    "pydl>=1.0.1,<2.0.0",
+    # fastapi.testclient.TestClient is built on httpx, which fastapi does NOT
+    # pull in (it lives behind fastapi[standard]). It used to be present only
+    # by accident, as a transitive dep of something else; a `poetry sync`
+    # removed it and every GUI endpoint test errored at fixture setup. Declared
+    # here so the test environment is reproducible rather than lucky.
+    "httpx>=0.27,<1.0",
+    # For scripts/find_redundant_tests.py only -- nothing in the suite imports
+    # them, and no CI job runs them. Kept as dev deps rather than an extra
+    # because the analysis is a periodic investigation, not part of any build:
+    # it wants a whole-suite run with per-test coverage contexts (about +33% on
+    # top of the suite, measured), which is not something to do on every
+    # commit.
+    "coverage>=7.16.0,<8.0",
+    "pytest-cov>=6.0,<8.0",
+]
 
 [build-system]
 requires = ["poetry-core>=2.0.0", "poetry-dynamic-versioning>=1.4.0,<2.0.0"]

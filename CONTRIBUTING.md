@@ -49,6 +49,22 @@ Do not use `poetry update` for that; it re-resolves everything and rewrites
 `poetry.lock`. Use it only when you mean to upgrade dependencies, and commit
 the new lock file.
 
+**Without Poetry.** The development tools (pytest, pre-commit, the stubs)
+are a standard dependency group, so pip (25.1 or newer) installs them too:
+
+```bash
+pip install -e ".[gui]" --group dev
+pre-commit install
+```
+
+That works, but pip resolves fresh from pyproject's version ranges instead
+of installing `poetry.lock`, so you may run a newer pymc/pytensor/numpy than
+CI does -- and in this stack a minor release can shift numerical results
+rather than fail loudly. If a test passes for you and fails in CI (or the
+reverse), suspect that first. Poetry is still needed to change a dependency:
+every edit to pyproject's dependencies needs `poetry lock`, and the commit
+carries the new lock file.
+
 Other everyday commands:
 
 ```bash
