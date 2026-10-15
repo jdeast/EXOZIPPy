@@ -1,0 +1,80 @@
+# HAT-P-3: the full fit (4 TESS sectors, HIRES RVs, SED) with the MIST
+# evolutionary model AND the Claret limb-darkening tie.
+#
+# Built to test band.star_constrains_ld (components/sed/sed.md, "The Claret
+# limb-darkening tie").  It combines two shipped siblings:
+#   - hat3.yaml: the same data, but constrained by the Torres relations with
+#     `mist: False`;
+#   - hat3_mist.yaml: the MIST model, but a star-only fit with no transits,
+#     so no band whose limb darkening could be tied.
+# The tie needs both a transit (something that reads the band's limb
+# darkening) and a constrained star (something that reads its Teff; here
+# MIST, the SED and the spectroscopic [Fe/H]), hence this third config.
+#
+# What the tie does here: the TESS band's (u1, u2) get a Gaussian of width
+# 0.05 on their offset from the Claret (2017) TESS table interpolated at the
+# star's (teff, logg, feh) -- once for the band, although four light curves
+# read it (EXOFASTv2 applies it once per file, a bug: jdeast/EXOFASTv2#9) -- and the
+# star is held inside the tables' range.  The offsets are reported as
+# band.TESS.du1/du2.  The tie is on by default; the band block below writes
+# it out to say so.
+
+run:
+  name: "hat3"
+
+prefix: "fitresults_claret/HAT-P-3b"
+
+star:
+  - name: "A"
+    mist: True
+
+evolutionarymodel:
+  - star: "A"
+    constrain: [feh, radius, teff, age]
+
+planet:
+  - name: "b"
+
+orbit:
+  - name: "b"
+    primary: ["A"]
+    companion: ["b"]
+
+parameter_file: "hat3_mist_claret.params.yaml"
+
+sed:
+  file: "hat3_sed.yaml"
+
+rvinstrument:
+  - name: "HIRES"
+    file: "HAT-3b.HIRES.rv"
+
+transit:
+  - name: "TESS-S16"
+    file: "n20190912.TESS.TESS.HAT-P-3.S16.0120.SPOC.dat"
+    band: "TESS"
+  - name: "TESS-S22"
+    file: "n20200220.TESS.TESS.HAT-P-3.S22.0120.SPOC.dat"
+    band: "TESS"
+  - name: "TESS-S49"
+    file: "n20220301.TESS.TESS.HAT-P-3.S49.0120.SPOC.dat"
+    band: "TESS"
+  - name: "TESS-S76"
+    file: "n20240227.TESS.TESS.HAT-P-3.S76.0120.SPOC.dat"
+    band: "TESS"
+
+band:
+  - name: "TESS"
+    filter: "TESS"
+    star_constrains_ld: true
+
+sampler:
+  # nuts, as in hat3_mist.yaml (no jax needed).
+  method: nutpie   # nuts, numpyro, blackjax, nutpie, ptde, ptde_async, demc, demcz
+  tune: 500
+  draws: 1000
+  chains: 4
+  cores: 4
+  target_accept: 0.95
+  recompute_trace: True
+  profile: False

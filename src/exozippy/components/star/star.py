@@ -418,6 +418,9 @@ class Star(Component):
           relations' [Fe/H] term reads ``star.feh``, for its target stars.
         * **torres** -- reads teff, feh and radius (and logg, hence radius
           again) of its target stars.
+        * **band** ``star_constrains_ld`` -- the Claret limb-darkening tie
+          reads teff, feh and logg (hence radius) of each tied band's star
+          (``Band.claret_tie_stars``).
         """
         out = []
 
@@ -515,6 +518,19 @@ class Star(Component):
                 continue
             for param in params:
                 _mark(name, param, getattr(comp, "star_indices", None))
+
+        # The Claret limb-darkening tie: a tied band's derived du1/du2 read
+        # the table at its star's (teff, logg, feh) -- and logg is
+        # calc_logg_from_logmass(logmass, radius), so radius too.  Asked of
+        # the band as a pure query (claret_tie_stars), because the band
+        # settles whose star it carries during its own stage 3.  Only a
+        # built Band can answer; in_topology may hand back a raw config block
+        # (a partial harness), and its limb darkening is read by nothing yet.
+        band = in_topology(system, "band")
+        if isinstance(band, Component):
+            tie_stars = sorted(set(band.claret_tie_stars(system).values()))
+            for param in ("teff", "feh", "radius"):
+                _mark(band.CLARET_CONSUMER_LABEL, param, tie_stars)
 
         for param in self.STRUCTURE_PARAMS:
             _mark("user prior", param, self._user_prior_stars(param))

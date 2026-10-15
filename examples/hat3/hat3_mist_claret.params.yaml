@@ -1,0 +1,93 @@
+# HAT-P-3 full fit + MIST + the Claret limb-darkening tie (hat3_mist_claret.yaml).
+#
+# Start values are hat3.params.yaml's (the MAP of a converged Torres fit of
+# the same data), with two deliberate differences:
+#   - no hand-supplied mass prior: with the MIST tracks in the fit the mass
+#     is constrained by them (hat3_mist.params.yaml says why);
+#   - no band.TESS.q1/q2 start: the tie seeds them from the Claret table at
+#     the star's start, which is the point of testing it.  A start written
+#     here would win over that seed.
+overdisperse: true
+
+star.A.feh:
+    initval: 0.2468066
+    mu: 0.27
+    sigma: 0.08
+    citation: high-resolution spectroscopy
+
+# A start value only (see the header): the tracks constrain the mass.
+star.A.mass:
+    initval: 0.92
+
+star.A.teff:
+    initval: 5153.18328524
+star.A.radius:
+    initval: 0.84809479
+star.A.teffsed:
+    initval: 5171.19974003
+star.A.radiussed:
+    initval: 0.84872445
+star.A.distance:
+    initval: 133.92614673
+
+# The initial metallicity, seeded slightly above the surface value (diffusion
+# depletes a K dwarf's surface), as in hat3_mist.params.yaml.  star.A.eep is
+# left to the component's grid search.
+star.A.initfeh:
+    initval: 0.30
+
+# see scripts/mkticsed.py
+star.A.av:
+    initval: 0.08710332
+    upper: 0.096687450
+    citation: Schlegel:1998
+
+# NOTE: the Gaia DR3 parallax uncertainty (0.0143000) has been added in quadrature with 0.01 to account for remaining systematic residuals
+star.A.parallax:
+    mu: 7.45278
+    sigma: 0.01745
+    citation: [GaiaCollaboration:2016, GaiaCollaboration:2023]
+
+sed.errscale:
+    initval: 1.00329802
+
+planet.b.mass:
+    initval: 0.57982066
+planet.b.radius:
+    initval: 0.91095007
+
+orbit.b.tc:
+    initval: 2454218.75893002
+orbit.b.logP:
+    initval: 0.46235882
+orbit.b.cosi:
+    initval: 0.06348728
+orbit.b.secosw:
+    initval: 0.14033024
+orbit.b.sesinw:
+    initval: 0.09205694
+
+# The tie's width is band.TESS.du1/du2's sigma (default 0.05, the tables'
+# systematic floor, applied once per band).
+
+rvinstrument.HIRES.gamma:
+    initval: -14.01010534
+rvinstrument.HIRES.jitter_variance:
+    initval: 20.21967784
+
+transit.TESS-S16.baseline:
+    initval: 1.00005441
+transit.TESS-S16.jitter_variance:
+    initval: -1.21e-06
+transit.TESS-S22.baseline:
+    initval: 1.00006769
+transit.TESS-S22.jitter_variance:
+    initval: -5.6e-07
+transit.TESS-S49.baseline:
+    initval: 1.00004644
+transit.TESS-S49.jitter_variance:
+    initval: -1.1e-07
+transit.TESS-S76.baseline:
+    initval: 1.00003373
+transit.TESS-S76.jitter_variance:
+    initval: 1.6e-07

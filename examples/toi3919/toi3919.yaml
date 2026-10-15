@@ -10,9 +10,10 @@
 # filter was written out and the prefix set.
 #
 # Conversion warnings (features of the EXOFASTv2 fit that did not translate):
-#   - the EXOFASTv2 fit used Claret limb-darkening priors; the LD table prior
-#     is not implemented yet, so the limb darkening is constrained by the
-#     transit data alone
+#   - (since resolved) the EXOFASTv2 fit used Claret limb-darkening
+#     priors, which were not implemented when this was converted.  They are
+#     now, on by default (band.star_constrains_ld), so this fit has them;
+#     toi3919_claret.yaml writes the choice out explicitly.
 
 run:
   name: "toi3919"

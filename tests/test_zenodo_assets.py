@@ -84,9 +84,10 @@ def test_the_migrated_pins_are_bit_identical_to_the_old_literals():
     Given the size/md5 literals the consumers carried before the move,
     When they are compared with the registry,
     Then every record id, file name, size and md5 is unchanged, and no
-    record was added or dropped on the way.
+    record was dropped on the way.  (Records published since -- the Claret
+    tables -- were never literals, so they are not compared here.)
     """
-    assert set(RECORDS) == set(_OLD_LITERALS)
+    assert set(_OLD_LITERALS) <= set(RECORDS)
     for name, (record_id, files) in _OLD_LITERALS.items():
         rec = zenodo_assets.record(name)
         assert rec.record_id == record_id, name

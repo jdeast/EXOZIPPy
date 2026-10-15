@@ -1186,12 +1186,10 @@ def convert(pro_path, outdir, base, priorfile_override=None):
         )
     else:
         info("/nomist -> mist: False; no evolutionarymodel block")
-    if not take("noclaret"):
-        warn(
-            "the EXOFASTv2 fit used Claret limb-darkening priors; the LD "
-            "table prior is not implemented yet, so the limb darkening is "
-            "constrained by the transit data alone"
-        )
+    # EXOFASTv2 ties every transit band's limb darkening to the Claret
+    # tables unless /noclaret; so does EXOZIPPy (band.star_constrains_ld, on
+    # by default).  The conversion writes the choice out either way.
+    claret = not take("noclaret")
 
     # ---- thermal emission ----------------------------------------------
     fitthermal = take("fitthermal") or []
@@ -1519,6 +1517,9 @@ def convert(pro_path, outdir, base, priorfile_override=None):
                 "converter; check whether EXOZIPPy has an equivalent"
             )
 
+    # ---- Claret limb-darkening tie ------------------------------------------
+    claret_bands = _claret_bands(claret, bands, transits, param_entries)
+
     # ---- copy data files ---------------------------------------------------
     copied = []
     for entry in transits + rvs:
@@ -1541,6 +1542,7 @@ def convert(pro_path, outdir, base, priorfile_override=None):
         rvs=rvs,
         bands=bands,
         fitthermal=fitthermal,
+        claret_bands=claret_bands,
         sed_yaml_name=sed_yaml_name,
         sed_floors=sed_floors,
         mann_entries=mann_entries,
@@ -1674,6 +1676,65 @@ def _translate_ld_priors(ld_priors, param_entries):
             comment = None
 
 
+def _claret_bands(claret, bands, transits, param_entries):
+    """{band: (star_constrains_ld or None, comment)} for the band blocks.
+
+    EXOFASTv2 applies the Claret prior to every transit band unless
+    /noclaret, and so does EXOZIPPy's default; the choice is written out
+    either way, so a converted config says what the EXOFASTv2 fit did
+    (``true``, or ``false`` for /noclaret).  A band the tie cannot serve is
+    written ``false`` with the reason, rather than emitting a config that
+    raises at startup: a host star whose start lies outside the tables' box
+    (EXOFASTv2 rejected such steps too, which is why it needed /noclaret
+    there).  Every EXOFASTv2 band name is a Claret quadratic table, and the
+    translator writes quadratic bands only.
+    """
+    from exozippy.models.Claret.claret_tables import BOX
+
+    if not claret:
+        info(
+            "/noclaret: limb darkening fitted from the transit data alone "
+            "(star_constrains_ld: false written on every band)"
+        )
+        return {b: (False, "EXOFASTv2's /noclaret") for b in bands}
+
+    # The host's starting (teff, feh): every band's limb darkening belongs
+    # to the first star, the one the translator makes every planet's host.
+    starts = {}
+    for path, fields, _comment in param_entries:
+        m = re.match(r"^star\.([^.]+)\.(teff|feh)$", path)
+        if m and m.group(2) not in starts:
+            starts[m.group(2)] = fields.get("initval", fields.get("mu"))
+    outside = [
+        f"{ax} = {starts[ax]:g}"
+        for ax in ("teff", "feh")
+        if starts.get(ax) is not None
+        and not BOX[ax][0] <= starts[ax] <= BOX[ax][1]
+    ]
+
+    out = {}
+    for b in bands:
+        if outside:
+            why = (
+                f"EXOFASTv2 used the Claret prior, but the host starts at "
+                f"{', '.join(outside)}, outside the tables' range"
+            )
+            warn(f"band '{b}': {why}; star_constrains_ld: false written")
+            out[b] = (False, why)
+            continue
+        out[b] = (True, "EXOFASTv2's Claret limb-darkening prior")
+        n_files = sum(t["band"] == b for t in transits)
+        if n_files > 1:
+            info(
+                f"band '{b}': EXOFASTv2 applied its Claret prior once per "
+                f"transit file ({n_files} files), a bug (jdeast/EXOFASTv2#9) that "
+                f"shrinks the prior's width with the number of files; "
+                f"EXOZIPPy applies it once per band, so the limb-darkening "
+                f"posteriors will be wider than EXOFASTv2's"
+            )
+    return out
+
+
 # ----------------------------------------------------------------------
 # SED file translation
 # ----------------------------------------------------------------------
@@ -1762,6 +1823,7 @@ def _emit_config(
     rvs,
     bands,
     fitthermal,
+    claret_bands,
     sed_yaml_name,
     sed_floors,
     mann_entries,
@@ -1893,6 +1955,12 @@ def _emit_config(
             L.append(f'    filter: "{b}"')
             if b in fitthermal:
                 L.append("    fitthermal: true")
+            tie, why = claret_bands[b]
+            if tie is None:
+                continue
+            if why:
+                L.append(f"    # {why}")
+            L.append(f"    star_constrains_ld: {'true' if tie else 'false'}")
         L.append("")
 
     if rvs:
