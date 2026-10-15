@@ -7365,4 +7365,4 @@ gui = ["fastapi", "pyqt6", "pyqt6-webengine", "pywebview", "qtpy", "ruamel-yaml"
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<3.15"
-content-hash = "2bf8b66c5d5f38ed2692de35195bb7d3ff96823d707426e59097cd559882bccf"
+content-hash = "e005041c9b0c2e17e749e91df64d3ac66d0b950c76e1e19aab9153be0f7cfec9"
