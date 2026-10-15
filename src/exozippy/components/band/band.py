@@ -874,14 +874,27 @@ class Band(Component):
             for ax in AXIS_ORDER:
                 p = probed[f"star.{s}.{ax}"]
                 if p.value is None:
-                    # Every tied star's teff/logg/feh has a defaults.yaml
-                    # start, so the engine always answers; None is a
-                    # bookkeeping bug upstream, not a star to skip.
-                    raise RuntimeError(
-                        f"[{self.prefix}] probe_start returned no start for "
-                        f"star.{s}.{ax} (star {label}), a star a Claret-tied "
-                        f"band reads; its box check cannot be made."
+                    if ax != "logg":
+                        # teff and feh are SAMPLED with defaults.yaml starts,
+                        # so the engine always answers for them; None is a
+                        # bookkeeping bug upstream, not a star to skip.
+                        raise RuntimeError(
+                            f"[{self.prefix}] probe_start returned no start "
+                            f"for star.{s}.{ax} (star {label}), a star a "
+                            f"Claret-tied band reads; its box check cannot "
+                            f"be made."
+                        )
+                    # logg is DERIVED (logmass, radius); "not derivable" is a
+                    # documented probe_start answer when nothing before
+                    # stage 4 reaches it (no mass/radius information yet).
+                    # Its bound is a soft barrier in the model either way.
+                    logger.info(
+                        f"[{self.prefix}] star {label}: its logg start is "
+                        f"not derivable before stage 4, so the Claret "
+                        f"tables' logg range is not checked at the start; "
+                        f"the soft barrier still holds it in the model."
                     )
+                    continue
                 lo, hi = BOX[ax]
                 if lo <= p.value <= hi:
                     continue

@@ -46,7 +46,17 @@ def _ltt_wiring_config(lc_file, light_travel_time=None):
         "star": [{"name": "A", "mist": False}],
         "planet": [{"name": "b"}],
         "orbit": [{"name": "b"}],
-        "band": [{"name": "TESS", "filter": "TESS", "ld_law": "quadratic"}],
+        # The Claret tie (on by default since #452) seeds the band's limb
+        # darkening, which would move the stored pre-LTT golden fixture;
+        # these tests are about light travel time, so it is off.
+        "band": [
+            {
+                "name": "TESS",
+                "filter": "TESS",
+                "ld_law": "quadratic",
+                "star_constrains_ld": False,
+            }
+        ],
         "transit": [entry],
     }
 
