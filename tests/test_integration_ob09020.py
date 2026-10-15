@@ -316,4 +316,6 @@ def test_run_fit_ob09020_starts_at_the_user_seeds(ob09020_result):
 
     q = 10 ** (table["star.L2.logmass"] - table["star.L1.logmass"])
     assert table["lens.L2.q"] == pytest.approx(q, rel=1e-6)
-    assert table["lens.L2.q"] == pytest.approx(0.273, rel=1e-6)
+    # Yee et al. 2016 Table 7 q = 0.275 (the params file uses the joint
+    # fit's physical block as one paper's set).
+    assert table["lens.L2.q"] == pytest.approx(0.275, rel=1e-6)

@@ -309,3 +309,25 @@ contradictory values).  KMT-2019-BLG-1806 still prefers the current
 ladder except for O2 (+4.8 nats with both distances above the data
 hints), and swapping the lens and source distance levels costs 581.
 
+
+## After JDE's 2026-10-15 rulings (paper values)
+
+Re-measured at the new head against master 4e123970.  Only three rows
+changed; every other row of table A, every row of table B and every
+other row of table C is identical to the section above.
+
+| config | master | before | now |
+|---|---|---|---|
+| ob09020 | +36,499.8, m5 | +36,530.5, m0 | +33,540.2, m0 |
+| ob09020_linear | +33,249.5, m5 | +39,048.7, m0 | +44,852.6, m0 |
+| kelt17 | -1,458.2, m0 | -1,458.2, m0 | +665.4, m0 |
+
+- ob09020: every seed is now printed in Skowron+2011, Yee+2016 or Gaia
+  DR3, or derived from those with the arithmetic written out (README).
+  The keplerian start is 2,960 nats below master's, whose seeds were
+  proper motions the old engine derived; the linear one is 11,600 above.
+- kelt17: the seeds are Zhou+2016's (the stellar mass was missing).
+- The stage 1-3 probe now reads registered components' roles; no shipped
+  config's start changed with it.
+- Ordering sweep, kelt17 and both ob09020 rows: identical under all nine
+  orderings.
