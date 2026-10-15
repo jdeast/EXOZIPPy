@@ -1,15 +1,20 @@
-# KELT-17 b priors, near the EXOFASTv2 best fit (kelt17/RM kelt17.priors).
-# initval = start (near MAP); sigma = Gaussian prior width (0 = fixed).
+# KELT-17 b starting values and priors: Zhou et al. 2016, AJ 152, 136
+# (Z16): the adopted (YY circular) global fit of Tables 7 and 8, and the
+# final TRES/SPC spectroscopic parameters, converted where noted.  The broadening
+# terms are the EXOFASTv2 RM example's.
+# initval = start; sigma = Gaussian prior width (0 = fixed).
 
 # ---- Star (no SED/MIST here -> prior the fundamentals) ----
-star.A.radius:
+star.A.radius:              # Z16 Table 7: 1.645 +0.060/-0.055
   initval: 1.645
   sigma: 0.06
-star.A.teff:
+star.A.mass:                # Z16 Table 7: 1.635 +0.066/-0.061 (start only)
+  initval: 1.635
+star.A.teff:                # Z16 Table 7: 7454 +/- 49
   initval: 7454
   sigma: 75
-star.A.feh:
-  initval: 0.21
+star.A.feh:                 # Z16 final SPC: [m/H] = 0.25 +/- 0.08
+  initval: 0.25
   sigma: 0.08
 
 # ---- Rossiter-McLaughlin broadening (m/s), fixed as in the EXOFASTv2 example
@@ -26,14 +31,14 @@ star.A.vmicro:
   sigma: 0
   citation: EXOFASTv2 RM example
 
-# ---- Orbit (near best fit) ----
+# ---- Orbit (Z16 Tables 7 and 8) ----
 orbit.b.period:
   initval: 3.0801716
 orbit.b.tc:
-  initval: 2457330.86812
-orbit.b.cosi:               # i ~ 84.9 deg (b ~ 0.56)
-  initval: 0.089
-# circular orbit
+  initval: 2457287.74564
+orbit.b.cosi:               # i = 84.87 deg -> cos i = 0.089416
+  initval: 0.089416
+# circular orbit, as Z16 adopt
 orbit.b.secosw:
   initval: 0.0
   sigma: 0
@@ -42,12 +47,15 @@ orbit.b.sesinw:
   sigma: 0
 
 # ---- Spin-orbit via sqrt(vsini)cos/sin(lambda) [(m/s)^1/2] ----
-# -> vsini ~ 49 km/s, lambda ~ -113 deg (retrograde).
+# Z16 Table 7: v sin I = 44200 m/s, lambda = -115.9 deg, so
+# sqrt(44200) = 210.238 and (cos, sin)(-115.9 deg) = (-0.43680, -0.89956).
 orbit.b.svcoslam:
-  initval: -87.50
+  initval: -91.83
 orbit.b.svsinlam:
-  initval: -204.33
+  initval: -189.12
 
-# ---- Planet radius ratio ----
+# ---- Planet (Z16 Tables 7 and 8) ----
 planet.b.p:
-  initval: 0.0959
+  initval: 0.09526
+planet.b.mass:              # Z16 Table 7: 1.31 +0.28/-0.29 Mjup
+  initval: 1.31
