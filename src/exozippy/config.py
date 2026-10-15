@@ -1252,6 +1252,10 @@ class ConfigManager:
         # and then every defaults.yaml value is a seed and every user value
         # rigid, which is the documented probe behavior (config.md).
         self.engine_roles = None
+        # Set by System: () -> (roles, prefixes, unknown paths) for the
+        # components that have declared a manifest so far, read by a stage
+        # 1-3 probe (roles None).  System._declared_engine_roles.
+        self.role_provider = None
         # Exact numbers a component supplies for the relations to use --
         # never parameters, never seeds, never reported (add_constant).
         self.constants = {}
@@ -4121,6 +4125,9 @@ class ConfigManager:
 
         L = PRECEDENCE_LADDER
         roles = self.engine_roles
+        partial_roles, registered, unknown = {}, set(), set()
+        if roles is None and self.role_provider is not None:
+            partial_roles, registered, unknown = self.role_provider()
         user = {str(k): float(v) for k, v in user_provided_params.items()}
         seed_hints = dict(seed_hints or {})
 
@@ -4196,6 +4203,10 @@ class ConfigManager:
 
                 if roles is not None:
                     role = roles.get(path, "derived")
+                elif c_type in registered and path not in unknown:
+                    # a stage 1-3 probe, but this component has already
+                    # declared its manifest (System._declared_engine_roles)
+                    role = partial_roles.get(path, "derived")
                 else:
                     # A stage 1-3 probe: no manifest exists yet, so the role
                     # is read off defaults.yaml through the component

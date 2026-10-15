@@ -244,3 +244,38 @@ def test_the_settle_is_minimum_norm_in_the_direction_no_check_sees(
     assert sol["mulensevent.0.t_E"] == pytest.approx(134.1, rel=1e-6)
     pms = [sol[f"star.{i}.pm_{ax}"] for i in (0, 1) for ax in ("ra", "dec")]
     assert max(abs(v + 3.0) for v in pms) < 1.0, pms
+
+
+def test_a_stage_3_probe_reads_the_roles_of_registered_components(
+    monkeypatch,
+):
+    """
+    Given examples/kelt4 kelt4_rvonly, probed for the orbit's eccentricity
+      at stage 3 from RVInstrument (which registers after the orbit),
+    When the probe solves,
+    Then e is the defaults.yaml start of the SAMPLED secosw/sesinw, exactly:
+      the orbit has declared its manifest, so the probe knows vcve, the
+      omega unit vector and chord are derived and their defaults.yaml
+      values are fills.  Guessing the roles from defaults.yaml read all of
+      them as sampled (each declares bounds and an init_scale), their starts
+      disagreed, and the probe settled them by moving secosw/sesinw: e =
+      0.00011, and 1.000006 under the init_scale noise test.
+    """
+    from exozippy.components.rvinstrument.rvinstrument import RVInstrument
+
+    probed = {}
+    original = RVInstrument.register_parameters
+
+    def register(self, system):
+        original(self, system)
+        probed.update(
+            self.config_manager.probe_start(
+                ["orbit.0.ecc", "orbit.0.secosw", "orbit.0.sesinw"]
+            )
+        )
+
+    monkeypatch.setattr(RVInstrument, "register_parameters", register)
+    _prepare(monkeypatch, "kelt4", "kelt4_rvonly.yaml")
+    assert probed["orbit.0.secosw"].source == "default"
+    assert probed["orbit.0.sesinw"].source == "default"
+    assert probed["orbit.0.ecc"].value == pytest.approx(2e-4, rel=1e-9)
