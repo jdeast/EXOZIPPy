@@ -262,6 +262,30 @@ class _Lambda:
         return _call(self.fn, [values[n] for n in self.names])
 
 
+class _FDPartial:
+    """d g / d `name` by a central difference of the compiled residual `g`.
+
+    For a relation whose partial sympy cannot print: one built on an
+    implemented function (a table lookup such as the Claret limb-darkening
+    tie), whose derivative is an unevaluated ``Derivative`` that lambdify
+    refuses.  The step is a millionth of the value (or of 1)."""
+
+    __slots__ = ("names", "g", "name")
+
+    def __init__(self, g, name):
+        self.names = g.names
+        self.g = g
+        self.name = name
+
+    def __call__(self, values):
+        x = float(values[self.name])
+        h = 1e-6 * max(1.0, abs(x))
+        up, dn = dict(values), dict(values)
+        up[self.name] = x + h
+        dn[self.name] = x - h
+        return (self.g(up) - self.g(dn)) / (2.0 * h)
+
+
 def _compiled(cm, key, build):
     """A pure function of (expression, target) cached on the ConfigManager.
 
@@ -530,11 +554,17 @@ class Engine:
         def build():
             syms = [sp.Symbol(n) for n in names]
             g = eq.lhs - eq.rhs
-            parts = {
-                n: _Lambda(sp.diff(g, s), syms) for n, s in zip(names, syms)
-            }
+            g_fn = _Lambda(g, syms)
+            parts = {}
+            for n, s in zip(names, syms):
+                d = sp.diff(g, s)
+                parts[n] = (
+                    _FDPartial(g_fn, n)
+                    if d.has(sp.Derivative)
+                    else _Lambda(d, syms)
+                )
             return (
-                _Lambda(g, syms),
+                g_fn,
                 parts,
                 _Lambda(eq.lhs, syms),
                 _Lambda(eq.rhs, syms),
