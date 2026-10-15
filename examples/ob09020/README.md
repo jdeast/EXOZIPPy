@@ -346,44 +346,55 @@ started at +19,024 while the params file carried a hand-constructed
 `pi_E_N` and a `bigomega` tuned against it, before both were replaced by
 the published values and the frame rule (2026-09-11).
 
-**Which values are seeded, and from where (2026-10-14).**  The two papers'
-values do not close as a set.  From Skowron+2011 (the light-curve fit):
-`t_0`, `u_0`, `q`, the angular source radius `theta_* = 4.45 uas`, and the
-printed `t_E = 76.9 d`, `theta_E = 2.95 mas`, `pi_E = (-0.022, +0.149)`.
-From Yee+2016: the lens masses (0.888 + 0.244 Msun), `D_L = 747 pc` and the
-keplerian orbit.  `D_S = 8 kpc` is from neither: it is an assumption.
-In this model `t_E`, `theta_E` and `pi_E` are DERIVED from the masses,
-distances and proper motions, and Yee's block with 8 kpc implies
-`theta_E = 3.34 mas` and `|pi_E| = 0.363`, where Skowron's column prints
-2.95 and 0.151 (their `theta_E` and `pi_E` imply `M_total = 2.4 Msun` and
-`pi_rel = 0.444 mas`, i.e. the source at 1.1 kpc for `D_L = 747 pc`).
-Pinned together, the precedence rule of the relaxation engine (review
-3.14.22) kept `t_E` and `pi_E_N`, dropped `theta_E` and `pi_E_E`, and
-settled the parallax direction on its mirror branch: start logp -892,087.
-So Skowron's `t_E`, `theta_E` and `pi_E` are NOT seeded any more (JDE
-2026-10-14), and the one quantity Yee's block does not fix -- the relative
-proper motion -- is seeded on the lens primary (the source stays at its
-default), at the values that reproduce the start every measurement here
-was taken at: `t_E = 83.73 d`, `pi_E = (-0.345, +0.112)`, the frame
-`bigomega = 340.755` was converted in.  `rho` is now `theta_* / theta_E =
-0.0013313` with Skowron's measured `theta_*`; their printed `t_*/t_E =
-0.0015078` rests on the `t_E` no longer seeded.
+**Which values are seeded, and from where (2026-10-15).**  Every seed in
+both params files is a printed value or is derived from printed values,
+with the arithmetic written beside it: Skowron+2011 (S11) Table 1 for the
+light curve (the IOP version of record), S11 Sec. 3.2 for the assumed
+`D_S = 8 kpc` (`pi_s = 0.125 mas`, the `pi_S` of Yee+2016's Table 4),
+Yee+2016 (Y16) Table 7 for the masses, `D_L`, `q` and the orbit, and Gaia
+DR3 4050356367410860160 for the lens proper motion.  Y16 print no
+light-curve parameters for their joint fit.
 
-Start logp (2026-10-14; the old engine's start delivered none of the five
-pins and sat at +36,500):
+*The "2.4 Msun" was not a contradiction between the papers.*  S11's
+printed `pi_E = (-0.022, +0.149)` and `theta_E = 2.95 mas` imply
+`M = theta_E/(kappa |pi_E|) = 2.4 Msun` and, at `D_L = 747 pc`, a source at
+1.1 kpc -- against Y16's 1.132 Msun.  But S11's `pi_E,N` is the median of
+a posterior that S11 Sec. 5.1 splits into separate `pi_E,N > 0` and
+`pi_E,N < 0` regions along the `pi_E,N`-`gamma_perp` degeneracy (their
+Fig. 5): a median between two modes, near zero, is a point on neither,
+and it shrinks `|pi_E|` from ~0.36 to 0.15.  S11 Sec. 4.2.1 gives the
+most probable region as `pi_E,N ~ -0.2`, `pi_E,E ~ +0.2`.  `pi_E,E =
+0.149 +/- 0.010` is the well-measured component; Y16's masses and
+distances fix `|pi_E| = pi_rel/theta_E = 0.363`; together they give
+`pi_E = (-0.331, +0.149)`, in S11's negative-`pi_E,N` region.  Neither a
+frame (both papers' `pi_E` is geocentric, S11 Appendix A), an axis order
+(N, E in both) nor the edition explains the 2.4 Msun -- the statistic
+does.
+
+So `t_E`, `theta_E` and `pi_E` are not seeded (they are derived here
+from masses, distances and proper motions).  The relative proper motion
+is `mu_geo = theta_E / t_E` along that `pi_E`, with S11's printed `t_E`
+(76.9 d with priors; 78.3 d in the linear column), converted to
+heliocentric with Earth's velocity at t0_par; the lens primary's proper
+motion is Gaia DR3's (the 0.5" blend the lens dominates), and the
+source's follows.  `orbit.L.bigomega` follows from that `phi_pi` by the
+frame rule (`phi_pi - alpha_0 - Omega_Y16` = 334.439 deg).  `rho` is S11's
+printed `t_* / t_E = 0.11595/76.9 = 0.0015078` in both files.  The
+linear file now takes its column's own IOP `u_0`, `s_0`, `alpha_0`.
+
+Start logp (2026-10-15; master started at +36,500 / +33,250 and delivered
+none of S11's printed `t_E`/`theta_E`/`pi_E`):
 
 | seeds | keplerian | linear |
 |---|---|---|
-| Skowron `t_E`/`theta_E`/`pi_E` pinned (precedence rule) | -892,087 | +15,312 |
-| those removed, nothing in their place | -3.6e6 | -2.6e7 |
-| removed; pm seeds as shipped, `rho = t_*/t_E` | +35,937 | **+39,049** |
-| removed; pm seeds as shipped, `rho = theta_*/theta_E` | **+36,530** | +33,253 |
-| removed; pm from Skowron's `t_E` and `phi_pi` with Yee's `theta_E` (bigomega rotated with `phi_pi`) | +24,239 | +17,289 |
+| S11's `t_E`/`theta_E`/`pi_E` pinned (precedence rule) | -892,087 | +15,312 |
+| those unpinned, proper motions the engine used to derive (not published) | +36,530 | +39,049 |
+| **all seeds from the papers (shipped)** | **+33,540** | **+44,853** |
+| as shipped, with S11's light-curve `q = 0.273` (keplerian) | +25,150 | |
+| with the full-orbit `u_0`/`t_E` and the arXiv `s_0`/`alpha_0` (linear) | | +18,359 |
+| as shipped, `star.Source.distance` unpinned | -157,802 | -15,189 |
 
-The bold cells are what each params file ships.  Without proper-motion
-seeds the trajectory has no relative motion to derive from (all four at
-the default) and the start is meaningless.  Skowron's own direction
-(`phi_pi = 98.4 deg`, with Yee's `theta_E` the relative motion is 15.9
-mas/yr) is worse than the shipped one at both starts.  The per-instrument
-flux and `err_scale` seeds still date from the static geometry; the
-acceptance fit refreshes them.
+Unpinned, the source distance runs to its 100 kpc bound (the source
+radius and distance both absorb the pinned `rho`), so S11's 8 kpc stays.
+The per-instrument flux and `err_scale` seeds still date from the static
+geometry; the acceptance fit refreshes them.

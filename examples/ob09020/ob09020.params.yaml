@@ -1,20 +1,21 @@
 # OGLE-2009-BLG-020 / OGLE-2009-BLG-020L starting values.
 #
-# Light curve: Skowron et al. 2011, ApJ 738, 87, Table 1, "parallax + full
-#   orbit (with priors)" column.  Use the IOP version of record -- the
-#   arXiv v1 posting prints different values (see README.md).
-# Orbit: Yee et al. 2016, ApJ 821, 121, Table 7 (joint microlensing + RV).
+# Every seed below is a printed value or is derived from printed values,
+# with the conversion written out beside it:
+#   Skowron et al. 2011, ApJ 738, 87 (S11): Table 1, "parallax + full
+#     orbit (with priors)" column -- the IOP version of record; the arXiv
+#     v1 posting prints different values (README) -- and Sec. 3.2's
+#     assumed source distance.
+#   Yee et al. 2016, ApJ 821, 121 (Y16): Table 7, the joint microlensing
+#     + RV fit (masses, D_L, q and the orbit).  Y16 print no light-curve
+#     parameters for that fit.
+#   Gaia DR3 4050356367410860160 (0.5" from the event): the lens proper
+#     motion.
 #
-# Skowron+2011 Appendix A is EXOZIPPy's convention (conventions.md C17),
-# so its parameters transfer unchanged.  Where a value below is NOT as
-# printed, the line says which published number it came from and how.
-#
-# Which paper each value is from is stated beside it.  The two papers'
-# values are not one self-consistent set (marginal medians, and the
-# physical block is Yee's while the light curve is Skowron's), so the
-# light-curve quantities the physical block DETERMINES -- t_E, theta_E,
-# pi_E -- are not seeded; see "Light curve" below.  D_S = 8 kpc is from
-# neither paper: it is an assumption.
+# S11 Appendix A is EXOZIPPy's convention (conventions.md C17), so its
+# trajectory parameters transfer unchanged.  S11's printed t_E, theta_E
+# and pi_E are NOT seeded: in this model they are derived from the masses,
+# distances and proper motions (README, "Which values are seeded").
 
 # Sky position (OGLE EWS).  Required: the OGLE file is HJD_UTC and the
 # HJD -> BJD_TDB conversion refuses placeholder coordinates.
@@ -25,103 +26,100 @@ star.dec:
     initval: -29.5190556
     sigma: 0
 
-# --- Light curve (Skowron+2011 Table 1) -----------------------------------
+# --- Light curve (S11 Table 1, with priors) -------------------------------
 source.Source.t_0:
     initval: 2454917.252
 
 source.Source.u_0:
     initval: 0.0613           # positive, as printed
 
-# t_E, theta_E and pi_E (Skowron: 76.9 d, 2.95 mas, (-0.022, +0.149)) are
-# NOT pinned (JDE 2026-10-14).  Here they are DERIVED from the masses,
-# distances and proper motions, and Yee's physical block -- M = 0.888 +
-# 0.244 Msun, D_L = 747 pc -- with the assumed D_S = 8 kpc gives
-# theta_E = 3.34 mas and |pi_E| = pi_rel/theta_E = 0.363, where Skowron's
-# light-curve column prints 2.95 and 0.151 (which together imply M_total =
-# 2.4 Msun and pi_rel = 0.444 mas, i.e. the source at 1.1 kpc for this
-# D_L).  The two papers' values cannot all hold at once; pinned together,
-# the relaxation engine kept t_E and pi_E_N, dropped theta_E and pi_E_E,
-# and settled the pi_E direction on its mirror branch (start logp
-# -892,087).  A pure-Skowron set is worse still (README).  So the physical
-# block is kept and the light-curve values it determines are not seeded;
-# the proper motions below supply the one thing Yee's block does not.
-
-# rho = theta_*/theta_E, with Skowron's measured angular source radius
-# theta_* = 4.45 uas and the theta_E = 3.3426 mas Yee's block derives.
-# Skowron's printed rho = t_*/t_E = 0.11595/76.9 = 0.0015078 rests on their
-# t_E, which is not seeded here; measured at this start: +36,530 with this
-# rho, +35,937 with 0.0015078.
+# rho = t_*/t_E, both printed: 0.11595 d / 76.9 d.  (The ob09020_linear
+# sibling uses the same value.)
 source.Source.rho:
-    initval: 0.0013313
+    initval: 0.0015078
 
-lens.L2.q:
-    initval: 0.273
+# s and alpha are derived from orbit L (the lens companion's `orbit: L`,
+# keplerian), so the published s_0 = 0.4294 and alpha_0 = 189.08 are the
+# acceptance check, not inputs.
 
-# s and alpha are derived from orbit L (the lens companion's `orbit: L`, keplerian), so the
-# published s_0 = 0.4294 and alpha_0 = 189.08 are the acceptance check,
-# not inputs.
-
-# --- Lens and source physical parameters ----------------------------------
-# Yee+2016 number the bodies opposite to Skowron: their M1 = 0.244 and
-# M2 = 0.888 are EXOZIPPy's L2 and L1.
+# --- Lens and source physical parameters (Y16 Table 7; S11 Sec. 3.2) ------
+# Y16 number the bodies opposite to S11: their m1 = 0.244 and m2 = 0.888
+# are EXOZIPPy's L2 and L1, and their q = 0.275 = m1/m2 is lens.L2.q.
+# (S11's light-curve q = 0.273 is the same quantity from the light curve
+# alone; Y16's joint value is used so the physical block is one paper's.)
 star.L1.mass:
     initval: 0.888
+lens.L2.q:
+    initval: 0.275
 star.L1.distance:
-    initval: 747.0            # pc
+    initval: 747.0            # pc, Y16 D_L
 star.L2.distance:
     initval: 747.0            # pc
 
+# S11 Sec. 3.2: "We assume the source to be in the Galactic Bulge at
+# Ds = 8 kpc, and thus the source parallax is pi_s = 0.125 mas" -- the
+# pi_S of Y16's Table 4 D_L = AU/(theta_E pi_E + pi_S).  An assumption, but
+# the papers' own.
 star.Source.distance:
-    initval: 8000.0           # pc -- an ASSUMPTION, from neither paper
+    initval: 8000.0           # pc
 
 # --- Proper motions (the leaves t_E and pi_E derive from) -----------------
-# NOT published: neither paper prints a proper motion.  t_E and pi_E are
-# DERIVED here, from the masses, the distances and the relative proper
-# motion, and Yee's block fixes everything except that last vector -- so it
-# has to be seeded, and these are the values that put the trajectory where
-# every ob09020 measurement since 2026-09-11 was taken (start logp +36,397,
-# and the frame orbit.L.bigomega below was converted against): t_E = 83.73
-# d and pi_E = (-0.345, +0.112), phi_pi = 162.07 deg, with the source at
-# its default -3 mas/yr.  They are what the relaxation engine solved from
-# Skowron's printed t_E and pi_E pins before those pins were removed (see
-# "Light curve" above).  The source pm is the default, written out so the
-# relative motion is stated, not implied.
+# Derived, not printed.  From the block above:
+#   M = 0.888 (1 + 0.275) = 1.1322 Msun, pi_rel = 1/0.747 - 1/8 = 1.213688 mas
+#   theta_E = sqrt(kappa M pi_rel) = 3.345262 mas  (kappa = 8.143853)
+#   |pi_E| = pi_rel / theta_E = 0.362808
+# Direction: pi_E,E = +0.149 is S11's printed, well-measured component;
+# pi_E,N = -sqrt(|pi_E|^2 - 0.149^2) = -0.330800, NEGATIVE as in S11's most
+# probable region (Sec. 4.2.1: pi_E,N ~ -0.2, pi_E,E ~ +0.2).  S11's
+# printed pi_E,N = -0.022 is the median of a posterior S11 Sec. 5.1 splits
+# into pi_E,N > 0 and < 0 regions, not a point on either (README).
+#   phi_pi = atan2(pi_E,E, pi_E,N) = 155.7521 deg E of N
+# Magnitude: mu_geo = theta_E / t_E = 3.345262 / 76.9 d = 15.888905 mas/yr
+# (S11's printed t_E), so mu_geo (E, N) = (6.525341, -14.487140).  The
+# model's heliocentric relative motion adds pi_rel v_earth,perp(t0_par)
+# (S11 eq. A9; v_perp = (0.482048, 0.669449) au/yr at this event's t0_par,
+# MulensEvent.register_frame_constants): mu_helio = (7.110397, -13.674638).
+# The lens primary's pm is Gaia DR3 4050356367410860160 (G = 16.26, the
+# blend of lens and source at 0.5" -- the lens dominates; RUWE 3.4, as a
+# 276 d binary's photocenter would give), and the source's is the lens's
+# minus mu_helio.
 star.L1.pm_ra:
-    initval: 2.0744280203949508    # mas/yr
+    initval: 4.389036         # mas/yr, Gaia DR3 pmra
 star.L1.pm_dec:
-    initval: -16.060377498515283   # mas/yr
+    initval: -11.233021       # mas/yr, Gaia DR3 pmdec
 star.Source.pm_ra:
-    initval: -3.0
+    initval: -2.721362        # = 4.389036 - 7.110397
 star.Source.pm_dec:
-    initval: -3.0
+    initval: 2.441618         # = -11.233021 + 13.674638
 
-# --- Lens binary orbit (Yee+2016 Table 7) ---------------------------------
+# --- Lens binary orbit (Y16 Table 7) --------------------------------------
 orbit.L.period:
     initval: 276.555          # d
 
 orbit.L.tp:
     initval: 2454758.692      # time of periastron
 
-# e = 0.265, omega_* = 331.600 deg.  Yee print omega_peri = 151.600, the
+# e = 0.265, omega_* = 331.600 deg.  Y16 print omega_peri = 151.600, the
 # other end of the apsidal line; EXOFASTv2's omega_* is that plus 180.
 orbit.L.secosw:
     initval: 0.4528268
 orbit.L.sesinw:
     initval: -0.2448427
 
-# Yee quote the orbit in the Skowron Appendix B frame, whose third axis
-# points toward the observer (EXOZIPPy's +Z points away), so i -> 180 - i.
+# Y16 quote the orbit in the S11 Appendix B frame, whose third axis points
+# toward the observer (EXOZIPPy's +Z points away), so i -> 180 - i.
 orbit.L.cosi:
     initval: 0.635054         # i = 180 - 129.424 = 50.576 deg
 
-# Yee's Omega_node = -7.767 is in that same frame, and the mapping into
+# Y16's Omega_node = -7.767 is in that same frame, and the mapping into
 # EXOZIPPy's sky frame is bigomega = PA(binary axis at t_0,kep) -
-# Omega_frame.  PA is not published: it is phi_pi - alpha_0, and phi_pi is
-# a model output, so this seed is frame-converted against the built model
-# rather than read off the table.  The fit is extremely sharp in it --
-# +/-10 deg costs >1e6 nats -- so do not round it.
+# Omega_frame, with PA = phi_pi - alpha_0 (S11's alpha_0 = 189.08):
+#   bigomega = 155.7521 - 189.08 + 7.767 = -25.561 = 334.439 deg
+# (the earlier 340.755 is the same rule at the phi_pi = 162.07 deg the
+# engine used to derive).  The fit is extremely sharp in it -- +/-10 deg
+# costs >1e6 nats -- so do not round it.
 orbit.L.bigomega:
-    initval: 340.755          # deg E of N
+    initval: 334.4391         # deg E of N
 
 # --- Per-instrument blending and error scaling ----------------------------
 # f_source and f_blend fit linearly against the model above, per

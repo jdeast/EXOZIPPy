@@ -12,9 +12,10 @@
 # parameters do not transfer verbatim and are converted below; the
 # arithmetic is written out so it can be checked.
 #
-# The physical block (masses, distances) is carried over from the sibling
-# unchanged: it is the same lens system, and Skowron's linear column does
-# not print one.
+# The physical block (L1 mass, distances, Gaia proper motion) is the
+# sibling's, Yee et al. 2016 Table 7: it is the same lens system, and
+# Skowron's linear column does not print one.  The mass ratio is this
+# column's light-curve q = 0.272 (the sibling uses Yee's joint 0.275).
 
 # Sky position (OGLE EWS).  Required: the OGLE file is HJD_UTC and the
 # HJD -> BJD_TDB conversion refuses placeholder coordinates.
@@ -25,61 +26,39 @@ star.dec:
     initval: -29.5190556
     sigma: 0
 
-# --- Light curve ----------------------------------------------------------
-# EDITION WARNING, and it is the reason this block is not simply Table 1's
-# linear column.  Skowron+2011's arXiv v1 posting prints DIFFERENT values
-# from the IOP version of record, and this repository uses IOP (see
-# ob09020.params.yaml and the README).  The arXiv PDF is what is reachable
-# here, so its linear column cannot be trusted for any quantity the two
-# editions disagree on -- measured: seeding the arXiv linear column's
-# u_0 = 0.0601 instead of the IOP 0.0613 moves the start logp by 158,686
-# nats, from +31,268 to -127,419, on a 2% change.
-#
-# The split below is therefore by WHAT DETERMINES EACH VALUE, and it was
-# settled by measurement, not taste:
-#
-#   u_0 and rho come from the sibling's IOP set (Skowron's full-orbit
-#   column), because the physical block (masses, distances, proper
-#   motions) is shared.  Taking them from the arXiv linear column instead
-#   fights it: u_0 alone costs 158,686 nats.  t_E, theta_E and pi_E are
-#   NOT seeded, for the sibling's reason (ob09020.params.yaml): the shared
-#   physical block determines them, and Skowron's printed values
-#   contradict it.
-#
-#   s_0, alpha_0, q and the two rates come from Table 1's linear column,
-#   because they are ONE geometric set -- s_0 is defined at t0_par under a
-#   particular orbital-motion model, so the full-orbit s_0 does not belong
-#   with linear rates.  Measured: swapping in the full-orbit s_0 = 0.4294
-#   and alpha_0 = 189.08 costs ~100,000 nats.
-#
-# Mixed provenance is deliberate and is the best start available here
-# (+39,049 measured 2026-10-14, against +33,250 with Skowron's t_E,
-# theta_E and pi_E pinned under the old engine, which delivered none).
+# --- Light curve (S11 Table 1, "parallax + 2 par. motion") ---------------
+# The IOP version of record's linear column, as the README's acceptance
+# table quotes it: u_0 = +0.0603, t_E = 78.3 d, s_0 = 0.4268, alpha_0 =
+# 189.06 deg, gamma_par = +0.12 /yr, gamma_perp = +2.78 /yr.  t_0 and q are
+# not in that quote and are the arXiv v1 column's (4917.253, 0.272); every
+# other value here is IOP.  (An earlier version took u_0 and rho from the
+# full-orbit column: with t_E, theta_E and pi_E pinned against the shared
+# physical block, the linear column's own u_0 cost ~159,000 nats.  With
+# the proper motions derived from the papers below it is the best start:
+# +44,853, against +18,359 with the full-orbit u_0 and t_E and the arXiv
+# s_0 and alpha_0.)
 source.Source.t_0:
     initval: 2454917.253
 
 source.Source.u_0:
-    initval: 0.0613           # positive, as printed; see the A16 note below
+    initval: 0.0603           # positive, as printed; see the A16 note below
 
-# t_E, theta_E and pi_E: not seeded (see the header, and the sibling's
-# "Light curve" block for the numbers).
-
-# Skowron's printed rho = t_*/t_E.  The theta_*/theta_E alternative the
-# keplerian sibling uses (0.0013313) measured worse at THIS start (+33,253
-# against +39,049); kept as printed.
+# rho = t_*/t_E from the WITH-PRIORS column, 0.11595 d / 76.9 d -- the one
+# rho both ob09020 params files use (JDE 2026-10-15).  (This column's own
+# arXiv t_* / t_E = 0.11631/78.3 measured 435 nats worse, at the arXiv
+# s_0 and alpha_0.)
 source.Source.rho:
-    initval: 0.0015078        # = t_*/t_E = 0.11595/76.9
+    initval: 0.0015078
 
 lens.L2.q:
     initval: 0.272
 
 # s and alpha ARE inputs here, unlike the keplerian sibling where they are
-# derived from orbit L.  These are the values that file names as its
-# acceptance check: the published s_0 and alpha_0.
+# derived from orbit L: the IOP linear column's s_0 and alpha_0.
 lens.L2.s:
-    initval: 0.4261
+    initval: 0.4268
 lens.L2.alpha:
-    initval: 189.07           # deg
+    initval: 189.06           # deg
 
 # --- Orbital motion: Skowron's gammas, CONVERTED --------------------------
 # Skowron+2011 parameterize the sky-projected motion as
@@ -95,7 +74,7 @@ lens.L2.alpha:
 #   mass per Julian year (C13/C24, defaults.yaml) -- so it carries the s_0
 #   factor that gamma_par divides out:
 #
-#       ds_dt = gamma_par * s_0 = 0.12 * 0.4261 = 0.051132 r_E/yr
+#       ds_dt = gamma_par * s_0 = 0.12 * 0.4268 = 0.051216 r_E/yr
 #
 #   dalpha_dt is the NEGATIVE of gamma_perp (conventions.md C24, Skowron
 #   Appendix A.4 verbatim), and its USER unit is deg/yr while gamma_perp is
@@ -120,7 +99,7 @@ lens.L2.alpha:
 # dalpha_dt's sign is tied to u_0 being positive above -- one choice, not
 # two.  Table 1's note says every column is the positive-u_0 solution.
 orbit.L.ds_dt:
-    initval: 0.051132           # r_E/yr
+    initval: 0.051216           # r_E/yr
 orbit.L.dalpha_dt:
     initval: -159.28          # deg/yr
 
@@ -134,22 +113,30 @@ star.L1.distance:
 star.L2.distance:
     initval: 747.0            # pc
 
+# S11 Sec. 3.2's assumed source distance (pi_s = 0.125 mas); see the
+# keplerian sibling.
 star.Source.distance:
-    initval: 8000.0           # pc -- an ASSUMPTION, from neither paper
+    initval: 8000.0           # pc
 
 # --- Proper motions (the leaves t_E and pi_E derive from) -----------------
-# NOT published, and the same values as the keplerian sibling (whose
-# params file explains them): with the shared physical block they give
-# t_E = 83.70 d and pi_E = (-0.346, +0.112), where this config also
-# started before t_E, theta_E and pi_E were unpinned.
+# Derived exactly as in the keplerian sibling (whose params file writes
+# out each step), at THIS column's t_E = 78.3 d and q = 0.272:
+#   M = 0.888 (1 + 0.272) = 1.129536 Msun, pi_rel = 1.213688 mas
+#   theta_E = 3.341324 mas, |pi_E| = 0.363236
+#   pi_E = (-0.331269, +0.149) (S11's pi_E,E; pi_E,N negative), phi_pi =
+#   155.7825 deg
+#   mu_geo = theta_E / t_E = 15.586443 mas/yr -> (E, N) = (6.393589,
+#   -14.214754); mu_helio = mu_geo + pi_rel v_perp = (6.978645, -13.402252)
+# The lens primary's pm is Gaia DR3 4050356367410860160; the source's is
+# the lens's minus mu_helio.
 star.L1.pm_ra:
-    initval: 2.0744280203949508    # mas/yr
+    initval: 4.389036         # mas/yr, Gaia DR3 pmra
 star.L1.pm_dec:
-    initval: -16.060377498515283   # mas/yr
+    initval: -11.233021       # mas/yr, Gaia DR3 pmdec
 star.Source.pm_ra:
-    initval: -3.0
+    initval: -2.589610        # = 4.389036 - 6.978645
 star.Source.pm_dec:
-    initval: -3.0
+    initval: 2.169231         # = -11.233021 + 13.402252
 
 # --- Per-instrument blending and error scaling ----------------------------
 # f_source and f_blend fit linearly against the model above, per
