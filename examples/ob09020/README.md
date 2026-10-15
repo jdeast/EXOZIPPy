@@ -374,13 +374,17 @@ does.
 So `t_E`, `theta_E` and `pi_E` are not seeded (they are derived here
 from masses, distances and proper motions).  The relative proper motion
 is `mu_geo = theta_E / t_E` along that `pi_E`, with S11's printed `t_E`
-(76.9 d with priors; 78.3 d in the linear column), converted to
+(76.9 d, with priors), converted to
 heliocentric with Earth's velocity at t0_par; the lens primary's proper
 motion is Gaia DR3's (the 0.5" blend the lens dominates), and the
 source's follows.  `orbit.L.bigomega` follows from that `phi_pi` by the
 frame rule (`phi_pi - alpha_0 - Omega_Y16` = 334.439 deg).  `rho` is S11's
-printed `t_* / t_E = 0.11595/76.9 = 0.0015078` in both files.  The
-linear file now takes its column's own IOP `u_0`, `s_0`, `alpha_0`.
+printed `t_* / t_E = 0.11595/76.9 = 0.0015078` in both files.  Both
+files take every S11 value from that ONE column, "parallax + full orbit
+(with priors)" (JDE 2026-10-15: never mix Table-1 columns): the linear
+file linearizes the full-orbit solution, whose `gamma_par`/`gamma_perp`
+are the orbit's instantaneous rates at t0_par (arXiv v1 values -- the
+IOP edition's are not available here).
 
 Start logp (2026-10-15; master started at +36,500 / +33,250 and delivered
 none of S11's printed `t_E`/`theta_E`/`pi_E`):
@@ -389,10 +393,10 @@ none of S11's printed `t_E`/`theta_E`/`pi_E`):
 |---|---|---|
 | S11's `t_E`/`theta_E`/`pi_E` pinned (precedence rule) | -892,087 | +15,312 |
 | those unpinned, proper motions the engine used to derive (not published) | +36,530 | +39,049 |
-| **all seeds from the papers (shipped)** | **+33,540** | **+44,853** |
+| **all seeds from the papers (shipped)** | **+33,540** | **+47,696** |
+| linear: S11's "2 par. motion" column instead (IOP `u_0`, `s_0`, `alpha_0`, rates) | | +44,853 |
 | as shipped, with S11's light-curve `q = 0.273` (keplerian) | +25,150 | |
-| with the full-orbit `u_0`/`t_E` and the arXiv `s_0`/`alpha_0` (linear) | | +18,359 |
-| as shipped, `star.Source.distance` unpinned | -157,802 | -15,189 |
+| `star.Source.distance` unpinned | -157,802 | -15,189 (2 par. motion seeds) |
 
 Unpinned, the source distance runs to its 100 kpc bound (the source
 radius and distance both absorb the pinned `rho`), so S11's 8 kpc stays.
