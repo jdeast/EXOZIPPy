@@ -44,6 +44,25 @@ def _raw_initval(user_params, key, default=None):
     return val
 
 
+def mag_to_flux(mag, mag_err):
+    """Magnitudes -> (flux, sigma_flux), the one conversion in the package.
+
+    Exact for the value.  The error is the first-order propagation evaluated
+    at the OBSERVED flux, so sigma stays a DATA CONSTANT: evaluating it at
+    the model flux instead would make sigma a function of the parameters and
+    bias the fit toward faint models.
+
+    This is module scope rather than inline in `load_data` because the
+    offline tools that have to see the data exactly as the model does --
+    the (s, q) mode finder in `gridsearch.py`, which reads the same files
+    without building a System -- would otherwise each carry their own copy
+    of these two lines, and a copy that drifts is a search optimizing a
+    different chi2 from the fit it seeds.
+    """
+    flux = 10.0 ** (-0.4 * np.asarray(mag))
+    return flux, (np.log(10.0) / 2.5) * flux * np.maximum(mag_err, 0.0)
+
+
 class _BootstrapGeometry:
     """The flux bootstrap's reader of the event geometry (see
     ``MulensInstrument._probe_bootstrap_geometry``).
@@ -526,13 +545,7 @@ class MulensInstrument(Instrument):
                 df = df.iloc[:, :3]
 
             if fmt not in ("flux", "dia"):
-                # Magnitudes -> flux.  Exact for the value; the error is the
-                # first-order propagation evaluated at the OBSERVED flux, so
-                # sigma stays a data constant (using the model flux instead
-                # would make sigma a function of the parameters and bias the
-                # fit toward faint models).
-                f = 10.0 ** (-0.4 * f)
-                e = (np.log(10.0) / 2.5) * f * np.maximum(e, 0.0)
+                f, e = mag_to_flux(f, e)
 
             per_file.append((t, f, e, df))
 
@@ -1712,9 +1725,7 @@ class MulensInstrument(Instrument):
         self._scale_flux_amplitudes(self.manifest, f_total_init)
 
         if self.total_detrend_cols > 0:
-            self.manifest["detrend_coeffs"] = {
-                "shape": (self.total_detrend_cols,)
-            }
+            self.manifest["detrend_coeffs"] = self._detrend_manifest_entry()
 
         # Binary source: one flux ratio q_flux = f_s2/f_s1 per instrument
         # (sources have different colors, so the ratio is chromatic).

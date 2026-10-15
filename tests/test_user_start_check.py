@@ -65,6 +65,10 @@ class _FakeParam:
             return f"{parts[0]}.{index}.{parts[-1]}"
         return self.label
 
+    def index_key(self, index=0):
+        parts = self.label.split(".")
+        return f"{parts[0]}.{index}.{parts[-1]}"
+
     def element_is_active(self, index=0):
         return self._active
 

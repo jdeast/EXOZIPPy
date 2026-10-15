@@ -52,6 +52,34 @@ def _poll_until(predicate, timeout, interval=POLL_INTERVAL):
     return None
 
 
+def _poll_while_progressing(
+    predicate, progress, stall_timeout, ceiling, interval=POLL_INTERVAL
+):
+    """Poll `predicate` until truthy, giving up only once `progress()` stalls.
+
+    `progress()` returns any comparable marker of the work advancing; every
+    change restarts the `stall_timeout` clock. `ceiling` bounds the total wait
+    regardless. Returns (value or None, why) -- `why` names which limit ended
+    an unsuccessful wait, for the failure message.
+    """
+    start = time.time()
+    last_marker = progress()
+    last_change = start
+    while True:
+        value = predicate()
+        if value:
+            return value, None
+        now = time.time()
+        marker = progress()
+        if marker != last_marker:
+            last_marker, last_change = marker, now
+        if now - last_change >= stall_timeout:
+            return None, f"no progress for {stall_timeout:.0f}s"
+        if now - start >= ceiling:
+            return None, f"still busy at the {ceiling:.0f}s ceiling"
+        time.sleep(interval)
+
+
 def _write_ptde_config(work_dir, out_prefix, *, draws=100_000):
     """Write a fast PTDE run config into work_dir; return the config filename.
 
@@ -208,6 +236,40 @@ def test_snapshot_is_thinned_and_atomic(tmp_path):
         open(str(prefix) + "_gui_snapshot" + os.sep + "partial.json")
     )
     assert meta["n_draws"] == 500 and meta["n_kept"] <= 200
+
+
+def test_poll_while_progressing_waits_out_progress_and_stops_on_a_stall():
+    """
+    Given a wait that follows a progress marker instead of a fixed clock (#369),
+    When the marker keeps changing past the stall window, then stops changing,
+    Then the wait outlasts the stall window while busy, ends on the stall once
+    idle, and still ends at the ceiling however busy the work stays.
+    """
+    t0 = time.time()
+    # Done at 0.6 s with a 0.2 s stall window: only progress keeps it alive.
+    value, why = _poll_while_progressing(
+        lambda: "done" if time.time() - t0 > 0.6 else None,
+        lambda: int((time.time() - t0) / 0.05),
+        stall_timeout=0.2,
+        ceiling=5.0,
+        interval=0.01,
+    )
+    assert (value, why) == ("done", None)
+
+    value, why = _poll_while_progressing(
+        lambda: None, lambda: 0, stall_timeout=0.1, ceiling=5.0, interval=0.01
+    )
+    assert value is None and why.startswith("no progress")
+
+    t0 = time.time()
+    value, why = _poll_while_progressing(
+        lambda: None,
+        lambda: time.time() - t0,
+        stall_timeout=5.0,
+        ceiling=0.2,
+        interval=0.01,
+    )
+    assert value is None and "ceiling" in why
 
 
 # ---------------------------------------------------------------------------
