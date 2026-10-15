@@ -319,13 +319,25 @@ other row of table C is identical to the section above.
 | config | master | before | now |
 |---|---|---|---|
 | ob09020 | +36,499.8, m5 | +36,530.5, m0 | +33,540.2, m0 |
-| ob09020_linear | +33,249.5, m5 | +39,048.7, m0 | +44,852.6, m0 |
+| ob09020_linear | +33,249.5, m5 | +39,048.7, m0 | +47,695.7, m0 |
 | kelt17 | -1,458.2, m0 | -1,458.2, m0 | +665.4, m0 |
 
 - ob09020: every seed is now printed in Skowron+2011, Yee+2016 or Gaia
   DR3, or derived from those with the arithmetic written out (README).
   The keplerian start is 2,960 nats below master's, whose seeds were
-  proper motions the old engine derived; the linear one is 11,600 above.
+  proper motions the old engine derived; the linear one is 14,450 above
+  (both files now take every Skowron+2011 value from the one "parallax +
+  full orbit (with priors)" column; the linear file's earlier "2 par.
+  motion" seeds gave +44,852.6).  At the keplerian start every printed
+  value is reproduced exactly (t_0, u_0, rho, q, t_E = 76.900, theta_E,
+  pi_E, alpha_0 = 189.080 deg); the only miss is s_0 = 0.42633 against
+  S11's 0.4294 (-0.7%), which comes from combining Y16's orbit and D_L
+  with S11's theta_E, not from an unsolved relation.
+- An ob09020 fit from the keplerian start (scratch copy, 34 cores, PTDE)
+  was stopped by request during the seed polish: round 1 of the DE polish
+  took the start from +33,540.2 to +33,818.6 (579 sweeps, ~9 min, stopped
+  on rate); round 2 was re-whitening at the polished point when it was
+  stopped, ~25 min in.  No params.2 file is shipped (deferred).
 - kelt17: the seeds are Zhou+2016's (the stellar mass was missing).
 - The stage 1-3 probe now reads registered components' roles; no shipped
   config's start changed with it.
