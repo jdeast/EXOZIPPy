@@ -86,7 +86,7 @@
   "POT:low_bound.mulensevent.mu_dec_rel_geo": -9.85967654375977e-305,
   "POT:low_bound.mulensevent.mu_ra_rel": -9.85967654375977e-305,
   "POT:low_bound.mulensevent.mu_ra_rel_geo": -9.85967654375977e-305,
-  "POT:low_bound.mulensevent.mu_rel_geo_mag": -7.944016163298746e-10,
+  "POT:low_bound.mulensevent.mu_rel_geo_mag": -9.85967654375977e-305,
   "POT:low_bound.mulensevent.mu_rel_mag": -9.85967654375977e-305,
   "POT:low_bound.mulensevent.pi_rel": -9.85967654375977e-305,
   "POT:low_bound.mulensevent.t_E": -9.85967654375977e-305,
@@ -122,5 +122,5 @@
   "RV:star.radius_raw": -0.9189385332046727,
   "RV:star.rv_raw": -1.8378770664093453
  },
- "total_logp": 23145.362706921544
+ "total_logp": 23145.362706922337
 }

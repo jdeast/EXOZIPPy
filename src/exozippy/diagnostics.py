@@ -513,9 +513,10 @@ class ModelAuditor:
           ledger == user, built != user -> the DERIVATION cannot preserve
               it.  The pin was recorded at rank 100 and never touched; the
               graph still computes something else because the seed path
-              approximates the chain.  (Worked example: mulensevent.t_E is
-              seeded through mu_rel_HELIO while the graph evaluates
-              mu_rel_GEO -- symbolic_physics.py's SEEDING APPROXIMATION.)
+              approximates the chain.  (The historical worked example,
+              mulensevent.t_E seeded through mu_rel_HELIO while the graph
+              evaluated mu_rel_GEO, is gone: the engine's relations are
+              geocentric since review 8.6.23.)
 
           ledger != user -> OVERSPECIFIED; something had to give, and
               _last_solved_by names the equation that overwrote it.

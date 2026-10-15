@@ -3,18 +3,18 @@
 In a physical-parameter microlensing fit t_E and pi_E are DERIVED from the
 lens and source masses, distances and proper motions.  Seeding them
 alongside the leaf seeds over-determines the chain, and the relaxation
-engine reconciles it by moving whichever leaves were left unseeded.
-Neither of the engine's own detectors sees this (the Contradiction Clause
-needs every symbol of ONE violated relation at user rank, and the chain's
-intermediates sit at RANK_DERIVED_USER), so ``cm.diagnostics`` stays empty
-and the only thing that can report it is the user-start echo check,
-``ModelAuditor.check_user_starts`` (PR #252), which compares every user
-initval against the COMPILED graph at the build start.
+engine reconciles it by moving whichever leaves were left unseeded.  Under
+the precedence rule (review 3.14.22) with GEOCENTRIC t_E / pi_E relations
+(review 8.6.23) the unseeded leaves absorb seeds that can hold, and a seed
+that cannot (|pi_E| is fixed by the masses and distances) is dropped and
+reported by name; the user-start echo check,
+``ModelAuditor.check_user_starts`` (PR #252), reports it against the
+COMPILED graph with the component's own recipe.
 
-These tests pin that the check fires on exactly this case, on the shipped
-examples/ob170114 (Mroz et al. 2026), and that the component's own recipe
-(``Parameter.seed_remedy`` on mulensevent.t_E / pi_E_*) reaches the CLI
-warning once.  They are slow (two ob170114 builds, ~20 s each).
+These tests pin both on the shipped examples/ob170114 (Mroz et al. 2026),
+and that the recipe (``Parameter.seed_remedy`` on mulensevent.t_E /
+pi_E_*) reaches the CLI warning once.  They are slow (ob170114 builds,
+~20 s each).
 """
 
 import copy
@@ -60,59 +60,81 @@ def _build_and_audit(monkeypatch, config, params):
     return system, model, auditor, findings, built
 
 
-def test_t_E_pi_E_seeds_over_the_chain_are_reported_with_the_recipe(
-    monkeypatch, caplog
-):
-    """
-    Given the shipped ob170114 seeds with the source system's proper-motion
-      seeds REMOVED and t_E / pi_E re-seeded at the published values --
-      the state the example was in before its params file learned the
-      recipe (measured 2026-08-27: phi_pi rotated 35 deg, t_E 173 -> 205),
-    When the model is built and the user-start check runs,
-    Then the engine records nothing (this is the blind spot), but all
-      three seeds are reported as not delivered, with the values the model
-      is built at -- t_E ~ 202.65 d and phi_pi ~ 1.1 deg against 173 d and
-      37.25 deg -- each carrying the mulensevent seed_remedy; and the CLI
-      warning (run.inspect_start) prints both values per key and the
-      recipe ONCE, naming the three keys.
-    """
-    # Arrange
+def _seed_over_the_chain(pi_e_e):
+    """ob170114 with the source system's pm seeds REMOVED and t_E / pi_E
+    re-seeded -- the state the example was in before its params file
+    learned the recipe (measured 2026-08-27: phi_pi rotated 35 deg,
+    t_E 173 -> 205)."""
     config, params = _load()
     for leaf in ("pm_ra", "pm_dec"):
         del params[f"star.Source.{leaf}"]
         del params[f"star.SComp.{leaf}"]
     params["mulensevent.t_E"] = {"initval": T_E_PUB}
     params["mulensevent.pi_E_N"] = {"initval": PI_E_N_PUB}
-    params["mulensevent.pi_E_E"] = {"initval": PI_E_E_PUB}
+    params["mulensevent.pi_E_E"] = {"initval": pi_e_e}
+    return config, params
 
-    # Act
+
+def test_published_t_E_pi_E_seeds_over_the_chain_are_delivered(monkeypatch):
+    """
+    Given the published t_E / pi_E seeded over the chain, the source pm
+      seeds removed,
+    When the model is built and the user-start check runs,
+    Then the model is built at the published t_E and pi_E direction and
+      nothing is reported for them.  Under the old engine (alphabetical,
+      HELIOCENTRIC relations) this built t_E = 202.65 d and phi_pi = 1.1
+      deg; under the precedence rule (review 3.14.22) the unseeded source
+      pm absorbs the seeds, and with the geocentric relations (8.6.23) the
+      model's t_E is the engine's.  |pi_E| is fixed by the masses and
+      distances, so pi_E_E -- last in keep-order -- is not held exactly,
+      but the re-derived value is within the user-start tolerance of 0.127.
+    """
+    config, params = _seed_over_the_chain(PI_E_E_PUB)
+
+    system, _model, _auditor, findings, built = _build_and_audit(
+        monkeypatch, config, params
+    )
+
+    # pi_E_E is the one the engine could not hold exactly, but it lands
+    # within the user-start tolerance, so no drop is reported either.
+    assert system.config_manager.diagnostics == []
+    assert not set(SEED_KEYS) & {f["key"] for f in findings}
+    assert built["mulensevent.t_E"] == pytest.approx(T_E_PUB, rel=1e-4)
+    phi_pi = np.degrees(
+        np.arctan2(built["mulensevent.pi_E_E"], built["mulensevent.pi_E_N"])
+    )
+    assert phi_pi == pytest.approx(PHI_PI_PUB, abs=2.0)
+
+
+def test_a_pi_E_seed_the_chain_cannot_hold_is_reported_with_the_recipe(
+    monkeypatch, caplog
+):
+    """
+    Given the same chain with pi_E_E seeded at 4x the published value --
+      a |pi_E| the pinned masses and distances cannot give,
+    When the model is built and the user-start check runs,
+    Then the engine drops pi_E_E and says so, the echo check reports it
+      with the value the model is built at, carrying the mulensevent
+      seed_remedy, and the CLI warning (run.inspect_start) prints the
+      recipe ONCE.
+    """
+    config, params = _seed_over_the_chain(4 * PI_E_E_PUB)
+
     system, model, auditor, findings, built = _build_and_audit(
         monkeypatch, config, params
     )
 
-    # Assert -- the engine's own detectors are blind to it ...
-    assert system.config_manager.diagnostics == []
-    # ... so the echo check is what reports it, on exactly these keys.
+    assert "mulensevent.0.pi_E_E" in [
+        d["param_paths"][0] for d in system.config_manager.diagnostics
+    ]
     by_key = {f["key"]: f for f in findings}
-    assert set(SEED_KEYS) <= set(by_key), sorted(by_key)
-    t_e = by_key["mulensevent.t_E"]
-    assert t_e["requested"] == pytest.approx(T_E_PUB)
-    # Measured 202.651 d (2026-10-05); a 5% band leaves room for the
-    # platform-dependent build while staying far from 173.
-    assert t_e["produced"] == pytest.approx(202.65, rel=0.05)
-    phi_pi = np.degrees(
-        np.arctan2(
-            by_key["mulensevent.pi_E_E"]["produced"],
-            by_key["mulensevent.pi_E_N"]["produced"],
-        )
-    )
-    assert abs(phi_pi - PHI_PI_PUB) > 20.0, phi_pi  # measured 1.08 deg
-    remedies = {by_key[k]["remedy"] for k in SEED_KEYS}
-    assert len(remedies) == 1
-    (remedy,) = remedies
-    assert "DROP the t_E and pi_E seeds" in remedy
+    assert "mulensevent.pi_E_E" in by_key, sorted(by_key)
+    finding = by_key["mulensevent.pi_E_E"]
+    assert finding["requested"] == pytest.approx(4 * PI_E_E_PUB)
+    assert finding["produced"] == pytest.approx(built["mulensevent.pi_E_E"])
+    assert "DROP the t_E and pi_E seeds" in finding["remedy"]
+    assert built["mulensevent.t_E"] == pytest.approx(T_E_PUB, rel=1e-4)
 
-    # The CLI path: the same findings through run.inspect_start.
     from exozippy.run import inspect_start
 
     caplog.set_level(logging.WARNING)
@@ -128,11 +150,8 @@ def test_t_E_pi_E_seeds_over_the_chain_are_reported_with_the_recipe(
         for r in caplog.records
         if "not built at every value you set" in r.getMessage()
     ]
-    assert "mulensevent.t_E: you set 173, the model is built at" in block
+    assert "mulensevent.pi_E_E: you set 0.508, the model is built at" in block
     assert block.count("DROP the t_E and pi_E seeds") == 1
-    assert (
-        "For mulensevent.pi_E_E, mulensevent.pi_E_N, mulensevent.t_E:" in block
-    )
 
 
 def test_a_consistent_t_E_seed_over_the_shipped_leaves_is_silent(
@@ -156,12 +175,9 @@ def test_a_consistent_t_E_seed_over_the_shipped_leaves_is_silent(
         monkeypatch, config, params
     )
 
-    # The engine's t_E relation is still HELIOCENTRIC here (review 8.6.23),
-    # so its own t_E differs from the model's geocentric one and the pinned
-    # 173 d does not hold exactly in the ledger: it is reported as dropped.
-    # The model is built at 173 regardless (below).
-    assert [
-        d["param_paths"][0] for d in system.config_manager.diagnostics
-    ] in ([], ["mulensevent.0.t_E"])
+    # The engine's t_E relation is GEOCENTRIC, as the model's is (review
+    # 8.6.23), so the consistent seed holds in the ledger too: nothing is
+    # dropped.
+    assert system.config_manager.diagnostics == []
     assert "mulensevent.t_E" not in {f["key"] for f in findings}
     assert built["mulensevent.t_E"] == pytest.approx(T_E_PUB, rel=1e-4)

@@ -563,6 +563,10 @@ class MulensEvent(Component):
     def register_parameters(self, system):
         """Stage 3: Declare the event-level manifest and push hints."""
         self._validate_bodies(system)
+        # The geocentric frame's constants for the relaxation engine's t_E
+        # and pi_E relations (review 8.6.23); MulensInstrument supplied them
+        # at stage 1 already where there are data.
+        self.register_frame_constants(system)
         # No seed push here: the one seeder (the peak finder) runs in
         # MulensInstrument.load_data at stage 1, where the seeds must land
         # for its flux bootstrap.  A stage-3 re-push of a seed file once
@@ -1035,6 +1039,26 @@ class MulensEvent(Component):
                 context_nodes["earth_vperp_e"] = pt.as_tensor_variable(vperp_e)
                 context_nodes["earth_vperp_n"] = pt.as_tensor_variable(vperp_n)
         return super().add_parameter(model, param_name, system, context_nodes)
+
+    def register_frame_constants(self, system):
+        """Hand the relaxation engine Earth's projected velocity at t0_par.
+
+        The engine's t_E and pi_E relations are GEOCENTRIC, as the model's
+        are (review 8.6.23): mu_geo = mu_helio - pi_rel * v_perp.  The two
+        components of v_perp are exact per-event numbers, not parameters,
+        so they reach the relations through ConfigManager.add_constant --
+        the same values ``add_parameter`` injects into the model graph.
+        Called by MulensInstrument.load_data as soon as t0_par is final
+        (before its stage-1 probe of the event geometry) and again at stage
+        3, which also covers a fit with no microlensing data (0, 0).
+        """
+        vperp_e, vperp_n = self._earth_vperp_en(system)
+        self.config_manager.add_constant(
+            "mulensevent.0.earth_vperp_e", vperp_e
+        )
+        self.config_manager.add_constant(
+            "mulensevent.0.earth_vperp_n", vperp_n
+        )
 
     def _earth_vperp_en(self, system):
         """Earth's velocity at t0_par projected on the sky, (East, North),

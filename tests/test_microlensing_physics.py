@@ -149,6 +149,11 @@ def test_microlensing_sympy_pytensor_equivalence():
 
     # 2. Pass topology and explicitly trigger the solver
     cm = ConfigManager(user_params, system_config=system_config)
+    # No MulensEvent here to supply Earth's projected velocity for the
+    # geocentric t_E relation (review 8.6.23); with no data the two frames
+    # coincide, which is what MulensEvent itself registers then.
+    cm.add_constant("mulensevent.0.earth_vperp_e", 0.0)
+    cm.add_constant("mulensevent.0.earth_vperp_n", 0.0)
     cm.finalize_user_params()
 
     # Verify the solver completed the chain.  Derived values are injected

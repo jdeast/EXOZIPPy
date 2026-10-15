@@ -111,7 +111,7 @@
  },
  "terms": {
   "POT:galacticmodel.imf_prior": -1.6543528454768015,
-  "POT:galacticmodel.kinematic_prior": 12.950562893657661,
+  "POT:galacticmodel.kinematic_prior": 13.403891193101742,
   "POT:gaussian_prior.orbit.xbigomega": -0.4456791985581438,
   "POT:gaussian_prior.orbit.ybigomega": -0.054320801441857,
   "POT:logit_uniform_prior.band.u1": -4.681943244794005,
@@ -131,8 +131,8 @@
   "POT:logit_uniform_prior.source.u_0": -1.3863059589957878,
   "POT:logit_uniform_prior.star.distance": -12.417829635654815,
   "POT:logit_uniform_prior.star.logmass": -3.3784372510747103,
-  "POT:logit_uniform_prior.star.pm_dec": -4.15888308610594,
-  "POT:logit_uniform_prior.star.pm_ra": -4.158883098616467,
+  "POT:logit_uniform_prior.star.pm_dec": -4.158883086060788,
+  "POT:logit_uniform_prior.star.pm_ra": -4.158883097706429,
   "POT:logit_uniform_prior.star.radius": -5.456862363171632,
   "POT:logit_uniform_prior.star.rv": -4.1588830833596715,
   "POT:low_bound.lens.q": -1.3395771232963572e-263,
@@ -142,14 +142,14 @@
   "POT:low_bound.mulensevent.mu_dec_rel_geo": -9.85967654375977e-305,
   "POT:low_bound.mulensevent.mu_ra_rel": -9.85967654375977e-305,
   "POT:low_bound.mulensevent.mu_ra_rel_geo": -9.85967654375977e-305,
-  "POT:low_bound.mulensevent.mu_rel_geo_mag": -0.0006943019390825002,
+  "POT:low_bound.mulensevent.mu_rel_geo_mag": -5.477090105670943e-206,
   "POT:low_bound.mulensevent.mu_rel_mag": -9.85967654375977e-305,
   "POT:low_bound.mulensevent.pi_rel": -9.85967654375977e-305,
-  "POT:low_bound.mulensevent.t_E": -9.85967654375977e-305,
+  "POT:low_bound.mulensevent.t_E": -6.4643323046561034e-15,
   "POT:low_bound.mulensevent.theta_E": -9.85967654375977e-305,
   "POT:low_bound.mulensinstrument.f_blend": -8.873708889383794e-304,
   "POT:low_bound.mulensinstrument.f_source": -6.238322633717684,
-  "POT:mulensevent.event_rate_prior": 4.011807151596858,
+  "POT:mulensevent.event_rate_prior": 3.971596130260891,
   "POT:mulensevent.mu_rel_singularity": -9.85967654375977e-305,
   "POT:mulensevent.source_behind_lens": -9.85967654375977e-305,
   "POT:mulensevent.theta_E_singularity": -9.85967654375977e-305,
@@ -171,7 +171,7 @@
   "RV:band.u1_raw": -2.756815599614018,
   "RV:mulensinstrument.err_scale_raw": -8.270446798842054,
   "RV:mulensinstrument.log_f_total_raw": -8.270446798842054,
-  "RV:mulensinstrument.model": -973813.7535174086,
+  "RV:mulensinstrument.model": -891927.7044383356,
   "RV:mulensinstrument.q_source_raw": -8.270446798842054,
   "RV:orbit.cosi_raw": -0.9189385332046727,
   "RV:orbit.logP_raw": -0.9189385332046727,
@@ -192,5 +192,5 @@
   "RV:star.radius_raw": -0.9189385332046727,
   "RV:star.rv_raw": -2.756815599614018
  },
- "total_logp": -973973.5633863101
+ "total_logp": -892087.1004956568
 }

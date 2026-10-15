@@ -116,7 +116,44 @@ def test_a_pinned_t_E_is_absorbed_by_the_lens_distance(monkeypatch):
     cm = system.config_manager
     rep = cm._last_keep_report
     assert "mulensevent.0.t_E" in rep["kept"]
-    lens = next(
-        a for a in rep["absorbed"] if a[0].endswith(".distance") and a[3] == 25
-    )
-    assert lens[2] != pytest.approx(lens[1])  # moved off the 4 kpc guess
+    # Re-derived by one relation ("absorbed", rank 25) or settled at its tier
+    # ("moved", labelled MULENS_LENS_DISTANCE (25)) -- the geocentric t_E
+    # relation (review 8.6.23) is not solved for a distance, so it settles.
+    lens = [
+        a
+        for a in rep["absorbed"] + rep["moved"]
+        if a[0].endswith(".distance")
+        and str(a[3]) in ("25", "MULENS_LENS_DISTANCE (25)")
+    ]
+    assert len(lens) == 1, rep
+    assert lens[0][2] != pytest.approx(lens[0][1])  # moved off the 4 kpc guess
+    others = [
+        a[0]
+        for a in rep["absorbed"] + rep["moved"]
+        if a[0].endswith(".distance")
+    ]
+    assert others == [lens[0][0]]  # the source distance keeps its seed
+
+
+@pytest.mark.slow
+def test_a_pinned_t_E_is_delivered_by_the_built_model(monkeypatch):
+    """
+    Given examples/ob08092 (t_E pinned on top of the lens and source seeds),
+    When the model is BUILT and the user-start check reads the compiled
+      graph,
+    Then the model starts at the pinned t_E: the engine's t_E and pi_E
+      relations are GEOCENTRIC, as the model's are (review 8.6.23), so the
+      lens distance absorbs the pinned value in the frame the model uses.
+      Under the heliocentric relations the model started 1.3% off it.
+    """
+    from exozippy.diagnostics import ModelAuditor
+
+    system = _prepare(monkeypatch, "ob08092", "ob08092.yaml")
+    model = system.build_model()
+    with model:
+        auditor = ModelAuditor(model, system, system.get_mcmc_init(model))
+        findings = auditor.check_user_starts()
+        built = auditor.user_start_values()
+    assert "mulensevent.t_E" not in {f["key"] for f in findings}
+    pinned = system.config_manager._last_resolved["mulensevent.0.t_E"]
+    assert built["mulensevent.t_E"] == pytest.approx(pinned, rel=1e-6)

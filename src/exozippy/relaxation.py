@@ -171,6 +171,10 @@ class Plan:
     checks: list
     determined_by: dict  # path -> Step
     scales: dict = dataclasses.field(default_factory=dict)  # plan-propagated
+    # _plan_scale's cycle bookkeeping: symbols being computed, and whether
+    # the computation under way met one of them
+    scale_busy: set = dataclasses.field(default_factory=set)
+    scale_cut: bool = False
 
 
 def _as_real(x):
@@ -409,8 +413,10 @@ class Engine:
         the same way along the plan that determined it, at the plan's
         values.  The last covers a symbol the leaves cannot reach at their
         own anchors: a stage-1 probe has every proper motion at its default,
-        so mu_rel = 0 there and t_E has no finite value to propagate.
-        None when there is no source at all."""
+        so mu_rel = 0 there and t_E has no finite value to propagate.  Where
+        the plan determined `path` from inputs that have no scale (user pins
+        on derived symbols), the scale a relation to scaled symbols implies
+        (_implied_scale).  None when there is no source at all."""
         s = self.declared_scales.get(path)
         if s is not None:
             return s
@@ -424,7 +430,68 @@ class Engine:
         memo = plan.scales
         if path in memo:
             return memo[path]
-        memo[path] = None  # a plan is a DAG; this only guards a bad one
+        # A symbol already being computed (a cycle through the implied
+        # scales) answers None for now, and nothing that depended on that
+        # provisional None is memoized -- it would poison the symbol for the
+        # rest of the plan's life, whichever end of the cycle came first.
+        if path in plan.scale_busy:
+            plan.scale_cut = True
+            return None
+        plan.scale_busy.add(path)
+        outer_cut, plan.scale_cut = plan.scale_cut, False
+        try:
+            s = self._forward_plan_scale(plan, path)
+            if s is None:
+                s = self._implied_scale(plan, path)
+        finally:
+            plan.scale_busy.discard(path)
+        cut = plan.scale_cut
+        if s is not None or not cut:
+            memo[path] = s
+        plan.scale_cut = cut or outer_cut
+        return s
+
+    def _implied_scale(self, plan, path):
+        """The scale a relation IMPLIES for `path` from its other symbols'
+        scales, |dg/dx|^-1 sqrt(sum_j (dg/dy_j s_j)^2), the tightest over
+        the relations whose every other symbol has one.  For a symbol the
+        plan determined from inputs with no scale of their own: a user's
+        pinned t_E and pi_E, when the sampled coordinate the leaf pass
+        would propagate them from (mu_rel under fitmurel, log_pi_rel under
+        fitpirel) has no engine start because its start arrives at build.
+        mu_rel_geo = mu_rel - pi_rel * v_perp then takes its scale from
+        mu_rel and pi_rel, as the forward pass would have given it."""
+        vals = plan.values
+        best = None
+        for pos in self.by_symbol.get(path, ()):
+            names = self.relations[pos][1]
+            if not all(n in vals for n in names):
+                continue
+            others = [n for n in names if n != path]
+            if not others:
+                continue
+            sc = [self.scale(m, plan) for m in others]
+            if any(s is None or not s > 0 for s in sc):
+                continue
+            _res, parts, _fl, _fr = self._residual(pos)[:4]
+            try:
+                dp = float(parts[path](vals))
+                num = math.sqrt(
+                    sum(
+                        (float(parts[m](vals)) * s) ** 2
+                        for m, s in zip(others, sc)
+                    )
+                )
+            except (ZeroDivisionError, OverflowError, ValueError):
+                continue
+            if not (math.isfinite(dp) and math.isfinite(num)) or dp == 0.0:
+                continue
+            s = num / abs(dp)
+            if s > 0.0 and (best is None or s < best):
+                best = s
+        return best
+
+    def _forward_plan_scale(self, plan, path):
         st = plan.determined_by.get(path)
         if st is None or not st.inputs:
             return None
@@ -445,8 +512,7 @@ class Engine:
             if not math.isfinite(delta):
                 return None
             var += wrap(delta, self.periodic.get(path)) ** 2
-        memo[path] = math.sqrt(var) if var > 0.0 else None
-        return memo[path]
+        return math.sqrt(var) if var > 0.0 else None
 
     def require_scale(self, path, why, plan=None):
         s = self.scale(path, plan)

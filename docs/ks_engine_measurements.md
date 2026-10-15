@@ -21,52 +21,56 @@ mass and radius pins replaced by a density pin of 2.6 g/cm3).
 Cells: start logp (change from master), `m` = check_user_starts misses,
 `neg` = negative masses in the ledger, `d` = user values on derived elements
 DROPPED, `c` = relations the rigid user values contradict, `u` = relations a
-tier could not settle.  `master` is the base of this PR; `rule` is the KS
-rule with the HELIOCENTRIC t_E / pi_E relations (the first commit).
+tier could not settle.  `master` is commit 01d6a8cc, the base these were measured on (the branch
+was rebased onto a later master afterwards, which changed `examples/hat3`'s
+limb-darkening priors); `rule` is the KS
+rule with the HELIOCENTRIC t_E / pi_E relations (the first commit);
+`rule+geo` adds the GEOCENTRIC relations (review 8.6.23, the second
+commit).
 
-| config | scenario | master | rule |
-|---|---|---|---|
-| astrometry_sim/simbinary | shipped | -247.616, m0 | -247.616, m0 |
-| DC2018_128/DC2018_128 | rank22 | -912820, m0, **neg1** | 3065.37 (+9.16e+05), m0 |
-| DC2018_128/DC2018_128 | shipped | 3373.88, m0 | 3374.55 (+0.669), m0 |
-| GaiaBH1/gaiabh1 | shipped | -280.186, m0 | -280.186, m0 |
-| galactic_model/gm | shipped | -1.14765, m0 | -1.14765, m0 |
-| gj1214/gj1214 | shipped | 108478, m0 | 108478, m0 |
-| hat3/hat3 | shipped | 272792, m0 | 272792, m0, d2, c2 |
-| hat3/hat3_mist | density | -1706.07, m1 | -790.418 (+916), m0 |
-| hat3/hat3_mist | shipped | -49.3124, m0 | -49.3124, m0 |
-| hat3/hat3_staronly | shipped | -63.6153, m0 | -63.6153, m0 |
-| hat3/hat3_transitonly | shipped | 257824, m0 | 258432 (+608), m0 |
-| hd80606/hd80606 | shipped | -132978, m0 | -132978, m0 |
-| hd80606/hd80606_rvonly | shipped | -125231, m0 | -125231, m0 |
-| hd80606/hd80606_transitonly | shipped | -7861.49, m0 | -7861.49, m0 |
-| HIP1349/hip1349 | shipped | -342.896, m0 | -342.896, m0 |
-| kb180087_obj3/kb180087_obj3 | shipped | 56830.6, m0 | 56831.2 (+0.642), m0 |
-| kelt17/kelt17 | shipped | -1458.24, m0 | -1458.24, m0 |
-| kelt17/kelt17_all | shipped | 8799.74, m1 | 8799.74, m1, d1 |
-| kelt17/kelt17_dt | shipped | 8649.97, m1 | 8649.97, m1, d1 |
-| kelt17/kelt17_fast | shipped | 16948, m0 | 16948, m0, d1 |
-| kelt17/kelt17_rm | shipped | -23777, m1 | -23777, m1, d1 |
-| kelt4/kelt4 | shipped | 83423.2, m0 | 83423.2, m0 |
-| kelt4/kelt4_rv+transit+sed | shipped | 84384.5, m0 | 84384.5, m0 |
-| kelt4/kelt4_rvonly | shipped | -601.08, m0 | -601.08, m0 |
-| KMT-2019-BLG-1806/KMT-2019-BLG-1806 | shipped | 45503.4, m1 | 45504.1 (+0.693), m1 |
-| KMT-2021-BLG-1122L/KMT-2021-BLG-1122L | shipped | -10807.8, m0 | -10807.9 (-0.106), m0 |
-| ob07224/ob07224 | shipped | 23136.8, m3 | 23145.4 (+8.61), m2, d3 |
-| ob08092/ob08092 | shipped | 6243.19, m1 | 6243.19, m1 |
-| ob09020/ob09020 | shipped | 36499.8, m5 | -973974 (-1.01e+06), m4, d2 |
-| ob09020/ob09020_linear | shipped | 33249.5, m5 | 2259.65 (-3.1e+04), m4, d2 |
-| ob140939/ob140939 | shipped | -1549.53, m0 | -1549.53, m0 |
-| ob140939/ob140939_today | shipped | -2294.27, m0 | -2294.27, m0, d1 |
-| ob161003/ob161003 | shipped | 79403.2, m0 | 79403.2, m0 |
-| ob161045/ob161045 | shipped | 21063.3, m0 | 21063.3, m0 |
-| ob170114/ob170114 | overdet | -74625.8, m3 | -74625.6 (+0.194), m3, d1 |
-| ob170114/ob170114 | shipped | 5939.36, m0 | 5939.68 (+0.323), m0 |
-| ob170114/ob170114 | tp | 5939.08, m0 | 5939.4 (+0.323), m0 |
-| ogle0383/OGLE_0383LD | shipped | 26734.5, m1 | 26735.2 (+0.688), m1 |
-| theophylline/theophylline | shipped | -619.722, m0 | -619.722, m0 |
-| toi3919/toi3919 | shipped | 8217.45, m0 | 8217.45, m0, c2 |
-| wasp18/wasp18 | shipped | 83488.9, m0 | 83488.9, m0 |
+| config | scenario | master | rule | rule+geo |
+|---|---|---|---|---|
+| astrometry_sim/simbinary | shipped | -247.616, m0 | -247.616, m0 | -247.616, m0 |
+| DC2018_128/DC2018_128 | rank22 | -912820, m0, **neg1** | 3065.37 (+9.16e+05), m0 | 3065.94 (+9.16e+05), m0 |
+| DC2018_128/DC2018_128 | shipped | 3373.88, m0 | 3374.55 (+0.669), m0 | 3374.96 (+1.08), m0 |
+| GaiaBH1/gaiabh1 | shipped | -280.186, m0 | -280.186, m0 | -280.186, m0 |
+| galactic_model/gm | shipped | -1.14765, m0 | -1.14765, m0 | -1.14765, m0 |
+| gj1214/gj1214 | shipped | 108478, m0 | 108478, m0 | 108478, m0 |
+| hat3/hat3 | shipped | 272792, m0 | 272792, m0, d2, c2 | 272792, m0, d2, c2 |
+| hat3/hat3_mist | density | -1706.07, m1 | -790.418 (+916), m0 | -790.418 (+916), m0 |
+| hat3/hat3_mist | shipped | -49.3124, m0 | -49.3124, m0 | -49.3124, m0 |
+| hat3/hat3_staronly | shipped | -63.6153, m0 | -63.6153, m0 | -63.6153, m0 |
+| hat3/hat3_transitonly | shipped | 257824, m0 | 258432 (+608), m0 | 258432 (+608), m0 |
+| hd80606/hd80606 | shipped | -132978, m0 | -132978, m0 | -132978, m0 |
+| hd80606/hd80606_rvonly | shipped | -125231, m0 | -125231, m0 | -125231, m0 |
+| hd80606/hd80606_transitonly | shipped | -7861.49, m0 | -7861.49, m0 | -7861.49, m0 |
+| HIP1349/hip1349 | shipped | -342.896, m0 | -342.896, m0 | -342.896, m0 |
+| kb180087_obj3/kb180087_obj3 | shipped | 56830.6, m0 | 56831.2 (+0.642), m0 | 56832.2 (+1.61), m0 |
+| kelt17/kelt17 | shipped | -1458.24, m0 | -1458.24, m0 | -1458.24, m0 |
+| kelt17/kelt17_all | shipped | 8799.74, m1 | 8799.74, m1, d1 | 8799.74, m1, d1 |
+| kelt17/kelt17_dt | shipped | 8649.97, m1 | 8649.97, m1, d1 | 8649.97, m1, d1 |
+| kelt17/kelt17_fast | shipped | 16948, m0 | 16948, m0, d1 | 16948, m0, d1 |
+| kelt17/kelt17_rm | shipped | -23777, m1 | -23777, m1, d1 | -23777, m1, d1 |
+| kelt4/kelt4 | shipped | 83423.2, m0 | 83423.2, m0 | 83423.2, m0 |
+| kelt4/kelt4_rv+transit+sed | shipped | 84384.5, m0 | 84384.5, m0 | 84384.5, m0 |
+| kelt4/kelt4_rvonly | shipped | -601.08, m0 | -601.08, m0 | -601.08, m0 |
+| KMT-2019-BLG-1806/KMT-2019-BLG-1806 | shipped | 45503.4, m1 | 45504.1 (+0.693), m1 | 45420.9 (-82.6), m0 |
+| KMT-2021-BLG-1122L/KMT-2021-BLG-1122L | shipped | -10807.8, m0 | -10807.9 (-0.106), m0 | -10807.9 (-0.074), m0 |
+| ob07224/ob07224 | shipped | 23136.8, m3 | 23145.4 (+8.61), m2, d3 | 23145.4 (+8.61), m2, d2 |
+| ob08092/ob08092 | shipped | 6243.19, m1 | 6243.19, m1 | 6252.18 (+8.99), m0 |
+| ob09020/ob09020 | shipped | 36499.8, m5 | -973974 (-1.01e+06), m4, d2 | -892087 (-9.29e+05), m2, d2 |
+| ob09020/ob09020_linear | shipped | 33249.5, m5 | 2259.65 (-3.1e+04), m4, d2 | 15311.6 (-1.79e+04), m2, d2 |
+| ob140939/ob140939 | shipped | -1549.53, m0 | -1549.53, m0 | -1233.58 (+316), m0 |
+| ob140939/ob140939_today | shipped | -2294.27, m0 | -2294.27, m0, d1 | -1978.42 (+316), m0, d1 |
+| ob161003/ob161003 | shipped | 79403.2, m0 | 79403.2, m0 | 79400.8 (-2.39), m0 |
+| ob161045/ob161045 | shipped | 21063.3, m0 | 21063.3, m0 | 21063.4 (+0.0453), m0 |
+| ob170114/ob170114 | overdet | -74625.8, m3 | -74625.6 (+0.194), m3, d1 | 5939.96 (+8.06e+04), m0, d1 |
+| ob170114/ob170114 | shipped | 5939.36, m0 | 5939.68 (+0.323), m0 | 5940.06 (+0.695), m0 |
+| ob170114/ob170114 | tp | 5939.08, m0 | 5939.4 (+0.323), m0 | 5939.78 (+0.695), m0 |
+| ogle0383/OGLE_0383LD | shipped | 26734.5, m1 | 26735.2 (+0.688), m1 | 26739.7 (+5.15), m0 |
+| theophylline/theophylline | shipped | -619.722, m0 | -619.722, m0 | -619.722, m0 |
+| toi3919/toi3919 | shipped | 8217.45, m0 | 8217.45, m0, c2 | 8217.45, m0, c2 |
+| wasp18/wasp18 | shipped | 83488.9, m0 | 83488.9, m0 | 83488.9, m0 |
 
 Reading it (the rule alone):
 
@@ -96,3 +100,107 @@ Reading it (the rule alone):
 - The `density` scenario: the radius absorbs and the MIST-backed mass keeps its
   seed; the density is delivered (m 1 -> 0) because its relation now carries
   the 3/(4 pi) of a mean density, as the model's `calc_density` does.
+
+
+Reading it (with the geocentric relations, the second commit):
+
+- Pinned t_E values are now delivered exactly: ob08092 +9.0 nats (m 1 -> 0),
+  ob140939 and ob140939_today +316, OGLE_0383LD +5.2 (m 1 -> 0), and the
+  `overdet` scenario +8.1e4 (m 3 -> 0): ob170114 with its source proper
+  motions removed and t_E/pi_E pinned now starts within 0.1 nat of the
+  shipped config.
+- KMT-2019-BLG-1806 -82.6 (m 1 -> 0): its params file pins t_E = 118.2 d,
+  which the old engine never delivered (the model started at 122.3 d).  The
+  rule now delivers it, and the data prefer the old 122.3 d by 82.6 nats --
+  a params-file value to re-tune, not an engine effect.
+- ob161003 -2.4 nats, DC2018_128 +0.4, kb180087_obj3 +1.0, ob170114 +0.4:
+  the same seeds evaluated in the frame the model uses.
+- ob09020 (and `_linear`): t_E and pi_E_N are kept, theta_E = 2.95 and
+  pi_E_E = 0.149 are dropped; the start is still ~9e5 nats below master,
+  which delivered none of its five pins.  Its pins are mutually
+  inconsistent with its masses and distances under every ordering in
+  section C; they need a ruling, not an engine change.
+
+## B. Sensitivity to init_scale
+
+Every DECLARED init_scale the engine sees multiplied by its own factor
+10**U(-3, 3) (one factor per path, three independent trials; propagated
+scales follow from the perturbed ones), the solved starts compared with the
+unperturbed run.  Cells: how many start values moved by more than 1%, and
+the largest relative move.  Every row not listed moved nothing in any trial.
+
+| config | trial 0 | trial 1 | trial 2 |
+|---|---|---|---|
+| hat3_mist density | 0 | 1 (max 0.28 star.0.eep) | 1 (max 0.28 star.0.eep) |
+| kelt4_rvonly | 0 | 0 | 8 (max 13 orbit.0.esinw) |
+| ob09020 | 4 (max 3.1 star.2.pm_dec) | 4 (max 1.6 star.2.pm_ra) | 4 (max 1.1 star.2.pm_ra) |
+| ob09020_linear | 4 (max 3.1 star.2.pm_dec) | 4 (max 1.6 star.2.pm_ra) | 4 (max 1.1 star.2.pm_ra) |
+
+On 37 of the 41 rows no start moves.  Three of the four that do split a
+correction INSIDE one tier -- the only place the rule lets a scale act.
+ob09020's four DEFAULT_WEAK proper motions share the t_E/pi_E_N
+correction (min-norm in scale units, so the split follows the scales); in
+kelt4_rvonly trial 2 the DEFAULT msini start's scale fell by ~1e3 and the
+secosw/sesinw defaults (0.01) took a share of its correction (e 0.0002 ->
+0.002).  The fourth is not the rule's: in the hat3_mist `density` scenario
+the EEP (702 -> 505) is the MIST standalone solver's answer, and that
+solver's own search starts from a scale-dependent guess.  Which value
+absorbs never changed.  The old engine's choice of
+absorber was itself scale-weighted, so the same perturbation re-routed
+whole corrections there; this is the measurement behind "no WLS" (Q4).
+
+## C. Ordering sweep
+
+Start logp with both commits under each alternative ordering, as the change
+from the current ladder (`=` unchanged), and the check_user_starts misses.
+O0 current; O1 lens and source distance levels swapped (lens 30, source
+25); O2 both distances above the data hints (62/65); O3 DEFAULT_WEAK merged
+into DEFAULT (20); O4/O5/O6 LIKELIHOOD_BACKED just above DEFAULT (21), equal
+to DERIVED_DATA (60), just below USER (99); O7 keep-order by params-file
+position only; O8 keep-order by REVERSE depth.
+| config | O0 | O1 | O2 | O3 | O4 | O5 | O6 | O7 | O8 |
+|---|---|---|---|---|---|---|---|---|---|
+| DC2018_128 rank22 | 3065.94 m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 |
+| DC2018_128 | 3374.96 m0 | -8.23 m0 | -50.1 m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 |
+| gm | -1.14765 m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 |
+| hat3 | 272792 m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 |
+| hat3_mist density | -790.418 m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 |
+| hat3_mist | -49.3124 m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 |
+| hat3_staronly | -63.6153 m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 |
+| kb180087_obj3 | 56832.2 m0 | -8.77 m0 | -45 m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 |
+| kelt4 | 83423.2 m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 |
+| KMT-2019-BLG-1806 | 45420.9 m0 | -3.47e+04 m1 | +102 m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 |
+| KMT-2021-BLG-1122L | -10807.9 m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 |
+| ob07224 | 23145.4 m2 | = m2 | = m2 | = m2 | = m2 | = m2 | = m2 | = m2 | = m2 |
+| ob08092 | 6252.18 m0 | -5.76 m0 | -3.26 m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 |
+| ob09020 | -892087 m2 | = m2 | = m2 | = m2 | = m2 | = m2 | = m2 | = m2 | +3.42e+05 m2 |
+| ob09020_linear | 15311.6 m2 | = m2 | = m2 | = m2 | = m2 | = m2 | = m2 | = m2 | +2.9e+03 m2 |
+| ob140939 | -1233.58 m0 | -4.62e+03 m0 | +2.02 m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 |
+| ob140939_today | -1978.42 m0 | = m0 | +2.65 m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 |
+| ob161003 | 79400.8 m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 |
+| ob161045 | 21063.4 m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 |
+| ob170114 overdet | 5939.96 m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 |
+| ob170114 | 5940.06 m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 |
+| OGLE_0383LD | 26739.7 m0 | -7.75 m0 | -242 m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 |
+| toi3919 | 8217.45 m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 |
+
+Reading it:
+
+- The current ladder (O0) is best or tied on every row but one.  Swapping
+  the two distance levels (O1) costs up to 3.5e4 nats (KMT-2019-BLG-1806,
+  which then misses its t_E) and 4.6e3 (ob140939); lifting both distances
+  above the data hints (O2) costs up to 242 (OGLE_0383LD), but buys +102 on
+  KMT-2019-BLG-1806.
+- Merging DEFAULT_WEAK into DEFAULT (O3) changes nothing measured here: no
+  shipped config pins a quantity whose only absorbers are a weak and a plain
+  default.
+- The LIKELIHOOD_BACKED slot (O4-O6) changes nothing on any row: no
+  shipped config, nor the `density` scenario, has a backed seed in the
+  absorbing tier for any slot from 21 to 99.  The slot is not decided by
+  these data.
+- Keep-order: params-file order (O7) keeps the same pins as depth order
+  everywhere.  Reverse depth (O8) is the only alternative that changes
+  ob09020: it keeps all three of t_E, pi_E_N, pi_E_E and drops theta_E and
+  the lens mass instead (+3.4e5 nats over O0, still ~5.5e5 below master);
+  with depth order (O0) it keeps the mass and t_E/pi_E_N and drops theta_E
+  and pi_E_E.

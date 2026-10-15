@@ -191,6 +191,40 @@ _OB161003_PRESPLIT_PM = {
     "star.Lens.pm_dec": {"initval": -13.595474606031832},
     "star.LensB.pm_ra": {"initval": -2.999999999986347},
     "star.LensB.pm_dec": {"initval": -2.999999999986347},
+    # The recording's t_E in the model's frame.  Since the engine's t_E
+    # relation is GEOCENTRIC, as the model's is (review 8.6.23), the params
+    # file's t_E = 28.931 is now HELD, by moving the lens distance to
+    # 3999.87 pc; the recording was taken at the old heliocentric solve,
+    # which left the distance at 4000 and the model at this t_E (the
+    # value the engine derives from the recording's seeds with no t_E
+    # pin).  Seeding it restores the recording's trajectory.
+    "mulensevent.t_E": {"initval": 28.93009601441995},
+    # ...and the recording's flux start, verbatim.  The stage-1 flux
+    # bootstrap solves the fluxes at the engine's geometry, which was the
+    # heliocentric t_E = 28.931 and pi_E = (-0.1489, 0) then and is the
+    # model's (28.9301, (-0.1486, -0.0108)) now, so it hands back slightly
+    # different fluxes (0.47 nats of data term here).
+    "mulensinstrument.0.log_f_total": {"initval": -7.854683602537745},
+    "mulensinstrument.0.q_flux": {"initval": 1.1852323739823298},
+    "mulensinstrument.0.q_source": {"initval": 0.684433988480038},
+    "mulensinstrument.1.log_f_total": {"initval": -7.906415441909498},
+    "mulensinstrument.1.q_flux": {"initval": 2.798433684549884},
+    "mulensinstrument.1.q_source": {"initval": 0.6054899302198117},
+    "mulensinstrument.2.log_f_total": {"initval": -7.821989847206374},
+    "mulensinstrument.2.q_flux": {"initval": 1.1484250380452332},
+    "mulensinstrument.2.q_source": {"initval": 0.5985908235230286},
+    "mulensinstrument.3.log_f_total": {"initval": -7.833956224581702},
+    "mulensinstrument.3.q_flux": {"initval": 1.2768004287988972},
+    "mulensinstrument.3.q_source": {"initval": 0.707334624650332},
+    "mulensinstrument.4.log_f_total": {"initval": -7.822404176676059},
+    "mulensinstrument.4.q_flux": {"initval": 0.6913217132467729},
+    "mulensinstrument.4.q_source": {"initval": 0.6180232335497442},
+    "mulensinstrument.5.log_f_total": {"initval": -7.7921251220773184},
+    "mulensinstrument.5.q_flux": {"initval": 0.849692662233089},
+    "mulensinstrument.5.q_source": {"initval": 0.6182802203053476},
+    "mulensinstrument.6.log_f_total": {"initval": -7.779167971018416},
+    "mulensinstrument.6.q_flux": {"initval": 9.24590439682858},
+    "mulensinstrument.6.q_source": {"initval": 0.5223164513467705},
 }
 
 # Every term whose pre-split value was an identical per-source pair summed
@@ -410,6 +444,18 @@ def test_ob161003_collapse_reconciles_against_the_presplit_recording():
     halved_seen = set()
     renorm_seen = False
     for name, (before, after, delta) in moved.items():
+        if (
+            name == "POT:low_bound.mulensevent.mu_rel_geo_mag"
+            and abs(after) <= 1e-12
+        ):
+            # Collapsed (one copy left), AND its preliminary steepness now
+            # comes from a scale the engine propagates to |mu_rel_geo|
+            # through the geocentric relations (review 8.6.23) -- the same
+            # change as lens.q's below -- so the recorded -0.0188 (half:
+            # -0.0094) is ~0 now.  whitening.measure_barrier_scales
+            # re-measures it before any sampling.
+            halved_seen.add(name)
+            continue
         if name in _OB161003_HALVED:
             # Exactly one of the two identical per-source copies remains.
             # Halving a finite double IS exact, but `after` is this

@@ -460,6 +460,18 @@ class MulensInstrument(Instrument):
         dec_rad = dec_deg * np.pi / 180.0
         self._source_radec_rad = (ra_rad, dec_rad)
 
+        # A PROVISIONAL geocentric frame, at MulensEvent's preliminary
+        # t0_par, so the relaxation engine's geocentric t_E / pi_E relations
+        # (review 8.6.23) are usable by the stage-1 probes that run before
+        # t0_par is final -- the peak finder's question of which of
+        # t_0/u_0/t_E is already informed.  Re-anchored below once t0_par
+        # is final, before the bootstrap's own probe.
+        self._event = system.mulensevent
+        _, self._earth_pos_ref, self._earth_vel_ref = (
+            self._event.geocentric_frame()
+        )
+        self._event.register_frame_constants(system)
+
         # Pass 1: read every file.  The raw times must exist before the
         # Skowron reference frame is anchored below (t0_par can fall back to
         # the median data time).
@@ -557,12 +569,6 @@ class MulensInstrument(Instrument):
         # median flux and the declared q_source start without them.
         self._peak_find_seeds(system, per_file)
 
-        # The event geometry the bootstrap below reads, as the relaxation
-        # engine would start it given everything known NOW (user entries, the
-        # peak finder's seed 0, hints so far) -- one probe for
-        # every file.  See _probe_bootstrap_geometry.
-        geometry = self._probe_bootstrap_geometry(system)
-
         # Geocentric reference (Skowron+2011 convention): Earth's position and
         # velocity at t_0_par define the inertial frame.  All observer positions
         # are stored as deviations from this linear Earth trajectory so that
@@ -586,6 +592,17 @@ class MulensInstrument(Instrument):
         _, self._earth_pos_ref, self._earth_vel_ref = (
             self._event.geocentric_frame()
         )
+        # ... and handed to the relaxation engine BEFORE the probe below:
+        # its t_E and pi_E relations are geocentric (review 8.6.23), so the
+        # geometry the bootstrap reads is the one the model will start at.
+        self._event.register_frame_constants(system)
+
+        # The event geometry the bootstrap below reads, as the relaxation
+        # engine would start it given everything known NOW (user entries, the
+        # peak finder's seed 0, hints so far) -- one probe for every file.
+        # See _probe_bootstrap_geometry.  It runs after t0_par is final and
+        # the frame constants are in (above); nothing it reads moved there.
+        geometry = self._probe_bootstrap_geometry(system)
 
         # Median absolute position per instrument (used by MulensEvent to
         # detect satellite parallax when sizing the logmass scale)

@@ -282,7 +282,9 @@ def test_plan_holds_a_t_E_the_kinematics_derive():
         {
             "source.0.t_0": {"initval": 2458554.8},
             "mulensevent.0.theta_E": {"initval": 0.5},
-            "mulensevent.0.mu_rel_mag": {"initval": 10.0},
+            # The GEOCENTRIC |mu_rel| t_E is derived from (review 8.6.23);
+            # the heliocentric one needs MulensEvent's frame constants.
+            "mulensevent.0.mu_rel_geo_mag": {"initval": 10.0},
         },
         system_config=_PSPL_CONFIG,
     )

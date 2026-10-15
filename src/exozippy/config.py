@@ -1248,6 +1248,9 @@ class ConfigManager:
         # and then every defaults.yaml value is a seed and every user value
         # rigid, which is the documented probe behavior (config.md).
         self.engine_roles = None
+        # Exact numbers a component supplies for the relations to use --
+        # never parameters, never seeds, never reported (add_constant).
+        self.constants = {}
         # Paths a component's stiff likelihood backs (evolutionary model,
         # SED, empirical relations): their starts decide at
         # PRECEDENCE_LIKELIHOOD_BACKED.  See declare_likelihood_backed.
@@ -3455,6 +3458,42 @@ class ConfigManager:
         """
         self.engine_roles = dict(roles) if roles is not None else None
 
+    def add_constant(self, path, value):
+        """Supply an exact NUMBER the relations may use (review 8.6.23).
+
+        Some relations need a per-fit constant that is not a parameter and
+        is known only once the data are read: Earth's projected velocity at
+        t0_par, which turns the heliocentric relative proper motion into the
+        geocentric one t_E and pi_E are defined in.  The component maps the
+        symbol in its ``get_symbol_map`` (so it is an engine path) and calls
+        this with the value in INTERNAL units; the relaxation engine then
+        substitutes it into every relation, holds it fixed, never solves
+        for it, never seeds anything with it and never reports it (it is in
+        no ledger, no inject-back and no export).  A relation whose constant
+        has not been supplied yet -- a stage-1 probe before the component
+        knows it -- is simply not usable, which is what an unknown symbol
+        already means.  A constant is a component input, like a hint:
+        re-supplied by a second registration pass, not rolled back.
+        Canonical index-form path only.
+        """
+        parts = str(path).split(".")
+        if len(parts) != 3 or not parts[1].isdigit():
+            raise ValueError(
+                f"add_constant: '{path}' is not a canonical index-form path "
+                f"(<component>.<index>.<name>)."
+            )
+        if path not in self.master_symbol_map:
+            raise KeyError(
+                f"add_constant: '{path}' is not an engine symbol; map it in "
+                f"the component's get_symbol_map first."
+            )
+        value = float(value)
+        if not np.isfinite(value):
+            raise ValueError(
+                f"add_constant: '{path}' = {value} is not finite."
+            )
+        self.constants[path] = value
+
     def declare_likelihood_backed(self, path):
         """Declare that a stiff likelihood term backs `path`'s start.
 
@@ -3632,6 +3671,8 @@ class ConfigManager:
 
         parameters = {}
         for internal_path in self.master_symbol_map:
+            if internal_path in self.constants:
+                continue  # an exact number the relations use, no parameter
             parts = internal_path.split(".")
             c_type = parts[0]
             p_name = parts[-1]
@@ -4257,6 +4298,7 @@ class ConfigManager:
             periodic,
             ladder=L,
             keep_order_mode=KEEP_ORDER,
+            constants=self.constants,
         )
         resolved = engine.solve()
         logger.info(
