@@ -9,10 +9,12 @@
 # so its parameters transfer unchanged.  Where a value below is NOT as
 # printed, the line says which published number it came from and how.
 #
-# These published values are not a self-consistent set -- they are
-# marginal medians, and the physical block comes from a different paper
-# than the light curve.  EXOZIPPy reports at startup which of them the
-# model could not reproduce; that report is expected here, not a fault.
+# Which paper each value is from is stated beside it.  The two papers'
+# values are not one self-consistent set (marginal medians, and the
+# physical block is Yee's while the light curve is Skowron's), so the
+# light-curve quantities the physical block DETERMINES -- t_E, theta_E,
+# pi_E -- are not seeded; see "Light curve" below.  D_S = 8 kpc is from
+# neither paper: it is an assumption.
 
 # Sky position (OGLE EWS).  Required: the OGLE file is HJD_UTC and the
 # HJD -> BJD_TDB conversion refuses placeholder coordinates.
@@ -30,22 +32,30 @@ source.Source.t_0:
 source.Source.u_0:
     initval: 0.0613           # positive, as printed
 
-mulensevent.t_E:
-    initval: 76.9             # d
+# t_E, theta_E and pi_E (Skowron: 76.9 d, 2.95 mas, (-0.022, +0.149)) are
+# NOT pinned (JDE 2026-10-14).  Here they are DERIVED from the masses,
+# distances and proper motions, and Yee's physical block -- M = 0.888 +
+# 0.244 Msun, D_L = 747 pc -- with the assumed D_S = 8 kpc gives
+# theta_E = 3.34 mas and |pi_E| = pi_rel/theta_E = 0.363, where Skowron's
+# light-curve column prints 2.95 and 0.151 (which together imply M_total =
+# 2.4 Msun and pi_rel = 0.444 mas, i.e. the source at 1.1 kpc for this
+# D_L).  The two papers' values cannot all hold at once; pinned together,
+# the relaxation engine kept t_E and pi_E_N, dropped theta_E and pi_E_E,
+# and settled the pi_E direction on its mirror branch (start logp
+# -892,087).  A pure-Skowron set is worse still (README).  So the physical
+# block is kept and the light-curve values it determines are not seeded;
+# the proper motions below supply the one thing Yee's block does not.
 
+# rho = theta_*/theta_E, with Skowron's measured angular source radius
+# theta_* = 4.45 uas and the theta_E = 3.3426 mas Yee's block derives.
+# Skowron's printed rho = t_*/t_E = 0.11595/76.9 = 0.0015078 rests on their
+# t_E, which is not seeded here; measured at this start: +36,530 with this
+# rho, +35,937 with 0.0015078.
 source.Source.rho:
-    initval: 0.0015078        # = t_*/t_E = 0.11595/76.9
-
-mulensevent.theta_E:
-    initval: 2.95             # mas
+    initval: 0.0013313
 
 lens.L2.q:
     initval: 0.273
-
-mulensevent.pi_E_N:
-    initval: -0.022
-mulensevent.pi_E_E:
-    initval: 0.149
 
 # s and alpha are derived from orbit L (the lens companion's `orbit: L`, keplerian), so the
 # published s_0 = 0.4294 and alpha_0 = 189.08 are the acceptance check,
@@ -62,7 +72,28 @@ star.L2.distance:
     initval: 747.0            # pc
 
 star.Source.distance:
-    initval: 8000.0           # pc
+    initval: 8000.0           # pc -- an ASSUMPTION, from neither paper
+
+# --- Proper motions (the leaves t_E and pi_E derive from) -----------------
+# NOT published: neither paper prints a proper motion.  t_E and pi_E are
+# DERIVED here, from the masses, the distances and the relative proper
+# motion, and Yee's block fixes everything except that last vector -- so it
+# has to be seeded, and these are the values that put the trajectory where
+# every ob09020 measurement since 2026-09-11 was taken (start logp +36,397,
+# and the frame orbit.L.bigomega below was converted against): t_E = 83.73
+# d and pi_E = (-0.345, +0.112), phi_pi = 162.07 deg, with the source at
+# its default -3 mas/yr.  They are what the relaxation engine solved from
+# Skowron's printed t_E and pi_E pins before those pins were removed (see
+# "Light curve" above).  The source pm is the default, written out so the
+# relative motion is stated, not implied.
+star.L1.pm_ra:
+    initval: 2.0744280203949508    # mas/yr
+star.L1.pm_dec:
+    initval: -16.060377498515283   # mas/yr
+star.Source.pm_ra:
+    initval: -3.0
+star.Source.pm_dec:
+    initval: -3.0
 
 # --- Lens binary orbit (Yee+2016 Table 7) ---------------------------------
 orbit.L.period:

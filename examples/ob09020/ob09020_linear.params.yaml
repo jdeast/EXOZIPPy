@@ -38,10 +38,13 @@ star.dec:
 # The split below is therefore by WHAT DETERMINES EACH VALUE, and it was
 # settled by measurement, not taste:
 #
-#   u_0, t_E, rho, pi_E come from the sibling's IOP set, because the
-#   physical block (masses, distances, proper motions) determines them and
-#   that block is shared.  Taking them from the arXiv linear column instead
-#   fights it: u_0 alone costs 158,686 nats.
+#   u_0 and rho come from the sibling's IOP set (Skowron's full-orbit
+#   column), because the physical block (masses, distances, proper
+#   motions) is shared.  Taking them from the arXiv linear column instead
+#   fights it: u_0 alone costs 158,686 nats.  t_E, theta_E and pi_E are
+#   NOT seeded, for the sibling's reason (ob09020.params.yaml): the shared
+#   physical block determines them, and Skowron's printed values
+#   contradict it.
 #
 #   s_0, alpha_0, q and the two rates come from Table 1's linear column,
 #   because they are ONE geometric set -- s_0 is defined at t0_par under a
@@ -50,29 +53,25 @@ star.dec:
 #   and alpha_0 = 189.08 costs ~100,000 nats.
 #
 # Mixed provenance is deliberate and is the best start available here
-# (+33,250, against the keplerian sibling's +36,500 on the same data).
+# (+39,049 measured 2026-10-14, against +33,250 with Skowron's t_E,
+# theta_E and pi_E pinned under the old engine, which delivered none).
 source.Source.t_0:
     initval: 2454917.253
 
 source.Source.u_0:
     initval: 0.0613           # positive, as printed; see the A16 note below
 
-mulensevent.t_E:
-    initval: 76.9             # d
+# t_E, theta_E and pi_E: not seeded (see the header, and the sibling's
+# "Light curve" block for the numbers).
 
+# Skowron's printed rho = t_*/t_E.  The theta_*/theta_E alternative the
+# keplerian sibling uses (0.0013313) measured worse at THIS start (+33,253
+# against +39,049); kept as printed.
 source.Source.rho:
     initval: 0.0015078        # = t_*/t_E = 0.11595/76.9
 
-mulensevent.theta_E:
-    initval: 2.95             # mas
-
 lens.L2.q:
     initval: 0.272
-
-mulensevent.pi_E_N:
-    initval: -0.022
-mulensevent.pi_E_E:
-    initval: 0.149
 
 # s and alpha ARE inputs here, unlike the keplerian sibling where they are
 # derived from orbit L.  These are the values that file names as its
@@ -136,7 +135,21 @@ star.L2.distance:
     initval: 747.0            # pc
 
 star.Source.distance:
-    initval: 8000.0           # pc
+    initval: 8000.0           # pc -- an ASSUMPTION, from neither paper
+
+# --- Proper motions (the leaves t_E and pi_E derive from) -----------------
+# NOT published, and the same values as the keplerian sibling (whose
+# params file explains them): with the shared physical block they give
+# t_E = 83.70 d and pi_E = (-0.346, +0.112), where this config also
+# started before t_E, theta_E and pi_E were unpinned.
+star.L1.pm_ra:
+    initval: 2.0744280203949508    # mas/yr
+star.L1.pm_dec:
+    initval: -16.060377498515283   # mas/yr
+star.Source.pm_ra:
+    initval: -3.0
+star.Source.pm_dec:
+    initval: -3.0
 
 # --- Per-instrument blending and error scaling ----------------------------
 # f_source and f_blend fit linearly against the model above, per

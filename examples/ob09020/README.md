@@ -346,18 +346,44 @@ started at +19,024 while the params file carried a hand-constructed
 `pi_E_N` and a `bigomega` tuned against it, before both were replaced by
 the published values and the frame rule (2026-09-11).
 
-The published point-values do not close as a set, and the startup report
-now says so rather than leaving it to this README: five user values are
-reported as not reproduced, led by `pi_E_N` (set -0.022, starts -0.345)
-and `theta_E` (set 2.95, starts 3.343).  Both are the same tension --
-Table 1's printed |pi_E| = 0.151 against the theta_E/(kappa M) = 0.30
-implied by its own priors' masses, which are marginal medians rather than
-a joint point.  The per-instrument flux and
-`err_scale` seeds also still date from the static geometry (measured at
-the arXiv-seed start: a linear-flux refit leaves the caustic window
-healthy -- Bronberg chi2/N = 4.3 on raw errors -- while the OGLE wings sit
-at chi2/N ~ 375, carrying the mismatch between Skowron's with-priors
-trajectory values and the joint solution's unprinted ones).
-Resolving that tension is precisely what the acceptance FIT is for; the
-per-instrument chi2/N table and the flux/`err_scale` seeds are refreshed
-from its posterior.
+**Which values are seeded, and from where (2026-10-14).**  The two papers'
+values do not close as a set.  From Skowron+2011 (the light-curve fit):
+`t_0`, `u_0`, `q`, the angular source radius `theta_* = 4.45 uas`, and the
+printed `t_E = 76.9 d`, `theta_E = 2.95 mas`, `pi_E = (-0.022, +0.149)`.
+From Yee+2016: the lens masses (0.888 + 0.244 Msun), `D_L = 747 pc` and the
+keplerian orbit.  `D_S = 8 kpc` is from neither: it is an assumption.
+In this model `t_E`, `theta_E` and `pi_E` are DERIVED from the masses,
+distances and proper motions, and Yee's block with 8 kpc implies
+`theta_E = 3.34 mas` and `|pi_E| = 0.363`, where Skowron's column prints
+2.95 and 0.151 (their `theta_E` and `pi_E` imply `M_total = 2.4 Msun` and
+`pi_rel = 0.444 mas`, i.e. the source at 1.1 kpc for `D_L = 747 pc`).
+Pinned together, the precedence rule of the relaxation engine (review
+3.14.22) kept `t_E` and `pi_E_N`, dropped `theta_E` and `pi_E_E`, and
+settled the parallax direction on its mirror branch: start logp -892,087.
+So Skowron's `t_E`, `theta_E` and `pi_E` are NOT seeded any more (JDE
+2026-10-14), and the one quantity Yee's block does not fix -- the relative
+proper motion -- is seeded on the lens primary (the source stays at its
+default), at the values that reproduce the start every measurement here
+was taken at: `t_E = 83.73 d`, `pi_E = (-0.345, +0.112)`, the frame
+`bigomega = 340.755` was converted in.  `rho` is now `theta_* / theta_E =
+0.0013313` with Skowron's measured `theta_*`; their printed `t_*/t_E =
+0.0015078` rests on the `t_E` no longer seeded.
+
+Start logp (2026-10-14; the old engine's start delivered none of the five
+pins and sat at +36,500):
+
+| seeds | keplerian | linear |
+|---|---|---|
+| Skowron `t_E`/`theta_E`/`pi_E` pinned (precedence rule) | -892,087 | +15,312 |
+| those removed, nothing in their place | -3.6e6 | -2.6e7 |
+| removed; pm seeds as shipped, `rho = t_*/t_E` | +35,937 | **+39,049** |
+| removed; pm seeds as shipped, `rho = theta_*/theta_E` | **+36,530** | +33,253 |
+| removed; pm from Skowron's `t_E` and `phi_pi` with Yee's `theta_E` (bigomega rotated with `phi_pi`) | +24,239 | +17,289 |
+
+The bold cells are what each params file ships.  Without proper-motion
+seeds the trajectory has no relative motion to derive from (all four at
+the default) and the start is meaningless.  Skowron's own direction
+(`phi_pi = 98.4 deg`, with Yee's `theta_E` the relative motion is 15.9
+mas/yr) is worse than the shipped one at both starts.  The per-instrument
+flux and `err_scale` seeds still date from the static geometry; the
+acceptance fit refreshes them.
