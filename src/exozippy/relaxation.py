@@ -1089,45 +1089,58 @@ class Engine:
                 r, vals = resid(x)
                 J = jac(x, r)
             x_start = x.copy()
-            free = reach.copy()
-            for _it in range(_SETTLE_MAX_ITER):
-                # each residual in units of its OWN scale at the current
-                # point: a scale taken where d t_E / d mu_rel is enormous
-                # would call any point converged
-                sr = rscale(checks, vals)
-                rn = r / sr
-                if not np.all(np.isfinite(rn)):
-                    break
-                if np.max(np.abs(rn), initial=0.0) <= _SETTLE_TARGET:
-                    break
-                cols = np.flatnonzero(free)
-                if cols.size == 0:
-                    break
-                Ju = (J[:, cols] / sr[:, None]) * s[cols][None, :]
-                Ju = np.where(np.isfinite(Ju), Ju, 0.0)
-                u = (x[cols] - a[cols]) / s[cols]
-                # rcond well above the finite-difference noise (~1e-7 of a
-                # column): a direction the relations barely see must not be
-                # given the giant step a near-zero singular value asks for
-                # -- it is the noise of the difference quotient.
-                u_new = np.linalg.pinv(Ju, rcond=1e-6) @ (Ju @ u - rn)
-                accepted = False
-                for frac in (1.0, 0.5, 0.25, 0.125, 1 / 16, 1 / 32, 1 / 64):
-                    xt = x.copy()
-                    xt[cols] = a[cols] + s[cols] * (u + frac * (u_new - u))
-                    hit = (xt < lo) | (xt > hi)
-                    xt = np.clip(xt, lo, hi)
-                    rt, vt = resid(xt)
-                    if np.all(np.isfinite(rt)) and np.sum(
-                        (rt / sr) ** 2
-                    ) < np.sum(rn**2):
-                        x, r, vals = xt, rt, vt
-                        free &= ~hit
-                        accepted = True
+
+            def gauss_newton(x, r, vals, J):
+                free = reach.copy()
+                for _it in range(_SETTLE_MAX_ITER):
+                    # each residual in units of its OWN scale at the current
+                    # point: a scale taken where d t_E / d mu_rel is enormous
+                    # would call any point converged
+                    sr = rscale(checks, vals)
+                    rn = r / sr
+                    if not np.all(np.isfinite(rn)):
                         break
-                if not accepted:
-                    break
-                J = jac(x, r)
+                    if np.max(np.abs(rn), initial=0.0) <= _SETTLE_TARGET:
+                        break
+                    cols = np.flatnonzero(free)
+                    if cols.size == 0:
+                        break
+                    Ju = (J[:, cols] / sr[:, None]) * s[cols][None, :]
+                    Ju = np.where(np.isfinite(Ju), Ju, 0.0)
+                    u = (x[cols] - a[cols]) / s[cols]
+                    # rcond well above the finite-difference noise (~1e-7 of
+                    # a column): a direction the relations barely see must
+                    # not be given the giant step a near-zero singular value
+                    # asks for -- it is the noise of the difference quotient.
+                    u_new = np.linalg.pinv(Ju, rcond=1e-6) @ (Ju @ u - rn)
+                    accepted = False
+                    for frac in (
+                        1.0,
+                        0.5,
+                        0.25,
+                        0.125,
+                        1 / 16,
+                        1 / 32,
+                        1 / 64,
+                    ):
+                        xt = x.copy()
+                        xt[cols] = a[cols] + s[cols] * (u + frac * (u_new - u))
+                        hit = (xt < lo) | (xt > hi)
+                        xt = np.clip(xt, lo, hi)
+                        rt, vt = resid(xt)
+                        if np.all(np.isfinite(rt)) and np.sum(
+                            (rt / sr) ** 2
+                        ) < np.sum(rn**2):
+                            x, r, vals = xt, rt, vt
+                            free &= ~hit
+                            accepted = True
+                            break
+                    if not accepted:
+                        break
+                    J = jac(x, r)
+                return x, r, vals, J
+
+            x, r, vals, J = gauss_newton(x, r, vals, J)
             if worst(checks, r, vals) > _SETTLE_TARGET:
                 x, r = self._settle_slsqp(
                     x,
@@ -1142,6 +1155,45 @@ class Engine:
                     resid,
                 )
                 r, vals = resid(x)
+                return x, worst(checks, r, vals)
+            # Gauss-Newton reached the constraint surface, but nothing holds
+            # it to the NEAREST point of it: a direction no check sees (the
+            # common motion of a lens and a source proper motion, which
+            # every relation reads only as a difference) rides along on the
+            # difference-quotient noise of a stiff check, and no later step
+            # brings it back.  Measured on KMT-2019-BLG-1806 with t_E and
+            # pi_E pinned: both proper motions at +25,027 mas/yr for a 0.6
+            # mas/yr relative motion.  So the minimum norm is imposed
+            # explicitly: project the correction onto the row space of the
+            # (scaled) Jacobian at the converged point -- dropping exactly
+            # the part no check sees -- and re-converge from there; keep the
+            # result only if it satisfies every check and is nearer.
+            cols = np.flatnonzero(reach)
+            for _round in range(3):
+                if cols.size == 0:
+                    break
+                sr = rscale(checks, vals)
+                Ju = (J[:, cols] / sr[:, None]) * s[cols][None, :]
+                Ju = np.where(np.isfinite(Ju), Ju, 0.0)
+                u = (x[cols] - a[cols]) / s[cols]
+                # rcond well above the difference-quotient noise, which is
+                # exactly what this projection exists to drop (measured: the
+                # common-motion singular value at 1.3e-6 of the largest)
+                u_p = np.linalg.pinv(Ju, rcond=1e-4) @ (Ju @ u)
+                if not float(u_p @ u_p) < float(u @ u) * (1.0 - 1e-9):
+                    break
+                xt = x.copy()
+                xt[cols] = np.clip(a[cols] + s[cols] * u_p, lo[cols], hi[cols])
+                rt, vt = resid(xt)
+                if not np.all(np.isfinite(rt)):
+                    break
+                xt, rt, vt, Jt = gauss_newton(xt, rt, vt, jac(xt, rt))
+                ut = (xt[cols] - a[cols]) / s[cols]
+                if worst(checks, rt, vt) > _SETTLE_TARGET or not float(
+                    ut @ ut
+                ) < float(u @ u):
+                    break
+                x, r, vals, J = xt, rt, vt, Jt
             return x, worst(checks, r, vals)
 
         best = attempt(np.array([fixed[m] for m in movable], dtype=float))
