@@ -25,6 +25,7 @@ when the cache is switched off.
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 
@@ -71,6 +72,16 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.action == "fetch":
+        # The fetch core's INFO lines, and only those (not every library's),
+        # so the CI log says per file whether it was linked from the
+        # restored cache or downloaded from Zenodo.
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(logging.Formatter("zenodo: %(message)s"))
+        core = logging.getLogger("exozippy.utilities.zenodo")
+        core.addHandler(handler)
+        core.setLevel(logging.INFO)
+        core.propagate = False
+
         from exozippy.utilities import zenodo
 
         zenodo.fetch_every_record()
