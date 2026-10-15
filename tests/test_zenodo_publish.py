@@ -20,6 +20,7 @@ import importlib.util
 import json
 import sys
 import threading
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -61,6 +62,14 @@ class FakeZenodo:
         self.echo_auth_on_403 = False
         self.corrupt_listing: set[str] = set()  # report wrong md5 for these
         self.published: list[int] = []
+        # Communities: slug -> id; record -> member community ids; open
+        # inclusion requests (id -> (record, community id)); whether the
+        # token's account curates (so the request carries an accept link).
+        self.communities = {"exozippy": "cid-exozippy"}
+        self.members: dict[int, set[str]] = {}
+        self.requests: dict[str, tuple[int, str]] = {}
+        self.curator = True
+        self.accept_base = None  # override the accept link's host
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
         self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
         self.thread = threading.Thread(
@@ -125,6 +134,9 @@ class FakeZenodo:
             "id": dep_id,
             "conceptrecid": str(d["concept"]),
             "metadata": d["metadata"],
+            "parent": {
+                "communities": {"ids": sorted(self.members.get(dep_id, set()))}
+            },
             "files": [
                 {"key": n, "size": len(b), "checksum": "md5:" + _md5(b)}
                 for n, b in sorted(self.buckets[d["bucket"]].items())
@@ -158,6 +170,15 @@ class FakeZenodo:
                     fake.fail_5xx -= 1
                     return self._send(503, {"message": "busy"})
                 parts = self.path.split("?")[0].strip("/").split("/")
+                if parts[:2] == ["api", "communities"] and method == "GET":
+                    query = urllib.parse.unquote(self.path.split("?q=")[1])
+                    slug = query.split("slug:")[1]
+                    hits = [
+                        {"id": cid, "slug": sl}
+                        for sl, cid in fake.communities.items()
+                        if sl == slug
+                    ]
+                    return self._send(200, {"hits": {"hits": hits}})
                 if parts[:2] == ["api", "records"] and method == "GET":
                     dep_id = int(parts[2])
                     if not fake.deps[dep_id]["published"]:
@@ -168,6 +189,43 @@ class FakeZenodo:
                     if fake.echo_auth_on_403:
                         msg = f"bad token {auth}"
                     return self._send(403, {"message": msg})
+                if (
+                    parts[:2] == ["api", "records"]
+                    and parts[3:] == ["communities"]
+                    and method == "POST"
+                ):
+                    rec = int(parts[2])
+                    cid = json.loads(body)["communities"][0]["id"]
+                    rid = f"req{len(fake.requests) + 1}"
+                    fake.requests[rid] = (rec, cid)
+                    actions = {}
+                    if fake.curator:
+                        base = fake.accept_base or fake.base
+                        actions["accept"] = (
+                            f"{base}/api/requests/{rid}/actions/accept"
+                        )
+                    return self._send(
+                        200,
+                        {
+                            "processed": [
+                                {
+                                    "community_id": cid,
+                                    "request": {
+                                        "id": rid,
+                                        "links": {"actions": actions},
+                                    },
+                                }
+                            ],
+                            "errors": [],
+                        },
+                    )
+                if parts[:2] == ["api", "requests"] and parts[3:] == [
+                    "actions",
+                    "accept",
+                ]:
+                    rec, cid = fake.requests.pop(parts[2])
+                    fake.members.setdefault(rec, set()).add(cid)
+                    return self._send(200, {"status": "accepted"})
                 if parts[0] == "files" and method == "PUT":
                     bucket, name = parts[1], urllib.request.unquote(parts[2])
                     fake.buckets[bucket][name] = body
@@ -636,6 +694,90 @@ def test_publish_with_typed_title(
     )
     assert rc == 0, err
     assert fake.published == [draft]
+    # Publishing alone leaves a record in no community on Zenodo, so
+    # --publish puts it in the default one.
+    assert fake.members[draft] == {"cid-exozippy"}
+
+
+def _published(fake, bundle):
+    return fake.new_dep(
+        METADATA,
+        {"grid.parquet": (bundle / "grid.parquet").read_bytes()},
+        published=True,
+    )
+
+
+def test_community_adds_a_published_record_and_is_idempotent(
+    fake, token_file, bundle, capsys
+):
+    """
+    Given a published record in no community, and an account that curates
+    exozippy,
+    When `community` runs, twice,
+    Then the first run requests inclusion, accepts it and confirms; the
+    second finds it already there and sends nothing.
+    """
+    rec = _published(fake, bundle)
+    argv = ["community", "--record", str(rec), "--token-file", str(token_file)]
+
+    rc, out, err = _run(capsys, *argv)
+    assert rc == 0, err
+    assert fake.members[rec] == {"cid-exozippy"}
+    assert "added to the 'exozippy' community" in out
+
+    n_posts = sum(m == "POST" for m, _, _ in fake.log)
+    rc, out, err = _run(capsys, *argv)
+    assert rc == 0, err
+    assert "already in the 'exozippy' community" in out
+    assert sum(m == "POST" for m, _, _ in fake.log) == n_posts
+    _assert_auth_only_in_headers(fake)
+
+
+def test_community_without_curator_rights_leaves_the_request_open(
+    fake, token_file, bundle, capsys
+):
+    """
+    Given an account that does not curate the community,
+    When `community` runs,
+    Then the request is made, NOT accepted, and the output says a curator
+    must accept it.
+    """
+    fake.curator = False
+    rec = _published(fake, bundle)
+    rc, out, err = _run(
+        capsys,
+        "community",
+        "--record",
+        str(rec),
+        "--token-file",
+        str(token_file),
+    )
+    assert rc == 0, err
+    assert rec not in fake.members
+    assert "REQUESTED" in out and "curator" in out
+
+
+def test_community_refuses_an_accept_link_on_another_host(
+    fake, token_file, bundle, capsys
+):
+    """
+    Given an inclusion request whose accept link points at another host,
+    When `community` runs,
+    Then it raises rather than send the token there.
+    """
+    fake.accept_base = "https://elsewhere.example"
+    rec = _published(fake, bundle)
+    rc, _, err = _run(
+        capsys,
+        "community",
+        "--record",
+        str(rec),
+        "--token-file",
+        str(token_file),
+    )
+    assert rc == 1
+    assert "refusing to send the token" in err
+    assert rec not in fake.members
 
 
 @pytest.fixture

@@ -32,7 +32,7 @@ every message the script prints is passed through a redactor.
    # the others; --prune makes the draft hold exactly the bundle)
    python scripts/zenodo_publish.py new-version --record 21893308 --bundle grid/
    # a brand-new record; metadata needs title, creators, description,
-   # license, upload_type (communities defaults to [exozippy])
+   # license, upload_type (communities defaults to [exozippy]; see step 3)
    python scripts/zenodo_publish.py new-record --bundle grid/ --metadata meta.yaml
    ```
 
@@ -47,6 +47,18 @@ every message the script prints is passed through a redactor.
 3. **Review and publish** the draft at the URL the script prints. (`--publish`
    exists but requires typing the exact title at a terminal; prefer the web
    page, where the metadata can be read before the DOI is minted.)
+   **Then put it in the community**: Zenodo ignores the `communities`
+   metadata when a record is published, so a new record lands in NO
+   community (the Claret tables, record 23384502, did):
+
+   ```bash
+   python scripts/zenodo_publish.py community --record <id>
+   ```
+
+   requests inclusion in exozippy, accepts the request when your account
+   curates the community, and reads the record back to confirm; it is a
+   no-op for a record already there (a new version inherits its parent's
+   communities). `--publish` runs this step itself.
 4. **Pin**: every pin lives in ONE place,
    `src/exozippy/utilities/zenodo_assets.py` (`RECORDS`: one `ZenodoRecord`
    entry per dataset, keyed by name, every version of a dataset sharing one

@@ -20,6 +20,15 @@ new-record --bundle DIR --metadata FILE
 upload --draft ID --bundle DIR
     Resume into an existing, unpublished draft (after an interrupted run).
     Files already on the draft with a matching md5 are skipped.
+community --record ID [--community SLUG]
+    Put a PUBLISHED record into a Zenodo community (default exozippy):
+    request inclusion, accept the request when the token's account curates
+    the community, and read the record back to confirm. A no-op when the
+    record is already in it. Publishing does NOT do this by itself: Zenodo
+    ignores the deposit API's ``communities`` metadata on publish (the Claret
+    tables, record 23384502, came out of review in no community), so every
+    new record needs it. New versions inherit their parent's communities.
+    ``--publish`` runs it automatically.
 pin --record ID [--update-registry] [--name KEY]
     Read a PUBLISHED record's public API (no token) and print its
     ZenodoRecord entry for src/exozippy/utilities/zenodo_assets.py (matched
@@ -264,7 +273,9 @@ def load_metadata(path: Path) -> dict:
 
     ``communities`` may be given as plain identifiers (``[exozippy]``); they
     are translated to Zenodo's ``[{"identifier": ...}]`` here, and the
-    exozippy community is added when no communities are given.
+    exozippy community is added when no communities are given.  Zenodo does
+    NOT act on this field when the record is published; it only says which
+    communities ``--publish`` (and the banner's ``community`` step) add.
     """
     if not path.is_file():
         raise ZenodoError(f"Metadata file {path} does not exist.")
@@ -343,6 +354,7 @@ class Client:
         upload: Path | None = None,
         ok: tuple[int, ...] = (200, 201, 202, 204),
         retry: bool = True,
+        accept: str = "application/json",
     ):
         """Send one request; return the decoded JSON body (or None).
 
@@ -355,7 +367,7 @@ class Client:
         for attempt in range(1, attempts + 1):
             handle = None
             try:
-                headers = {"Accept": "application/json"}
+                headers = {"Accept": accept}
                 data = None
                 if body is not None:
                     data = json.dumps(body).encode()
@@ -561,6 +573,96 @@ def verify(client: Client, dep_id, files: dict) -> dict:
     return dep
 
 
+def community_id(client: Client, slug: str) -> str:
+    """The UUID of the community whose slug is ``slug``; raises unless
+    exactly one matches."""
+    out = client.request(
+        "GET",
+        client.url("/api/communities?q=" + urllib.parse.quote(f"slug:{slug}")),
+    )
+    hits = [
+        h
+        for h in ((out or {}).get("hits") or {}).get("hits", [])
+        if h.get("slug") == slug
+    ]
+    if len(hits) != 1:
+        raise ZenodoError(
+            f"Expected exactly one Zenodo community with slug {slug!r}, "
+            f"found {len(hits)}."
+        )
+    return hits[0]["id"]
+
+
+def record_community_ids(client: Client, record) -> list[str]:
+    """The community UUIDs a PUBLISHED record belongs to (InvenioRDM's
+    ``parent.communities``; the legacy record JSON does not carry it)."""
+    rec = client.request(
+        "GET",
+        client.url(f"/api/records/{record}"),
+        accept="application/vnd.inveniordm.v1+json",
+    )
+    communities = ((rec or {}).get("parent") or {}).get("communities") or {}
+    return list(communities.get("ids") or [])
+
+
+def add_to_community(client: Client, record, slug: str) -> None:
+    """Put published ``record`` into community ``slug``; see ``community``
+    in the module docstring."""
+    cid = community_id(client, slug)
+    if cid in record_community_ids(client, record):
+        print(f"Record {record} is already in the {slug!r} community.")
+        return
+    out = client.request(
+        "POST",
+        client.url(f"/api/records/{record}/communities"),
+        body={"communities": [{"id": cid}]},
+        retry=False,
+    )
+    errors = (out or {}).get("errors") or []
+    if errors:
+        raise ZenodoError(
+            f"Zenodo refused to add record {record} to {slug!r}: "
+            f"{redact(errors)}"
+        )
+    processed = (out or {}).get("processed") or []
+    if len(processed) != 1:
+        raise ZenodoError(
+            f"Expected one inclusion request for record {record} in "
+            f"{slug!r}, got {redact(out)}."
+        )
+    request = processed[0].get("request") or {}
+    accept = ((request.get("links") or {}).get("actions") or {}).get("accept")
+    if accept is None:
+        print(
+            f"Inclusion of record {record} in {slug!r} was REQUESTED "
+            f"(request {request.get('id')}); a curator of the community must "
+            f"accept it on zenodo.org. Rerun this command afterwards to "
+            f"confirm."
+        )
+        return
+    # The accept link is absolute; the token may only ever go to the host
+    # this client was pointed at.
+    if not accept.startswith(client.base + "/"):
+        raise ZenodoError(
+            f"The accept link {accept!r} is not on {client.base}; refusing "
+            f"to send the token there. Accept the request on the web."
+        )
+    client.request("POST", accept, body={}, retry=False)
+    if cid not in record_community_ids(client, record):
+        raise ZenodoError(
+            f"The inclusion request for record {record} was accepted, but "
+            f"the record still does not list the {slug!r} community."
+        )
+    print(f"Record {record} added to the {slug!r} community.")
+
+
+def _community_slugs(dep: dict) -> list[str]:
+    """The communities a deposition's metadata names, else the default."""
+    comms = (dep.get("metadata") or {}).get("communities") or []
+    slugs = [c["identifier"] for c in comms if c.get("identifier")]
+    return slugs or [DEFAULT_COMMUNITY]
+
+
 def maybe_publish(client: Client, dep: dict, args) -> None:
     if not args.publish:
         return
@@ -582,7 +684,10 @@ def maybe_publish(client: Client, dep: dict, args) -> None:
         client.url(f"/api/deposit/depositions/{dep['id']}/actions/publish"),
         retry=False,
     )
-    print(f"Published record {dep['id']}. Now run `pin --record {dep['id']}`.")
+    print(f"Published record {dep['id']}.")
+    for slug in _community_slugs(dep):
+        add_to_community(client, dep["id"], slug)
+    print(f"Now run `pin --record {dep['id']}`.")
 
 
 def finish(client: Client, dep: dict, files: dict, args) -> None:
@@ -590,6 +695,8 @@ def finish(client: Client, dep: dict, files: dict, args) -> None:
     print(
         f"\nDRAFT READY (not published): {web_url(dep)}\n"
         "Review it there and click Publish. Then run\n"
+        f"  python scripts/zenodo_publish.py community --record {dep['id']}\n"
+        "to put it in the exozippy community (publishing alone does not),\n"
         f"  python scripts/zenodo_publish.py pin --record {dep['id']}\n"
         "to print (or, with --update-registry, write) its entry in\n"
         "src/exozippy/utilities/zenodo_assets.py."
@@ -937,6 +1044,17 @@ def update_registry(path: Path, key: str, entry: str, pub: dict) -> None:
     print(f"Updated registry entry {key!r} in {path}.")
 
 
+def cmd_community(args) -> None:
+    if args.dry_run:
+        print(
+            f"[dry-run] would add record {args.record} to the "
+            f"{args.community!r} community (request inclusion, accept it if "
+            f"this account curates the community, confirm)."
+        )
+        return
+    add_to_community(_client(args), args.record, args.community)
+
+
 def cmd_pin(args) -> None:
     web = base_url(args.sandbox)
     url = f"{web}/api/records/{args.record}"
@@ -1060,6 +1178,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     up.add_argument("--draft", required=True, help="unpublished draft id")
     up.set_defaults(func=cmd_upload)
+
+    comm = sub.add_parser(
+        "community",
+        parents=[common],
+        help="put a PUBLISHED record into a community (default exozippy)",
+    )
+    comm.add_argument("--record", required=True, help="published record id")
+    comm.add_argument(
+        "--community",
+        default=DEFAULT_COMMUNITY,
+        help=f"community slug (default {DEFAULT_COMMUNITY})",
+    )
+    comm.set_defaults(func=cmd_community)
 
     pin = sub.add_parser(
         "pin",
