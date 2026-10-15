@@ -599,8 +599,20 @@ class GridResult:
         Returns None when the mirror lies off the grid or no node within
         `tol_dex` of it ever finished -- which is the honest answer, and not
         the same as "the grid prefers this side".
+
+        Also None when the seed sits so close to s = 1 that the mirror
+        window overlaps the seed's OWN basin (the log s suppression radius
+        `local_minima` uses).  Otherwise the window holds the seed's column
+        and, q being unconstrained, the seed itself comes back as "mirror,
+        dchi2 = +0.0" (RMDC26 event 096, s = 0.9676).  Merely dropping the
+        seed's rows is not enough: the window then returns the far slope of
+        the same basin at a small dchi2, the same false degeneracy.  Near
+        s = 1 the caustic is resonant and there is no close/wide pair.
         """
         target = -float(seed["log_s"])
+        own = self.default_min_sep()[0] * self.d_log_s
+        if abs(target - float(seed["log_s"])) <= own + tol_dex:
+            return None
         near = np.flatnonzero(np.abs(self.log_s - target) <= tol_dex)
         if near.size == 0:
             return None
