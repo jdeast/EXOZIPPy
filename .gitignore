@@ -33,11 +33,12 @@ src/exozippy/models/NextGen/BCs/NextGen.wavelength.csv
 # tests/test_tracked_file_sizes.py is the second guard (size, not name).
 src/exozippy/models/NextGen/BCs/*.bc.parquet
 src/exozippy/models/NextGen/BCs/*.bc.parquet.*
-# The Claret limb-darkening tables, likewise destined for Zenodo: written
-# here by models/Claret/generate_claret_tables.py (with its generated
-# README.md) and, once published, fetched here on first use. sources/ holds
-# that generator's raw VizieR downloads.
+# The Claret limb-darkening tables, likewise on Zenodo: fetched into
+# ATLAS_L_vt2/ on first use (with fetch_assets' staging files); build/ is
+# where models/Claret/generate_claret_tables.py writes a rebuild, and
+# sources/ holds its raw VizieR downloads.
 src/exozippy/models/Claret/ATLAS_L_vt2/
+src/exozippy/models/Claret/build/
 src/exozippy/models/Claret/sources/
 src/exozippy/components/evolutionarymodel/testing.ipynb
 src/exozippy/components/evolutionarymodel/massradius_mann.py

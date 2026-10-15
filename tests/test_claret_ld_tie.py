@@ -1,12 +1,12 @@
 """The Claret limb-darkening tie (band.star_constrains_ld).
 
-An opted-in band gets the derived offsets du1 = u1 - u1_Claret (and du2 on a
+A tied band gets the derived offsets du1 = u1 - u1_Claret (and du2 on a
 quadratic band) whose defaults.yaml Gaussian N(0, 0.05) IS the tie -- the
 mulensinstrument.zeropoint pattern -- with the table interpolated at the
 band's star's (teff, logg, feh), once per band.  The star is held inside the
 tables' box: hard bounds on its sampled teff/feh, a soft barrier on its
 derived logg.  The rulings are in components/sed/sed.md ("The Claret
-limb-darkening tie") and docs/claret_ld_prior_plan.md.
+limb-darkening tie").
 
 Every System-level test runs against SYNTHETIC tables
 (conftest.write_synthetic_claret_tables): the real ones are git-ignored and
@@ -88,7 +88,7 @@ def _prepared(tmp_path, bands, transit_bands, params=None):
 
 
 _TESS_TIED = {"name": "TESS", "filter": "TESS", "star_constrains_ld": True}
-_V_UNTIED = {"name": "V", "filter": "V"}
+_V_UNTIED = {"name": "V", "filter": "V", "star_constrains_ld": False}
 
 
 # --------------------------------------------------------------------------
@@ -140,7 +140,9 @@ def test_interpolation_is_exact_on_a_linear_table_and_matches_the_graph(
     point = (6123.0, 4.37, 0.13)
     expected = [SYNTHETIC_CLARET[c](*point) for c in ("a", "b")]
 
-    np.testing.assert_allclose(interpolate(table, *point), expected, rtol=1e-12)
+    np.testing.assert_allclose(
+        interpolate(table, *point), expected, rtol=1e-12
+    )
 
     t, g, z = pt.dscalar(), pt.dscalar(), pt.dscalar()
     fn = pytensor.function([t, g, z], interpolate_node(table, t, g, z))
@@ -151,13 +153,14 @@ def test_a_missing_table_is_a_runtime_error_and_a_nonexistent_one_a_value_error(
     tmp_path,
 ):
     """
-    Given an empty table directory,
+    Given an empty, explicitly named table directory,
     When a table that should exist is read, and one that cannot exist,
-    Then the first raises RuntimeError naming how to build it (never
-    FileNotFoundError, the BC-table fetch's rule) and the second ValueError
-    -- there is no linear TESS table.
+    Then the first raises RuntimeError naming the directory (never
+    FileNotFoundError, the BC-table fetch's rule; and an explicit directory
+    is never fetched into) and the second ValueError -- there is no linear
+    TESS table.
     """
-    with pytest.raises(RuntimeError, match="generate_claret_tables"):
+    with pytest.raises(RuntimeError, match="explicitly given table directory"):
         ct.load_table("V", "quadratic", tmp_path)
     with pytest.raises(ValueError, match="no linear Claret table for 'TESS'"):
         ct.load_table("TESS", "linear", tmp_path)
@@ -185,8 +188,7 @@ def test_the_kipping_map_has_unit_jacobian(q1, q2):
     When its Jacobian determinant is evaluated,
     Then |det| = 1 everywhere: uniform (q1, q2) IS uniform (u1, u2) over the
     triangle, so a Gaussian on (u1, u2) times the q1/q2 sampling is exactly
-    EXOFASTv2's truncated Gaussian and the tie owes no Jacobian term
-    (docs/claret_ld_prior_plan.md, A1).
+    EXOFASTv2's truncated Gaussian and the tie owes no Jacobian term.
     """
     a, b = pt.dscalar(), pt.dscalar()
     u = pt.stack([calc_u1_from_kipping(a, b), calc_u2_from_kipping(a, b)])
@@ -235,24 +237,78 @@ def test_a_microlensing_only_band_cannot_be_tied(monkeypatch):
 
 
 # --------------------------------------------------------------------------
-# 3. Opt-in: an untied config is untouched.
+# 3. On by default; false turns it off.
 # --------------------------------------------------------------------------
-def test_without_the_flag_nothing_changes(tmp_path):
+def test_false_turns_the_tie_off_completely(tmp_path):
     """
-    Given a transit fit whose band does not set star_constrains_ld,
+    Given a transit fit whose band sets star_constrains_ld: false,
     When the system is prepared,
     Then there are no offsets, no bounds on the star and no new reader of
-    its Teff -- the opt-in guarantee that no shipped config moves.  (No
-    tables are needed at all, and none are provided.)
+    its Teff -- EXOFASTv2's /NOCLARET.  (No tables are needed at all, and
+    none are provided.)
     """
-    system = _prepared(tmp_path, [{"name": "TESS", "filter": "TESS"}], ["TESS"])
+    system = _prepared(
+        tmp_path,
+        [{"name": "TESS", "filter": "TESS", "star_constrains_ld": False}],
+        ["TESS"],
+    )
 
     assert "du1" not in system.band.manifest
     assert "du2" not in system.band.manifest
-    assert not any(k.startswith("star.") for k in system.config_manager.param_overrides)
+    assert not any(
+        k.startswith("star.") for k in system.config_manager.param_overrides
+    )
     assert system.band.grid_bound_paths() == {}
     labels = {c.label for c in system.star.structure_consumers(system)}
     assert Band.CLARET_CONSUMER_LABEL not in labels
+
+
+def test_an_unset_band_is_tied_by_default(tmp_path, synthetic_claret_tables):
+    """
+    Given a transit band that does not mention star_constrains_ld,
+    When the system is prepared,
+    Then it carries the tie exactly as an explicit true would: offsets
+    declared, the star bounded and read (EXOFASTv2's default).
+    """
+    system = _prepared(
+        tmp_path, [{"name": "TESS", "filter": "TESS"}], ["TESS"]
+    )
+
+    assert system.band.manifest["du1"] == {"expr_key": "default"}
+    assert "star.0.teff" in system.config_manager.param_overrides
+    labels = {c.label for c in system.star.structure_consumers(system)}
+    assert Band.CLARET_CONSUMER_LABEL in labels
+
+
+def test_an_unset_band_the_tie_cannot_serve_is_skipped_with_a_warning(
+    tmp_path, synthetic_claret_tables, caplog
+):
+    """
+    Given an unset band with no Claret table (Gaia G) next to a tableable one,
+    When the system is prepared,
+    Then the G band is skipped with a WARNING naming it and the remedy --
+    an explicit true would raise (test_a_filter_with_no_claret_table_raises
+    covers the lookup) -- while the TESS band is tied.
+    """
+    import logging
+
+    bands = [
+        {"name": "TESS", "filter": "TESS"},
+        {"name": "G", "filter": "Gaia.G"},
+    ]
+    with caplog.at_level(logging.WARNING, logger="exozippy"):
+        system = _prepared(tmp_path, bands, ["TESS", "G"])
+
+    np.testing.assert_array_equal(
+        system.band.manifest["du1"]["mask"], [True, False]
+    )
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any(
+        "G:" in m
+        and "OFF for this band" in m
+        and "star_constrains_ld: false" in m
+        for m in msgs
+    ), msgs
 
 
 # --------------------------------------------------------------------------
@@ -282,9 +338,12 @@ def test_a_tied_band_declares_offsets_bounds_its_star_and_reads_it(
             "lower": ct.BOX[ax][0],
             "upper": ct.BOX[ax][1],
         }
-        assert band.grid_bound_paths()[f"star.{ax}"]["source"] == (
+        # Per tied star, never the broadcast label (an untied star's wall
+        # is not the tables running out).
+        assert band.grid_bound_paths()[f"star.0.{ax}"]["source"] == (
             "Claret limb-darkening table"
         )
+        assert f"star.{ax}" not in band.grid_bound_paths()
 
     read = {
         (c.param, c.star)
@@ -310,7 +369,9 @@ def test_the_seed_is_the_table_value_at_the_stars_start(
     point = [probed[f"star.0.{ax}"].value for ax in ("teff", "logg", "feh")]
 
     cfg = {
-        p: cm.resolve("band", p, shape=(2,), names=system.band.names)["initval"]
+        p: cm.resolve("band", p, shape=(2,), names=system.band.names)[
+            "initval"
+        ]
         for p in ("q1", "q2")
     }
     q1, q2 = cfg["q1"][0], cfg["q2"][0]
@@ -342,7 +403,9 @@ def test_a_user_initval_beats_the_seed(tmp_path, synthetic_claret_tables):
     assert float(np.atleast_1d(q1)[0]) == 0.5
 
 
-def test_a_star_starting_below_the_tables_raises(tmp_path, synthetic_claret_tables):
+def test_a_star_starting_below_the_tables_raises(
+    tmp_path, synthetic_claret_tables
+):
     """
     Given a tied band whose star starts at 3200 K, below the tables' 3500 K,
     When the system is prepared,
@@ -385,7 +448,9 @@ def test_a_tie_on_an_otherwise_unread_teff_warns(
     Then it WARNS that the tie is the only thing reading that Teff -- the
     user asked for it, so it is not refused.
     """
-    with caplog.at_level(logging.WARNING, logger="exozippy.components.band.band"):
+    with caplog.at_level(
+        logging.WARNING, logger="exozippy.components.band.band"
+    ):
         _prepared(tmp_path, [_TESS_TIED], ["TESS"], _params(teff_sigma=None))
     assert "read by nothing but the Claret" in caplog.text
 
@@ -433,9 +498,15 @@ def test_the_tie_is_a_gaussian_on_the_offset_from_the_table(
     point = (teff[0], logg[0], feh[0])
 
     assert du1.shape == (1,)
-    np.testing.assert_allclose(du1, u1 - SYNTHETIC_CLARET["a"](*point), rtol=1e-10)
-    np.testing.assert_allclose(du2, u2 - SYNTHETIC_CLARET["b"](*point), rtol=1e-10)
-    np.testing.assert_allclose(pot, -0.5 * np.sum((du1 / 0.05) ** 2), rtol=1e-10)
+    np.testing.assert_allclose(
+        du1, u1 - SYNTHETIC_CLARET["a"](*point), rtol=1e-10
+    )
+    np.testing.assert_allclose(
+        du2, u2 - SYNTHETIC_CLARET["b"](*point), rtol=1e-10
+    )
+    np.testing.assert_allclose(
+        pot, -0.5 * np.sum((du1 / 0.05) ** 2), rtol=1e-10
+    )
 
     assert np.isfinite(model.compile_logp()(start))
     assert np.all(np.isfinite(model.compile_dlogp()(start)))
@@ -460,11 +531,29 @@ def test_grid_bounds_from_two_components_are_merged_not_replaced():
 
     system = SimpleNamespace(
         active_components={
-            "sed": comp({"star.feh": {"lower": -4.0, "upper": 0.5, "source": "BC grid"}}),
+            "sed": comp(
+                {
+                    "star.feh": {
+                        "lower": -4.0,
+                        "upper": 0.5,
+                        "source": "BC grid",
+                    }
+                }
+            ),
             "band": comp(
-                {"star.feh": {"lower": -2.0, "upper": 1.0, "source": "Claret table"}}
+                {
+                    "star.feh": {
+                        "lower": -2.0,
+                        "upper": 1.0,
+                        "source": "Claret table",
+                    }
+                }
             ),
         }
     )
     merged = grid_bounded_paths(system)["star.feh"]
-    assert merged == {"lower": -2.0, "upper": 0.5, "source": "BC grid and Claret table"}
+    assert merged == {
+        "lower": -2.0,
+        "upper": 0.5,
+        "source": "BC grid and Claret table",
+    }

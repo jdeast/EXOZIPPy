@@ -1123,8 +1123,8 @@ def convert(pro_path, outdir, base, priorfile_override=None):
     else:
         info("/nomist -> mist: False; no evolutionarymodel block")
     # EXOFASTv2 ties every transit band's limb darkening to the Claret
-    # tables unless /noclaret; EXOZIPPy's tie is opt-in per band
-    # (band.star_constrains_ld), so the conversion writes it explicitly.
+    # tables unless /noclaret; so does EXOZIPPy (band.star_constrains_ld, on
+    # by default).  The conversion writes the choice out either way.
     claret = not take("noclaret")
 
     # ---- thermal emission ----------------------------------------------
@@ -1610,22 +1610,23 @@ def _claret_bands(claret, bands, transits, param_entries):
     """{band: (star_constrains_ld or None, comment)} for the band blocks.
 
     EXOFASTv2 applies the Claret prior to every transit band unless
-    /noclaret; EXOZIPPy's tie is opt-in, so it is written out explicitly
-    (None = write nothing: the default, off, already says /noclaret).  A
-    band the tie cannot serve is written ``false`` with the reason, rather
-    than emitting a config that raises at startup: a host star whose start
-    lies outside the tables' box (EXOFASTv2 rejected such steps too, which
-    is why it needed /noclaret there).  Every EXOFASTv2 band name is a
-    Claret quadratic table, and the translator writes quadratic bands only.
+    /noclaret, and so does EXOZIPPy's default; the choice is written out
+    either way, so a converted config says what the EXOFASTv2 fit did
+    (``true``, or ``false`` for /noclaret).  A band the tie cannot serve is
+    written ``false`` with the reason, rather than emitting a config that
+    raises at startup: a host star whose start lies outside the tables' box
+    (EXOFASTv2 rejected such steps too, which is why it needed /noclaret
+    there).  Every EXOFASTv2 band name is a Claret quadratic table, and the
+    translator writes quadratic bands only.
     """
     from exozippy.models.Claret.claret_tables import BOX
 
     if not claret:
         info(
             "/noclaret: limb darkening fitted from the transit data alone "
-            "(star_constrains_ld left at its default, false)"
+            "(star_constrains_ld: false written on every band)"
         )
-        return {b: (None, None) for b in bands}
+        return {b: (False, "EXOFASTv2's /noclaret") for b in bands}
 
     # The host's starting (teff, feh): every band's limb darkening belongs
     # to the first star, the one the translator makes every planet's host.
@@ -1656,10 +1657,10 @@ def _claret_bands(claret, bands, transits, param_entries):
         if n_files > 1:
             info(
                 f"band '{b}': EXOFASTv2 applied its Claret prior once per "
-                f"transit file ({n_files} files, effective sigma "
-                f"{0.05 / n_files**0.5:.4f}); EXOZIPPy applies it once per "
-                f"band (sigma 0.05). To reproduce EXOFASTv2, add "
-                f"band.{b}.du1/du2: {{sigma: {0.05 / n_files**0.5:.4f}}}"
+                f"transit file ({n_files} files), a bug (jdeast/EXOFASTv2#9) that "
+                f"shrinks the prior's width with the number of files; "
+                f"EXOZIPPy applies it once per band, so the limb-darkening "
+                f"posteriors will be wider than EXOFASTv2's"
             )
     return out
 

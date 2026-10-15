@@ -14,9 +14,10 @@
 # What the tie does here: the TESS band's (u1, u2) get a Gaussian of width
 # 0.05 on their offset from the Claret (2017) TESS table interpolated at the
 # star's (teff, logg, feh) -- once for the band, although four light curves
-# read it (EXOFASTv2 would apply it four times; see
-# docs/claret_ld_prior_plan.md, A6) -- and the star is held inside the
-# tables' range.  The offsets are reported as band.TESS.du1/du2.
+# read it (EXOFASTv2 applies it once per file, a bug: jdeast/EXOFASTv2#9) -- and the
+# star is held inside the tables' range.  The offsets are reported as
+# band.TESS.du1/du2.  The tie is on by default; the band block below writes
+# it out to say so.
 
 run:
   name: "hat3"

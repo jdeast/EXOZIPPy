@@ -242,6 +242,7 @@ exozippy-fetch-theoph = "exozippy.components.pharmacokinetics.fetch_theoph:main"
 # Zenodo rather than shipped in the wheel (models/NextGen/bc_tables.py), so
 # SED fits can run offline afterwards.
 exozippy-fetch-bc-tables = "exozippy.models.NextGen.bc_tables:main"
+exozippy-fetch-claret-tables = "exozippy.models.Claret.claret_tables:main"
 
 # Only poetry-specific configuration belongs under [tool.poetry] now; every
 # field above is standard PEP 621 metadata that any tool can read.

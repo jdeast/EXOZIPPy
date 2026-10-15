@@ -67,13 +67,8 @@ orbit.b.secosw:
 orbit.b.sesinw:
     initval: 0.09205694
 
-# The tie's width is band.TESS.du1/du2's sigma (default 0.05, EXOFASTv2's).
-# Uncomment to reproduce EXOFASTv2's per-FILE counting of the prior for these
-# four TESS light curves (0.05 / sqrt(4)):
-# band.TESS.du1:
-#     sigma: 0.025
-# band.TESS.du2:
-#     sigma: 0.025
+# The tie's width is band.TESS.du1/du2's sigma (default 0.05, the tables'
+# systematic floor, applied once per band).
 
 rvinstrument.HIRES.gamma:
     initval: -14.01010534

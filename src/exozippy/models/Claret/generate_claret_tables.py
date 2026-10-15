@@ -2,7 +2,8 @@
 Build the Claret limb-darkening tables EXOZIPPy publishes on Zenodo, and
 check them cell by cell against EXOFASTv2's copies.
 
-The design is in docs/claret_ld_prior_plan.md (Phase 1). In short:
+The rulings the tables serve are in components/sed/sed.md ("The Claret
+limb-darkening tie"). In short:
 
 1. Download the published coefficients from VizieR into a fresh directory
    and pin every source file by size and md5:
@@ -45,15 +46,15 @@ The design is in docs/claret_ld_prior_plan.md (Phase 1). In short:
 Claret's metallicity column is log[M/H]; EXOFASTv2 (and EXOZIPPy) index the
 tables by the star's [Fe/H], so the axis is named ``feh`` here.
 
-Where things go. The tables are written into the package tree, where
-EXOZIPPy's other model data live and where the fetch will put the published
-copies: ``models/Claret/ATLAS_L_vt2/`` (DEFAULT_TABLE_DIR), alongside
-``models/NextGen/BCs/`` and ``models/MIST/MISTv2.5/EEPs/``. So a local build
-can be tested in place before anything is uploaded, and the same directory is
-the Zenodo bundle. The raw VizieR downloads go to ``models/Claret/sources/``
-(DEFAULT_SOURCE_DIR). Both are git-ignored. Re-running replaces this
-generator's own files in the table directory and refuses if anything else is
-there.
+Where things go. The tables are written to ``models/Claret/build/``
+(DEFAULT_BUILD_DIR), which is the Zenodo bundle -- deliberately NOT
+``models/Claret/ATLAS_L_vt2/`` (DEFAULT_TABLE_DIR), where a fit fetches the
+PUBLISHED tables and checks each against its pinned md5: a rebuild sitting
+there would fail that check. To fit against a rebuild before publishing it,
+pass its directory to ``claret_tables.load_table(..., table_dir=...)``. The
+raw VizieR downloads go to ``models/Claret/sources/`` (DEFAULT_SOURCE_DIR).
+All three are git-ignored. Re-running replaces this generator's own files in
+the output directory and refuses if anything else is there.
 
 Usage (from a git checkout, so the git revision can be recorded)::
 
@@ -82,8 +83,8 @@ from scipy.io import readsav
 from exozippy.models.Claret.claret_tables import (
     BOX,
     DATASET,
+    DEFAULT_BUILD_DIR,
     DEFAULT_SOURCE_DIR,
-    DEFAULT_TABLE_DIR,
     LAW_COLUMNS,
     TABLE_BANDS,
     table_filename,
@@ -101,7 +102,7 @@ _HTTP_TIMEOUT = 60
 
 
 @dataclass(frozen=True)
-class Catalogue:
+class Catalog:
     key: str
     vizier_id: str
     bibcode: str
@@ -109,15 +110,15 @@ class Catalogue:
     files: Tuple[str, ...]
 
 
-CATALOGUES = {
-    "cb11": Catalogue(
+CATALOGS = {
+    "cb11": Catalog(
         key="cb11",
         vizier_id="J/A+A/529/A75",
         bibcode="2011A&A...529A..75C",
         reference="Claret & Bloemen (2011), A&A 529, A75",
         files=("ReadMe", "tableab.dat.gz", "tableu.dat.gz"),
     ),
-    "c17": Catalogue(
+    "c17": Catalog(
         key="c17",
         vizier_id="J/A+A/600/A30",
         bibcode="2017A&A...600A..30C",
@@ -126,7 +127,7 @@ CATALOGUES = {
     ),
 }
 
-# Fixed-width layouts, transcribed from each catalogue's ReadMe
+# Fixed-width layouts, transcribed from each catalog's ReadMe
 # ("Byte-by-byte Description"). The ReadMe's 1-based inclusive byte range
 # a-b is the 0-based half-open colspec (a-1, b).
 CB11_QUADRATIC = {
@@ -223,6 +224,7 @@ EXOFAST_VARIABLES = {
 }
 EXOFAST_SUFFIX = {"quadratic": "", "linear": ".linear"}
 
+
 @dataclass(frozen=True)
 class ExofastDefect:
     """A known defect in one of EXOFASTv2's save files, ruled on here.
@@ -274,7 +276,11 @@ EXOFAST_DEFECTS = {
 # and a published table must hold 0.0 there.
 EXOFAST_FEH = np.round(
     np.concatenate(
-        [-5.0 + np.arange(10) * 0.5, -0.3 + np.arange(7) * 0.1, 0.5 + np.arange(2) * 0.5]
+        [
+            -5.0 + np.arange(10) * 0.5,
+            -0.3 + np.arange(7) * 0.1,
+            0.5 + np.arange(2) * 0.5,
+        ]
     ),
     2,
 )
@@ -303,8 +309,8 @@ _KEY_DECIMALS = {"teff": 0, "logg": 2, "feh": 2}
 # -------------------------------------------------------------------
 
 
-def _local_name(cat: Catalogue, fname: str) -> str:
-    """Both catalogues ship a ReadMe, so local copies carry the key."""
+def _local_name(cat: Catalog, fname: str) -> str:
+    """Both catalogs ship a ReadMe, so local copies carry the key."""
     return f"{cat.key}.{fname}"
 
 
@@ -313,7 +319,7 @@ def download_sources(dest: Path) -> Dict[str, Path]:
 
     A fresh directory per run: a downloaded file is untrusted input, and a
     directory holding files from some earlier run could silently mix two
-    versions of a catalogue.
+    versions of a catalog.
     """
     dest = Path(dest).expanduser()
     if dest.exists() and any(dest.iterdir()):
@@ -323,7 +329,7 @@ def download_sources(dest: Path) -> Dict[str, Path]:
         )
     dest.mkdir(parents=True, exist_ok=True)
     paths = {}
-    for cat in CATALOGUES.values():
+    for cat in CATALOGS.values():
         for fname in cat.files:
             url = f"{VIZIER_FTP}/{cat.vizier_id}/{fname}"
             out = dest / _local_name(cat, fname)
@@ -343,7 +349,7 @@ def existing_sources(src: Path) -> Dict[str, Path]:
     """The source files of an earlier download, all of which must exist."""
     src = Path(src).expanduser()
     paths = {}
-    for cat in CATALOGUES.values():
+    for cat in CATALOGS.values():
         for fname in cat.files:
             p = src / _local_name(cat, fname)
             if not p.is_file():
@@ -364,9 +370,9 @@ def _md5(path: Path) -> str:
     return h.hexdigest()
 
 
-def source_record(cat: Catalogue, fname: str, path: Path) -> Dict:
+def source_record(cat: Catalog, fname: str, path: Path) -> Dict:
     return {
-        "catalogue": cat.vizier_id,
+        "catalog": cat.vizier_id,
         "bibcode": cat.bibcode,
         "reference": cat.reference,
         "file": fname,
@@ -403,7 +409,9 @@ def git_revision() -> str:
 # -------------------------------------------------------------------
 
 
-def _read_fixed_width(path: Path, layout: Dict[str, Tuple[int, int]]) -> pd.DataFrame:
+def _read_fixed_width(
+    path: Path, layout: Dict[str, Tuple[int, int]]
+) -> pd.DataFrame:
     """One VizieR fixed-width table. Text columns stay text (a filter coded
     "NA" or "C" must not become a missing value)."""
     text_cols = {"filt", "met", "mod"}
@@ -427,7 +435,9 @@ def _read_fixed_width(path: Path, layout: Dict[str, Tuple[int, int]]) -> pd.Data
     return df
 
 
-def _check_codes(df: pd.DataFrame, col: str, allowed: Sequence[str], path: Path):
+def _check_codes(
+    df: pd.DataFrame, col: str, allowed: Sequence[str], path: Path
+):
     found = set(df[col].unique())
     unknown = found - set(allowed)
     if unknown:
@@ -478,7 +488,9 @@ def _axis_index(name: str) -> Dict[float, int]:
     return {round(float(v), dec): i for i, v in enumerate(AXES[name])}
 
 
-def build_cubes(rows: pd.DataFrame, columns: Sequence[str], label: str) -> Dict[str, np.ndarray]:
+def build_cubes(
+    rows: pd.DataFrame, columns: Sequence[str], label: str
+) -> Dict[str, np.ndarray]:
     """One (feh, teff, logg) cube per coefficient, NaN where Claret has no
     value. The axis order is EXOFASTv2's save files' (IDL's (logg, teff,
     feh), reversed by readsav)."""
@@ -519,11 +531,16 @@ def trim_to_box(cubes: Dict[str, np.ndarray], label: str) -> pd.DataFrame:
     """Long-format table of the box, which must be complete."""
     m = _box_masks()
     sub = {
-        c: cube[np.ix_(m["feh"], m["teff"], m["logg"])] for c, cube in cubes.items()
+        c: cube[np.ix_(m["feh"], m["teff"], m["logg"])]
+        for c, cube in cubes.items()
     }
     for c, arr in sub.items():
         if not np.isfinite(arr).all():
-            fe, te, lg = AXES["feh"][m["feh"]], AXES["teff"][m["teff"]], AXES["logg"][m["logg"]]
+            fe, te, lg = (
+                AXES["feh"][m["feh"]],
+                AXES["teff"][m["teff"]],
+                AXES["logg"][m["logg"]],
+            )
             holes = [
                 f"(teff={te[j]:.0f}, logg={lg[k]:.1f}, feh={fe[i]:+.1f})"
                 for i, j, k in np.argwhere(~np.isfinite(arr))[:5]
@@ -533,7 +550,10 @@ def trim_to_box(cubes: Dict[str, np.ndarray], label: str) -> pd.DataFrame:
                 f"missing cell(s) inside the box {BOX}, e.g. {', '.join(holes)}."
             )
     F, T, L = np.meshgrid(
-        AXES["feh"][m["feh"]], AXES["teff"][m["teff"]], AXES["logg"][m["logg"]], indexing="ij"
+        AXES["feh"][m["feh"]],
+        AXES["teff"][m["teff"]],
+        AXES["logg"][m["logg"]],
+        indexing="ij",
     )
     df = pd.DataFrame({"teff": T.ravel(), "logg": L.ravel(), "feh": F.ravel()})
     for c, arr in sub.items():
@@ -546,7 +566,9 @@ def trim_to_box(cubes: Dict[str, np.ndarray], label: str) -> pd.DataFrame:
 # -------------------------------------------------------------------
 
 
-def load_exofast_cubes(exofast_root: Path, band: str, law: str) -> Dict[str, np.ndarray]:
+def load_exofast_cubes(
+    exofast_root: Path, band: str, law: str
+) -> Dict[str, np.ndarray]:
     path = (
         Path(exofast_root).expanduser()
         / "quadld"
@@ -566,7 +588,10 @@ def load_exofast_cubes(exofast_root: Path, band: str, law: str) -> Dict[str, np.
                 f"{path}: its {key} axis differs from quadld.pro's; the cubes "
                 f"cannot be compared cell by cell."
             )
-    return {c: np.asarray(data[v], float) for c, v in EXOFAST_VARIABLES[law].items()}
+    return {
+        c: np.asarray(data[v], float)
+        for c, v in EXOFAST_VARIABLES[law].items()
+    }
 
 
 def _more_than_4_decimals(values: np.ndarray) -> np.ndarray:
@@ -587,11 +612,19 @@ def cross_check(
     """
     label = f"{band} ({law})"
     defect = EXOFAST_DEFECTS.get((band, law))
-    ref_band = band if defect is None or defect.holds_band is None else defect.holds_band
+    ref_band = (
+        band
+        if defect is None or defect.holds_band is None
+        else defect.holds_band
+    )
     swap = None if defect is None else defect.swap
     ours = cubes[(ref_band, law)]
     m = _box_masks()
-    in_box = m["feh"][:, None, None] & m["teff"][None, :, None] & m["logg"][None, None, :]
+    in_box = (
+        m["feh"][:, None, None]
+        & m["teff"][None, :, None]
+        & m["logg"][None, None, :]
+    )
     stats = {}
     for c in ours:
         theirs_c = c if swap is None else swap[c]
@@ -638,7 +671,9 @@ def write_table(df: pd.DataFrame, meta: Dict, path: Path) -> None:
     out.to_parquet(path, index=False)
 
 
-def write_readme(bundle: Path, records: List[Dict], sources: List[Dict], revision: str):
+def write_readme(
+    bundle: Path, records: List[Dict], sources: List[Dict], revision: str
+):
     lines = [
         "# Claret limb-darkening tables for EXOZIPPy",
         "",
@@ -649,8 +684,10 @@ def write_readme(bundle: Path, records: List[Dict], sources: List[Dict], revisio
         "## Sources",
         "",
     ]
-    for cat in CATALOGUES.values():
-        lines.append(f"- {cat.reference}, VizieR {cat.vizier_id} ({cat.bibcode})")
+    for cat in CATALOGS.values():
+        lines.append(
+            f"- {cat.reference}, VizieR {cat.vizier_id} ({cat.bibcode})"
+        )
     lines += [
         "",
         "Source files, as downloaded:",
@@ -659,7 +696,9 @@ def write_readme(bundle: Path, records: List[Dict], sources: List[Dict], revisio
         "|---|---|---|",
     ]
     for s in sources:
-        lines.append(f"| {s['catalogue']}/{s['file']} | {s['size']} | {s['md5']} |")
+        lines.append(
+            f"| {s['catalog']}/{s['file']} | {s['size']} | {s['md5']} |"
+        )
     lines += [
         "",
         "## Selection and grid",
@@ -758,18 +797,24 @@ def prepare_table_dir(out: Path) -> Path:
     return out
 
 
-def build_bundle(exofast_root: Path, out: Path, sources: Dict[str, Path]) -> List[Dict]:
+def build_bundle(
+    exofast_root: Path, out: Path, sources: Dict[str, Path]
+) -> List[Dict]:
     # Everything that can fail before writing is done first, so a failed
     # run leaves the previous tables in place.
     revision = git_revision()
 
     source_info = {
-        name: source_record(CATALOGUES[name.split(".", 1)[0]], name.split(".", 1)[1], p)
+        name: source_record(
+            CATALOGS[name.split(".", 1)[0]], name.split(".", 1)[1], p
+        )
         for name, p in sources.items()
     }
 
     tables = {
-        ("quadratic", "cb11"): read_cb11(sources["cb11.tableab.dat.gz"], "quadratic"),
+        ("quadratic", "cb11"): read_cb11(
+            sources["cb11.tableab.dat.gz"], "quadratic"
+        ),
         ("linear", "cb11"): read_cb11(sources["cb11.tableu.dat.gz"], "linear"),
         ("quadratic", "c17"): read_c17_table25(sources["c17.table25.dat.gz"]),
     }
@@ -778,9 +823,17 @@ def build_bundle(exofast_root: Path, out: Path, sources: Dict[str, Path]) -> Lis
         ("linear", "cb11"): "cb11.tableu.dat.gz",
         ("quadratic", "c17"): "c17.table25.dat.gz",
     }
-    jobs = [(band, code, "quadratic", "cb11") for band, code in CB11_BANDS["quadratic"].items()]
-    jobs += [(band, code, "quadratic", "c17") for band, code in C17_BANDS.items()]
-    jobs += [(band, code, "linear", "cb11") for band, code in CB11_BANDS["linear"].items()]
+    jobs = [
+        (band, code, "quadratic", "cb11")
+        for band, code in CB11_BANDS["quadratic"].items()
+    ]
+    jobs += [
+        (band, code, "quadratic", "c17") for band, code in C17_BANDS.items()
+    ]
+    jobs += [
+        (band, code, "linear", "cb11")
+        for band, code in CB11_BANDS["linear"].items()
+    ]
     # The readers trust TABLE_BANDS to say which tables exist; hold the
     # build to exactly that set.
     for law, bands in TABLE_BANDS.items():
@@ -799,7 +852,9 @@ def build_bundle(exofast_root: Path, out: Path, sources: Dict[str, Path]) -> Lis
         rows = tables[(law, cat)]
         rows = rows[rows["filt"] == code]
         if rows.empty:
-            raise ValueError(f"{label}: no rows for Claret filter code {code!r}.")
+            raise ValueError(
+                f"{label}: no rows for Claret filter code {code!r}."
+            )
         cubes[(band, law)] = build_cubes(rows, LAW_COLUMNS[law], label)
 
     checked = []
@@ -808,7 +863,16 @@ def build_bundle(exofast_root: Path, out: Path, sources: Dict[str, Path]) -> Lis
         check = cross_check(
             band, law, cubes, load_exofast_cubes(exofast_root, band, law)
         )
-        checked.append((band, code, law, cat, check, trim_to_box(cubes[(band, law)], label)))
+        checked.append(
+            (
+                band,
+                code,
+                law,
+                cat,
+                check,
+                trim_to_box(cubes[(band, law)], label),
+            )
+        )
 
     out = prepare_table_dir(out)
     records = []
@@ -831,7 +895,14 @@ def build_bundle(exofast_root: Path, out: Path, sources: Dict[str, Path]) -> Lis
         }
         path = out / table_filename(band, law)
         write_table(df, meta, path)
-        records.append({"band": band, "law": law, "file": path.name, "exofastv2_check": check})
+        records.append(
+            {
+                "band": band,
+                "law": law,
+                "file": path.name,
+                "exofastv2_check": check,
+            }
+        )
         n_only = sum(s["exofast_only"] for s in check.values())
         print(
             f"{path.name}: {len(df)} nodes; EXOFASTv2 agrees on "
@@ -855,9 +926,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--out",
         type=Path,
-        default=DEFAULT_TABLE_DIR,
-        help="Table directory, which is also the Zenodo bundle "
-        f"(default: {DEFAULT_TABLE_DIR}).",
+        default=DEFAULT_BUILD_DIR,
+        help="Output directory, which is also the Zenodo bundle "
+        f"(default: {DEFAULT_BUILD_DIR}).",
     )
     group = parser.add_mutually_exclusive_group()
     group.add_argument(

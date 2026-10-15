@@ -6,7 +6,7 @@ the one interpolation the model and the start-value seed share.
 about tables. The tables themselves -- where they live, what they are
 called, how they are read -- are ``models/Claret/claret_tables.py``'s. The
 design and its rulings are in components/sed/sed.md ("The Claret
-limb-darkening tie") and docs/claret_ld_prior_plan.md.
+limb-darkening tie").
 """
 
 from __future__ import annotations
@@ -26,22 +26,24 @@ from exozippy.models.Claret.claret_tables import AXIS_ORDER, ClaretTable
 _UNSUPPORTED = "Unsupported"
 
 
-def claret_band_name(filter_label: str, where: str) -> str:
-    """The Claret table name (the alias table's ``Claret`` column) of a
-    band's ``filter:`` label. Strict: every way of not having one RAISES.
+def claret_band_lookup(filter_label: str) -> tuple[str | None, str | None]:
+    """``(Claret table name, None)`` for a band's ``filter:`` label, or
+    ``(None, why there is none)``.
 
     ``bc_grid.resolve_filter_name`` is deliberately not used here. It hands
     back the label unchanged for an unknown or ``Unsupported`` filter, which
     is right for the BC grid (the label may already be a canonical column
     name) and wrong for this tie: a Gaia G band would then look for a
-    "Gaia.G" Claret table instead of being told there is none.
+    "Gaia.G" Claret table instead of being told there is none.  Returning the
+    reason rather than raising lets Band decide: an explicit
+    ``star_constrains_ld: true`` raises with it, the default skips the band
+    with it.  A missing alias table is a broken install and always raises.
     """
     alias_df = _load_alias_table()
     if alias_df is None:
         raise RuntimeError(
-            f"{where}: the filter alias table (filters/filternames.txt) is "
-            f"missing, so filter {filter_label!r} cannot be mapped to a "
-            f"Claret table."
+            f"the filter alias table (filters/filternames.txt) is missing, so "
+            f"filter {filter_label!r} cannot be mapped to a Claret table."
         )
     # A bare "I"/"R" names two rows; the project convention picks one
     # (AMBIGUOUS_FILTER_ALIASES), exactly as for the BC grid.
@@ -51,31 +53,44 @@ def claret_band_name(filter_label: str, where: str) -> str:
     else:
         rows = alias_df[alias_df.eq(filter_label).any(axis=1)]
     if rows.empty:
-        raise ValueError(
-            f"{where}: filter {filter_label!r} is not in the filter alias "
-            f"table (filters/filternames.txt), so there is no Claret "
-            f"limb-darkening table for it. Set star_constrains_ld: false on "
-            f"this band, or spell the filter as the alias table does."
+        return None, (
+            f"filter {filter_label!r} is not in the filter alias table "
+            f"(filters/filternames.txt), so there is no Claret "
+            f"limb-darkening table for it (spell the filter as the alias "
+            f"table does if it should have one)"
         )
     names = {str(v) for v in rows["Claret"] if not pd.isna(v)}
     if len(names) > 1:
-        raise ValueError(
-            f"{where}: filter {filter_label!r} names alias-table rows with "
-            f"different Claret tables {sorted(names)}; write the filter out "
-            f"(its full SVO id) to say which."
+        return None, (
+            f"filter {filter_label!r} names alias-table rows with different "
+            f"Claret tables {sorted(names)} (write the filter out, its full "
+            f"SVO id, to say which)"
         )
     if not names or names == {_UNSUPPORTED}:
-        raise ValueError(
-            f"{where}: filter {filter_label!r} has no Claret limb-darkening "
-            f"table (the Claret & Bloemen 2011 and Claret 2017 bands are U B "
-            f"V R I J H K, SDSS u'g'r'i'z', Kepler, CoRoT, TESS, Spitzer "
-            f"IRAC and Stromgren uvby). Set star_constrains_ld: false on "
-            f"this band to fit its limb darkening from the data alone."
+        return None, (
+            f"filter {filter_label!r} has no Claret limb-darkening table "
+            f"(the Claret & Bloemen 2011 and Claret 2017 bands are U B V R I "
+            f"J H K, SDSS u'g'r'i'z', Kepler, CoRoT, TESS, Spitzer IRAC and "
+            f"Stromgren uvby)"
         )
-    return names.pop()
+    return names.pop(), None
 
 
-def interpolate(table: ClaretTable, teff: float, logg: float, feh: float) -> np.ndarray:
+def claret_band_name(filter_label: str, where: str) -> str:
+    """The Claret table name of a band's ``filter:`` label. Strict: every
+    way of not having one RAISES, naming ``where``."""
+    name, problem = claret_band_lookup(filter_label)
+    if name is None:
+        raise ValueError(
+            f"{where}: {problem}. Set star_constrains_ld: false on this band "
+            f"to fit its limb darkening from the data alone."
+        )
+    return name
+
+
+def interpolate(
+    table: ClaretTable, teff: float, logg: float, feh: float
+) -> np.ndarray:
     """Coefficients at one point, in ``table.columns`` order -- numpy.
 
     The same trilinear interpolation as ``interpolate_node`` (bc_grid's
@@ -87,7 +102,9 @@ def interpolate(table: ClaretTable, teff: float, logg: float, feh: float) -> np.
     idx, frac = [], []
     for ax in AXIS_ORDER:
         grid = table.axes[ax]
-        i = int(np.clip(np.searchsorted(grid, point[ax]) - 1, 0, len(grid) - 2))
+        i = int(
+            np.clip(np.searchsorted(grid, point[ax]) - 1, 0, len(grid) - 2)
+        )
         idx.append(i)
         frac.append((point[ax] - grid[i]) / (grid[i + 1] - grid[i]))
     out = np.zeros(table.values.shape[-1])
@@ -95,7 +112,12 @@ def interpolate(table: ClaretTable, teff: float, logg: float, feh: float) -> np.
         w = 1.0
         for c, f in zip(corner, frac):
             w *= f if c else 1.0 - f
-        out += w * table.values[idx[0] + corner[0], idx[1] + corner[1], idx[2] + corner[2]]
+        out += (
+            w
+            * table.values[
+                idx[0] + corner[0], idx[1] + corner[1], idx[2] + corner[2]
+            ]
+        )
     return out
 
 

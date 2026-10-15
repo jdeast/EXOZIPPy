@@ -461,18 +461,20 @@ def test_the_claret_prior_is_written_as_an_explicit_tie_on_every_band(
     assert not any("Claret" in w for w in warnings)
 
 
-def test_noclaret_leaves_the_tie_at_its_default(tmp_path, monkeypatch):
+def test_noclaret_turns_the_tie_off_explicitly(tmp_path, monkeypatch):
     """
     Given /noclaret,
     When the driver is converted,
-    Then no band block sets star_constrains_ld: the default (off) is
-    exactly EXOFASTv2's /noclaret, and the choice is reported.
+    Then every band block writes star_constrains_ld: false -- the tie is on
+    by default, as in EXOFASTv2, so /noclaret must be said -- and the choice
+    is reported.
     """
     config, _, _, infos = _convert(
         tmp_path, monkeypatch, _driver_with("/noclaret")
     )
 
-    assert not any("star_constrains_ld" in b for b in config["band"])
+    assert config["band"]
+    assert all(b["star_constrains_ld"] is False for b in config["band"])
     assert any("/noclaret" in i for i in infos)
 
 

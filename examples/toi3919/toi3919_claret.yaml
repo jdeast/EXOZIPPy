@@ -3,16 +3,13 @@
 # (components/sed/sed.md, "The Claret limb-darkening tie").
 #
 # The EXOFASTv2 fit this example was converted from used the Claret prior
-# (it did not set /noclaret); toi3919.yaml, converted before the tie
-# existed, could not reproduce that.  This one does, with one deliberate
-# difference: EXOZIPPy applies the prior ONCE PER BAND, where EXOFASTv2
-# applied it once per transit FILE -- four times for TESS, twice for Sloan
-# i' (docs/claret_ld_prior_plan.md, A6).  To reproduce EXOFASTv2's counting
-# for a parity run, add to the params file:
-#     band.TESS.du1:   {sigma: 0.025}     # 0.05 / sqrt(4)
-#     band.TESS.du2:   {sigma: 0.025}
-#     band.Sloani.du1: {sigma: 0.0354}    # 0.05 / sqrt(2)
-#     band.Sloani.du2: {sigma: 0.0354}
+# (it did not set /noclaret).  The tie is on by default, so toi3919.yaml
+# carries it too; this sibling writes it out explicitly, as the converter
+# now does.  EXOZIPPy applies the prior ONCE PER BAND; EXOFASTv2 applied it
+# once per transit FILE (four times for TESS, twice for Sloan i'), a bug
+# (jdeast/EXOFASTv2#9) -- 0.05 is the tables' systematic floor, which more data cannot
+# shrink -- so the limb-darkening posteriors here are wider than
+# EXOFASTv2's.
 #
 # The params file is toi3919.yaml's: it carries EXOFASTv2's converged q1/q2
 # as starts, which outrank the tie's table seed.  Everything below except

@@ -798,6 +798,12 @@ def grid_bounded_paths(system):
     telling you something.  A grid extent is a statement about what the
     MODEL can evaluate: past it the interpolator has no data, and a
     posterior against it is reporting that the grid ran out.
+
+    A key is a parameter LABEL (``star.feh``: the claim covers every
+    element) or one element's INDEX key (``star.0.feh``: that element only,
+    ``Parameter.index_key``) -- the Claret tie bounds only the stars its
+    bands read, and claiming the label would blame the tables for another
+    star's wall.  ``check_near_bounds`` reads both for each element.
     """
     out = {}
     # active_components is a {name: component} DICT (System.__init__).
@@ -918,7 +924,20 @@ def warn_posterior_near_bounds(
             if isinstance(u, (list, tuple)):
                 u = u[i] if i < len(u) else None
             unit = "" if u is None else str(u).strip()
-            grid = grid_paths.get(par.label)
+            # A claim on the whole parameter and one on this element both
+            # apply (grid_bounded_paths: the SED bounds every star's feh,
+            # the Claret tie only its tied stars').
+            claims = [
+                c
+                for c in (
+                    grid_paths.get(par.label),
+                    grid_paths.get(par.index_key(i)),
+                )
+                if c is not None
+            ]
+            grid_source = (
+                " and ".join(c["source"] for c in claims) if claims else None
+            )
             frac = frac_low if side == "lower" else frac_high
             hit = {
                 "label": par.get_display_label(i),
@@ -929,7 +948,7 @@ def warn_posterior_near_bounds(
                 "upper": hi_u,
                 "frac": frac,
                 "trigger": "median" if med_hit else "mass",
-                "grid": (grid or {}).get("source"),
+                "grid": grid_source,
             }
             hits.append(hit)
             if med_hit:

@@ -7,18 +7,12 @@ import pymc as pm
 import pytensor.tensor as pt
 
 from exozippy.components.band.claret import (
-    claret_band_name,
+    claret_band_lookup,
     interpolate,
     interpolate_node,
     kipping_from_quadratic,
 )
 from exozippy.components.component import Component
-from exozippy.models.Claret.claret_tables import (
-    AXIS_ORDER,
-    BOX,
-    TABLE_BANDS,
-    load_table,
-)
 from exozippy.components.parameterization import (
     merge_overrides,
     mode_manifest,
@@ -29,6 +23,12 @@ from exozippy.components.sed.bc_grid import (
     _load_alias_table,
     facility_from_svo_name,
     resolve_filter_name,
+)
+from exozippy.models.Claret.claret_tables import (
+    AXIS_ORDER,
+    BOX,
+    TABLE_BANDS,
+    load_table,
 )
 
 logger = logging.getLogger(__name__)
@@ -44,7 +44,7 @@ LDConsumer = namedtuple("LDConsumer", "label band star kind")
 
 # The Claret tie's start-value seed keeps the sampled Kipping coordinates
 # (or a linear u1) this far inside [0, 1]: a start ON the edge has no raw
-# (logit) coordinate.  Reached only when the table's centre lies outside the
+# (logit) coordinate.  Reached only when the table's center lies outside the
 # physical triangle (some infrared quadratic and blue linear nodes do).
 _SEED_EDGE = 1e-3
 
@@ -175,11 +175,16 @@ class Band(Component):
                     "(Claret & Bloemen 2011; Claret 2017 for TESS) at the "
                     "star's Teff, logg and [Fe/H]: a Gaussian of width 0.05 "
                     "(band.du1/du2 sigma) on each coefficient's offset from "
-                    "the table, once per band. OPT-IN, default false -- "
-                    "EXOFASTv2 applies this by default unless /NOCLARET is "
-                    "given. With it on, the star is held inside the tables' "
-                    "range (Teff 3500-10000 K, logg 2.0-5.0, [Fe/H] -2.0 to "
-                    "+1.0). Transit, RM and Doppler-tomography bands only."
+                    "the table, once per band. ON BY DEFAULT, as in "
+                    "EXOFASTv2; false turns it off (EXOFASTv2's /NOCLARET). "
+                    "Left unset, a band the tie cannot apply to (a filter "
+                    "with no Claret table, a light curve over several hosts "
+                    "with no star_ndx) is skipped with a warning; an "
+                    "explicit true raises instead. With it on, the star is "
+                    "held inside the tables' range (Teff 3500-10000 K, logg "
+                    "2.0-5.0, [Fe/H] -2.0 to +1.0), and a star that STARTS "
+                    "outside it raises: set false on its bands. Transit, RM "
+                    "and Doppler-tomography bands only."
                 ),
             },
             {
@@ -336,17 +341,20 @@ class Band(Component):
         return laws
 
     def _parse_star_constrains_ld(self):
-        """Per-band ``star_constrains_ld``, default False (opt-in).
+        """Per-band ``star_constrains_ld``: True, False, or None when unset.
 
-        A YAML boolean or absent; anything else raises.  ``bool()`` of the
+        Unset means ON wherever the tie can apply (EXOFASTv2's default,
+        ``_claret_tie_plan``); the distinction from an explicit True is what
+        happens where it cannot -- a skip with a warning, not a raise.  A
+        YAML boolean or absent; anything else raises.  ``bool()`` of the
         string "false" is True, so a quoted value would otherwise turn the
         tie ON -- and with it bounds on the star -- for a user who asked for
         the opposite.
         """
         out = []
         for i, c in enumerate(self.config):
-            v = c.get("star_constrains_ld", False)
-            if not isinstance(v, bool):
+            v = c.get("star_constrains_ld")
+            if v is not None and not isinstance(v, bool):
                 raise ValueError(
                     f"{self.prefix}.{self.names[i]}: star_constrains_ld must "
                     f"be true or false (a YAML boolean, unquoted), not {v!r}."
@@ -354,9 +362,83 @@ class Band(Component):
             out.append(v)
         return out
 
-    def _tied_bands(self):
-        """Indices of the bands whose limb darkening is tied to Claret."""
-        return [i for i, on in enumerate(self.star_constrains_ld) if on]
+    def _claret_tie_plan(self, system):
+        """``(tied, skipped)``: which bands carry the Claret tie -- a PURE
+        query, so ``Star.structure_consumers`` (which may run before Band's
+        stage 3) and Band itself cannot disagree.
+
+        ``tied`` is a list of ``(band index, Claret table name)``;
+        ``skipped`` a list of ``(band index, reason, level)`` for the UNSET
+        bands the default could not apply to, ``level`` being the logging
+        level ``_register_claret_tie`` reports it at.  An explicit ``true``
+        that cannot be honored RAISES here, naming the band: the user asked
+        for it, so dropping it would be a modeling choice the fit never
+        reports.  A star that STARTS outside the tables is not judged here
+        (it needs a probed start, ``_check_and_seed_claret_starts``) and
+        raises for an unset band too: the tables cannot describe that star.
+        """
+        tied, skipped = [], []
+        candidates = [
+            i
+            for i, on in enumerate(self.star_constrains_ld)
+            if on is not False
+        ]
+        if not candidates:
+            return tied, skipped
+        consumers = self.ld_consumers(system)
+        _stars, unnamed = self._ld_star_resolution(system)
+        unnamed_bands = {i for i, _labels in unnamed}
+
+        for i in candidates:
+            explicit = self.star_constrains_ld[i] is True
+            where = f"{self.prefix}.{self.names[i]}.star_constrains_ld"
+            kinds = {c.kind for c in consumers if c.band == i}
+            reason, level = None, logging.WARNING
+            if not kinds & set(self.CLARET_TIE_KINDS):
+                # Nothing that reads limb darkening the tie applies to: for
+                # an unset band that is simply not a case for it (INFO).
+                level = logging.INFO
+                if "mulens" in kinds:
+                    reason = (
+                        "the Claret limb-darkening tie is not implemented "
+                        "for microlensing light curves yet; this band is read "
+                        "only by a finite-source microlensing light curve"
+                    )
+                else:
+                    reason = (
+                        "nothing in this topology reads this band's limb "
+                        "darkening through a transit, a Rossiter-McLaughlin "
+                        "(rvinstrument rm:) block or a Doppler tomography "
+                        "dataset, so there is nothing to tie"
+                    )
+            elif i in unnamed_bands and self.star_ndx_declared[i] is None:
+                reason = (
+                    "this band's light curve covers planets around more than "
+                    "one star, so whose atmosphere its limb darkening "
+                    "describes is ambiguous -- and the tie would predict one "
+                    "host's coefficients from another's temperature (set "
+                    "star_ndx: on the band to name the host)"
+                )
+            else:
+                law = self.ld_laws[i]
+                name, reason = claret_band_lookup(self.filter_names[i])
+                if name is not None and name not in TABLE_BANDS[law]:
+                    reason = (
+                        f"there is no {law} Claret table for {name} (this "
+                        f"band's ld_law is {law}); {law} tables exist for "
+                        f"{', '.join(TABLE_BANDS[law])} (use ld_law: "
+                        f"quadratic to tie it)"
+                    )
+                if reason is None:
+                    tied.append((i, name))
+                    continue
+            if explicit:
+                raise ValueError(
+                    f"{where}: {reason}.  Set star_constrains_ld: false on "
+                    f"this band."
+                )
+            skipped.append((i, reason, level))
+        return tied, skipped
 
     def build_maps(self):
         self.star_map = np.array(self.star_indices, dtype=int)
@@ -652,13 +734,15 @@ class Band(Component):
     # The Claret limb-darkening tie (star_constrains_ld)
     #
     # components/sed/sed.md, "The Claret limb-darkening tie", has the
-    # rulings; docs/claret_ld_prior_plan.md the design.  In one paragraph:
-    # an opted-in band gets the derived offsets du1 = u1 - u1_Claret (and du2
-    # on a quadratic band), whose defaults.yaml Gaussian N(0, 0.05) is the
-    # tie -- the mulensinstrument.zeropoint pattern, so the width is an
-    # ordinary params-file field.  The table prediction is a context node
-    # interpolated at the band's star's (teff, logg, feh), counted ONCE per
-    # band (EXOFASTv2 counts it once per transit FILE).  The star is held
+    # rulings.  In one paragraph: a tied band (every band the tie can
+    # apply to, unless star_constrains_ld: false) gets the derived offsets
+    # du1 = u1 - u1_Claret (and du2 on a quadratic band), whose defaults.yaml
+    # Gaussian N(0, 0.05) is the tie -- the mulensinstrument.zeropoint
+    # pattern, so the width is an ordinary params-file field.  The table
+    # prediction is a context node interpolated at the band's star's (teff,
+    # logg, feh), counted ONCE per band: 0.05 is the tables' systematic
+    # floor, which more data cannot shrink (EXOFASTv2 counting it once per
+    # transit FILE is a bug, jdeast/EXOFASTv2#9).  The star is held
     # inside the tables' box: hard bounds on its sampled teff/feh, a soft
     # barrier on its derived logg -- the SED's and the MIST grid's ruling.
     # ------------------------------------------------------------------
@@ -671,63 +755,34 @@ class Band(Component):
         ``_resolve_ld_stars`` writes during Band's own stage 3 -- possibly
         after Star has asked.
         """
-        tied = self._tied_bands()
+        tied, _skipped = self._claret_tie_plan(system)
         if not tied:
             return {}
         stars, _unnamed = self._ld_star_resolution(system)
-        return {i: stars[i] for i in tied}
+        return {i: stars[i] for i, _name in tied}
 
     def _register_claret_tie(self, system):
-        """Stage 3: validate every tied band, load its table, declare the
-        offsets, bound the star, check and seed the start.
+        """Stage 3: settle which bands carry the tie (``_claret_tie_plan``),
+        report the unset bands it skipped, load each tied band's table,
+        declare the offsets, bound the star, check and seed the start.
 
         Called after ``_resolve_ld_stars``, so ``star_indices`` is final.
-        Every way an explicit ``star_constrains_ld: true`` cannot be honoured
-        RAISES, naming the band: the user asked for this, so dropping it
-        would be a modeling choice the fit never reports.
         """
-        consumers = self.ld_consumers(system)
-        _stars, unnamed = self._ld_star_resolution(system)
-        unnamed_bands = {i for i, _labels in unnamed}
-        tied = self._tied_bands()
-
-        for i in tied:
-            where = f"{self.prefix}.{self.names[i]}.star_constrains_ld"
-            kinds = {c.kind for c in consumers if c.band == i}
-            if not kinds & set(self.CLARET_TIE_KINDS):
-                if "mulens" in kinds:
-                    raise ValueError(
-                        f"{where}: the Claret limb-darkening tie is not "
-                        f"implemented for microlensing light curves yet; this "
-                        f"band is read only by a finite-source microlensing "
-                        f"light curve.  Remove star_constrains_ld from it."
-                    )
-                raise ValueError(
-                    f"{where}: nothing in this topology reads this band's "
-                    f"limb darkening through a transit, a Rossiter-McLaughlin "
-                    f"(rvinstrument rm:) block or a Doppler tomography "
-                    f"dataset, so there is nothing to tie.  Remove "
-                    f"star_constrains_ld from it."
-                )
-            if i in unnamed_bands and self.star_ndx_declared[i] is None:
-                raise ValueError(
-                    f"{where}: this band's light curve covers planets around "
-                    f"more than one star, so whose atmosphere its limb "
-                    f"darkening describes is ambiguous -- and the tie would "
-                    f"predict one host's coefficients from another's "
-                    f"temperature.  Set star_ndx: on the band to name the "
-                    f"host."
-                )
-            law = self.ld_laws[i]
-            name = claret_band_name(self.filter_names[i], where)
-            if name not in TABLE_BANDS[law]:
-                raise ValueError(
-                    f"{where}: there is no {law} Claret table for {name} "
-                    f"(this band's ld_law is {law}); {law} tables exist for "
-                    f"{', '.join(TABLE_BANDS[law])}.  Use ld_law: quadratic, "
-                    f"or set star_constrains_ld: false."
-                )
-            self._claret_tables[i] = load_table(name, law)
+        plan, skipped = self._claret_tie_plan(system)
+        for i, reason, level in skipped:
+            logger.log(
+                level,
+                f"[{self.prefix}] {self.names[i]}: the Claret limb-darkening "
+                f"tie (star_constrains_ld, on by default) is OFF for this "
+                f"band: {reason}.  Set star_constrains_ld: false on it to "
+                f"say so explicitly.",
+            )
+        tied = [i for i, _name in plan]
+        self._claret_tied = tied
+        if not tied:
+            return
+        for i, name in plan:
+            self._claret_tables[i] = load_table(name, self.ld_laws[i])
 
         self._declare_claret_offsets(tied)
         self._bound_tied_stars(sorted({self.star_indices[i] for i in tied}))
@@ -774,12 +829,15 @@ class Band(Component):
                 self.config_manager.add_override(
                     f"star.{s}.{ax}", lower=lo, upper=hi
                 )
+        # Per tied star (index keys): a wall on an UNtied star is not the
+        # tables running out (diagnostics.grid_bounded_paths).
         self._grid_bound_paths = {
-            f"star.{ax}": {
+            f"star.{s}.{ax}": {
                 "lower": BOX[ax][0],
                 "upper": BOX[ax][1],
                 "source": "Claret limb-darkening table",
             }
+            for s in stars
             for ax in AXIS_ORDER
         }
 
@@ -816,7 +874,14 @@ class Band(Component):
             for ax in AXIS_ORDER:
                 p = probed[f"star.{s}.{ax}"]
                 if p.value is None:
-                    continue
+                    # Every tied star's teff/logg/feh has a defaults.yaml
+                    # start, so the engine always answers; None is a
+                    # bookkeeping bug upstream, not a star to skip.
+                    raise RuntimeError(
+                        f"[{self.prefix}] probe_start returned no start for "
+                        f"star.{s}.{ax} (star {label}), a star a Claret-tied "
+                        f"band reads; its box check cannot be made."
+                    )
                 lo, hi = BOX[ax]
                 if lo <= p.value <= hi:
                     continue
@@ -835,8 +900,9 @@ class Band(Component):
                     continue
                 raise ValueError(
                     msg + "  The tables cannot predict this star's limb "
-                    "darkening.  Set star_constrains_ld: false on the band "
-                    "(EXOFASTv2's /NOCLARET), or correct the start."
+                    "darkening.  The tie is on by default; set "
+                    "star_constrains_ld: false on the bands that read this "
+                    "star (EXOFASTv2's /NOCLARET), or correct the start."
                 )
 
         for i in tied:
@@ -862,7 +928,7 @@ class Band(Component):
     def _claret_seed(self, i, coeffs):
         """The sampled limb-darkening coordinates of band ``i`` at the table
         coefficients ``coeffs``: Kipping (q1, q2) on a quadratic band, u1 on
-        a linear one -- projected inside [0, 1] when the table's centre lies
+        a linear one -- projected inside [0, 1] when the table's center lies
         outside the physical region (logged), since a start on an edge has
         no raw coordinate."""
         lo, hi = _SEED_EDGE, 1.0 - _SEED_EDGE
@@ -879,7 +945,7 @@ class Band(Component):
                 f"({', '.join(f'{c:.4f}' for c in coeffs)}) lies outside the "
                 f"physical limb-darkening region; its start is projected "
                 f"inside it ({', '.join(f'{k}={v:.4f}' for k, v in clipped.items())}). "
-                f"The prior is still centred on the table value."
+                f"The prior is still centered on the table value."
             )
         return clipped
 
@@ -887,7 +953,7 @@ class Band(Component):
         """Warn when the tie is the ONLY thing reading a star's Teff.
 
         Then the star's teff and feh are free parameters held by nothing but
-        their wide defaults and the table prior, whose centre follows them:
+        their wide defaults and the table prior, whose center follows them:
         the tie constrains the limb darkening little and the light curve's
         shape pulls the star's temperature instead.  A warning, not a raise
         -- the user asked for the tie, and a deliberately weak constraint is
@@ -1143,9 +1209,11 @@ class Band(Component):
         # {parameter label: {lower, upper, source}} of the bounds the Claret
         # tie injects on the star (grid_bound_paths); empty with no tie.
         self._grid_bound_paths = {}
-        # The tie's tables, {band index: ClaretTable} for the tied bands, and
-        # its per-model context-node cache (_claret_context).
+        # The tie's tables, {band index: ClaretTable} for the tied bands, the
+        # tied band indices themselves (_register_claret_tie), and its
+        # per-model context-node cache (_claret_context).
         self._claret_tables = {}
+        self._claret_tied = []
         self._claret_context_cache = None
 
         # Settle whose limb darkening each band carries before anything reads
@@ -1190,9 +1258,8 @@ class Band(Component):
                 f"rvinstrument 'rm:' block does)."
             )
 
-        # The Claret limb-darkening tie, on the bands that opted in.
-        if self._tied_bands():
-            self._register_claret_tie(system)
+        # The Claret limb-darkening tie: on by default wherever it applies.
+        self._register_claret_tie(system)
 
         # thermal/reflect/ellipsoidal (all ppm, opt-in per band via
         # fitthermal/fitreflect/fitellip) enter the manifest ONLY when some
@@ -1277,9 +1344,8 @@ class Band(Component):
     def build_likelihood(self, model, system):
         # The tie's Gaussian is the derived du1/du2's own (build_pymc);
         # what is declared here is how it reports itself.
-        tied = self._tied_bands()
-        if tied:
-            self._declare_claret_tie(system, tied)
+        if self._claret_tied:
+            self._declare_claret_tie(system, self._claret_tied)
 
     def compile_plotters(self, model, system):
         pass

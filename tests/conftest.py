@@ -261,9 +261,8 @@ def write_synthetic_claret_tables(root, bands=("TESS", "V", "I")):
     """Write Claret limb-darkening tables in the published layout and return
     the directory -- to be patched in as ``claret_tables.DEFAULT_TABLE_DIR``.
 
-    The real tables are git-ignored (built by
-    models/Claret/generate_claret_tables.py, later fetched from Zenodo), so
-    no test may depend on them.  These span exactly the box
+    The real tables are fetched from Zenodo on first use, so no unit test
+    may depend on them.  These span exactly the box
     (claret_tables.BOX) on the published axes, with the SYNTHETIC_CLARET
     coefficients; a quadratic table for every band and a linear one for
     every band that has one (claret_tables.TABLE_BANDS).
@@ -314,6 +313,14 @@ def synthetic_claret_tables(tmp_path, monkeypatch):
 
     root = write_synthetic_claret_tables(tmp_path / "claret")
     monkeypatch.setattr(ct, "DEFAULT_TABLE_DIR", root)
+    # Pin the synthetic files as if they were the published ones, so the
+    # readers go through the real ensure_tables md5 check, not around it.
+    pins = {
+        f.name: {"size": f.stat().st_size, "md5": ct._md5(f)}
+        for f in sorted(root.glob("*.parquet"))
+    }
+    monkeypatch.setattr(ct, "_TABLE_FILES", pins)
+    monkeypatch.setattr(ct, "_verified", set())
     return root
 
 

@@ -231,6 +231,217 @@ RECORDS: Mapping[str, ZenodoRecord] = MappingProxyType(
                 }
             ),
         ),
+        # The Claret limb-darkening tables (one parquet per band and law,
+        # built by models/Claret/generate_claret_tables.py). Consumer:
+        # models/Claret/claret_tables.py (fetched per table on first use, via
+        # the band's star_constrains_ld tie).
+        "claret_ld_tables": ZenodoRecord(
+            record_id=23384502,
+            concept_record_id=23384501,
+            title="Claret Limb-Darkening Tables for EXOZIPPy",
+            creators=("Yee, Samuel", "Eastman, Jason"),
+            citation_key="Yee:2026claret",
+            files=_pins(
+                {
+                    "MANIFEST.txt": (
+                        3676,
+                        "4fa87eff980d7e0f2147c18314d59286",
+                    ),
+                    "README.md": (
+                        8779,
+                        "b7ce5a9284abee6e42e601b9f56c60a2",
+                    ),
+                    "claret_ATLAS_L_vt2.B.linear.parquet": (
+                        21079,
+                        "7e67bd3642d81bf12e441d1522e2c0fc",
+                    ),
+                    "claret_ATLAS_L_vt2.B.quad.parquet": (
+                        38132,
+                        "3145a808c435def2261e2078de287404",
+                    ),
+                    "claret_ATLAS_L_vt2.CoRoT.linear.parquet": (
+                        21670,
+                        "32b61fb4157b3e3f23d61c4108301f01",
+                    ),
+                    "claret_ATLAS_L_vt2.CoRoT.quad.parquet": (
+                        35943,
+                        "004a00dd71de4a3916795e8447b20535",
+                    ),
+                    "claret_ATLAS_L_vt2.H.linear.parquet": (
+                        19677,
+                        "7ef59bce9433fe55e32a6acbe6deff08",
+                    ),
+                    "claret_ATLAS_L_vt2.H.quad.parquet": (
+                        30712,
+                        "511bc193f7b714577dcf740b93881747",
+                    ),
+                    "claret_ATLAS_L_vt2.I.linear.parquet": (
+                        20800,
+                        "0ffcbd7dd6d01a24dae7589932b27e4e",
+                    ),
+                    "claret_ATLAS_L_vt2.I.quad.parquet": (
+                        33312,
+                        "7d150fb1f68456acd5b0dc0666bf0ec9",
+                    ),
+                    "claret_ATLAS_L_vt2.J.linear.parquet": (
+                        19777,
+                        "6c36fd7349c5890b30b8df99779b922d",
+                    ),
+                    "claret_ATLAS_L_vt2.J.quad.parquet": (
+                        31353,
+                        "a057b3d4b5eeb2560b612ad5ea2b3edc",
+                    ),
+                    "claret_ATLAS_L_vt2.K.linear.parquet": (
+                        19164,
+                        "dd7750c63497c3afa3270f6153832ac5",
+                    ),
+                    "claret_ATLAS_L_vt2.K.quad.parquet": (
+                        30028,
+                        "eab895a702fcbcfc4c9eb134a8f12eab",
+                    ),
+                    "claret_ATLAS_L_vt2.Kepler.linear.parquet": (
+                        20936,
+                        "9fa4cfbd3909e9c4b9cbf9af4d32abb3",
+                    ),
+                    "claret_ATLAS_L_vt2.Kepler.quad.parquet": (
+                        35269,
+                        "cf6427a769393b6e83d2594d944e3f7c",
+                    ),
+                    "claret_ATLAS_L_vt2.R.linear.parquet": (
+                        20988,
+                        "8797c960acdc2571b73a10893ea3f1f8",
+                    ),
+                    "claret_ATLAS_L_vt2.R.quad.parquet": (
+                        34225,
+                        "c6ff95843b4898c0261f0e870943ad70",
+                    ),
+                    "claret_ATLAS_L_vt2.Sloang.linear.parquet": (
+                        21109,
+                        "883ad6143efa1afb917d44b52cd72e9a",
+                    ),
+                    "claret_ATLAS_L_vt2.Sloang.quad.parquet": (
+                        37219,
+                        "abf849749bdd118703584e0f4f835f92",
+                    ),
+                    "claret_ATLAS_L_vt2.Sloani.linear.parquet": (
+                        20860,
+                        "22af70136ab90c86e95f9f617b86591b",
+                    ),
+                    "claret_ATLAS_L_vt2.Sloani.quad.parquet": (
+                        34178,
+                        "57fdbe93a0979ae4cf3f02d4b781754c",
+                    ),
+                    "claret_ATLAS_L_vt2.Sloanr.linear.parquet": (
+                        21237,
+                        "1aa4d2f234a9dedb23377c2f0354022f",
+                    ),
+                    "claret_ATLAS_L_vt2.Sloanr.quad.parquet": (
+                        35290,
+                        "e553ebbdc6b2412750775442f02af43b",
+                    ),
+                    "claret_ATLAS_L_vt2.Sloanu.linear.parquet": (
+                        23297,
+                        "413be1e75b87a182dab7d3f0877c63f8",
+                    ),
+                    "claret_ATLAS_L_vt2.Sloanu.quad.parquet": (
+                        37401,
+                        "b7630f6f6ed1b0f2cc584b1d9a35080f",
+                    ),
+                    "claret_ATLAS_L_vt2.Sloanz.linear.parquet": (
+                        21441,
+                        "4083e8e6c32ac056096e21cb7785f941",
+                    ),
+                    "claret_ATLAS_L_vt2.Sloanz.quad.parquet": (
+                        33180,
+                        "92db2da28df2a266a133ef1a93875f4c",
+                    ),
+                    "claret_ATLAS_L_vt2.Spit36.linear.parquet": (
+                        18957,
+                        "7dd0b8fb3302f1f165d0ae4ce816d909",
+                    ),
+                    "claret_ATLAS_L_vt2.Spit36.quad.parquet": (
+                        28704,
+                        "0f7345d232615b8582cf841907d9a144",
+                    ),
+                    "claret_ATLAS_L_vt2.Spit45.linear.parquet": (
+                        18014,
+                        "76029a22d90c9103a5f7b250b05b6d91",
+                    ),
+                    "claret_ATLAS_L_vt2.Spit45.quad.parquet": (
+                        27137,
+                        "6190645e69249a2c7946103851592dda",
+                    ),
+                    "claret_ATLAS_L_vt2.Spit58.linear.parquet": (
+                        17111,
+                        "bf3102bea1a41416f1f4d6ec07025bd0",
+                    ),
+                    "claret_ATLAS_L_vt2.Spit58.quad.parquet": (
+                        26461,
+                        "58b7536177ca0600a9f0944bc300ff0c",
+                    ),
+                    "claret_ATLAS_L_vt2.Spit80.linear.parquet": (
+                        16919,
+                        "00e7b3747cc8b290a6031eda52fa1aa3",
+                    ),
+                    "claret_ATLAS_L_vt2.Spit80.quad.parquet": (
+                        25149,
+                        "df0715fd90b9626afed3f9f570212f3f",
+                    ),
+                    "claret_ATLAS_L_vt2.Stromb.linear.parquet": (
+                        21367,
+                        "b7b49cb501fce62fffd824c11d324295",
+                    ),
+                    "claret_ATLAS_L_vt2.Stromb.quad.parquet": (
+                        37714,
+                        "2efe58b0419f731ced3fa5b12e8a08c8",
+                    ),
+                    "claret_ATLAS_L_vt2.Stromu.linear.parquet": (
+                        21793,
+                        "848b92367dae30c46d90876914683bf4",
+                    ),
+                    "claret_ATLAS_L_vt2.Stromu.quad.parquet": (
+                        37329,
+                        "0db44414be73e83ee07daba60cdcf540",
+                    ),
+                    "claret_ATLAS_L_vt2.Stromv.linear.parquet": (
+                        21455,
+                        "db3e958e35e783667982ef14058fea4c",
+                    ),
+                    "claret_ATLAS_L_vt2.Stromv.quad.parquet": (
+                        39690,
+                        "abbaedde7b2910d6e185f600cc599fdc",
+                    ),
+                    "claret_ATLAS_L_vt2.Stromy.linear.parquet": (
+                        20790,
+                        "42333bf361c33c5ddec463909b2f5a43",
+                    ),
+                    "claret_ATLAS_L_vt2.Stromy.quad.parquet": (
+                        35789,
+                        "9d064f461c14ff4185ee7f9643bf60fa",
+                    ),
+                    "claret_ATLAS_L_vt2.TESS.quad.parquet": (
+                        34449,
+                        "360b9c3f80ccf40e149aaea96883b669",
+                    ),
+                    "claret_ATLAS_L_vt2.U.linear.parquet": (
+                        21924,
+                        "eac142cb90356d1447ccbde892a9e66c",
+                    ),
+                    "claret_ATLAS_L_vt2.U.quad.parquet": (
+                        38363,
+                        "23e5393095ca700fbdee1f650f137a2d",
+                    ),
+                    "claret_ATLAS_L_vt2.V.linear.parquet": (
+                        21067,
+                        "23be6b7f4c8eb076472c690f115693d8",
+                    ),
+                    "claret_ATLAS_L_vt2.V.quad.parquet": (
+                        37707,
+                        "16d552971099ca2ef27edb4f37d2024b",
+                    ),
+                }
+            ),
+        ),
     }
 )
 
