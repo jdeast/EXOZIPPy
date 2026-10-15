@@ -314,19 +314,43 @@ def _reindex_from_section(p, axis, transits, bands, rvs):
     Returns False when the prior must be DROPPED (its header names a
     dataset this conversion does not have), True otherwise, re-pointing
     ``p["index"]`` in place -- loudly -- where the header and the ``_N``
-    index disagree.  See ``_section_index``.
+    index disagree.  See ``_section_matches``.
+
+    A header can name more than one instance: two transit files from one
+    telescope, night and band (``n20190101.Sloanz.FLWO.a.dat`` and
+    ``...b.dat``) share a label.  The user cannot fix that short of
+    renaming their EXOFASTv2 data files, so it does not raise: the prior
+    keeps its own ``_N`` where that is one of the candidates and takes the
+    first candidate otherwise, a WARNING names every candidate, and
+    ``p["alternates"]`` lists the others so the params file can carry them
+    as commented-out entries to switch to.
     """
-    idx = _section_index(p, axis, transits, bands, rvs)
-    if idx is None:
+    p["alternates"] = []
+    matches = _section_matches(p, axis, transits, bands, rvs)
+    if matches is None:
         return True
     label = f"{p['name']}_{p['index']}"
-    if idx < 0:
+    if not matches:
         warn(
             f"prior '{label}' sits under '# {p['section']}', which names no "
             f"{axis} of this conversion (the priorfile was written for "
             "another set of data files); dropped"
         )
         return False
+    idx = p["index"] if p["index"] in matches else matches[0]
+    if len(matches) > 1:
+        names = _axis_instance_names(axis, transits, bands, rvs)
+        others = [i for i in matches if i != idx]
+        warn(
+            f"prior '{label}' sits under '# {p['section']}', which names "
+            f"{len(matches)} {axis}s of this conversion; assigned to "
+            f"{axis} {idx} ({names[idx]}); other candidate(s): "
+            + ", ".join(f"{axis} {i} ({names[i]})" for i in others)
+            + ". Each other candidate is written commented out after the "
+            "active entry in the params file; to switch, comment out the "
+            "active entry and uncomment the one you want"
+        )
+        p["alternates"] = others
     if idx != p["index"]:
         info(
             f"prior '{label}' re-pointed to {axis} {idx} by its "
@@ -335,6 +359,17 @@ def _reindex_from_section(p, axis, transits, bands, rvs):
         )
         p["index"] = idx
     return True
+
+
+def _axis_instance_names(axis, transits, bands, rvs):
+    """The instance names along a section-header axis, by index."""
+    if axis == "transit":
+        return [t["name"] for t in transits]
+    if axis == "band":
+        return list(bands)
+    if axis == "telescope":
+        return [r["name"] for r in rvs]
+    raise ValueError(f"no section-header axis named {axis!r}")
 
 
 def parse_priorfile(path):
@@ -354,7 +389,7 @@ def parse_priorfile(path):
     EXOFASTv2's own ``<prefix>priors.final`` (mkprior.pro) heads each
     instance's block with its label (``# TRES``, ``# i'``, ``# KeplerCam UT
     2022-04-28 (i')``), which names the instance independently of the
-    ``_N`` index -- see ``_section_index``.
+    ``_N`` index -- see ``_section_matches``.
 
     A VALUE that is another parameter's name LINKS the two (mkss.pro:
     ``prior.value = findvariable(ss, entries[1])``): ``dilute_1 dilute_0 0``
@@ -446,8 +481,8 @@ _EXOFAST_PRETTY_BANDS = {
 _TRANSIT_LABEL = re.compile(r"^(\S+) UT (\d{4})-(\d{2})-(\d{2}) \((.+)\)$")
 
 
-def _section_index(p, axis, transits, bands, rvs):
-    """The instance a prior's SECTION header names, or None if it names none.
+def _section_matches(p, axis, transits, bands, rvs):
+    """The instances a prior's SECTION header names; None if it names none.
 
     EXOFASTv2 numbers transits by sorted filename and bands by sorted name
     (see the module docstring), so a ``_N`` index is only meaningful for the
@@ -455,11 +490,13 @@ def _section_index(p, axis, transits, bands, rvs):
     DIFFERENT set of files -- common, since the driver keeps evolving after
     the run -- silently re-points every transit and band prior at the wrong
     instance.  Its section headers do not drift, so where one parses as a
-    label of this prior's axis it decides.  Returns -1 when the header IS
-    such a label but names no instance of this conversion (a dataset not in
-    this fit).  A transit header is matched on its band as well as its
-    telescope and night: two filters observed simultaneously by one
-    telescope (LCO-SAAO-1m0 in g' and i') share the other two.
+    label of this prior's axis it decides.  Returns the list of matching
+    instance indices, EMPTY when the header IS such a label but names no
+    instance of this conversion (a dataset not in this fit).  A transit
+    header is matched on its band as well as its telescope and night: two
+    filters observed simultaneously by one telescope (LCO-SAAO-1m0 in g'
+    and i') share the other two.  Two transit files that share all three
+    both match, and ``_reindex_from_section`` chooses between them.
     """
     sec = p.get("section")
     if not sec:
@@ -470,27 +507,26 @@ def _section_index(p, axis, transits, bands, rvs):
             return None
         tel, date = m.group(1), m.group(2) + m.group(3) + m.group(4)
         band = m.group(5)
-        for i, t in enumerate(transits):
-            if (
-                t.get("telescope") == tel
-                and t.get("date") == date
-                and band in (t["band"], _EXOFAST_PRETTY_BANDS.get(t["band"]))
-            ):
-                return i
-        return -1
+        return [
+            i
+            for i, t in enumerate(transits)
+            if t.get("telescope") == tel
+            and t.get("date") == date
+            and band in (t["band"], _EXOFAST_PRETTY_BANDS.get(t["band"]))
+        ]
     if axis == "band":
-        for i, b in enumerate(bands):
-            if sec in (b, _EXOFAST_PRETTY_BANDS.get(b)):
-                return i
+        hits = [
+            i
+            for i, b in enumerate(bands)
+            if sec in (b, _EXOFAST_PRETTY_BANDS.get(b))
+        ]
         known = set(_EXOFAST_PRETTY_BANDS.values()) | set(
             _EXOFAST_PRETTY_BANDS
         )
-        return -1 if sec in known else None
+        return hits if hits or sec in known else None
     if axis == "telescope":
-        for i, r in enumerate(rvs):
-            if sec == r["name"]:
-                return i
-        return None
+        hits = [i for i, r in enumerate(rvs) if sec == r["name"]]
+        return hits or None
     return None
 
 
@@ -714,18 +750,39 @@ def _fmt(v):
     return f'"{v}"'
 
 
-def _emit_params_yaml(entries, header_lines):
-    """entries: list of (path, {field: value}, comment_or_None)."""
+def _emit_params_yaml(entries, header_lines, alternates=None):
+    """entries: list of (path, {field: value}, comment_or_None).
+
+    alternates: {path: (section, [alternate path, ...])} -- a prior whose
+    section header named several instances (``_reindex_from_section``).
+    The same fields are written for each alternate path as COMMENTED-OUT
+    lines directly after the active entry, so the user switches by
+    swapping which one is commented.
+    """
+    alternates = alternates or {}
     out = [f"# {h}" for h in header_lines]
     out.append("")
     for path, fields, comment in entries:
         if comment:
             for c in comment.splitlines():
                 out.append(f"# {c}")
+        body = [
+            f"  {key}: {_fmt(fields[key])}"
+            for key in ("initval", "mu", "sigma", "lower", "upper")
+            if key in fields
+        ]
         out.append(f"{path}:")
-        for key in ("initval", "mu", "sigma", "lower", "upper"):
-            if key in fields:
-                out.append(f"  {key}: {_fmt(fields[key])}")
+        out.extend(body)
+        if path in alternates:
+            section, alt_paths = alternates[path]
+            out.append(
+                f"# AMBIGUOUS: '# {section}' also names the instance(s) "
+                "below; to use one instead, comment out the entry above "
+                "and uncomment it"
+            )
+            for alt in alt_paths:
+                out.append(f"# {alt}:")
+                out.extend(f"# {line}" for line in body)
         out.append("")
     return "\n".join(out) + "\n"
 
@@ -1203,6 +1260,7 @@ def convert(pro_path, outdir, base, priorfile_override=None):
         p for p in priors if p.get("link")
     ]
     repointed = {}  # (name, priorfile index) -> instance index
+    alternates = {}  # path -> (section, [path]) of an ambiguous header
 
     for p in priors:
         name = p["name"]
@@ -1304,6 +1362,11 @@ def convert(pro_path, outdir, base, priorfile_override=None):
 
         n = names[p["index"]]
         path = template.format(n=n)
+        if p["alternates"]:
+            alternates[path] = (
+                p["section"],
+                [template.format(n=names[i]) for i in p["alternates"]],
+            )
         if name == "dilute":
             t = transits[p["index"]]
             if not (t.get("fitdilute") or t.get("seddeblend")):
@@ -1500,7 +1563,7 @@ def convert(pro_path, outdir, base, priorfile_override=None):
             "link, width>0 -> Gaussian tie.",
         ]
         (outdir / f"{base}.params.yaml").write_text(
-            _emit_params_yaml(param_entries, header)
+            _emit_params_yaml(param_entries, header, alternates)
         )
 
     if sed_lines:

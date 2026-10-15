@@ -56,15 +56,16 @@ def _convert(
     priors=_PRIORS,
     priorfile_override=None,
     sed="J2M 10.0 0.02 0.02\n",
+    transit_files=(
+        "n20200101.TESS.TESS.dat",
+        "n20190101.Sloanz.FLWO.dat",
+        "n20190101.Sloang.FLWO.dat",
+    ),
 ):
     """Convert ``driver`` against _DRIVER's data files and ``priors``."""
     data = tmp_path / "data"
     data.mkdir()
-    for name in (
-        "n20200101.TESS.TESS.dat",
-        "n20190101.Sloanz.FLWO.dat",
-        "n20190101.Sloang.FLWO.dat",
-    ):
+    for name in transit_files:
         (data / name).write_text("2458484.5 1.0 0.001\n")
     (data / "HIRES.rv").write_text("2458484.5 0.0 5.0\n")
     (data / "star.sed").write_text(sed)
@@ -422,8 +423,99 @@ def test_a_transit_header_is_matched_on_its_band(tmp_path, monkeypatch):
     """
     priors = "teff 5700 100\n# FLWO UT 2019-01-01 (z')\nf0_0 1.003\n"
     _, params, _, _ = _convert(tmp_path, monkeypatch, _DRIVER, priors=priors)
-    assert params["transit.FLWO_UT20190101_Sloanz.baseline"]["initval"] == 1.003
+    assert (
+        params["transit.FLWO_UT20190101_Sloanz.baseline"]["initval"] == 1.003
+    )
     assert "transit.FLWO_UT20190101_Sloang.baseline" not in params
+
+
+def test_a_transit_header_whose_band_matches_no_file_drops_the_prior(
+    tmp_path, monkeypatch
+):
+    """
+    Given a prior under '# FLWO UT 2019-01-01 (r')' -- FLWO observed that
+      night, but in g' and z' only,
+    When it is converted,
+    Then the prior is dropped with a "names no transit" warning rather
+      than landing on either FLWO file of the night.
+    """
+    priors = "teff 5700 100\n# FLWO UT 2019-01-01 (r')\nf0_0 1.003\n"
+    _, params, warnings, _ = _convert(
+        tmp_path, monkeypatch, _DRIVER, priors=priors
+    )
+    assert not any(k.endswith(".baseline") for k in params)
+    assert any("names no transit" in w for w in warnings)
+
+
+# Two files from one telescope, night AND band: one header names both.
+_TWIN_FILES = (
+    "n20200101.TESS.TESS.dat",
+    "n20190101.Sloanz.FLWO.a.dat",
+    "n20190101.Sloanz.FLWO.b.dat",
+)
+_TWIN_A = "transit.FLWO_UT20190101_Sloanz.baseline"
+_TWIN_B = "transit.FLWO_UT20190101_Sloanz_1.baseline"
+
+
+def _ambiguity_warnings(warnings):
+    return [w for w in warnings if "names 2 transits" in w]
+
+
+def test_an_ambiguous_transit_header_keeps_a_matching_index(
+    tmp_path, monkeypatch
+):
+    """
+    Given two FLWO z' files from one night (transits 0 and 1) and a prior
+      f0_1 under their shared header '# FLWO UT 2019-01-01 (z')',
+    When it is converted,
+    Then the prior stays on transit 1 -- its own index is one of the
+      files the header names -- and a warning names both candidates.
+    """
+    priors = "teff 5700 100\n# FLWO UT 2019-01-01 (z')\nf0_1 1.003\n"
+    _, params, warnings, infos = _convert(
+        tmp_path,
+        monkeypatch,
+        _DRIVER,
+        priors=priors,
+        transit_files=_TWIN_FILES,
+    )
+    assert params[_TWIN_B]["initval"] == 1.003
+    assert _TWIN_A not in params
+    assert not any("re-pointed" in i for i in infos)
+    (w,) = _ambiguity_warnings(warnings)
+    assert "assigned to transit 1 (FLWO_UT20190101_Sloanz_1)" in w
+    assert "transit 0 (FLWO_UT20190101_Sloanz)" in w
+
+
+def test_an_ambiguous_transit_header_writes_the_other_candidate_commented(
+    tmp_path, monkeypatch
+):
+    """
+    Given two FLWO z' files from one night (transits 0 and 1) and a prior
+      f0_2 under their shared header -- an index that is neither,
+    When it is converted,
+    Then the prior lands on the first candidate (transit 0), a warning
+      names both, and the params file carries the same entry for transit 1
+      commented out directly after the active one.
+    """
+    priors = "teff 5700 100\n# FLWO UT 2019-01-01 (z')\nf0_2 1.003\n"
+    _, params, warnings, _ = _convert(
+        tmp_path,
+        monkeypatch,
+        _DRIVER,
+        priors=priors,
+        transit_files=_TWIN_FILES,
+    )
+    assert params[_TWIN_A]["initval"] == 1.003
+    assert _TWIN_B not in params
+    (w,) = _ambiguity_warnings(warnings)
+    assert "assigned to transit 0 (FLWO_UT20190101_Sloanz)" in w
+    assert "transit 1 (FLWO_UT20190101_Sloanz_1)" in w
+    text = (tmp_path / "out" / "t.params.yaml").read_text()
+    active = text.index(f"\n{_TWIN_A}:\n  initval: 1.003\n")
+    commented = text.index(f"\n# {_TWIN_B}:\n#   initval: 1.003\n")
+    assert active < commented
+    assert "\n\n" not in text[active + 1 : commented]
 
 
 def test_sed_star_columns_become_blends_and_contrasts(tmp_path, monkeypatch):
