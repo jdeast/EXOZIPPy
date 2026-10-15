@@ -204,3 +204,108 @@ Reading it:
   the lens mass instead (+3.4e5 nats over O0, still ~5.5e5 below master);
   with depth order (O0) it keeps the mass and t_E/pi_E_N and drops theta_E
   and pi_E_E.
+
+## After JDE's 2026-10-14 rulings
+
+Re-measured on master 4e123970 and on this PR's head, each with its own
+`examples/` (this PR changes `ob09020`, `ob09020_linear` and
+`KMT-2019-BLG-1806`'s params files; master had meanwhile changed `hat3`'s
+limb-darkening priors).  The three rulings:
+
+- **K and the planet mass are one quantity.**  The RV semi-amplitude
+  estimate stays a hint on `planet.K`, and the sampled mass coordinate
+  (`planet.mass`, or `planet.msini` under m sin i coordinates, now
+  DEFAULT_WEAK like the mass) is the lowest seed K reads, so it absorbs the
+  hint alone; a user value on any mass coordinate supersedes the hint
+  (solve diagnostics, kind "superseded").  Every one of the 22 shipped
+  configs with an RV planet starts at master's cos i, and so do the
+  `hierarchical_orbit` and `taylor_orbit` test systems, whose cos i / e
+  pins are gone again.
+- **ob09020**: Skowron's `t_E`, `theta_E` and `pi_E` are no longer pinned;
+  the lens primary's proper motion is seeded (README).
+- **KMT-2019-BLG-1806**: Zang+2023 Table 4 "Outer" u_0 > 0 replaces our
+  own static MMEXOFAST solution.  With it the settle was found to leave a
+  correction's component no check sees (the common motion of the lens and
+  source proper motions, +25,027 mas/yr); it now projects that out.
+
+### A. Start logp
+
+
+| config | scenario | master (4e123970) | this PR |
+|---|---|---|---|
+| astrometry_sim/simbinary | shipped | -247.616, m0 | -247.616, m0 |
+| DC2018_128/DC2018_128 | rank22 | -912820, m0, **neg1** | 3065.94 (+9.16e+05), m0 |
+| DC2018_128/DC2018_128 | shipped | 3373.88, m0 | 3374.96 (+1.08), m0 |
+| GaiaBH1/gaiabh1 | shipped | -280.186, m0 | -280.186, m0 |
+| galactic_model/gm | shipped | -1.14765, m0 | -1.14765, m0 |
+| gj1214/gj1214 | shipped | 108478, m0 | 108478, m0 |
+| hat3/hat3 | shipped | 272748, m2 | 272748, m2, d2, c2 |
+| hat3/hat3_mist | density | -1706.07, m1 | -790.418 (+916), m0 |
+| hat3/hat3_mist | shipped | -49.3124, m0 | -49.3124, m0 |
+| hat3/hat3_staronly | shipped | -63.6153, m0 | -63.6153, m0 |
+| hat3/hat3_transitonly | shipped | 257824, m0 | 258432 (+608), m0 |
+| hd80606/hd80606 | shipped | -132978, m0 | -132978, m0 |
+| hd80606/hd80606_rvonly | shipped | -125231, m0 | -125231, m0 |
+| hd80606/hd80606_transitonly | shipped | -7861.49, m0 | -7861.49, m0 |
+| HIP1349/hip1349 | shipped | -342.896, m0 | -342.896, m0 |
+| kb180087_obj3/kb180087_obj3 | shipped | 56830.6, m0 | 56832.2 (+1.61), m0 |
+| kelt17/kelt17 | shipped | -1458.24, m0 | -1458.24, m0 |
+| kelt17/kelt17_all | shipped | 8799.74, m1 | 8799.74, m1, d1 |
+| kelt17/kelt17_dt | shipped | 8649.97, m1 | 8649.97, m1, d1 |
+| kelt17/kelt17_fast | shipped | 16948, m0 | 16948, m0, d1 |
+| kelt17/kelt17_rm | shipped | -23777, m1 | -23777, m1, d1 |
+| kelt4/kelt4 | shipped | 83423.2, m0 | 83423.2, m0 |
+| kelt4/kelt4_rv+transit+sed | shipped | 84384.5, m0 | 84384.5, m0 |
+| kelt4/kelt4_rvonly | shipped | -601.08, m0 | -601.08, m0 |
+| KMT-2019-BLG-1806/KMT-2019-BLG-1806 | shipped | 45503.4, m1 | 45541.9 (+38.4), m0 |
+| KMT-2021-BLG-1122L/KMT-2021-BLG-1122L | shipped | -10807.8, m0 | -10807.9 (-0.074), m0 |
+| ob07224/ob07224 | shipped | 23136.8, m3 | 23145.4 (+8.61), m2, d2 |
+| ob08092/ob08092 | shipped | 6243.19, m1 | 6252.18 (+8.99), m0 |
+| ob09020/ob09020 | shipped | 36499.8, m5 | 36530.5 (+30.7), m0 |
+| ob09020/ob09020_linear | shipped | 33249.5, m5 | 39048.7 (+5.8e+03), m0 |
+| ob140939/ob140939 | shipped | -1549.53, m0 | -1233.58 (+316), m0 |
+| ob140939/ob140939_today | shipped | -2294.27, m0 | -1978.42 (+316), m0, d1 |
+| ob161003/ob161003 | shipped | 79403.2, m0 | 79400.8 (-2.39), m0 |
+| ob161045/ob161045 | shipped | 21063.3, m0 | 21063.4 (+0.0453), m0 |
+| ob170114/ob170114 | overdet | -74625.8, m3 | 5939.96 (+8.06e+04), m0, d1 |
+| ob170114/ob170114 | shipped | 5939.36, m0 | 5940.06 (+0.695), m0 |
+| ob170114/ob170114 | tp | 5939.08, m0 | 5939.78 (+0.695), m0 |
+| ogle0383/OGLE_0383LD | shipped | 26734.5, m1 | 26739.7 (+5.15), m0 |
+| theophylline/theophylline | shipped | -619.722, m0 | -619.722, m0 |
+| toi3919/toi3919 | shipped | 8217.45, m0 | 8217.45, m0, c2 |
+| wasp18/wasp18 | shipped | 83488.9, m0 | 83488.9, m0 |
+
+The ob09020 rows: master delivered none of its five pins (m5); the rule
+with them pinned started at -892,087 / +15,312.  KMT-2019-BLG-1806:
++45,420.9 with the MMEXOFAST set delivered exactly, +45,425.9 with its t_E
+unpinned, +45,541.9 with Zang's.  hat3: the two misses are master's new
+limb-darkening priors against the params file's own starts, on both
+sides; the d2/c2 are the same `star.mass`/`star.parallax` drops and
+`teffsed`/`radiussed` contradictions as in section A above.
+
+### B. Sensitivity to init_scale (rows that move)
+
+| config | trial 0 | trial 1 | trial 2 |
+|---|---|---|---|
+| KMT-2019-BLG-1806 | 3 (max 0.06 star.1.pm_ra) | 4 (max 0.079 star.1.pm_dec) | 4 (max 0.092 star.1.pm_dec) |
+| hat3_mist density | 0 | 1 (max 0.28 star.0.eep) | 1 (max 0.28 star.0.eep) |
+
+KMT-2019-BLG-1806's four DEFAULT_WEAK proper motions share their
+correction in proportion to their scales, as the rule says (at most 0.09
+relative, i.e. ~0.3 mas/yr); the kelt4_rvonly msini/e split of section B
+above is gone (the K hint's only absorber is now the mass).  Every other
+row moves nothing.
+
+### C. Ordering sweep (rows the rulings changed)
+
+| config | O0 | O1 | O2 | O3 | O4 | O5 | O6 | O7 | O8 |
+|---|---|---|---|---|---|---|---|---|---|
+| KMT-2019-BLG-1806 | 45541.9 m0 | -581 m0 | +4.8 m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 |
+| ob09020 | 36530.5 m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 |
+| ob09020_linear | 39048.7 m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 | = m0 |
+
+ob09020 keeps every pin under every ordering now (it no longer pins the
+contradictory values).  KMT-2019-BLG-1806 still prefers the current
+ladder except for O2 (+4.8 nats with both distances above the data
+hints), and swapping the lens and source distance levels costs 581.
+
