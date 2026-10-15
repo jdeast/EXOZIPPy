@@ -26,9 +26,12 @@ limb-darkening tie"). In short:
    (claret.pro, which does not ship) interpolated some nodes VizieR does not
    tabulate; those carry more than 4 decimals, which the report counts as
    evidence of where they came from. None of them lies inside the box.
-   Three defects in EXOFASTv2's copies were found this way and are declared
-   in EXOFAST_DEFECTS: its Sloan z' quadratic table has a and b swapped, and
-   its Stromgren b and v quadratic tables are copies of Johnson B and V.
+   EXOFASTv2's copies were built from the original April 2011 release, and
+   three of them still carry that release's errors, which the 17 Jun 2011
+   correction (the VizieR version read here) fixed: its Sloan z' quadratic
+   table has a and b swapped, and its Stromgren b and v quadratic tables are
+   copies of Johnson B and V (jdeast/EXOFASTv2#10). They are declared in
+   EXOFAST_DEFECTS.
 
 4. Trim every table to the box that is complete in all of them (see
    BOX), cutting along [Fe/H] the way the MIST grid is trimmed rather than
@@ -227,7 +230,9 @@ EXOFAST_SUFFIX = {"quadratic": "", "linear": ".linear"}
 
 @dataclass(frozen=True)
 class ExofastDefect:
-    """A known defect in one of EXOFASTv2's save files, ruled on here.
+    """A known difference between one of EXOFASTv2's save files and VizieR:
+    an error of the April 2011 release EXOFASTv2 was built from, which the
+    corrected release fixed (jdeast/EXOFASTv2#10).
 
     The comparison stays EXACT in the corrected form, so any further change
     in either copy still raises:
@@ -243,9 +248,11 @@ class ExofastDefect:
     swap: Dict[str, str] | None = None
 
 
-# Every defect below was found by this cross-check (all 24 quadratic and 23
-# linear EXOFASTv2 tables were compared; the other 44 agree exactly). The
-# tables published here use VizieR's rows in every case.
+# Every difference below was found by this cross-check (all 24 quadratic and
+# 23 linear EXOFASTv2 tables were compared; the other 44 agree exactly). Each
+# is an error of the original April 2011 release EXOFASTv2's tables were
+# built from, fixed in the 17 Jun 2011 correction this reads
+# (jdeast/EXOFASTv2#10). The tables published here use VizieR's rows.
 EXOFAST_DEFECTS = {
     # ATLAS.L.2.Sloanz.sav stores Claret's b as quadlda (its u1) and
     # Claret's a as quadldb (its u2), on all 7695 tabulated nodes. VizieR's
@@ -259,10 +266,8 @@ EXOFAST_DEFECTS = {
     ),
     # ATLAS.L.2.Stromb.sav and ATLAS.L.2.Stromv.sav are exact copies of the
     # Johnson-Cousins B and V tables (all 7695 nodes, both coefficients),
-    # not Stromgren b and v. These are the file names that collide with B
-    # and V on a case-insensitive file system, which quadld.pro's 2013 rename
-    # to Strom* was meant to fix. Its Stromgren u and y tables, and all four
-    # Stromgren linear tables, are correct.
+    # not Stromgren b and v. Its Stromgren u and y tables, and all four
+    # Stromgren linear tables, match VizieR.
     ("Stromb", "quadratic"): ExofastDefect(
         note="it is a copy of the Johnson B table", holds_band="B"
     ),
@@ -731,9 +736,10 @@ def write_readme(
     ]
     if EXOFAST_DEFECTS:
         lines += [
-            "Known defects in EXOFASTv2's copies. The comparison is still exact, in the",
-            "corrected pairing shown in the table's `pairing` column, and these tables",
-            "use VizieR's rows:",
+            "EXOFASTv2's copies were built from the original April 2011 release, and",
+            "these still carry that release's errors, which the corrected release fixed",
+            "(jdeast/EXOFASTv2#10). The comparison is still exact, in the pairing shown",
+            "in the table's `pairing` column, and these tables use VizieR's rows:",
             "",
         ]
         for (band, law), defect in EXOFAST_DEFECTS.items():
