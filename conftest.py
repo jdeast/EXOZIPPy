@@ -453,7 +453,8 @@ def _finish_run():
                     flush=True,
                 )
     finally:
-        run.close()
+        # remove_run_dir drops the liveness lock itself, after retiring the
+        # directory -- see its docstring.
         module.remove_run_dir(run)
 
 

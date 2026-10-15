@@ -355,7 +355,11 @@ def test_microlensing_contradiction_no_override(caplog):
     import logging
 
     cm = ConfigManager(user_params, system_config=system_config)
-    with caplog.at_level(logging.DEBUG):
+    # logger= is required: caplog.at_level(DEBUG) alone lowers only the root
+    # logger, and a test that ran earlier on the same worker can leave the
+    # "exozippy" logger at INFO (cli_summary._console_logging does), which
+    # drops this debug line before it reaches caplog.
+    with caplog.at_level(logging.DEBUG, logger="exozippy.config"):
         cm.finalize_user_params()
 
     # When all variables are PRECEDENCE_USER the solver skips and logs at debug level
