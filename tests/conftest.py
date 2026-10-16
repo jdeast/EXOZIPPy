@@ -340,34 +340,44 @@ def synthetic_claret_tables(tmp_path, monkeypatch):
 _DELTA_DIR_ENV = "EXOZIPPY_DELTA_DIR"
 
 
-def _prewarm_bc_tables(config):
-    """Put the published NextGen BC tables in the package tree, once.
+def _prewarm_zenodo_records(config):
+    """Put every registered Zenodo record's files in place, once.
 
-    They are not tracked (models/NextGen/bc_tables.py fetches them on first
-    use), and `_no_shared_download_cache` switches the machine cache off for
-    every TEST -- so without this a fresh worktree would download ~96 MB
-    from Zenodo inside the first SED test, and a Zenodo outage would fail
-    the pre-push suite (review 2.13.4).  Run here, before any test and with
-    the real environment, the fetch is served by the machine cache when it
-    is warm (hard links, no network) and is a stat per table when the tree
-    already has them (CI restores them with actions/cache).
+    None of them is tracked: the NextGen spectra and BC tables, the MIST EEP
+    grid and the Claret limb-darkening tables are all fetched by their
+    loaders on first use, and `_no_shared_download_cache` switches the
+    machine cache off for every TEST -- so without this a fresh worktree
+    would download them inside whichever test first reads one, under that
+    test's pytest-timeout, and a Zenodo outage would fail the pre-push suite
+    (review 2.13.4). On CI the 128 MB MIST grid did exactly that: a trickling
+    transfer inside an example test ran into the 600 s timeout on two runners
+    at once.
+
+    Run here, before any test and with the real environment (the machine
+    cache ON), every fetch is a hard link from the machine cache when it is
+    warm and a stat when the tree already has the file. The set of records
+    is zenodo_assets.RECORDS and each is fetched by its owner's own
+    fetch_all() (zenodo.fetch_every_record), so a new record is covered
+    without touching this file -- and a record with no owner RAISES here,
+    naming it.
 
     Controller only, before xdist spawns its workers, so they all find the
-    files in place.  A failure is REPORTED, not raised: the suite also holds
-    hundreds of tests that never read a table, and each SED test that does
-    re-raises the loader's own error (file, record, how to pre-fetch) when
-    it gets there.
+    files in place. A network failure is REPORTED, not raised: the suite also
+    holds hundreds of tests that never read these files, and each test that
+    does re-raises the loader's own error (file, record, how to pre-fetch)
+    when it gets there.
     """
-    from exozippy.models.NextGen import bc_tables
+    from exozippy.utilities import zenodo
 
     try:
-        bc_tables.fetch_all()
+        zenodo.fetch_every_record()
     except RuntimeError as e:
         import warnings
 
         warnings.warn(
-            f"The NextGen BC tables could not be put in place before the "
-            f"suite; every test that reads one will fail with the reason: {e}",
+            f"The Zenodo data files could not all be put in place before the "
+            f"suite; every test that reads a missing one will fail with the "
+            f"reason: {e}",
             stacklevel=1,
         )
 
@@ -381,7 +391,7 @@ def pytest_configure(config):
     """
     if hasattr(config, "workerinput"):
         return  # an xdist worker; the controller has already done this
-    _prewarm_bc_tables(config)
+    _prewarm_zenodo_records(config)
     directory = os.environ.get(_DELTA_DIR_ENV)
     if not directory:
         directory = os.path.join(

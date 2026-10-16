@@ -28,8 +28,15 @@ Publishing a new version of a record
        pytest tests/test_zenodo_assets.py -n0
 
 Every cache (the destination directory and the machine cache behind
-``fetch_assets``) is keyed by size and md5, so the old version's copies are
-simply never matched again.
+``fetch_assets``, which CI keeps between runs keyed on this file's hash) is
+keyed by size and md5, so the old version's copies are simply never matched
+again.
+
+Adding a new record
+-------------------
+Add its entry to RECORDS and name its loader module in OWNERS; that module
+must expose ``fetch_all()``. Nothing else is needed for the test suite's
+prewarm and CI's download cache to cover it.
 
 There is deliberately no logic here beyond lookup, and no fallback: an
 unknown record or file is a bookkeeping error in the caller and raises
@@ -442,6 +449,22 @@ RECORDS: Mapping[str, ZenodoRecord] = MappingProxyType(
                 }
             ),
         ),
+    }
+)
+
+# The module that OWNS each record: the one whose loader reads its files, and
+# whose module-level ``fetch_all()`` puts every file that loader reads into
+# its default destination. ``zenodo.fetch_every_record`` drives the pre-fetch
+# (the test suite's prewarm, CI's machine-cache step, an offline machine)
+# from this table, so the set of records fetched is the set registered here
+# by construction -- a record added to RECORDS without an owner raises,
+# naming it, before anything is downloaded.
+OWNERS: Mapping[str, str] = MappingProxyType(
+    {
+        "nextgen_spectra": "exozippy.components.sed.make_bc",
+        "nextgen_bc_tables": "exozippy.models.NextGen.bc_tables",
+        "mist_eep_grids": "exozippy.models.MIST.eep_grid",
+        "claret_ld_tables": "exozippy.models.Claret.claret_tables",
     }
 )
 

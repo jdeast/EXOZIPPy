@@ -953,3 +953,213 @@ def test_an_unknown_alpha_vvcrit_combination_raises(monkeypatch):
     # ACT / ASSERT
     with pytest.raises(KeyError, match="afe_p0_vvcrit0.0"):
         eep_grid.ensure_eep_grid(alpha=0.4, vvcrit=0.4)
+
+
+# --- the progress floor ------------------------------------------------------
+
+
+class _TrickleResponse:
+    """A response whose every read1 returns `block` while a fake clock moves.
+
+    Each read advances `clock` by `seconds_per_read`, so a test controls
+    the observed rate without sleeping.
+    """
+
+    def __init__(self, block, n_reads, clock, seconds_per_read):
+        self.block = block
+        self.left = n_reads
+        self.clock = clock
+        self.step = seconds_per_read
+
+    def read1(self, n):
+        if self.left == 0:
+            return b""
+        self.left -= 1
+        self.clock[0] += self.step
+        return self.block
+
+
+def test_a_trickling_download_is_abandoned_with_its_rate_named(
+    tmp_path, monkeypatch
+):
+    """
+    Given a peer that keeps every read alive but delivers 1 KiB per 10 s,
+    When the body is copied,
+    Then the attempt raises TimeoutError naming the rate once a progress
+    window has passed below the floor -- rather than running until an
+    outer timeout kills it.
+
+    Regression: the per-read socket timeout cannot see a trickle (each read
+    succeeds), and on CI the 128 MB MIST grid sat inside one read until
+    pytest-timeout killed the test at 600 s, on two runners at once.
+    """
+    # ARRANGE
+    clock = [0.0]
+    monkeypatch.setattr(zenodo.time, "monotonic", lambda: clock[0])
+    response = _TrickleResponse(b"x" * 1024, 10_000, clock, 10.0)
+
+    # ACT / ASSERT
+    with open(tmp_path / "f.part", "wb") as handle:
+        with pytest.raises(TimeoutError, match=r"KiB/s.*trickling"):
+            zenodo._copy_with_progress_floor(
+                response, handle, "https://example.invalid/f.csv"
+            )
+    elapsed = clock[0]
+    assert zenodo._PROGRESS_WINDOW <= elapsed <= zenodo._PROGRESS_WINDOW + 10
+
+
+def test_a_slow_but_steady_download_is_not_cut_off(tmp_path, monkeypatch):
+    """
+    Given a peer delivering just above the floor, for several windows,
+    When the body is copied,
+    Then it completes intact -- the floor is for trickles, not slow links.
+    """
+    # ARRANGE
+    clock = [0.0]
+    monkeypatch.setattr(zenodo.time, "monotonic", lambda: clock[0])
+    per_window = zenodo._PROGRESS_FLOOR + 1024
+    reads_per_window = 16
+    block = b"y" * (per_window // reads_per_window + 1)
+    response = _TrickleResponse(
+        block,
+        5 * reads_per_window,
+        clock,
+        zenodo._PROGRESS_WINDOW / reads_per_window,
+    )
+    dest = tmp_path / "f.part"
+
+    # ACT
+    with open(dest, "wb") as handle:
+        zenodo._copy_with_progress_floor(
+            response, handle, "https://example.invalid/f.csv"
+        )
+
+    # ASSERT
+    assert dest.stat().st_size == 5 * reads_per_window * len(block)
+
+
+def test_a_trickle_is_retried_by_the_ladder(tmp_path, monkeypatch):
+    """
+    Given a first attempt that trickles and a second that is healthy,
+    When fetch_assets runs,
+    Then the TimeoutError from the floor is retried like any transport
+    error and the file lands intact.
+    """
+    # ARRANGE
+    payload = b"hello"
+    monkeypatch.setattr(zenodo.time, "sleep", lambda *a: None)
+    calls = []
+
+    def trickles_once(url, dest):
+        calls.append(url)
+        if len(calls) == 1:
+            raise TimeoutError("delivered only 12 bytes; trickling")
+        Path(dest).write_bytes(payload)
+
+    monkeypatch.setattr(zenodo, "_urlretrieve", trickles_once)
+
+    # ACT
+    zenodo.fetch_assets(_fake_assets(payload), tmp_path)
+
+    # ASSERT
+    assert len(calls) == 2
+    assert (tmp_path / "f.csv").read_bytes() == payload
+
+
+# --- fetch_every_record: the registry-driven pre-fetch ------------------------
+
+
+def _fake_owners(monkeypatch, records, owners):
+    """Swap in a registry of `records` (names only) owned by `owners`."""
+    from exozippy.utilities import zenodo_assets
+
+    monkeypatch.setattr(
+        zenodo_assets, "RECORDS", {name: object() for name in records}
+    )
+    monkeypatch.setattr(zenodo_assets, "OWNERS", owners)
+
+
+def _fake_module(monkeypatch, name, fetch_all=None):
+    import sys
+    import types
+
+    module = types.ModuleType(name)
+    if fetch_all is not None:
+        module.fetch_all = fetch_all
+    monkeypatch.setitem(sys.modules, name, module)
+
+
+def test_every_record_is_fetched_by_its_owner(monkeypatch):
+    """
+    Given two registered records, each with an owner module,
+    When fetch_every_record runs,
+    Then each owner's fetch_all is called once.
+    """
+    # ARRANGE
+    called = []
+    _fake_module(monkeypatch, "fake_owner_a", lambda: called.append("a"))
+    _fake_module(monkeypatch, "fake_owner_b", lambda: called.append("b"))
+    _fake_owners(
+        monkeypatch,
+        ["rec_a", "rec_b"],
+        {"rec_a": "fake_owner_a", "rec_b": "fake_owner_b"},
+    )
+
+    # ACT
+    zenodo.fetch_every_record()
+
+    # ASSERT
+    assert sorted(called) == ["a", "b"]
+
+
+@pytest.mark.parametrize("has_owner", [False, True])
+def test_a_record_nothing_can_fetch_raises_naming_it_before_any_fetch(
+    monkeypatch, has_owner
+):
+    """
+    Given a registered record with no owner, or an owner with no fetch_all,
+    When fetch_every_record runs,
+    Then it raises LookupError naming the record, and no other record's
+    fetch has started -- a bookkeeping error, not a network one, so it is
+    never swallowed by the prewarm's report-don't-raise.
+    """
+    # ARRANGE
+    called = []
+    _fake_module(monkeypatch, "fake_owner_a", lambda: called.append("a"))
+    _fake_module(monkeypatch, "fake_owner_z")  # no fetch_all
+    owners = {"rec_a": "fake_owner_a"}
+    if has_owner:
+        owners["rec_z"] = "fake_owner_z"
+    _fake_owners(monkeypatch, ["rec_a", "rec_z"], owners)
+
+    # ACT / ASSERT
+    with pytest.raises(LookupError, match="rec_z"):
+        zenodo.fetch_every_record()
+    assert called == []
+
+
+def test_one_failing_record_does_not_stop_the_others(monkeypatch):
+    """
+    Given two records, the first of which cannot be fetched (a network
+    failure),
+    When fetch_every_record runs,
+    Then the second is still fetched and one RuntimeError names the failure.
+    """
+    # ARRANGE
+    called = []
+
+    def broken():
+        raise urllib.error.URLError("unreachable")
+
+    _fake_module(monkeypatch, "fake_owner_a", broken)
+    _fake_module(monkeypatch, "fake_owner_b", lambda: called.append("b"))
+    _fake_owners(
+        monkeypatch,
+        ["rec_a", "rec_b"],
+        {"rec_a": "fake_owner_a", "rec_b": "fake_owner_b"},
+    )
+
+    # ACT / ASSERT
+    with pytest.raises(RuntimeError, match=r"rec_a.*unreachable"):
+        zenodo.fetch_every_record()
+    assert called == ["b"]

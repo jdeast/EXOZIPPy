@@ -3,9 +3,12 @@
 Some of the data EXOZIPPy needs is far too large to ship in the package --
 the NextGen model spectra (~250 MB) that synthesize bolometric corrections
 for filters with no precomputed BC table, the precomputed NextGen BC tables
-themselves (~96 MB), and the MIST EEP track grid (~128 MB) the evolutionary
-model interpolates. All are git-ignored, fetched on first use, and cached in
-place.
+themselves (~96 MB), the MIST EEP track grid (~128 MB) the evolutionary
+model interpolates, and the Claret limb-darkening tables (~1.5 MB). All are
+git-ignored, fetched on first use, and cached in place.
+``fetch_every_record()`` fetches every registered record at once, each
+through its owning loader (``zenodo_assets.OWNERS``); the test suite's
+prewarm and CI's download cache are built on it (docs/testing.md).
 
 This module owns the mechanics; the pins (every record id, file, size and
 md5) live in ``utilities/zenodo_assets.py``, and each caller asks it for the
@@ -31,7 +34,11 @@ test that has nothing to do with downloading. So:
   then atomically renamed into place, so an interrupted fetch can never be
   mistaken for a cached one;
 * a corrupt cached file is re-fetched rather than raising, since the recovery
-  is unambiguous.
+  is unambiguous;
+* a transfer is bounded: every socket read times out after
+  ``_DOWNLOAD_TIMEOUT`` of silence, and one that trickles below
+  ``_PROGRESS_FLOOR`` per ``_PROGRESS_WINDOW`` is abandoned, so the retry
+  ladder gets a fresh connection instead of the caller hanging.
 
 Machine-level shared cache
 --------------------------
@@ -112,6 +119,19 @@ _RETRY_BACKOFF = 5  # seconds; doubles each attempt
 # ladder below never engages because no exception is ever raised.
 _DOWNLOAD_TIMEOUT = 60.0  # seconds of silence before the socket errors
 _DOWNLOAD_CHUNK = 1 << 20  # bytes per read
+
+# Progress floor, for the stall the socket timeout cannot see: a peer that
+# keeps the connection alive with a trickle never goes quiet for
+# _DOWNLOAD_TIMEOUT, so every read succeeds and the transfer runs for as long
+# as the caller lets it. Observed on CI: the 128 MB MIST grid was still inside
+# one read when pytest-timeout killed the test at 600 s, on two runners at
+# once, while the same test took 9 s locally. An attempt that moves fewer
+# than _PROGRESS_FLOOR bytes in any _PROGRESS_WINDOW is abandoned with a
+# TimeoutError naming the rate, and the retry ladder opens a fresh
+# connection. The floor (~34 KiB/s) is far below any link that could fetch
+# these files in useful time, so it never cuts off a slow-but-real download.
+_PROGRESS_WINDOW = 120.0  # seconds
+_PROGRESS_FLOOR = 4 << 20  # bytes per window
 
 # Shared-cache configuration.
 _CACHE_ENV = "EXOZIPPY_CACHE_DIR"
@@ -481,7 +501,41 @@ def _urlretrieve(url: str, dest: Path) -> None:
     """
     with urllib.request.urlopen(url, timeout=_DOWNLOAD_TIMEOUT) as response:
         with open(dest, "wb") as handle:
-            shutil.copyfileobj(response, handle, _DOWNLOAD_CHUNK)
+            _copy_with_progress_floor(response, handle, url)
+
+
+def _copy_with_progress_floor(response, handle, url: str) -> None:
+    """Copy `response` to `handle`, raising if progress falls below the floor.
+
+    The per-read socket timeout catches a peer that goes silent; this
+    catches one that trickles (see _PROGRESS_FLOOR). Measured per window
+    rather than as an average from the start, so a fast start cannot bank
+    credit for a later stall. Raises TimeoutError, which _download_verified
+    retries like any other transport failure.
+    """
+    # read1, not read: HTTPResponse.read(n) loops until it has n bytes, so
+    # at a trickle one call could outlast the whole window before the check
+    # below ever ran. read1 returns whatever one socket read delivers.
+    window_start = time.monotonic()
+    window_bytes = 0
+    while True:
+        block = response.read1(_DOWNLOAD_CHUNK)
+        if not block:
+            return
+        handle.write(block)
+        window_bytes += len(block)
+        elapsed = time.monotonic() - window_start
+        if elapsed >= _PROGRESS_WINDOW:
+            if window_bytes < _PROGRESS_FLOOR:
+                raise TimeoutError(
+                    f"{url} delivered only {window_bytes} bytes in the last "
+                    f"{elapsed:.0f} s ({window_bytes / elapsed / 1024:.1f} "
+                    f"KiB/s, floor {_PROGRESS_FLOOR / _PROGRESS_WINDOW / 1024:.0f} "
+                    f"KiB/s); the server is trickling. Abandoning this "
+                    f"attempt."
+                )
+            window_start = time.monotonic()
+            window_bytes = 0
 
 
 def _download_verified(
@@ -702,3 +756,69 @@ def fetch_assets(
                 part.unlink(missing_ok=True)
 
         logger.info(f"Saved {filename} to {dest}")
+
+
+def fetch_every_record() -> None:
+    """Put every registered Zenodo record's files in their destinations.
+
+    Driven by ``zenodo_assets.RECORDS``: each record is fetched by the
+    module ``zenodo_assets.OWNERS`` names for it, through that module's
+    own ``fetch_all()`` -- the loader's own destination and checks, never a
+    second list of paths here. Through the machine cache when it is on, so
+    a warm machine (or a CI job that restored it) does this with no network
+    access at all.
+
+    The test suite runs this once before any test (tests/conftest.py), and
+    CI runs it as its own step before the suite so the machine cache it
+    saves holds every record whichever tests run. It is also the one-call
+    pre-fetch for a machine that will run offline.
+
+    Raises
+    ------
+    LookupError
+        A registered record has no owner, or its owner has no
+        ``fetch_all()``. A bookkeeping error in zenodo_assets.py, raised
+        before anything is downloaded.
+    RuntimeError
+        One or more records could not be fetched (network, or a pin
+        mismatch); every record is still attempted, and the message names
+        each failure.
+    """
+    import importlib
+
+    from . import zenodo_assets
+
+    fetchers = []
+    for name in sorted(zenodo_assets.RECORDS):
+        if name not in zenodo_assets.OWNERS:
+            raise LookupError(
+                f"Zenodo record '{name}' has no owner in "
+                f"zenodo_assets.OWNERS, so nothing can pre-fetch it; name "
+                f"the module whose loader reads it."
+            )
+        owner = zenodo_assets.OWNERS[name]
+        fetch_all = getattr(importlib.import_module(owner), "fetch_all", None)
+        if not callable(fetch_all):
+            raise LookupError(
+                f"{owner}, the owner of Zenodo record '{name}', has no "
+                f"fetch_all(); add one that fetches every file its loader "
+                f"reads into the default destination."
+            )
+        fetchers.append((name, owner, fetch_all))
+    stale = sorted(set(zenodo_assets.OWNERS) - set(zenodo_assets.RECORDS))
+    if stale:
+        raise LookupError(
+            f"zenodo_assets.OWNERS names {stale}, which are not registered "
+            f"records."
+        )
+
+    failures = []
+    for name, owner, fetch_all in fetchers:
+        try:
+            fetch_all()
+        except (RuntimeError, urllib.error.URLError, OSError) as e:
+            failures.append(f"{name} ({owner}.fetch_all): {e}")
+    if failures:
+        raise RuntimeError(
+            "Could not fetch every Zenodo record:\n  " + "\n  ".join(failures)
+        )

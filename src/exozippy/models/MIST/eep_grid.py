@@ -93,6 +93,17 @@ def ensure_eep_grid(alpha: float = 0.0, vvcrit: float = 0.0) -> Path:
     return EEP_GRID_DIR / filename
 
 
+def fetch_all() -> list[Path]:
+    """Fetch every published EEP grid into EEP_GRID_DIR; return the paths.
+
+    The owner hook for the ``mist_eep_grids`` record
+    (``zenodo_assets.OWNERS``): the pre-fetch that ``zenodo
+    .fetch_every_record`` runs before the test suite and in CI.
+    """
+    fetch_assets(_EEP_GRID_ASSETS, EEP_GRID_DIR)
+    return [EEP_GRID_DIR / name for name in sorted(_EEP_GRID_ASSETS)]
+
+
 def load_eep_grid(
     alpha: float = 0.0,
     vvcrit: float = 0.0,

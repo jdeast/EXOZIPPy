@@ -412,18 +412,47 @@ pytest after the tier's `-m`, so an explicit `-m` of your own wins. Tests:
 registered -- an unregistered marker only warns, so a typo would silently move a
 slow test into the fast tier).
 
-## Model data from Zenodo: the spectra and the BC tables
+## Model data from Zenodo, and the CI download cache
 
-The NextGen spectra, the NextGen BC tables and the MIST EEP grid are not in the
-repository; each is fetched from Zenodo on first use (`utilities/zenodo.py`). The
-autouse `_no_shared_download_cache` fixture switches the machine cache
-(`~/.cache/exozippy/downloads`) off inside every test, so the tables a test reads must
-already be in the tree. `tests/conftest.py::_prewarm_bc_tables` puts every published BC
-table there once, before the suite (served by the machine cache when it is warm, so a
-fresh worktree costs hard links, not a download); a failure is reported as a warning and
-then re-raised by each SED test that needs a table. CI restores both the spectra and the
-tables with actions/cache (`.github/workflows/tests.yml`). Offline with a cold cache,
-run `exozippy-fetch-bc-tables` once with network first.
+Every record in `src/exozippy/utilities/zenodo_assets.py` -- the NextGen spectra, the
+NextGen BC tables, the MIST EEP grid and the Claret limb-darkening tables -- is not in
+the repository; each is fetched from Zenodo on first use by its loader, through
+`utilities/zenodo.py` and the machine cache behind it (`~/.cache/exozippy/downloads`,
+or `$EXOZIPPY_CACHE_DIR/downloads`). The autouse `_no_shared_download_cache` fixture
+switches that cache off inside every test, so the files a test reads must already be in
+the tree.
+
+`tests/conftest.py::_prewarm_zenodo_records` puts them there once, on the controller
+before the suite and with the cache ON, by calling `zenodo.fetch_every_record()`. That
+is driven by the registry: `zenodo_assets.OWNERS` names the loader module of every
+record, and each owner's own `fetch_all()` does the fetch into its own destination, so
+there is no second list of paths to keep in sync. A record with no owner (or an owner
+with no `fetch_all()`) raises, naming it, before anything downloads; a network failure
+is reported as a warning and then re-raised by each test that reads a missing file. A
+warm machine cache makes this hard links, not downloads, so a fresh worktree costs no
+network. Offline with a cold cache, run it once with network first:
+
+```bash
+python -c "from exozippy.utilities import zenodo; zenodo.fetch_every_record()"
+```
+
+**On CI** (`.github/workflows/tests.yml`) one `actions/cache` entry holds that machine
+cache directory (`EXOZIPPY_CACHE_DIR` is set in the job env), keyed on the OS and the
+hash of `zenodo_assets.py`, so a new pin is a new entry by construction; restore-keys
+fall back to the previous entry, so a pin change downloads only the changed record. The
+entries are named `<md5>-<filename>`, so a restore can never overwrite a tracked file,
+and the pip-installed jobs (site-packages destinations) use the same entry. Master
+saves it, right after a `scripts/zenodo_ci_cache.py fetch` step and before the suite --
+so a failing test cannot stop the save, and an incomplete fetch is never saved -- and
+pull requests restore it, because an entry saved on a PR branch is visible only to that
+PR. `scripts/zenodo_ci_cache.py prune` drops superseded files before the save.
+`intel-mac.yml` and the nightly `pytest-latest-deps` job restore the same entry.
+
+**Downloads are bounded.** Every socket read has a 60 s timeout, and a transfer that
+keeps the socket alive but moves fewer than 4 MiB in any 120 s window (~34 KiB/s) is
+abandoned with a `TimeoutError` naming the rate and retried on a fresh connection, up
+to four attempts -- so a trickling Zenodo transfer fails in minutes instead of running
+a test into its pytest-timeout. Tests: `tests/test_zenodo_fetch.py`.
 
 ## Suite runtime and the pytensor compile cache
 
