@@ -1392,14 +1392,14 @@ def test_tiny_init_scale_does_not_fix_a_parameter():
     assert p._whiten_state is not None
 
 
-def test_zero_init_scale_falls_back_instead_of_freezing():
+def test_a_zero_init_scale_on_a_sampled_element_raises():
     """
-    Given a sampled parameter handed a non-positive init_scale,
+    Given a sampled parameter handed a non-positive init_scale (and no
+      sigma),
     When the model is built,
-    Then it takes the same span-fraction fallback a missing scale takes --
-    a zero whitening scale is a degenerate raw direction, not a pin.
+    Then it raises: a zero whitening scale is not a scale, and the
+      span-fraction fallback it used to take is gone (review 3.14.22).
     """
-    # Arrange / Act
     with pm.Model():
         p = Parameter(
             label="zeroscale",
@@ -1408,11 +1408,8 @@ def test_zero_init_scale_falls_back_instead_of_freezing():
             lower=0.0,
             upper=1.0,
         )
-        p.build_pymc()
-
-    # Assert
-    assert p.is_sampled.tolist() == [True]
-    assert float(p._whiten_state["sv_scale_logits"].get_value()[0]) > 0.0
+        with pytest.raises(ValueError, match="zeroscale.*no init_scale"):
+            p.build_pymc()
 
 
 def test_to_latex_prior_def_is_per_element_for_a_mixed_vector():

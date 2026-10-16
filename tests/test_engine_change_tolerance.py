@@ -1,88 +1,29 @@
-"""When does the relaxation engine count a re-solved value as a change?
-(review 1.1.9)
+"""When does the relaxation engine count a value as having moved?
+(reviews 1.1.9, 3.14.22)
 
-Two rules, both pinned here at the level of `config._meaningful_change` /
-`config._value_moved`, with the end-to-end case (a tp-seeded orbit whose tc
-lies near the defaults.yaml backstop) in tests/test_tp_seed.py:
+The change test is `config.value_moved` (relaxation.value_moved): a move
+counts when it is at least CHANGE_TOL_IN_SCALES of the symbol's init_scale.
+Since review 3.14.22 every engine symbol has a scale -- DECLARED
+(defaults.yaml, a component scale hint, a user sigma) or PROPAGATED from the
+sampled parameters through the relations -- so the relative-to-magnitude
+fallback the 1.1.9 version kept for scale-less symbols is gone: a symbol
+with no scale RAISES, naming it.  The same tolerance decides whether a
+relation is violated (relaxation.Engine.violation) and so whether a user
+value on a derived element holds.
 
-  * a STRICTLY HIGHER-RANKED answer always replaces the value.  The old code
-    kept the old value and promoted ITS rank instead, so a stale backstop
-    was reported "solved";
-  * otherwise the move is measured in units of the symbol's init_scale, not
-    relative to its magnitude.  The relative test was ~2460 d wide on a BJD.
+The other half of 1.1.9 -- "a strictly higher-ranked answer always
+replaces the value" -- no longer needs a function: under the KS rule a
+higher precedence is never traded against a lower one at all (it fixes its
+seeds first, and the lower tier absorbs).  End to end: tests/test_tp_seed.py
+(a tp-seeded orbit whose tc lies near the defaults.yaml backstop, which the
+old relative test discarded).
 """
-
-import logging
 
 import pytest
 
-from exozippy.config import (
-    CHANGE_TOL_IN_SCALES,
-    PRECEDENCE_DEFAULT,
-    PRECEDENCE_DERIVED_MIXED,
-    _meaningful_change,
-    _value_moved,
-)
+from exozippy.config import CHANGE_TOL_IN_SCALES, value_moved
 
 BACKSTOP = 2460000.0  # orbit.tc's defaults.yaml initval, days
-
-
-def test_a_higher_ranked_value_1e4_relative_away_replaces_the_old_one():
-    """
-    Given a value held at PRECEDENCE_DEFAULT and a solver answer 1e-4
-      RELATIVE away at PRECEDENCE_DERIVED_MIXED (246 d on a BJD, inside the
-      old 1e-3 relative band),
-    When the engine asks whether to apply it,
-    Then it applies it -- and leaves the provenance to the caller, which
-      writes the new value WITH the new rank.  (The old function wrote the
-      new rank onto the OLD value and returned False.)
-    """
-    new = BACKSTOP * (1 + 1e-4)
-
-    assert _meaningful_change(
-        new,
-        BACKSTOP,
-        PRECEDENCE_DERIVED_MIXED,
-        PRECEDENCE_DEFAULT,
-        1e-3,
-        None,
-        "orbit.0.tc",
-    )
-
-
-def test_a_higher_rank_replaces_even_an_identical_value():
-    """
-    Given the same number arriving at a strictly higher rank,
-    When the engine asks,
-    Then it is applied: the caller then records the rank against a value
-      the solver actually produced, instead of the rank being promoted onto
-      a value the solver never touched.
-    """
-    assert _meaningful_change(
-        1.0, 1.0, PRECEDENCE_DERIVED_MIXED, PRECEDENCE_DEFAULT, 1e-3, 0.1, "x"
-    )
-
-
-def test_an_equal_rank_sub_tolerance_move_is_not_a_change():
-    """
-    Given an equal-rank re-solve that moved by less than the tolerance,
-    When the engine asks,
-    Then it is NOT a change -- the guard that stops two agreeing derivation
-      paths from running the loop to max_iter.
-    """
-    scale = 0.001
-    old = BACKSTOP
-    new = old + 0.5 * CHANGE_TOL_IN_SCALES * scale
-
-    assert not _meaningful_change(
-        new,
-        old,
-        PRECEDENCE_DERIVED_MIXED,
-        PRECEDENCE_DERIVED_MIXED,
-        1e-3,
-        scale,
-        "orbit.0.tc",
-    )
 
 
 @pytest.mark.parametrize("magnitude", [0.0, 1.0, 2.46e6])
@@ -92,38 +33,46 @@ def test_the_tolerance_is_in_init_scale_units_not_relative(magnitude):
     When a value moves by 0.5x and by 2x the tolerance in scale units,
     Then the first is not a change and the second is -- the same answer at
       every magnitude.  Relative to the magnitude, the 2x move on a BJD
-      (2e-6 d) would have been 1e-12 and "unchanged".
+      (2e-8 d) would have been 1e-14 and "unchanged".
     """
     scale = 0.001
     step = CHANGE_TOL_IN_SCALES * scale
 
-    assert not _value_moved(
-        magnitude + 0.5 * step, magnitude, scale, 1e-3, "p"
-    )
-    assert _value_moved(magnitude + 2.0 * step, magnitude, scale, 1e-3, "p")
+    assert not value_moved(magnitude + 0.5 * step, magnitude, scale, "p")
+    assert value_moved(magnitude + 2.0 * step, magnitude, scale, "p")
 
 
-def test_a_bjd_move_of_a_period_counts_even_though_it_is_tiny_relatively():
+def test_a_bjd_move_of_ten_days_counts_even_though_it_is_tiny_relatively():
     """
     Given tc (init_scale 0.001 d) moved by 10 d at 2.46e6 -- 4e-6 relative,
-      far inside the old 1e-3 band,
-    When an equal-rank re-solve asks,
+      far inside the old 1e-3 relative band (review 1.1.9),
+    When the move is tested,
     Then it is a change.
     """
-    assert _value_moved(BACKSTOP - 10.0, BACKSTOP, 0.001, 1e-3, "orbit.0.tc")
+    assert value_moved(BACKSTOP - 10.0, BACKSTOP, 0.001, "orbit.0.tc")
 
 
-def test_a_symbol_without_init_scale_falls_back_to_relative_and_says_so(
-    caplog,
-):
+def test_a_periodic_move_is_measured_the_short_way_round():
     """
-    Given a symbol the engine holds no init_scale for,
+    Given an angle with period 2 pi and init_scale 0.01 rad,
+    When it moves from just below 2 pi to just above 0 (a 1e-7 rad step
+      across the cut),
+    Then it has not moved -- the difference is wrapped first.
+    """
+    two_pi = 6.283185307179586
+    assert not value_moved(5e-8, two_pi - 5e-8, 0.01, "orbit.0.omega", two_pi)
+    assert value_moved(0.5, two_pi - 0.5, 0.01, "orbit.0.omega", two_pi)
+
+
+@pytest.mark.parametrize("scale", [None, 0.0, float("nan")])
+def test_a_symbol_without_a_scale_raises_naming_it(scale):
+    """
+    Given a symbol with no usable init_scale,
     When its change is tested,
-    Then the old relative test applies AND a DEBUG line names the symbol --
-      the fallback is visible, not silent.
+    Then it RAISES, naming the symbol and where to declare one -- the
+      relative fallback this used to apply (and log at DEBUG) is gone
+      (review 3.14.22: no constant backstop, no relative substitute).
     """
-    with caplog.at_level(logging.DEBUG, logger="exozippy.config"):
-        assert not _value_moved(1.0 + 1e-4, 1.0, None, 1e-3, "star.0.foo")
-        assert _value_moved(1.0 + 1e-2, 1.0, None, 1e-3, "star.0.foo")
-
-    assert "star.0.foo: no init_scale" in caplog.text
+    with pytest.raises(ValueError, match="star.0.foo") as err:
+        value_moved(1.0 + 1e-2, 1.0, scale, "star.0.foo")
+    assert "star/defaults.yaml" in str(err.value)

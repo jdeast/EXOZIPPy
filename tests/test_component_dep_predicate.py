@@ -56,6 +56,7 @@ class _Neighbour(_Stub):
         self.built.append(param_name)
         par = Parameter(
             label="neighbour.mass",
+            init_scale=1.0,
             initval=1.0,
             lower=0.0,
             upper=10.0,

@@ -86,7 +86,7 @@ def test_unrecognized_yaml_subkey_is_reported_by_the_auditor():
     system.star = star
 
     with pm.Model(name="model_test4") as model:
-        star.manifest = {"mass_test4": {}}
+        star.manifest = {"mass_test4": {"init_scale": 1.0}}
         star.add_parameter(model=model, param_name="mass_test4", system=None)
 
     # ACT
@@ -192,6 +192,7 @@ def test_user_boundary_overrides_tighten_but_never_expand_limits():
             s["type"]: s["internal"],
             s["other_type"]: s["other_val"],
             "initval": 1.0,
+            "init_scale": 0.1,
             "unit": "",
             "internal_unit": "",
         }

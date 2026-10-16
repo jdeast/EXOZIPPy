@@ -317,7 +317,7 @@ def test_an_engine_recorded_contradiction_names_the_other_pin(monkeypatch):
     The ledger kept mass = 0.5 untouched, so the value-only reading is
     "the derivation cannot preserve this" -- true of the mechanism, and it
     sends the user looking for a broken derivation instead of at the
-    second pin they wrote.  `_relax_equation` already recorded the
+    second pin they wrote.  The relaxation engine already recorded the
     relation and both paths; this asserts the report uses them.
     """
     # Arrange -- the miss, plus the diagnostic the engine files for it.

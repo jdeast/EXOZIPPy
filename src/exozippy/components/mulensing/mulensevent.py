@@ -563,6 +563,10 @@ class MulensEvent(Component):
     def register_parameters(self, system):
         """Stage 3: Declare the event-level manifest and push hints."""
         self._validate_bodies(system)
+        # The geocentric frame's constants for the relaxation engine's t_E
+        # and pi_E relations (review 8.6.23); MulensInstrument supplied them
+        # at stage 1 already where there are data.
+        self.register_frame_constants(system)
         # No seed push here: the one seeder (the peak finder) runs in
         # MulensInstrument.load_data at stage 1, where the seeds must land
         # for its flux bootstrap.  A stage-3 re-push of a seed file once
@@ -978,12 +982,12 @@ class MulensEvent(Component):
         longer has to invert
         ``mu_rel_mag**2 = mu_ra_rel**2 + mu_dec_rel**2`` -- one equation in
         two unknowns -- by choosing a point on a circle (issue #93).  Where
-        that disagrees with the seeded ``t_E``, Condition B rewrites the
-        lowest-rank symbol in ``t_E = theta_E / |mu_rel_geo|``, which is
-        ``theta_E`` via the lens mass (defaults.yaml, ``PRECEDENCE_DEFAULT``)
-        and distance (``PRECEDENCE_MULENS_LENS_DISTANCE``).  So ``t_E``
-        keeps its measured value, the proper motion keeps the prior's, and
-        the lens mass absorbs the difference -- which is the standard
+        that disagrees with the seeded ``t_E``, the relaxation engine's KS
+        rule (review 3.14.22) holds the data tier and lets a LOWER one
+        absorb ``t_E = theta_E / |mu_rel_geo|``: theta_E through the lens
+        distance (``PRECEDENCE_MULENS_LENS_DISTANCE``) or a defaults.yaml
+        lens mass.  So ``t_E`` keeps its measured value, the proper motion
+        keeps the prior's, and the lens absorbs the difference -- which is the standard
         microlensing chain (a measured t_E plus an assumed mu_rel implies
         theta_E, hence a mass) and is the quantity a light curve genuinely
         cannot pin down.
@@ -1035,6 +1039,26 @@ class MulensEvent(Component):
                 context_nodes["earth_vperp_e"] = pt.as_tensor_variable(vperp_e)
                 context_nodes["earth_vperp_n"] = pt.as_tensor_variable(vperp_n)
         return super().add_parameter(model, param_name, system, context_nodes)
+
+    def register_frame_constants(self, system):
+        """Hand the relaxation engine Earth's projected velocity at t0_par.
+
+        The engine's t_E and pi_E relations are GEOCENTRIC, as the model's
+        are (review 8.6.23): mu_geo = mu_helio - pi_rel * v_perp.  The two
+        components of v_perp are exact per-event numbers, not parameters,
+        so they reach the relations through ConfigManager.add_constant --
+        the same values ``add_parameter`` injects into the model graph.
+        Called by MulensInstrument.load_data as soon as t0_par is final
+        (before its stage-1 probe of the event geometry) and again at stage
+        3, which also covers a fit with no microlensing data (0, 0).
+        """
+        vperp_e, vperp_n = self._earth_vperp_en(system)
+        self.config_manager.add_constant(
+            "mulensevent.0.earth_vperp_e", vperp_e
+        )
+        self.config_manager.add_constant(
+            "mulensevent.0.earth_vperp_n", vperp_n
+        )
 
     def _earth_vperp_en(self, system):
         """Earth's velocity at t0_par projected on the sky, (East, North),

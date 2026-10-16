@@ -63,7 +63,12 @@ def test_two_sources_sample_one_mu_rel_and_the_lens_pm_follows(tmp_path):
             model, getattr(system.mulensevent, f"mu_{axis}_rel").value, point
         )
         assert mu.size == 1
-        assert np.isclose(pm_v[lens], pm_v[s1] + mu[0], rtol=0, atol=1e-12), (
+        # Rounding only: the start's |mu_rel| is ~1e2 mas/yr (a 2.5 d
+        # peak-finder t_E), so the round trip through the geocentric
+        # components (review 8.6.23) leaves ~1e-14 relative of THAT on each
+        # axis -- a few 1e-12 absolute on the small one, platform-dependent.
+        # A wrong identity is off by mas/yr.
+        assert np.isclose(pm_v[lens], pm_v[s1] + mu[0], rtol=0, atol=1e-9), (
             axis,
             pm_v,
             mu,

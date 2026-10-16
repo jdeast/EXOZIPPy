@@ -529,6 +529,19 @@ class SED(Component):
         # in future could foresee doing per facility error scaling
         self.manifest = {"errscale": None}
 
+        # The SED's own temperature is what its colors pin, independently
+        # of everything else, so a contradiction elsewhere must not move it
+        # first (review 3.14.22, Q3).  Its radius is NOT declared: the
+        # photometry measures R/d (F ~ R^2 T^4 / d^2), so the radius trades
+        # freely against the distance and is exactly the kind of quantity
+        # that should absorb a pinned stellar density before an
+        # evolutionary-model mass does.  Declared on the SED's OWN
+        # parameter: where the stellar tie makes teffsed derived, this
+        # promotes nothing and star.teff stays an ordinary seed.
+        cm = self.config_manager
+        for si in range(len(system.star.names)):
+            cm.declare_likelihood_backed(f"star.{si}.teffsed")
+
         # errscale multiplies the photometric errors, so it is identified
         # only by the residual scatter of rows the stars' own parameters
         # have not absorbed.  With fewer rows than free SED parameters there

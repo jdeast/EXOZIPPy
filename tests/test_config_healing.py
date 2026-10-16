@@ -38,6 +38,11 @@ def test_config_derives_te_from_physical_input():
     }
 
     cm = ConfigManager(user_params, system_config=system_config)
+    # No MulensEvent here to supply Earth's projected velocity for the
+    # geocentric t_E relation (review 8.6.23); with no data the two frames
+    # coincide, which is what MulensEvent itself registers then.
+    cm.add_constant("mulensevent.0.earth_vperp_e", 0.0)
+    cm.add_constant("mulensevent.0.earth_vperp_n", 0.0)
     cm.finalize_user_params()
 
     # Check if t_E was derived and injected.  t_E is event-level after the
@@ -197,39 +202,6 @@ def test_a_repeated_symbolic_inversion_is_memoized(monkeypatch):
     assert first_pass > 0, "expected the engine to invert something"
     assert second_pass == 0
     assert len(cm._symbolic_solve_cache) == first_pass
-
-
-def test_the_substituted_debug_line_is_not_built_below_debug(caplog):
-    """
-    Given a solve running at INFO,
-    When the engine reaches its "Substituted:" diagnostic,
-    Then the line is not emitted -- and at DEBUG it still is.
-
-    The block walks every free symbol and runs a re.sub per resolved one
-    before handing the result to logger.debug, which then discarded it at
-    every level anybody runs a fit at.  The assertion is on the record rather
-    than on the timing, since what the gate protects is the work behind it.
-    """
-    # ARRANGE
-    user_params = {
-        "star.A.mass": {"initval": 1.0},
-        "star.A.radius": {"initval": 1.0},
-    }
-    config = {"star": [{"name": "A"}]}
-
-    # ACT
-    with caplog.at_level(logging.INFO, logger="exozippy.config"):
-        ConfigManager(dict(user_params), config).finalize_user_params()
-    at_info = [r for r in caplog.records if "Substituted:" in r.getMessage()]
-
-    caplog.clear()
-    with caplog.at_level(logging.DEBUG, logger="exozippy.config"):
-        ConfigManager(dict(user_params), config).finalize_user_params()
-    at_debug = [r for r in caplog.records if "Substituted:" in r.getMessage()]
-
-    # ASSERT
-    assert at_info == []
-    assert at_debug
 
 
 def test_finalize_does_not_mutate_the_callers_user_params():

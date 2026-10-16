@@ -9,6 +9,7 @@ and a re-probe of the rescaled model must land at ~1.
 
 import numpy as np
 import pymc as pm
+import pytest
 
 from exozippy.components.parameter import Parameter
 from exozippy.whitening import (
@@ -21,7 +22,9 @@ from exozippy.whitening import (
 def _toy_model():
     """Two bounded params with very different posterior widths, plus an
     unbounded Gaussian-prior param (whose raw N(0,1) IS the prior)."""
-    p_tight = Parameter(label="toy.x", initval=2.0, lower=0.0, upper=10.0)
+    p_tight = Parameter(
+        label="toy.x", initval=2.0, lower=0.0, upper=10.0, init_scale=1.0
+    )
     p_wide = Parameter(
         label="toy.y", initval=-1.0, lower=-5.0, upper=5.0, init_scale=0.3
     )
@@ -235,23 +238,28 @@ def test_user_init_scale_is_stripped_with_warning(caplog):
     )
 
 
-def test_missing_init_scale_falls_back_to_span_fraction():
-    """Given a bounded sampled parameter with no init_scale anywhere,
+def test_a_sampled_parameter_with_no_init_scale_raises():
+    """Given a bounded SAMPLED parameter with no init_scale from any source,
     When the model is built,
-    Then the preliminary whitening scale is a fraction of the span (the
-    parameter builds and samples rather than erroring)."""
-    # Arrange / Act
+    Then it RAISES naming the parameter (review 3.14.22).  It used to take a
+    tenth of the bound span -- a constant nobody chose, and for an unbounded
+    element with no sigma the prior width itself."""
     p = Parameter(label="toy.a", initval=5.0, lower=0.0, upper=100.0)
-    with pm.Model() as model:
-        p.build_pymc()
+    with pm.Model():
+        with pytest.raises(ValueError, match="toy.a.*no init_scale"):
+            p.build_pymc()
 
-    # Assert: raw=0 -> initval, and one raw unit moves a span-fraction step
-    det = model.compile_fn(model.replace_rvs_by_values([model["toy.a"]]))
-    (a0,) = det(model.initial_point())
-    assert np.isclose(a0, 5.0)
-    (a1,) = det({"toy.a_raw": np.array([1.0])})
-    step = a1 - a0
-    assert 1.0 < step < 20.0  # ~ 0.1 * span, through the logit Jacobian
+
+def test_a_user_sigma_is_an_init_scale_source():
+    """Given the same parameter with a user sigma and no init_scale,
+    When the model is built,
+    Then it builds: a prior width is a declared scale."""
+    p = Parameter(
+        label="toy.a", initval=5.0, lower=0.0, upper=100.0, sigma=2.0
+    )
+    with pm.Model():
+        p.build_pymc()
+    assert p.is_sampled.tolist() == [True]
 
 
 # ---------------------------------------------------------------------------
@@ -319,7 +327,9 @@ def test_escalation_resolves_scales_beyond_probe_range():
     lands near 1 instead of the clipped floor.
     """
     # Arrange: true posterior sigma ~5e-15 of the ~unit preliminary scale
-    p = Parameter(label="toy.t", initval=2.0, lower=0.0, upper=10.0)
+    p = Parameter(
+        label="toy.t", initval=2.0, lower=0.0, upper=10.0, init_scale=1.0
+    )
     with pm.Model() as model:
         tv = p.build_pymc()
         pm.Potential("like", -0.5 * ((tv - 2.0) / 5.0e-15) ** 2)
@@ -463,7 +473,9 @@ def test_no_false_still_unresolved_warning_after_escalation(caplog):
     import logging
 
     # Arrange
-    p = Parameter(label="toy.t", initval=2.0, lower=0.0, upper=10.0)
+    p = Parameter(
+        label="toy.t", initval=2.0, lower=0.0, upper=10.0, init_scale=1.0
+    )
     with pm.Model() as model:
         tv = p.build_pymc()
         pm.Potential("like", -0.5 * ((tv - 2.0) / 5.0e-15) ** 2)
@@ -544,7 +556,9 @@ def _barrier_model():
     """x, y sampled; d = x + y derived with finite bounds -> soft barriers."""
     import pytensor.tensor as pt
 
-    p_x = Parameter(label="toy.x", initval=2.0, lower=0.0, upper=10.0)
+    p_x = Parameter(
+        label="toy.x", initval=2.0, lower=0.0, upper=10.0, init_scale=1.0
+    )
     p_y = Parameter(
         label="toy.y", initval=-1.0, lower=-5.0, upper=5.0, init_scale=0.3
     )
@@ -622,7 +636,9 @@ def test_user_bound_scale_pins_the_barrier():
 
     from exozippy.whitening import measure_barrier_scales
 
-    p_x = Parameter(label="toy.x", initval=2.0, lower=0.0, upper=10.0)
+    p_x = Parameter(
+        label="toy.x", initval=2.0, lower=0.0, upper=10.0, init_scale=1.0
+    )
     holder = {}
     p_d = Parameter(
         label="toy.d",

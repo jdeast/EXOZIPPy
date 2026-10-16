@@ -200,6 +200,9 @@ class System(Component):
         self.config_manager = ConfigManager(
             self.user_params, system_config=self.config
         )
+        # A stage 1-3 probe reads the roles of the components that have
+        # already declared a manifest (see _declared_engine_roles).
+        self.config_manager.role_provider = self._declared_engine_roles
         # The modeling-prose collector (outputs/prose.py): components add
         # sentences at the code sites that implement each feature (stages
         # 1-6), run.py adds the sampling/results sentences, and
@@ -381,6 +384,7 @@ class System(Component):
         # solved starts back into user_params, so it is not re-entrant
         # (ConfigManager.snapshot_solve_inputs).
         solve_inputs = self.config_manager.snapshot_solve_inputs()
+        self.config_manager.set_engine_roles(self._engine_roles())
         self.config_manager.finalize_user_params()
 
         # After stage 4: TOPOLOGY REVISIONS that depend on a solved start
@@ -402,6 +406,7 @@ class System(Component):
                 comp.register_parameters(self)
             self._validate_reported_not_consumed()
             self._adopt_element_owners()
+            self.config_manager.set_engine_roles(self._engine_roles())
             self.config_manager.finalize_user_params()
             for message, paths in self.topology_revisions:
                 logger.warning(
@@ -631,6 +636,121 @@ class System(Component):
                 if mask.any():
                     out[(comp.prefix, name)] = mask
         return out
+
+    def _declared_engine_roles(self):
+        """What a stage 1-3 ``probe_start`` can know about roles: the roles
+        of the elements of components that have DECLARED a manifest, as
+        ``(roles, registered_prefixes, unknown_paths)``.
+
+        Before stage 4 the relaxation engine runs without roles
+        (``ConfigManager.engine_roles`` is None) and guesses each path's role
+        from defaults.yaml.  The guess cannot tell a parameterization's
+        sampled coordinates from its alternatives: orbit.vcve, secosw and
+        sesinw all declare bounds and an init_scale, so all three read as
+        sampled, their defaults.yaml starts (0.99, 0.01, 0.01) disagree, and
+        the probe settles the disagreement by moving them -- e to 1.000006
+        on examples/kelt4 under the init_scale noise test, past the e < 1
+        no single bound expresses.  A component registered at stage 3 has
+        said which it samples; this hands that to the probe.
+
+        A registered DERIVED element whose expression reads a component
+        that has NOT registered yet is left UNKNOWN (the probe guesses it):
+        its role says where its value comes from, and the producer's role
+        is still a guess -- a fitmurel lens proper motion is derived from
+        the event's mu_rel, which the guess would read as derived too,
+        leaving the chain with no seed at all.
+        """
+        registered = {
+            comp.prefix
+            for comp in self.active_components.values()
+            if getattr(comp, "manifest", None)
+        }
+        roles = self._engine_roles()
+        prefixes = {c.prefix for c in self.active_components.values()}
+        unknown = set()
+        for comp in self.active_components.values():
+            if comp.prefix not in registered:
+                continue
+            for name, raw in comp.manifest.items():
+                entry = interpret_manifest_entry(raw)
+                if not entry.names_expression:
+                    continue
+                n_elements = comp.n_elements
+                if entry.shape:
+                    shape = entry.shape
+                    n_elements = int(
+                        np.prod(shape)
+                        if isinstance(shape, tuple)
+                        else int(shape)
+                    )
+                cfg = self.config_manager.resolve(
+                    comp.prefix, name, shape=(comp.n_elements,)
+                )
+                for sel in entry.expression_configs(
+                    cfg.get("expressions", {}),
+                    n_elements=n_elements,
+                    where=f"{comp.prefix}.{name}",
+                ):
+                    reads = {
+                        str(dep).split(".")[0]
+                        for dep in sel.config.get("deps", [])
+                        if "." in str(dep)
+                    }
+                    if not (reads & (prefixes - registered)):
+                        continue
+                    for i in range(n_elements):
+                        if sel.mask is None or bool(
+                            np.atleast_1d(sel.mask)[i]
+                        ):
+                            unknown.add(f"{comp.prefix}.{i}.{name}")
+        return roles, registered, unknown
+
+    def _engine_roles(self):
+        """``{internal_path: "sampled" | "derived" | "inactive"}`` for every
+        element a manifest declares -- what the relaxation engine needs to
+        tell a SEED from a value that cannot reach the model (review
+        3.14.22).  Valid after stage 3.
+
+        Derived means any expression element, reported ones included
+        (``derived_elements``); inactive the ``mask`` complement
+        (``active_elements``); everything else declared is sampled, a pinned
+        (``sigma: 0``) element included -- its start IS its model value.
+        Paths use the engine's spelling, ``comp.<i>.param``.
+        """
+        derived = self.derived_elements()
+        active = self.active_elements()
+        roles = {}
+        system_config = self.config_manager.system_config
+        for comp in self.active_components.values():
+            listed = isinstance(system_config.get(comp.prefix), list)
+            for name, raw in getattr(comp, "manifest", {}).items():
+                entry = interpret_manifest_entry(raw)
+                n_elements = comp.n_elements
+                if entry.shape:
+                    shape = entry.shape
+                    n_elements = int(
+                        np.prod(shape)
+                        if isinstance(shape, tuple)
+                        else int(shape)
+                    )
+                d_mask = derived.get((comp.prefix, name))
+                a_mask = active.get((comp.prefix, name))
+                for i in range(n_elements):
+                    if d_mask is not None and bool(np.atleast_1d(d_mask)[i]):
+                        role = "derived"
+                    elif a_mask is not None and not bool(
+                        np.atleast_1d(a_mask)[i]
+                    ):
+                        role = "inactive"
+                    else:
+                        role = "sampled"
+                    roles[f"{comp.prefix}.{i}.{name}"] = role
+                    if not listed and n_elements == 1:
+                        # A flat-dict component's hints are 2-part
+                        # (_assert_canonical_engine_paths), while its
+                        # relation symbols are instantiated at index 0.
+                        roles[f"{comp.prefix}.{name}"] = role
+        return roles
 
     def active_elements(self):
         """``(component_prefix, param_name) -> boolean mask`` of ACTIVE elements.

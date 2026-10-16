@@ -85,7 +85,7 @@ These hold everywhere and are repeated here because a reader who never follows a
 Each line names when to read the doc. Read it first; do not reconstruct its reasoning from the code.
 
 - Before adding a component, or touching the manifest vocabulary (`manifest.py`), the build graph (`graph.py`) or the physics registry (`physics_registry.py`), read `src/exozippy/components/components.md`.
-- Before changing how a config value, hint, override, bound or link is resolved -- or the three user-facing spellings of an element name -- read `src/exozippy/config.md`.
+- Before changing how a config value, hint, override, bound or link is resolved, how the relaxation engine (`src/exozippy/relaxation.py`) decides which start absorbs a discrepancy, a `defaults.yaml` `rank:` or the precedence ladder -- or the three user-facing spellings of an element name -- read `src/exozippy/config.md`.
 - Before changing how a `Parameter` becomes a PyMC node (units, start values, pins, per-element roles, how a component-added prior is reported), read `src/exozippy/components/parameter.md`.
 - Before touching `init_scale`, `bound_scale`, the startup probe or the persisted whitening state, read `src/exozippy/whitening.md`.
 - Before projecting anything onto the sky, or "fixing" a sign in orbit, astrometry or microlensing geometry, read `src/exozippy/skyframe.md`.

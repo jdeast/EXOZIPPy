@@ -81,7 +81,15 @@ def _build_parity(tmp_path_factory, light_travel_time=None):
         for entry in config["transit"]:
             entry["light_travel_time"] = light_travel_time
 
-    system = System(config, user_params=fix["user_params"])
+    # The fixture was generated with the planet at 1 jupiterMass, which
+    # then came from planet.mass's defaults.yaml value.  Under the KS
+    # relaxation rule (review 3.14.22) a default on the DERIVED mass seeds
+    # nothing -- the sampled log_q's own default would set the start, 0.05%
+    # away -- so the scenario's mass is stated here, giving the identical
+    # system the IDL reference integrated.
+    user_params = json.loads(json.dumps(fix["user_params"]))
+    user_params["planet.0.mass"] = {"initval": 1.0}
+    system = System(config, user_params=user_params)
     system.prepare()
     model = system.build_model()
     model_flux = np.asarray(

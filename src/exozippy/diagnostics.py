@@ -513,9 +513,10 @@ class ModelAuditor:
           ledger == user, built != user -> the DERIVATION cannot preserve
               it.  The pin was recorded at rank 100 and never touched; the
               graph still computes something else because the seed path
-              approximates the chain.  (Worked example: mulensevent.t_E is
-              seeded through mu_rel_HELIO while the graph evaluates
-              mu_rel_GEO -- symbolic_physics.py's SEEDING APPROXIMATION.)
+              approximates the chain.  (The historical worked example,
+              mulensevent.t_E seeded through mu_rel_HELIO while the graph
+              evaluated mu_rel_GEO, is gone: the engine's relations are
+              geocentric since review 8.6.23.)
 
           ledger != user -> OVERSPECIFIED; something had to give, and
               _last_solved_by names the equation that overwrote it.
@@ -533,26 +534,35 @@ class ModelAuditor:
         ledger = dict(getattr(cm, "_last_resolved", None) or {})
         solved_by = dict(getattr(cm, "_last_solved_by", None) or {})
 
-        # THE ENGINE ALREADY KNOWS about one whole class of these, and it
-        # names the relation: when every symbol of a violated relation is
-        # user-set, nothing can be adjusted and _relax_equation records an
-        # "over-constrained" diagnostic.  Without reading it, such a miss
-        # reports as "the derivation cannot preserve your value", which is
-        # true of the mechanism and useless as advice -- the fix is to drop
-        # one of two pins, and the user has to be told WHICH.  Measured on
-        # examples/galactic_model, which pinned mass = 0.5 and
-        # logmass = -0.3 (log10(0.5) = -0.30103) and started at 10**-0.3.
+        # THE ENGINE ALREADY KNOWS about two whole classes of these, and it
+        # names the relation (review 3.14.22, relaxation.py):
         #
-        # NOT every double pin lands here: the clause needs ALL symbols at
-        # user rank, so a relation carrying one derived symbol is invisible
-        # to it (KMT-2019-BLG-1806 pins both rho and the source radius, and
-        # rho's relation also holds theta_E at rank 60).  This reads what
-        # the engine recorded; it does not re-derive the class.
+        #   * a CONTRADICTION -- a relation the user's values on SAMPLED
+        #     elements break among themselves, which no start can satisfy;
+        #   * a DROPPED value -- a user value on a DERIVED element that could
+        #     not hold together with the values kept before it (shallowest
+        #     derivation first, then params-file order), and was re-derived
+        #     from them instead.
+        #
+        # Without reading them, such a miss reports as "the derivation cannot
+        # preserve your value", which is true of the mechanism and useless as
+        # advice -- the fix is to drop one of two pins, and the user has to be
+        # told WHICH.  Measured on examples/galactic_model, which pinned
+        # mass = 0.5 and logmass = -0.3 (log10(0.5) = -0.30103) and started at
+        # 10**-0.3: the derived mass is now the value dropped, by name.
+        # This reads what the engine recorded; it does not re-derive either
+        # class.
         contradiction_of = {}
+        dropped_of = {}
         for entry in getattr(cm, "diagnostics", None) or []:
+            paths = list(entry.get("param_paths") or [])
+            if entry.get("kind") == "dropped" and paths:
+                dropped_of.setdefault(
+                    str(paths[0]), (entry.get("message", ""), paths[1:])
+                )
+                continue
             if entry.get("severity") != "error":
                 continue
-            paths = list(entry.get("param_paths") or [])
             for p in paths:
                 contradiction_of.setdefault(
                     str(p), (entry.get("message", ""), paths)
@@ -589,8 +599,32 @@ class ModelAuditor:
                 held = ledger.get(idx_key)
                 who = who or solved_by.get(idx_key)
 
-            # An engine-recorded contradiction outranks every other reading:
-            # it already knows the relation and the other pin.
+            # An engine-recorded drop or contradiction outranks every other
+            # reading: it already knows the relation and the other pins.
+            drop = dropped_of.get(key) or dropped_of.get(idx_key)
+            if drop is not None:
+                message, kept = drop
+                findings.append(
+                    {
+                        "key": key,
+                        "requested": requested,
+                        "produced": got,
+                        "rel": rel,
+                        "reason": "dropped",
+                        "detail": (
+                            "your value could not hold together with "
+                            + (
+                                ", ".join(kept)
+                                if kept
+                                else "the sampled starts"
+                            )
+                            + ", kept before it, so it was dropped and the "
+                            "model starts at the value they imply; drop one "
+                            "of them to keep this one. " + message
+                        ),
+                    }
+                )
+                continue
             clash = contradiction_of.get(key) or contradiction_of.get(idx_key)
             if clash is not None:
                 message, paths = clash

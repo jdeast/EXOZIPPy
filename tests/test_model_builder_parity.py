@@ -638,7 +638,12 @@ def test_rm_appears_only_on_its_own_instrument_in_the_charts(rm_split):
     # (hundreds of m/s at mid-transit, phase 0.25), nowhere else.
     ref, rm = (t for t in phased["b"].traces if t.role == "model")
     diff = np.abs(rm.y - ref.y)
-    in_transit = np.abs(rm.x - 0.25) < 0.02
+    # Half the transit in phase is (1 + p) / (2 pi a/R*) ~ 0.027 at this
+    # start (Zhou+2016's 1.635 Msun host, a/R* ~ 6.4).  The window covers it
+    # with room; the host used to sit at 2.46 Msun, absorbing planet c's RV
+    # semi-amplitude estimate against its user mass (K and the planet mass
+    # are one quantity now).
+    in_transit = np.abs(rm.x - 0.25) < 0.04
     assert np.max(diff[in_transit]) > 100.0
     assert np.max(diff[~in_transit]) < 1e-6
 

@@ -539,10 +539,83 @@ class Planet(Component):
         ]
         if rv_comps and has_orbit:
             k_ms_guess = rv_comps[0].k_init / np.sqrt(self.n_elements)
-            for i in range(self.n_elements):
-                self.config_manager.add_hint(f"planet.{i}.K", k_ms_guess)
+            self._push_rv_mass_hints(system, k_ms_guess)
 
         self._resolve_chen(system)
+
+    # The keys that state a planet's mass, in any of its coordinates.  A user
+    # value on one of them and RVInstrument's semi-amplitude estimate are two
+    # values of ONE quantity (K is the mass at the orbit's P, e, sin i and
+    # the host mass), so the user's supersedes the estimate outright.
+    _MASS_KEYS = ("mass", "msini", "log_q", "K")
+
+    def _push_rv_mass_hints(self, system, k_ms):
+        """Seed each RV planet's mass from the RV semi-amplitude estimate
+        `k_ms` (m/s), at the data tier -- and only its mass.
+
+        K and the mass are one quantity as far as the starts go (JDE
+        2026-10-14).  The estimate is a hint on the DERIVED planet.K, and
+        under the precedence rule (review 3.14.22) the relaxation engine
+        reconciles it with the model by moving the LOWEST-tier seeds K
+        reads.  The sampled mass coordinate is DEFAULT_WEAK (planet.mass in
+        linear coordinates, planet.msini in m sin i ones, both in
+        defaults.yaml), below the orbit's cos i, e/omega and the host mass,
+        so the mass alone absorbs it, at the P, e, sin i and host mass of
+        the final solve -- the exact conversion, done by the engine, with no
+        stage-3 guess at those starts.  (Converting here instead was tried:
+        ``probe_start`` at stage 3 does not know which elements are derived,
+        and its e moved off the default -- to 1.000006 under the init_scale
+        noise test -- so the converted mass was not the stage-4 one.)
+
+        Where that ordering cannot hold the estimate is not pushed:
+
+        * a user value on any mass coordinate, or on K, SUPERSEDES it, as a
+          higher tier does on the same element -- otherwise the only seeds
+          left to move would be the orbit's angles (a face-on or eccentric
+          start: harmless for an RV fit, catastrophic for a transit fit,
+          which then no longer transits).  Recorded in the solve
+          diagnostics (``supersede_hint``).
+        * a log_q planet (``fitlogq: true`` beside RVs) samples a DEFAULT
+          log_q, which would share the correction with cos i; it is logged.
+
+        Only planets on Keplerian orbits carry the K relation.
+        """
+        cm = self.config_manager
+        orbit = system.active_components["orbit"]
+        up = cm.user_params
+        for i in range(self.n_elements):
+            o = int(self.orbit_map[i])
+            if orbit.types[o] != "keplerian":
+                continue
+            nm = self.names[i]
+            stated = [
+                key
+                for key in self._MASS_KEYS
+                for spelled in (
+                    f"{self.prefix}.{i}.{key}",
+                    f"{self.prefix}.{key}",
+                )
+                if user_entry(up, spelled) is not None
+            ]
+            if stated:
+                cm.supersede_hint(
+                    f"{self.prefix}.{i}.K",
+                    k_ms,
+                    f"{self.prefix}.{nm}.{stated[0]}",
+                    "the RV semi-amplitude estimate and the planet's mass "
+                    "are one quantity; the user's value is used",
+                )
+                continue
+            if self.mass_parameterizations[i] == "log_q":
+                logger.info(
+                    f"[{self.prefix}.{nm}] the RV semi-amplitude estimate "
+                    f"({k_ms:.4g} m/s) is not used as a start: this planet "
+                    "samples log_q, whose default start would share the "
+                    "correction with the orbit's cos i.  Seed planet.mass "
+                    "or planet.log_q to start from the RV amplitude."
+                )
+                continue
+            cm.add_hint(f"{self.prefix}.{i}.K", k_ms)
 
     def _resolve_mass_parameterization(self, system):
         """Pick the sampled mass coordinate (stage 3, topology known).

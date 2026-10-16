@@ -149,6 +149,11 @@ def test_microlensing_sympy_pytensor_equivalence():
 
     # 2. Pass topology and explicitly trigger the solver
     cm = ConfigManager(user_params, system_config=system_config)
+    # No MulensEvent here to supply Earth's projected velocity for the
+    # geocentric t_E relation (review 8.6.23); with no data the two frames
+    # coincide, which is what MulensEvent itself registers then.
+    cm.add_constant("mulensevent.0.earth_vperp_e", 0.0)
+    cm.add_constant("mulensevent.0.earth_vperp_n", 0.0)
     cm.finalize_user_params()
 
     # Verify the solver completed the chain.  Derived values are injected
@@ -333,13 +338,16 @@ def test_event_rate_prior_and_gradient_are_finite_for_negative_pi_rel():
         assert np.all(np.isfinite(out)), f"{label}: non-finite {out}"
 
 
-def test_microlensing_contradiction_no_override(caplog):
+def test_microlensing_contradiction_no_override():
     """
-    When all variables in a violated equation are PRECEDENCE_USER, the solver must
-    leave every user value untouched and log a debug message — not silently
-    sacrifice one value to satisfy the equation.
+    Given distances that imply pi_rel ~ 0.125 and a user pi_rel of 0.999,
+    When the starts are solved,
+    Then the distances (SAMPLED: produced exactly) are left untouched and the
+      pi_rel (DERIVED: kept only if it fits) is DROPPED and reported by name --
+      no user distance is silently sacrificed to satisfy the relation (review
+      3.14.22; the old engine's Contradiction Clause left all three and
+      logged it at DEBUG).
     """
-    # Given: distances that imply pi_rel ~ 0.125, but user also sets pi_rel = 0.999
     system_config = {
         "star": [{"name": "Lens"}, {"name": "Source"}],
         "mulensevent": [{}],
@@ -352,16 +360,12 @@ def test_microlensing_contradiction_no_override(caplog):
         "mulensevent.pi_rel": 0.999,
     }
 
-    import logging
-
     cm = ConfigManager(user_params, system_config=system_config)
-    # logger= is required: caplog.at_level(DEBUG) alone lowers only the root
-    # logger, and a test that ran earlier on the same worker can leave the
-    # "exozippy" logger at INFO (cli_summary._console_logging does), which
-    # drops this debug line before it reaches caplog.
-    with caplog.at_level(logging.DEBUG, logger="exozippy.config"):
-        cm.finalize_user_params()
+    cm.finalize_user_params()
 
-    # When all variables are PRECEDENCE_USER the solver skips and logs at debug level
-    assert "over-constrained" in caplog.text.lower()
-    assert "leaving all user values unchanged" in caplog.text.lower()
+    assert cm._last_resolved["star.0.distance"] == 4000.0
+    assert cm._last_resolved["star.1.distance"] == 8000.0
+    assert cm._last_resolved["mulensevent.0.pi_rel"] == pytest.approx(0.125)
+    (drop,) = [d for d in cm.diagnostics if d.get("kind") == "dropped"]
+    assert drop["param_paths"][0] == "mulensevent.0.pi_rel"
+    assert {"star.0.distance", "star.1.distance"} <= set(drop["param_paths"])

@@ -179,10 +179,10 @@ _LOGIT_SATURATION_LQ = 30.0
 # same clipped value) -- so when in doubt, larger is safe.
 _LOGIT_SATURATION_PENALTY_K = 0.5
 
-# Preliminary whitening scale for a sampled bounded element whose
-# defaults.yaml provides no init_scale: this fraction of (upper - lower).
-# It only needs to land within the whitening probe's dynamic range -- the
-# measured rescale (Parameter.set_whitening) replaces it before sampling.
+# Placeholder scale for a NON-sampled (fixed or inactive) bounded element
+# with no init_scale: this fraction of (upper - lower).  It never reaches the
+# posterior.  A SAMPLED element without an init_scale raises instead (review
+# 3.14.22); this used to be its fallback too.
 _PRELIM_SCALE_SPAN_FRACTION = 0.1
 
 # The labels ConfigManager.initval_source may return.  Both start-value
@@ -2131,27 +2131,6 @@ class Parameter:
                 self._no_start_value_message(sampled_no_value, lowers, uppers)
             )
 
-        # init_scale is a PRELIMINARY whitening scale only (the probe-based
-        # rescale in set_whitening supersedes it), so it is optional: a
-        # missing entry falls back to a fraction of the bound span, or sigma
-        # when unbounded.  Non-sampled elements just need a finite
-        # placeholder (a NaN scale would poison phys_linear via NaN * raw=0).
-        # A non-POSITIVE scale takes the same fallback: a whitening scale of
-        # zero is not a scale, it is a degenerate raw direction the sampler
-        # cannot move (and it used to be silently reinterpreted as a pin --
-        # the `scales <= 1e-12` clause deleted above).  The user's sigma is
-        # synced into init_scale, so `sigma: 0` lands here; that element is
-        # already is_fixed and the placeholder never reaches the posterior.
-        for i in np.where(~(np.isfinite(scales) & (scales > 0)))[0]:
-            if np.isfinite(lowers[i]) and np.isfinite(uppers[i]):
-                scales[i] = _PRELIM_SCALE_SPAN_FRACTION * (
-                    uppers[i] - lowers[i]
-                )
-            elif not np.isnan(sigmas[i]) and sigmas[i] > 0:
-                scales[i] = sigmas[i]
-            else:
-                scales[i] = 1.0
-
         # Warn if user tried to fix a derived parameter -- sigma=0 has no
         # effect on derived params.  The sentence lives in
         # `derived_constraint_message` because check_user_starts says the
@@ -2283,6 +2262,40 @@ class Parameter:
                     bound_violations, inits, lowers, uppers
                 )
             )
+
+        # init_scale is a PRELIMINARY whitening scale (the probe-based
+        # rescale in set_whitening supersedes it) -- but a SAMPLED element
+        # must have one from a real source: defaults.yaml, a component scale
+        # hint, the relaxation engine's propagated scale, or the user's sigma
+        # (review 3.14.22, JDE 2026-10-14).  An unbounded sampled element with
+        # no sigma takes init_scale as its PRIOR WIDTH, and the relaxation
+        # engine splits corrections in it, so a constant invented here would
+        # be a silent modeling choice.  It used to be exactly that: a tenth of
+        # the bound span, else 1.0.  Non-sampled elements just need a finite
+        # placeholder (a NaN scale would poison phys_linear via NaN * raw=0),
+        # and a non-POSITIVE scale on one -- `sigma: 0` is synced into
+        # init_scale -- is a placeholder too: that element is fixed and the
+        # number never reaches the posterior.
+        no_scale = ~(np.isfinite(scales) & (scales > 0))
+        for i in np.where(no_scale & is_sampled)[0]:
+            if not np.isnan(sigmas[i]) and sigmas[i] > 0:
+                scales[i] = sigmas[i]
+                continue
+            raise ValueError(
+                f"Parameter '{self.label}': element {int(i)} is SAMPLED but "
+                f"has no init_scale from any source -- no init_scale in its "
+                f"defaults.yaml, no component scale hint, no scale the "
+                f"relaxation engine propagated from the relations, and no "
+                f"user sigma.  Declare an init_scale for it in its "
+                f"defaults.yaml (review 3.14.22: no constant is substituted)."
+            )
+        for i in np.where(no_scale & ~is_sampled)[0]:
+            if np.isfinite(lowers[i]) and np.isfinite(uppers[i]):
+                scales[i] = _PRELIM_SCALE_SPAN_FRACTION * (
+                    uppers[i] - lowers[i]
+                )
+            else:
+                scales[i] = 1.0
 
         # 3. PER-ELEMENT PARAMETERIZATION
         # use_logit[i]: finite bounds → logit transform (hard bounds). A sigma

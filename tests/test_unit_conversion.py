@@ -228,6 +228,7 @@ def test_seed_ledger_reports_user_units_not_reciprocal_ones():
     # ARRANGE: an angle in the units every orbit uses -- deg out, rad in.
     p = Parameter(
         label="orbit.omega",
+        init_scale=36.0,
         unit="deg",
         internal_unit="rad",
         initval=90.0,

@@ -266,17 +266,11 @@ orbit:
     internal_unit: ""
     latex: "V_C/V_E"
     description: "$V_c/V_e$"
-    # rank 5 is load-bearing, exactly as planet.log_q's is: the relaxation
-    # engine's Condition B rewrites the LOWEST-ranked symbol of a violated
-    # relation, so V_c/V_e always absorbs its bridge to (ecc, omega) rather than
-    # pushing back on them.  Without it, this parameter's mere DEFAULT competed
-    # with the sqrt(e)cos/sin defaults and the engine rewrote ecc/omega to
-    # satisfy it -- which moved the start of four shipped examples (hat3, the
-    # three kelt4s) and, through K, their planet masses.  It is the right
-    # direction in both modes: in V_c/V_e mode a user seeds this parameter and
-    # PRECEDENCE_USER wins anyway, while a user who seeds ecc/omega instead wants
-    # exactly this back-solve.
-    rank: 5
+    # No `rank:` (review 3.14.22).  It carried rank 5 so the old engine's
+    # Condition B would rewrite V_c/V_e rather than ecc/omega; under the KS
+    # rule a defaults.yaml value seeds only a SAMPLED element, so where V_c/V_e
+    # is merely reported this initval is a fill that cannot move anything, and
+    # where it is sampled ecc/omega are derived and carry no seed to compete.
     expressions:
       from_ecc:
         func_name: "calc_vcve"
@@ -309,9 +303,6 @@ orbit:
     # makes the angle arctan2(y, x) uniform, so a user mu/sigma is refused.
     structural_prior: true
     structural_remedy: "constrain the physical angle orbit.<name>.omega instead"
-    # rank 5, for the reason vcve's rank says: the direction vector must
-    # absorb its bridge to omega, never rewrite it.
-    rank: 5
   yomega:
     lower: -100.0
     upper: 100.0
@@ -327,9 +318,6 @@ orbit:
     # makes the angle arctan2(y, x) uniform, so a user mu/sigma is refused.
     structural_prior: true
     structural_remedy: "constrain the physical angle orbit.<name>.omega instead"
-    # rank 5, for the reason vcve's rank says: the direction vector must
-    # absorb its bridge to omega, never rewrite it.
-    rank: 5
 
   # --- Derived/Switchboard Targets ---
   ecc:
@@ -456,12 +444,9 @@ orbit:
     internal_unit: ""
     latex: "\\rm chord"
     description: "Transit Chord"
-    # rank 5, exactly as vcve and planet.log_q carry it: the relaxation
-    # engine's Condition B rewrites the LOWEST-ranked symbol of a violated
-    # relation, so the chord always absorbs its bridge to cos i rather than
-    # pushing back on cos i, a/R*, the radius ratio or the eccentricity.
-    # Without it this parameter's mere DEFAULT would compete with theirs.
-    rank: 5
+    # No `rank:` (review 3.14.22): the chord is in no relation, only the
+    # one-way chord solver, whose answer (PRECEDENCE_DERIVED_MIXED) replaces
+    # this defaults.yaml start whenever cos i and the rest are known.
     expressions:
       from_cosi:
         func_name: "calc_chord_from_cosi"

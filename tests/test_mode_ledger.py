@@ -38,7 +38,9 @@ MODE_COLUMNS = (
 def _two_basin_model():
     """One bounded parameter with two Gaussian basins: x=2 (deep) and x=7
     (shallow, delta lp = 6)."""
-    p = Parameter(label="toy.x", initval=2.0, lower=0.0, upper=10.0)
+    p = Parameter(
+        label="toy.x", init_scale=1.0, initval=2.0, lower=0.0, upper=10.0
+    )
     with pm.Model() as model:
         xv = p.build_pymc()
         lp1 = -0.5 * ((xv - 2.0) / 0.05) ** 2
@@ -312,6 +314,7 @@ def test_unimodal_posterior_plus_ledger_writes_a_rectangular_csv(tmp_path):
     comp = _FakeComp()
     comp.x = Parameter(
         label="toy.x",
+        init_scale=1.0,
         latex="x",
         description="toy parameter",
         initval=2.0,
@@ -357,6 +360,7 @@ def test_ledger_refuses_to_append_to_a_plain_layout_csv(tmp_path):
     comp = _FakeComp()
     comp.x = Parameter(
         label="toy.x",
+        init_scale=1.0,
         latex="x",
         description="toy parameter",
         initval=2.0,

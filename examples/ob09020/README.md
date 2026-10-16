@@ -346,18 +346,59 @@ started at +19,024 while the params file carried a hand-constructed
 `pi_E_N` and a `bigomega` tuned against it, before both were replaced by
 the published values and the frame rule (2026-09-11).
 
-The published point-values do not close as a set, and the startup report
-now says so rather than leaving it to this README: five user values are
-reported as not reproduced, led by `pi_E_N` (set -0.022, starts -0.345)
-and `theta_E` (set 2.95, starts 3.343).  Both are the same tension --
-Table 1's printed |pi_E| = 0.151 against the theta_E/(kappa M) = 0.30
-implied by its own priors' masses, which are marginal medians rather than
-a joint point.  The per-instrument flux and
-`err_scale` seeds also still date from the static geometry (measured at
-the arXiv-seed start: a linear-flux refit leaves the caustic window
-healthy -- Bronberg chi2/N = 4.3 on raw errors -- while the OGLE wings sit
-at chi2/N ~ 375, carrying the mismatch between Skowron's with-priors
-trajectory values and the joint solution's unprinted ones).
-Resolving that tension is precisely what the acceptance FIT is for; the
-per-instrument chi2/N table and the flux/`err_scale` seeds are refreshed
-from its posterior.
+**Which values are seeded, and from where (2026-10-15).**  Every seed in
+both params files is a printed value or is derived from printed values,
+with the arithmetic written beside it: Skowron+2011 (S11) Table 1 for the
+light curve (the IOP version of record), S11 Sec. 3.2 for the assumed
+`D_S = 8 kpc` (`pi_s = 0.125 mas`, the `pi_S` of Yee+2016's Table 4),
+Yee+2016 (Y16) Table 7 for the masses, `D_L`, `q` and the orbit, and Gaia
+DR3 4050356367410860160 for the lens proper motion.  Y16 print no
+light-curve parameters for their joint fit.
+
+*The "2.4 Msun" was not a contradiction between the papers.*  S11's
+printed `pi_E = (-0.022, +0.149)` and `theta_E = 2.95 mas` imply
+`M = theta_E/(kappa |pi_E|) = 2.4 Msun` and, at `D_L = 747 pc`, a source at
+1.1 kpc -- against Y16's 1.132 Msun.  But S11's `pi_E,N` is the median of
+a posterior that S11 Sec. 5.1 splits into separate `pi_E,N > 0` and
+`pi_E,N < 0` regions along the `pi_E,N`-`gamma_perp` degeneracy (their
+Fig. 5): a median between two modes, near zero, is a point on neither,
+and it shrinks `|pi_E|` from ~0.36 to 0.15.  S11 Sec. 4.2.1 gives the
+most probable region as `pi_E,N ~ -0.2`, `pi_E,E ~ +0.2`.  `pi_E,E =
+0.149 +/- 0.010` is the well-measured component; Y16's masses and
+distances fix `|pi_E| = pi_rel/theta_E = 0.363`; together they give
+`pi_E = (-0.331, +0.149)`, in S11's negative-`pi_E,N` region.  Neither a
+frame (both papers' `pi_E` is geocentric, S11 Appendix A), an axis order
+(N, E in both) nor the edition explains the 2.4 Msun -- the statistic
+does.
+
+So `t_E`, `theta_E` and `pi_E` are not seeded (they are derived here
+from masses, distances and proper motions).  The relative proper motion
+is `mu_geo = theta_E / t_E` along that `pi_E`, with S11's printed `t_E`
+(76.9 d, with priors), converted to
+heliocentric with Earth's velocity at t0_par; the lens primary's proper
+motion is Gaia DR3's (the 0.5" blend the lens dominates), and the
+source's follows.  `orbit.L.bigomega` follows from that `phi_pi` by the
+frame rule (`phi_pi - alpha_0 - Omega_Y16` = 334.439 deg).  `rho` is S11's
+printed `t_* / t_E = 0.11595/76.9 = 0.0015078` in both files.  Both
+files take every S11 value from that ONE column, "parallax + full orbit
+(with priors)" (JDE 2026-10-15: never mix Table-1 columns): the linear
+file linearizes the full-orbit solution, whose `gamma_par`/`gamma_perp`
+are the orbit's instantaneous rates at t0_par (arXiv v1 values -- the
+IOP edition's are not available here).
+
+Start logp (2026-10-15; master started at +36,500 / +33,250 and delivered
+none of S11's printed `t_E`/`theta_E`/`pi_E`):
+
+| seeds | keplerian | linear |
+|---|---|---|
+| S11's `t_E`/`theta_E`/`pi_E` pinned (precedence rule) | -892,087 | +15,312 |
+| those unpinned, proper motions the engine used to derive (not published) | +36,530 | +39,049 |
+| **all seeds from the papers (shipped)** | **+33,540** | **+47,696** |
+| linear: S11's "2 par. motion" column instead (IOP `u_0`, `s_0`, `alpha_0`, rates) | | +44,853 |
+| as shipped, with S11's light-curve `q = 0.273` (keplerian) | +25,150 | |
+| `star.Source.distance` unpinned | -157,802 | -15,189 (2 par. motion seeds) |
+
+Unpinned, the source distance runs to its 100 kpc bound (the source
+radius and distance both absorb the pinned `rho`), so S11's 8 kpc stays.
+The per-instrument flux and `err_scale` seeds still date from the static
+geometry; the acceptance fit refreshes them.

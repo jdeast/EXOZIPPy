@@ -679,6 +679,7 @@ def test_symbolic_initval_counts_as_a_start_value():
         initval=pt.as_tensor_variable(np.float64(5778.0)),
         lower=1000.0,
         upper=10000.0,
+        init_scale=80.0,
         unit="",
         internal_unit="",
     )
@@ -1475,7 +1476,7 @@ def test_a_bad_entry_dies_at_construction_not_in_finalize():
 @pytest.mark.parametrize(
     "kwargs",
     [
-        {"lower": 0.0, "upper": 10.0},  # logit branch
+        {"lower": 0.0, "upper": 10.0, "init_scale": 1.0},  # logit branch
         # gaussian branch: unbounded, so the raw N(0,1) IS the prior
         {"mu": 1.0, "sigma": 2.0, "lower": -np.inf, "upper": np.inf},
     ],

@@ -1880,8 +1880,8 @@ def test_ob170114_bootstrap_sees_the_engine_derived_t_E_and_pi_E(monkeypatch):
     Given examples/ob170114, whose params file derives t_E and pi_E from the
       lens/source masses, distances and proper motions (and names neither),
     When it is prepared,
-    Then the flux bootstrap is handed the engine's start -- t_E = 123.2 d,
-      pi_E = (0.110, 0.178) -- where it used to see t_E = None and invent
+    Then the flux bootstrap is handed the engine's start -- t_E = 173.0 d,
+      pi_E = (0.167, 0.127) -- where it used to see t_E = None and invent
       30 d with no parallax (review 2.6.30(b)).
     """
     # Arrange
@@ -1913,9 +1913,13 @@ def test_ob170114_bootstrap_sees_the_engine_derived_t_E_and_pi_E(monkeypatch):
     # Assert
     assert seen, "the flux bootstrap never ran"
     geometry = seen[0]
-    assert geometry("mulensevent.0.t_E") == pytest.approx(123.19, rel=1e-3)
-    assert geometry("mulensevent.0.pi_E_N") == pytest.approx(0.1103, rel=1e-3)
-    assert geometry("mulensevent.0.pi_E_E") == pytest.approx(0.1785, rel=1e-3)
+    # The published Mroz+26 values, which the shipped leaf seeds reproduce
+    # in the GEOCENTRIC frame the model uses.  Before review 8.6.23 the
+    # engine's heliocentric relations handed the bootstrap 123.19 d and
+    # (0.110, 0.178) -- not the event the model is built at.
+    assert geometry("mulensevent.0.t_E") == pytest.approx(172.9987, rel=1e-3)
+    assert geometry("mulensevent.0.pi_E_N") == pytest.approx(0.1670, rel=1e-3)
+    assert geometry("mulensevent.0.pi_E_E") == pytest.approx(0.1270, rel=1e-3)
     # ...and it is the start stage 4 settles on, not a stage-1 artifact.
     cm = system.config_manager
     assert cm.resolve("mulensevent", "t_E", element=0)["initval"][

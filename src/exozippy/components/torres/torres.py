@@ -89,9 +89,11 @@ class Torres(StellarRelation, Component):
         """Stage 3: nothing to declare -- Torres adds only potentials.
 
         Its inputs (star.teff, star.logg, star.feh) are already on the star
-        component, and the relation has no latent of its own.
+        component, and the relation has no latent of its own.  The mass and
+        radius it predicts are declared likelihood-backed (review 3.14.22).
         """
         self.manifest = {}
+        self._declare_likelihood_backed()
 
     def _warn_outside_calibration(self, system):
         """Warn when a star starts below the relations' calibrated mass range.

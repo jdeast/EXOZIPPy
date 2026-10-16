@@ -4,7 +4,7 @@ run:
 prefix: "fitresults/KMT-2019-BLG-1806_nt8long"
 
 # Binary lens + finite source (2L1S).
-# MMEXOFAST solution: t_E~118d, s~1.05, q~2.5e-5, alpha~-57 deg
+# Zang+2023 Table 4 "Outer" (u_0 > 0): t_E~134d, s~1.03, q~1.9e-5, alpha~-57 deg
 #
 # system architecture:
 #   star.Lens        = primary lens host    (lens body 0)
@@ -21,7 +21,7 @@ planet:
 mulensevent:
   - finite_source: True
     #mag_method: "auto_vbbl"  # default for binary+finite_source
-    t0_par: 2458715.481879152         # approximate t_0 from MMEXOFAST
+    t0_par: 2458715.481879152         # ~t_0 (an earlier MMEXOFAST fit; Zang+2023: 8715.453)
     # As in KMT-2019-BLG-1806.yaml: the shared params file supplies the
     # whole published solution, so the peak finder does not run.
 

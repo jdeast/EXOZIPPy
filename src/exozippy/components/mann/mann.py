@@ -148,8 +148,11 @@ class Mann(StellarRelation, Component):
             )
 
     def register_parameters(self, system):
-        """Stage 3: declare the Ks latent and validate the requested pathways."""
+        """Stage 3: declare the Ks latent and validate the requested pathways,
+        and declare the mass and radius it predicts likelihood-backed
+        (review 3.14.22)."""
         self.manifest = {"ks_offset": None}
+        self._declare_likelihood_backed()
         if any(self.ks_synthetic):
             sed = getattr(system, "sed", None)
             if sed is None:

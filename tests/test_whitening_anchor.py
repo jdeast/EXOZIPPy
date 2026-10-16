@@ -518,7 +518,9 @@ def _mixed_model():
 
     from exozippy.components.parameter import Parameter
 
-    p_logit = Parameter(label="toy.x", initval=2.0, lower=0.0, upper=10.0)
+    p_logit = Parameter(
+        label="toy.x", init_scale=1.0, initval=2.0, lower=0.0, upper=10.0
+    )
     p_gauss = Parameter(
         label="toy.z",
         initval=0.5,  # start

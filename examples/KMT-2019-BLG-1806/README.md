@@ -4,6 +4,16 @@ Published as KMT-2019-BLG-1806/OGLE-2019-BLG-1250 in Zang et al. 2023, AJ
 165, 103 (arXiv:2210.12344). (This README used to cite arXiv:2102.01806,
 which is KMT-2019-BLG-0797.)
 
+Starting values: Zang et al. 2023 Table 4, the "Outer" u_0 > 0 solution
+(t_0, u_0, t_E, s, log q, alpha and pi_E; rho is only an upper limit there
+and is not seeded), with alpha converted as the params file shows.  Until
+2026-10-14 the event starts were MMEXOFAST solution 0 of
+`KMT-2019-BLG-1806-r_exozippy_init.json`, our own static (no-parallax) fit;
+its t_E = 118.2 d is a no-parallax timescale, and the physical model here
+always carries the parallax its masses and distances imply, so once the
+start delivered that t_E exactly the data preferred 122.3 d by 82.6 nats.
+Start logp: Zang +45,541.9, MMEXOFAST +45,420.9.
+
 Coordinates: RA, Dec (J2000) = 18:02:09.01, -29:24:53.60 (270.53754,
 -29.41489 deg; l, b = +1.41, -3.35), Zang et al. 2023 Table 1, matching
 the KMTNet and OGLE (OGLE-2019-BLG-1250) alert pages. (Until 2026-10 the

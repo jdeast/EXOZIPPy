@@ -88,7 +88,9 @@ def test_store_hot_chains_off_by_default():
 
 def _two_basin_model():
     """Bounded parameter with basins at x=2 (deep) and x=7 (6 nats down)."""
-    p = Parameter(label="toy.x", initval=2.0, lower=0.0, upper=10.0)
+    p = Parameter(
+        label="toy.x", init_scale=1.0, initval=2.0, lower=0.0, upper=10.0
+    )
     with pm.Model() as model:
         xv = p.build_pymc()
         lp1 = -0.5 * ((xv - 2.0) / 0.05) ** 2

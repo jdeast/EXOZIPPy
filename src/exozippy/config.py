@@ -3,6 +3,7 @@ import copy
 import dataclasses
 import importlib
 import logging
+import math
 import signal
 import time
 from pathlib import Path
@@ -850,84 +851,127 @@ def _declared_instance_names(system_config):
 
 
 # ---------------------------------------------------------------------------
-# THE PRECEDENCE SCALE (review 3.14.14).  One ordered scale that decides WHICH
-# statement about a parameter wins.  Renamed from RANK_* 2026-08-27 to say what
-# it decides: the old name read as a quality score, and it never was one -- a
-# defaults.yaml value is not "worse evidence" than a user value, it simply
-# loses to it.
+# THE PRECEDENCE LADDER (reviews 3.14.14, 3.14.22).  ONE ordered table that
+# decides WHICH statement about a parameter wins, and the ONE place its levels
+# are written: every PRECEDENCE_* constant below is read off it, and a
+# defaults.yaml `rank:` names one of its keys rather than restating a number.
+# That is what lets an ordering be permuted for a measurement by editing one
+# dict (JDE 2026-10-14: the ordering sweep of the KS engine).
 #
-# HISTORY, so the rejected design is not re-proposed: splitting provenance from
-# precedence into two fields was proposed and JDE rejected it, correctly.  The
-# scale was always a proxy for precedence; ONE ordered scale is right, and the
-# coarse ledger/GUI label stays DERIVED from it (see DATA_PRECEDENCES below)
-# rather than stored beside it.
+# What the levels MEAN under the KS rule (relaxation.py; config.md,
+# "Precedence, and which value absorbs a discrepancy"): only a SEED carries a
+# level -- a user value, a component hint, a defaults.yaml value on a sampled
+# element.  The engine fixes seeds tier by tier from the top down, and a lower
+# tier ABSORBS whatever a higher one implies; no level is ever traded against
+# another.  A value the engine DERIVES carries no level of its own: the
+# ledger still REPORTS one (the min of its inputs', capped at DERIVED_USER)
+# for the provenance labels, but nothing decides on it.  So DERIVED_USER and
+# DERIVED_MIXED are mostly REPORTING levels; a component may still push a
+# hint at either (a start it computed from user values, or from a mix), and
+# DERIVED_MIXED is the level a standalone solver's answer is held at.
 #
-# THE RENAME STOPS AT TWO CONTRACT BOUNDARIES, and it stops there on purpose --
-# neither was flagged by the review item, and "finishing" the rename across
-# either one is a breaking change:
+#   USER                 a params.yaml value.  On a SAMPLED element it is
+#                        produced exactly; on a derived one it is kept in
+#                        order, or dropped and reported.
+#   DERIVED_USER         reported for a value derived from user values only.
+#   DERIVED_DATA         a data-derived component hint (an RV offset, a
+#                        peak-finder seed, a galactic-model proper motion).
+#   LIKELIHOOD_BACKED    a parameter whose start a stiff likelihood makes
+#                        expensive to move: an evolutionary-model mass, age
+#                        and EEP, the SED's own temperature, a mass
+#                        or radius an empirical relation predicts.  The
+#                        component says so (ConfigManager.
+#                        declare_likelihood_backed) and that parameter's
+#                        start is promoted to this level for the DECISION
+#                        only -- it still reports the rank it came with (a
+#                        defaults.yaml value still reports "default").  JDE
+#                        2026-10-14 (R-b): "a data level provenance ...
+#                        between user and default".  The slot is the one just
+#                        below DERIVED_DATA rather than equal to it: a data
+#                        hint is a measurement of the value itself and should
+#                        still move a backed default, never the reverse, while
+#                        every lower seed -- the microlensing distance
+#                        guesses, the defaults -- absorbs a contradiction
+#                        before a backed parameter moves.  The exact slot is
+#                        one axis of the ordering sweep.
+#   DERIVED_MIXED        reported for a value derived from a mix; the level
+#                        of a standalone solver's answer and of the 3+-body
+#                        lens seeds.
+#   MULENS_SOURCE_DISTANCE / MULENS_LENS_DISTANCE
+#                        the microlensing distance guesses (~8 kpc bulge
+#                        source, ~4 kpc lens).  Both beat the 10 pc
+#                        defaults.yaml backstop and yield to the user; the
+#                        lens yields to the source, so a relative parallax
+#                        the other values imply is absorbed by the LENS
+#                        distance (review 4.6.2 named them).
+#   DEFAULT              a defaults.yaml value.
+#   DEFAULT_WEAK         a defaults.yaml value written `rank: DEFAULT_WEAK`
+#                        (the stellar proper motions, the planet mass and
+#                        radius): absorbs before any ordinary default.
 #
-#   1. `rank:` in defaults.yaml (12 sites across orbit/star/planet) is a
-#      USER-FACING CONFIG KEY.  A user may write it in their own params file,
-#      so its spelling is part of the published interface.
-#   2. `"rank"` as an exported dict key -- config.py's provenance dict,
-#      introspect.py's field allowlist, and `rank: number | null` in
-#      gui/frontend/src/api.ts -- is a WIRE-FORMAT contract with the frontend.
-#
-# So the CONSTANTS below are the named levels of the scale and are called
-# PRECEDENCE_*; the FIELD a user writes and the API exports keeps its
-# historical name, `rank`.  Local variables holding that field's value are
-# also still `rank`, deliberately: they carry the thing the key names.  If the
-# user-facing key is ever renamed, do it as its own change with a deprecation
-# path, not as a tidy-up.
+# THE RENAME STOPS AT TWO CONTRACT BOUNDARIES (review 3.14.14).  The FIELD
+# keeps its historical name `rank`: the defaults.yaml key (whose VALUE is a
+# ladder NAME since review 3.14.22, never a number), and the exported
+# provenance dict key that `introspect.py`'s field allowlist and the GUI read.
+# Local variables holding that field's value are still `rank`, deliberately.
 # ---------------------------------------------------------------------------
-PRECEDENCE_USER = 100  # Explicitly in params.yaml
-PRECEDENCE_DERIVED_USER = 80  # Solved using ONLY PRECEDENCE_USER inputs
-PRECEDENCE_DERIVED_DATA = 60  # auto-estimated (e.g., K-band mass, RV offsets)
-PRECEDENCE_DERIVED_MIXED = 40  # Solved using a mix of User and Defaults
-PRECEDENCE_DEFAULT = 20  # From defaults.yaml
+PRECEDENCE_LADDER = {
+    "USER": 100,
+    "DERIVED_USER": 80,
+    "DERIVED_DATA": 60,
+    "LIKELIHOOD_BACKED": 55,
+    "DERIVED_MIXED": 40,
+    "MULENS_SOURCE_DISTANCE": 30,
+    "MULENS_LENS_DISTANCE": 25,
+    "DEFAULT": 20,
+    "DEFAULT_WEAK": 10,
+}
 
-# WITHIN-CLASS TIE-BREAKERS.  These two levels sit BETWEEN default and
-# derived-mixed; both are microlensing distance seeds and both are load-bearing
-# at exactly these values.  They lived as bare 25 and 30 literals in lens.py,
-# documented only in config.md, so nothing tied the two sites that must stay
-# ORDERED to the sentence explaining why.  Name them; do NOT change them.
-#
-# This pair is the PATTERN TO COPY for any future tie-break inside one class of
-# the scale (review 3.14.14's part (c)): give each side its own named level,
-# put them adjacent, and write the cycle they break in the comment between
-# them -- never leave the ordering implicit in two numeric literals in
-# different files.
-#
-# A microlensing lens sits at a few kpc, not at the 10 pc defaults.yaml
-# backstop, so the seed must beat PRECEDENCE_DEFAULT.  It must also LOSE to the
-# source-distance seed, because that is what breaks the d_L <-> parallax
-# cycle: pi_rel drives d_L to PRECEDENCE_MULENS_SOURCE_DISTANCE through the engine's
-# Condition B, and the parallax is then corrected as the weaker symbol.  Both
-# yield to anything the user writes.
-PRECEDENCE_MULENS_LENS_DISTANCE = (
-    25  # ~4 kpc lens seed; beats the 10 pc default
-)
-PRECEDENCE_MULENS_SOURCE_DISTANCE = (
-    30  # ~8 kpc bulge source; beats the lens seed
-)
+PRECEDENCE_USER = PRECEDENCE_LADDER["USER"]
+PRECEDENCE_DERIVED_USER = PRECEDENCE_LADDER["DERIVED_USER"]
+PRECEDENCE_DERIVED_DATA = PRECEDENCE_LADDER["DERIVED_DATA"]
+PRECEDENCE_LIKELIHOOD_BACKED = PRECEDENCE_LADDER["LIKELIHOOD_BACKED"]
+PRECEDENCE_DERIVED_MIXED = PRECEDENCE_LADDER["DERIVED_MIXED"]
+PRECEDENCE_MULENS_SOURCE_DISTANCE = PRECEDENCE_LADDER["MULENS_SOURCE_DISTANCE"]
+PRECEDENCE_MULENS_LENS_DISTANCE = PRECEDENCE_LADDER["MULENS_LENS_DISTANCE"]
+PRECEDENCE_DEFAULT = PRECEDENCE_LADDER["DEFAULT"]
+PRECEDENCE_DEFAULT_WEAK = PRECEDENCE_LADDER["DEFAULT_WEAK"]
+
+
+def ladder_level(name, where):
+    """The level a defaults.yaml `rank:` names.
+
+    A NAME of the ladder, never a number: the bare 5s and 10s restated the
+    table in a second place, which is exactly what made an ordering
+    impossible to change in one edit (review 3.14.22)."""
+    if isinstance(name, str) and name in PRECEDENCE_LADDER:
+        return PRECEDENCE_LADDER[name]
+    raise ValueError(
+        f"{where}: rank {name!r} is not a level of the precedence ladder.  "
+        f"`rank:` takes one of its names ({', '.join(PRECEDENCE_LADDER)}); "
+        f"a bare number is no longer accepted (review 3.14.22)."
+    )
+
 
 # THE COARSE LABEL IS DERIVED FROM THE SCALE, never stored beside it -- that
 # is 3.14.14's part (b), and this set is the whole of the derivation.  Which
 # levels mean "a component pushed this from the DATA", as opposed to "the
 # relaxation engine derived it".
 #
-# A SET and not a numeric band, because the two data levels do not bracket a
-# contiguous range: PRECEDENCE_DERIVED_MIXED (40) sits between them and
-# PRECEDENCE_DERIVED_USER (80) sits above them, and both are solver levels.  So
-# the obvious `>= 30 and < PRECEDENCE_USER` test would report every
+# A SET and not a numeric band, because the data levels do not bracket a
+# contiguous range: PRECEDENCE_DERIVED_MIXED sits between them and
+# PRECEDENCE_DERIVED_USER above them, and both are solver levels.  So the
+# obvious `>= 30 and < PRECEDENCE_USER` test would report every
 # engine-derived value as data-derived -- the mirror of the bug this replaces,
 # which hardcoded the two literals and so reported any NEW data level as
 # "solved".  Add a level here in the same commit that introduces it.
-# PRECEDENCE_MULENS_LENS_DISTANCE (25) is deliberately NOT here: that is the
+# PRECEDENCE_LIKELIHOOD_BACKED is deliberately NOT here: it is a DECISION
+# level only and is never reported (a backed value reports the rank it came
+# with).  PRECEDENCE_MULENS_LENS_DISTANCE is not here either: that is the
 # historical behavior, and whether those seeds should report as data at all
-# was review item 3.14.6 -- CLOSED, premise wrong (see the 2026-08-24 review's
-# appendix A): those four sites are computed exclusively from user_params
-# entries, so there was never a provenance lie to remove.
+# was review item 3.14.6 -- CLOSED, premise wrong (see the 2026-08-24
+# review's appendix A): those sites are computed exclusively from
+# user_params entries, so there was never a provenance lie to remove.
 DATA_PRECEDENCES = frozenset(
     {PRECEDENCE_DERIVED_DATA, PRECEDENCE_MULENS_SOURCE_DISTANCE}
 )
@@ -971,121 +1015,36 @@ class ProbedStart:
         return self.rank is not None and self.rank > PRECEDENCE_DEFAULT
 
 
-""" 
-This class is the reconciliation engine to determine the sole source of truth 
-with which to initialize the parameters (values, scales, bounds) of the model. Specifically, it
+"""
+ConfigManager is the reconciliation engine that decides the sole source of
+truth for every parameter's start, bounds and preliminary scale.  It
 
-1) determines the appropriate limits of each parameter, such that the bounds are the strictest among 
-  a) the default bounds (typically very conservatively limited by physics, e.g., abs(velocity) < c), 
-  b) any component specific bounds (e.g., bounds of the underlying grids), 
-  c) and any user supplied bounds.
+1) determines each parameter's limits, the strictest of the defaults.yaml
+   bounds, a component's validity limits and the user's;
 
-2) merges conflicting constraints, respecting a hierarchy of trust, such that
+2) decides every START value with the relaxation engine (relaxation.py):
+   seeds -- user values, component hints, defaults.yaml values on sampled
+   elements -- are fixed tier by tier down the precedence ladder, each tier
+   absorbing what the ones above it imply, and the symbolic relations of
+   every component's symbolic_physics.py carry each fixed value to the
+   symbols it determines (config.md, "Precedence, and which value absorbs a
+   discrepancy");
 
-user-specified values (from user_params.yaml) > data-derived estimates > global defaults (from defaults.yaml)
+3) carries a PRELIMINARY init_scale for every engine symbol -- declared, or
+   propagated from the sampled parameters through the relations -- which
+   seeds the whitening probe (exozippy/whitening.py measures the real ones)
+   and is the unit the engine splits a correction in;
 
-It makes use of each component's symbolic_physics.py to derive the sampled parameter initvals from the set of values 
-above, iteratively replacing the lowest ranked parameter with the re-derived value, and updating its weight the 
-average of its constituent weights. 
+4) reports what it could not honor: user values that contradict each other,
+   and user values on derived elements that had to be dropped
+   (ModelAuditor.check_user_starts words both).
 
-It repeats the process for init_scale, automatically differentiating each relation as it solves it
-(step 6 of _execute_solve) to propagate uncertainties.  These scales are only PRELIMINARY: they seed the
-whitening probe, which measures the real per-parameter scales from the data (see exozippy/whitening.py),
-and they set only the PRELIMINARY soft-bound barrier steepness, which whitening.measure_barrier_scales
-re-measures numerically from the whitened model.  The separate sympy forward and backward Jacobian scale
-PASSES that used to run after the solve loop -- filling derived-parameter scales for good, and
-back-propagating a user scale on a derived parameter to its sampled parents -- are deleted; see the note
-at the end of _execute_solve.  init_scale is NOT user-facing: entries in a user params file are stripped
-with a warning at construction.
-
-3) warns the user if there are conflicting user-specified constraints that cannot be reconciled.
-
-The logic of the config manager is independent of any specific components.
+The logic of the config manager is independent of any specific component.
 """
 
-
-# How far a re-solved value must move, IN UNITS OF THE SYMBOL'S init_scale,
-# before the relaxation engine treats it as a change (review 1.1.9, JDE ruling
-# 2026-10-06: "the best tolerance should be scaled by init_scale, if
-# present").  init_scale is the engine's own statement of what a meaningful
-# step in that parameter is -- but only a GUESS, made before the whitening
-# probe measures the real one, and the two sides of a wrong guess are not
-# symmetric here.  Too SMALL costs extra engine iterations; too LARGE
-# silently discards a real solve, which is 1.1.9's own failure.  So the
-# number errs small.  Measured when this landed (probe at the engine start,
-# 20 shipped examples, 392 sampled elements): preliminary/measured runs
-# from 4.5e-6 to 1.6e4, median 3.4, 19 elements above 1e3 -- so at 1e-5 even
-# the worst guess puts the threshold at ~0.16 of the true scale, and the
-# median one at ~3e-5.  The floor is round-off: on the hardest case, an
-# absolute epoch (orbit.tc: init_scale 0.001 d -> 1e-8 d), that is still ~20
-# ulps of 2.46e6.  And nothing shipped sits near it: the smallest nonzero
-# move the engine judged against a scale, on any example, was 0.035
-# init_scales, so every value from 1e-3 down to here decides identically.
-# The old test was RELATIVE to the value's MAGNITUDE, which has no meaning
-# for a quantity with an arbitrary zero: at 1e-3 it was ~2460 d on a BJD, so
-# a tp-implied tc solved anywhere within ~7 yr of the 2460000 backstop was
-# discarded.
-CHANGE_TOL_IN_SCALES = 1e-5
-
-
-def _value_moved(new_val, old_val, scale, rel_tolerance, path):
-    """Has `path` moved from `old_val` to `new_val` by a meaningful amount?
-
-    Measured in the symbol's preliminary init_scale (`scale`, INTERNAL units,
-    as the engine holds it in `resolved_scales`) whenever one exists:
-    ``|new - old| >= CHANGE_TOL_IN_SCALES * scale``.  A symbol with NO
-    init_scale at any source (defaults.yaml, a component scale hint, a user
-    sigma, the engine's own Jacobian propagation) keeps the old test RELATIVE
-    to the magnitude at `rel_tolerance`, logged at DEBUG with the symbol's
-    name so the set stays visible; it is not a silent substitute -- every
-    such symbol in the shipped examples was measured when this landed (see
-    config.md, "When a re-solved value counts as a change").
-    """
-    if scale is not None and np.isfinite(scale) and scale > 0:
-        return abs(new_val - old_val) >= CHANGE_TOL_IN_SCALES * scale
-    # Lazy %-formatting: the convergence check calls this for every symbol
-    # on every pass, so an f-string here would be built and thrown away
-    # at any level anybody runs a fit at.
-    logger.debug(
-        "%s: no init_scale, change test is relative at %g",
-        path,
-        rel_tolerance,
-    )
-    ref = max(abs(new_val), abs(old_val), 1e-9)
-    return abs(new_val - old_val) / ref >= rel_tolerance
-
-
-def _meaningful_change(
-    new_val,
-    old_val,
-    new_rank,
-    old_rank,
-    tolerance,
-    scale,
-    target_str,
-):
-    """Return True iff _execute_solve should apply this update and signal progress.
-
-    Two rules (review 1.1.9):
-
-    * A STRICTLY HIGHER-RANKED answer always replaces the value, however
-      close it is.  The old code instead kept the old value and promoted ITS
-      rank to the new one ("propagate rank silently") -- certifying as
-      "solved" a number the solver never produced.  On a tp-seeded orbit
-      that was the defaults.yaml tc backstop, held at PRECEDENCE_DERIVED_MIXED
-      and reported "solved" while 1875 d away from the tc the solver
-      returned.  Terminates: once applied, the path holds `new_rank`, so the
-      same answer is no longer strictly higher.
-    * Otherwise the value must have MOVED, in units of its init_scale
-      (`_value_moved`).  Returning False for an unmoved value is what stops
-      the loop running to max_iter when two equal-rank derivation paths
-      agree to within the tolerance.
-    """
-    if old_val is None:
-        return True  # Condition A: variable was previously unknown -- always an update
-    if new_rank > old_rank:
-        return True
-    return _value_moved(new_val, old_val, scale, tolerance, target_str)
+# The change test lives with the engine (relaxation.py); re-exported here,
+# where the tests and config.md name it (review 1.1.9).
+from .relaxation import CHANGE_TOL_IN_SCALES, value_moved  # noqa: E402,F401
 
 
 def _element_flag(table, key, element, fallback, absent):
@@ -1250,14 +1209,16 @@ class ConfigManager:
         self.seed_hint_source = None
         self.scale_hints = {}  # path -> init_scale in internal units
         # path -> init_scale (internal) as the LAST relaxation solve left it:
-        # defaults, component hints, user sigmas and the engine's own
-        # solved-value scale sync, refreshed at the end of _execute_solve.
-        # (It is not "from the Jacobian forward pass" -- the sympy forward and
-        # backward scale passes are deleted; see the note there.)
+        # the declared scale (defaults, a component scale hint, a user sigma)
+        # where there is one, else the one propagated from the sampled
+        # parameters through the relations (relaxation.Engine.scale).
         self.propagated_scales = {}
         self.symbolic_blacklist = set()
-        # (equation, target symbol) -> the solutions sp.solve returned.  See
-        # the memo in _execute_solve for why this exists and why it is safe.
+        # (equation, target symbol) -> the solutions sp.solve returned.
+        # sp.solve is a pure function of (equation, target) -- it sees no
+        # values -- so memoizing it is safe across seeds and probes, and the
+        # engine relaxes the same inversions many times per prepare().
+        # relaxation.py keeps its compiled (lambdified) forms the same way.
         self._symbolic_solve_cache = {}
 
         # Structured diagnostics collected by the relaxation engine (e.g.
@@ -1266,6 +1227,10 @@ class ConfigManager:
         # API (solve_api.py) without parsing log text.  Populated only when
         # the engine detects a contradiction; empty for a clean solve.
         self.diagnostics = []
+        # Data-derived starts a component withheld because a user value
+        # states the same quantity (supersede_hint); re-emitted into
+        # `diagnostics` on every solve.
+        self.superseded_hints = []
 
         # Snapshots of the last relaxation solve (seed 0, which is solved
         # last in finalize_user_params).  Exposed via export_solution() so a
@@ -1275,6 +1240,30 @@ class ConfigManager:
         self._last_scale_provenance = {}  # internal_path -> rank
         self._last_resolved = {}  # internal_path -> internal value
         self._last_solved_by = {}  # internal_path -> relation string
+        # The keep-in-order and tier report of the last solve: which user
+        # values on derived elements were kept or dropped, which relations
+        # the rigid user values contradict, which seeds were absorbed or
+        # moved.  relaxation.Engine.keep_report; read by the measurement
+        # harness and the tests, reported to the user through diagnostics.
+        self._last_keep_report = {}
+
+        # Which engine paths are SAMPLED, DERIVED or INACTIVE elements of the
+        # model (System._engine_roles, set before each finalize).  None
+        # before stage 4 -- a stage 1-3 probe cannot know the manifests --
+        # and then every defaults.yaml value is a seed and every user value
+        # rigid, which is the documented probe behavior (config.md).
+        self.engine_roles = None
+        # Set by System: () -> (roles, prefixes, unknown paths) for the
+        # components that have declared a manifest so far, read by a stage
+        # 1-3 probe (roles None).  System._declared_engine_roles.
+        self.role_provider = None
+        # Exact numbers a component supplies for the relations to use --
+        # never parameters, never seeds, never reported (add_constant).
+        self.constants = {}
+        # Paths a component's stiff likelihood backs (evolutionary model,
+        # SED, empirical relations): their starts decide at
+        # PRECEDENCE_LIKELIHOOD_BACKED.  See declare_likelihood_backed.
+        self.likelihood_backed = set()
 
         components_dir = Path(__file__).parent / "components"
 
@@ -1448,9 +1437,10 @@ class ConfigManager:
         """
         Register a shortcut solver for 'comp.param' targets.
 
-        By default a custom solver only runs when the relaxation engine
-        attacks an equation containing the target (see _execute_solve).
-        standalone=True additionally runs it once per iteration on its own:
+        By default a custom solver replaces the symbolic inversion of any
+        relation the relaxation engine solves for the target
+        (relaxation.Engine._solve_for).  standalone=True additionally makes
+        it a one-way derivation of its own (relaxation.Engine.solve):
         required when the target's defining relation always holds a second
         derived unknown (e.g. orbit.m_total in the Kepler relation, whose
         other side is the equally-unknown semi-major axis), so the equation path can
@@ -3051,6 +3041,14 @@ class ConfigManager:
         # runs once per seed and appends contradictions here; _record_diagnostic
         # dedupes so repeated seeds do not multiply identical entries.
         self.diagnostics = []
+        for path, value, by, why in self.superseded_hints:
+            self._record_diagnostic(
+                "info",
+                f"{path}: the data-derived start {value:.6g} was not used "
+                f"-- {by} supersedes it ({why}).",
+                [path, by],
+                kind="superseded",
+            )
 
         flat_params = {}
         name_to_index = {}
@@ -3167,10 +3165,10 @@ class ConfigManager:
             name_to_index
         )
 
-        # Solve seed 0 LAST so the final self.propagated_scales and any
-        # init_scale synced back into self.user_params by _execute_solve both
-        # reflect seed 0 -- the seed whose bounds/scales the model actually
-        # uses.  Only start positions vary between seeds; bounds/scales do not.
+        # Solve seed 0 LAST so the final self.propagated_scales (and the
+        # ledger) reflect seed 0 -- the seed whose bounds/scales the model
+        # actually uses.  Only start positions vary between seeds;
+        # bounds/scales do not.
         seed_resolved = [None] * K
         for k in list(range(1, K)) + [0]:
             flat_k = dict(base_flat)
@@ -3431,28 +3429,120 @@ class ConfigManager:
                 f"startup; remove init_scale from your params file."
             )
 
+    def supersede_hint(self, path, value, by, why):
+        """Record that a component did NOT push its data-derived start for
+        `path` (value `value`, user unit) because the user's `by` states
+        the same quantity (``Planet._push_rv_mass_hints``: an RV
+        semi-amplitude estimate against a user planet mass).  It is the
+        same-element rule -- a higher tier replaces a lower one outright --
+        applied by the component that knows two paths are one quantity;
+        the relaxation engine never sees the estimate.  Reported in the
+        solve diagnostics (kind "superseded"), which finalize_user_params
+        resets, so the record lives here and is re-emitted on every solve.
+        """
+        entry = (path, value, by, why)
+        if entry not in self.superseded_hints:
+            self.superseded_hints.append(entry)
+
     def record_diagnostic(self, severity, message, param_paths):
         """Public face of ``_record_diagnostic`` for a caller outside the
         solve -- ``System.prepare``'s topology revisions (review 2.9.15),
         recorded AFTER the last ``finalize_user_params``, which resets the
         list."""
-        self._record_diagnostic(severity, message, param_paths)
+        self._record_diagnostic(severity, message, param_paths, kind=None)
 
-    def _record_diagnostic(self, severity, message, param_paths):
+    def _record_diagnostic(self, severity, message, param_paths, kind=None):
         """Append a structured diagnostic (deduped) for the solve/validate API.
 
         severity is one of "error" | "warning" | "info"; param_paths is a list
         of the parameter paths involved.  Duplicate entries (same severity,
         message, and paths) -- e.g. the same contradiction seen once per seed
-        -- collapse to a single record.
+        -- collapse to a single record.  ``kind`` names what the engine found
+        ("contradiction": user values that break a relation among themselves;
+        "dropped": a user value on a derived element that could not be kept;
+        "unsettled": a tier that could not absorb a relation inside its
+        bounds), so ``ModelAuditor.check_user_starts`` can word each without
+        parsing the message.  The first path of a "dropped" entry is the
+        value that was dropped.
         """
         entry = {
             "severity": severity,
             "message": message,
             "param_paths": list(param_paths),
         }
+        if kind is not None:
+            entry["kind"] = kind
         if entry not in self.diagnostics:
             self.diagnostics.append(entry)
+
+    def set_engine_roles(self, roles):
+        """Tell the engine which paths are SAMPLED, DERIVED or INACTIVE.
+
+        ``roles`` is ``{internal_path: "sampled" | "derived" | "inactive"}``
+        for every element a manifest declares (``System._engine_roles``); a
+        path it does not name is not a parameter of this model and is
+        treated as derived.  Set by ``System.prepare`` immediately before
+        each ``finalize_user_params`` -- after the solve-input snapshot, so
+        that a revision's second registration pass probes with the roles
+        unknown, exactly as the first did.  The roles decide what is a SEED
+        (relaxation.Anchor): a defaults.yaml value seeds only a sampled
+        element, and a user value is produced exactly only there.
+        """
+        self.engine_roles = dict(roles) if roles is not None else None
+
+    def add_constant(self, path, value):
+        """Supply an exact NUMBER the relations may use (review 8.6.23).
+
+        Some relations need a per-fit constant that is not a parameter and
+        is known only once the data are read: Earth's projected velocity at
+        t0_par, which turns the heliocentric relative proper motion into the
+        geocentric one t_E and pi_E are defined in.  The component maps the
+        symbol in its ``get_symbol_map`` (so it is an engine path) and calls
+        this with the value in INTERNAL units; the relaxation engine then
+        substitutes it into every relation, holds it fixed, never solves
+        for it, never seeds anything with it and never reports it (it is in
+        no ledger, no inject-back and no export).  A relation whose constant
+        has not been supplied yet -- a stage-1 probe before the component
+        knows it -- is simply not usable, which is what an unknown symbol
+        already means.  A constant is a component input, like a hint:
+        re-supplied by a second registration pass, not rolled back.
+        Canonical index-form path only.
+        """
+        parts = str(path).split(".")
+        if len(parts) != 3 or not parts[1].isdigit():
+            raise ValueError(
+                f"add_constant: '{path}' is not a canonical index-form path "
+                f"(<component>.<index>.<name>)."
+            )
+        if path not in self.master_symbol_map:
+            raise KeyError(
+                f"add_constant: '{path}' is not an engine symbol; map it in "
+                f"the component's get_symbol_map first."
+            )
+        value = float(value)
+        if not np.isfinite(value):
+            raise ValueError(
+                f"add_constant: '{path}' = {value} is not finite."
+            )
+        self.constants[path] = value
+
+    def declare_likelihood_backed(self, path):
+        """Declare that a stiff likelihood term backs `path`'s start.
+
+        The start of that parameter -- whatever seeds it below
+        PRECEDENCE_LIKELIHOOD_BACKED: a defaults.yaml value, a distance
+        guess -- then DECIDES at that level, so poorly constrained seeds
+        absorb a contradiction before it does (review 3.14.22, Q3: "a crazy
+        stellar mass might be a tough one to recover if we constrain it by
+        evolutionary models").  It still REPORTS the rank it came with.  A
+        user value or a higher hint is untouched.  Called from a component's
+        register_parameters (stage 3) for the parameters its own likelihood
+        constrains: the evolutionary model's mass, EEP, initial [Fe/H] and
+        age; the SED's own temperature; an empirical relation's
+        mass and radius.  Any of the three spellings; stored in index form.
+        """
+        translated, _ = self._translate_and_scale(path, 0.0)
+        self.likelihood_backed.add(translated)
 
     def _provenance_label(self, rank):
         """Map a numeric provenance rank to a coarse source label."""
@@ -3613,6 +3703,8 @@ class ConfigManager:
 
         parameters = {}
         for internal_path in self.master_symbol_map:
+            if internal_path in self.constants:
+                continue  # an exact number the relations use, no parameter
             parts = internal_path.split(".")
             c_type = parts[0]
             p_name = parts[-1]
@@ -3745,7 +3837,7 @@ class ConfigManager:
     # read-only.  If the engine ever starts writing somewhere new, it belongs
     # in this tuple -- a mutation missing from it silently survives the probe.
     _PROBE_SNAPSHOT_ATTRS = (
-        "user_params",  # _execute_solve syncs solved init_scale back
+        "user_params",  # finalize injects the solved starts back
         "diagnostics",  # _record_diagnostic appends contradictions
         "propagated_scales",  # refreshed at the end of every solve
         "symbolic_blacklist",  # a 2 s sp.solve timeout adds the target
@@ -3753,6 +3845,12 @@ class ConfigManager:
         "_last_scale_provenance",
         "_last_resolved",
         "_last_solved_by",
+        "_last_keep_report",
+        # Not written by the engine, but by System.prepare right before each
+        # finalize; in the snapshot so restore_solve_inputs returns a
+        # revision's second registration pass to "roles unknown", the state
+        # the first pass's stage-3 probes ran in.
+        "engine_roles",
     )
     # _symbolic_solve_cache is deliberately NOT here.  Everything above is a
     # RESULT the probe must not leave behind -- a solved value, a rank, a
@@ -3795,7 +3893,7 @@ class ConfigManager:
         self.master_symbol_map.clear()
         self.master_symbol_map.update(symbols)
 
-    def probe_derivable(self, paths, tolerance=1e-3):
+    def probe_derivable(self, paths):
         """Which of `paths` the relaxation engine can pin down from what is
         known now, as opposed to falling back on a bare defaults.yaml value.
 
@@ -3819,10 +3917,10 @@ class ConfigManager:
         bookkeeping bug; the probe solves a subset of stage 4's inputs, so a
         failure here is never an expected outcome of knowing less.
         """
-        _, ranks = self._probe_solve(paths, tolerance)
+        _, ranks = self._probe_solve(paths)
         return {p for p in paths if ranks.get(p, 0) > PRECEDENCE_DEFAULT}
 
-    def probe_start(self, paths, tolerance=1e-3):
+    def probe_start(self, paths):
         """The start value the relaxation engine would give each of `paths`
         from what is known NOW, with its provenance -- read-only.
 
@@ -3890,7 +3988,7 @@ class ConfigManager:
                 )
         sets = self.seed_hint_sets or []
         resolved, ranks = self._probe_solve(
-            paths, tolerance, seed_hints=dict(sets[0]) if sets else None
+            paths, seed_hints=dict(sets[0]) if sets else None
         )
         out = {}
         for p in paths:
@@ -3923,7 +4021,7 @@ class ConfigManager:
         )
         return float(value) / factor
 
-    def _probe_solve(self, paths, tolerance, seed_hints=None):
+    def _probe_solve(self, paths, seed_hints=None):
         """Run the engine on a snapshot and roll every mutation back.
 
         The ONE snapshot/rollback shared by ``probe_derivable`` and
@@ -3982,7 +4080,7 @@ class ConfigManager:
 
             try:
                 resolved = self.resolve_and_validate_parameters(
-                    flat, tolerance, seed_hints=seed_hints
+                    flat, seed_hints=seed_hints
                 )
             except Exception as e:
                 raise RuntimeError(
@@ -4003,142 +4101,212 @@ class ConfigManager:
             self.master_symbol_map.update(saved_symbols)
 
     def resolve_and_validate_parameters(
-        self, user_provided_params, tolerance=1e-3, seed_hints=None
+        self, user_provided_params, seed_hints=None
     ):
-        """Run the relaxation engine.
+        """Run the relaxation engine (``relaxation.Engine``) once.
 
-        ``user_provided_params`` is {internal_path: internal_value} at
-        PRECEDENCE_USER.  ``seed_hints`` is the optional per-seed hint set for this
-        seed (see ``_build_seed_overrides``), layered in at PRECEDENCE_DERIVED_DATA
-        alongside ``self.hints``.
+        ``user_provided_params`` is {internal_path: internal_value}, the
+        user's own starts (seed 0 or one seed's set); ``seed_hints`` is this
+        seed's hint set (see ``_build_seed_overrides``).  Returns
+        {internal_path: internal value} and leaves behind the ledger
+        (``_last_resolved``, ``_last_provenance``, ``_last_solved_by``), the
+        preliminary scales (``propagated_scales``), the keep-in-order report
+        (``_last_keep_report``) and the diagnostics.
+
+        This method only builds the engine's inputs -- one ANCHOR per path
+        (``relaxation.Anchor``), the declared scales, the roles -- and reads
+        the outputs; the rule itself is ``relaxation.py``'s.
         """
-        resolved = {str(k): float(v) for k, v in user_provided_params.items()}
-        provenance = {
-            str(k): PRECEDENCE_USER for k in user_provided_params.keys()
-        }
-        resolved_scales = {}
-        scale_provenance = {}
-        # Per-solve record of which relation last set each variable (seed 0's
-        # values win because it is solved last).  Reset each call.
-        self._last_solved_by = {}
+        from .relaxation import KEEP_ORDER, Anchor, Engine
 
-        # 1. Initialize Default Armor (Rank 20)
+        # THE TRANSLATION WAS TOTAL, or we stop here (review 3.14.15c).
+        # Everything below indexes by PATH, so a non-canonical key does not
+        # fail -- it quietly creates a phantom second entry.
+        self._assert_canonical_engine_paths(seed_hints)
+
+        L = PRECEDENCE_LADDER
+        roles = self.engine_roles
+        partial_roles, registered, unknown = {}, set(), set()
+        if roles is None and self.role_provider is not None:
+            partial_roles, registered, unknown = self.role_provider()
+        user = {str(k): float(v) for k, v in user_provided_params.items()}
+        seed_hints = dict(seed_hints or {})
+
         def to_scalar(val):
             return val.item() if hasattr(val, "item") else float(val)
 
-        for path_str, sym in self.master_symbol_map.items():
-            parts = path_str.split(".")
-            c_type, p_name = parts[0], parts[-1]
-            el = (
-                int(parts[1])
-                if len(parts) == 3 and parts[1].isdigit()
-                else None
-            )
-            cfg = self.resolve(c_type, p_name, element=el)
+        # Every engine symbol, plus every hinted path (resolve() reads hints
+        # too, and a hinted parameter need not be an engine symbol -- the
+        # microlensing flux hints -- but its start passes through the ledger
+        # the same way).
+        paths = list(self.master_symbol_map)
+        seen = set(paths)
+        for extra in list(self.hints) + list(seed_hints):
+            if extra not in seen:
+                paths.append(extra)
+                seen.add(extra)
 
-            # Read rank directly from base_defaults (not from resolve() return dict)
-            param_rank = (
-                self.base_defaults.get(c_type, {}).get(p_name, {}).get("rank")
-                or self.base_defaults.get(p_name, {}).get("rank")
-                or PRECEDENCE_DEFAULT
-            )
-
-            if path_str not in resolved and cfg.get("initval") is not None:
-                # resolve() returns the initval in USER units, so the factor
-                # must honor a user `unit:` override -- pass full_path, the
-                # same way the init_scale conversion below does.
+        anchors = {}
+        declared = {}
+        scale_rank = {}
+        periodic = {}
+        # The DECLARED scales are read with the previous solve's propagated
+        # scales switched off: resolve() layers those as an init_scale
+        # default, which would make one seed's (or one probe's) solve an
+        # input to the next.
+        saved_scales = self.propagated_scales
+        self.propagated_scales = {}
+        try:
+            for path in paths:
+                parts = path.split(".")
+                c_type, p_name = parts[0], parts[-1]
+                el = (
+                    int(parts[1])
+                    if len(parts) == 3 and parts[1].isdigit()
+                    else None
+                )
+                cfg = self.resolve(c_type, p_name, element=el)
                 factor = self.get_conversion_factor(
-                    c_type, p_name, full_path=path_str
+                    c_type, p_name, full_path=path
                 )
-                resolved[path_str] = to_scalar(cfg["initval"]) * factor
-                provenance[path_str] = param_rank
-
-            if cfg.get("init_scale") is not None:
-                factor = self.get_conversion_factor(
-                    c_type, p_name, full_path=path_str
+                pdef = self.base_defaults.get(c_type, {}).get(p_name) or {}
+                rank_name = pdef.get("rank")
+                if rank_name is None:
+                    rank_name = (self.base_defaults.get(p_name) or {}).get(
+                        "rank"
+                    )
+                default_rank = (
+                    L["DEFAULT"]
+                    if rank_name is None
+                    else ladder_level(
+                        rank_name, f"{c_type}/defaults.yaml '{p_name}'"
+                    )
                 )
-                resolved_scales[path_str] = (
-                    to_scalar(cfg["init_scale"]) * factor
+                # resolve()'s init_scale, unless it is the user's `sigma: 0`
+                # (resolve() syncs a sigma into init_scale, and a pin is not
+                # a scale): then the defaults.yaml one it overwrote.
+                s_val = cfg.get("init_scale")
+                s_val = None if s_val is None else to_scalar(s_val)
+                if s_val is None or not s_val > 0:
+                    s_val = pdef.get("init_scale")
+                if s_val is not None and float(s_val) > 0:
+                    declared[path] = float(s_val) * factor
+                    scale_rank[path] = default_rank
+                per = pdef.get("periodic")
+                if isinstance(per, dict) and "value" in per:
+                    i_unit = pdef.get("internal_unit") or ""
+                    pf = (
+                        unit_conversion(per["unit"], i_unit, path)
+                        if per.get("unit") and i_unit
+                        else 1.0
+                    )
+                    periodic[path] = float(per["value"]) * pf
+
+                if roles is not None:
+                    role = roles.get(path, "derived")
+                elif c_type in registered and path not in unknown:
+                    # a stage 1-3 probe, but this component has already
+                    # declared its manifest (System._declared_engine_roles)
+                    role = partial_roles.get(path, "derived")
+                else:
+                    # A stage 1-3 probe: no manifest exists yet, so the role
+                    # is read off defaults.yaml through the component
+                    # contract (components.md): a SAMPLED parameter declares
+                    # lower, upper and an init_scale, so one with an
+                    # `expressions:` block that lacks any of them can only be
+                    # derived (t_E, theta_E, the relative proper motions, a
+                    # lens q).  One with all of them is ambiguous -- distance,
+                    # logmass and the proper motions carry alternative
+                    # parameterizations -- and is read as sampled: the common
+                    # topology, and a seed the probe keeps is the
+                    # conservative answer.  A parameter with no expression
+                    # is sampled everywhere.
+                    samplable = all(
+                        pdef.get(k) is not None
+                        for k in ("lower", "upper", "init_scale")
+                    )
+                    role = (
+                        "derived"
+                        if cfg.get("expressions") and not samplable
+                        else "sampled"
+                    )
+                sampled = role == "sampled"
+                if path in user:
+                    anchors[path] = Anchor(
+                        user[path],
+                        "rigid" if sampled else "candidate",
+                        L["USER"],
+                        L["USER"],
+                        sampled,
+                        "user",
+                    )
+                    continue
+                hint_rank = (
+                    self.hint_ranks.get(path, L["DERIVED_DATA"])
+                    if path in self.hints
+                    else None
                 )
-                scale_provenance[path_str] = param_rank
-
-        # THE TRANSLATION WAS TOTAL, or we stop here (review 3.14.15c).
-        # Everything below indexes `resolved`/`provenance` BY PATH, so a
-        # non-canonical key does not fail -- it quietly creates a second,
-        # phantom entry for a parameter that already has one, and the ledger,
-        # export_solution and initval_source then report it.  Checking at the
-        # door is the difference between a loud stop and a silent duplicate.
-        self._assert_canonical_engine_paths(seed_hints)
-
-        # 1.5 LAYER IN COMPONENT HINTS
-        for path_str, val in self.hints.items():
-            if provenance.get(path_str, 0) < PRECEDENCE_USER:
-                resolved[path_str] = val
-                provenance[path_str] = self.hint_ranks.get(
-                    path_str, PRECEDENCE_DERIVED_DATA
+                # A seed set (the peak finder's) wins a tie with an ordinary
+                # component hint: a per-seed fit of the light curve is more
+                # informative than a guess pushed for every seed alike.  A
+                # hint ABOVE the data level (a start derived from the user's
+                # own numbers) still beats it.
+                if path in seed_hints and (
+                    hint_rank is None or hint_rank <= L["DERIVED_DATA"]
+                ):
+                    val, rank, src = (
+                        seed_hints[path],
+                        L["DERIVED_DATA"],
+                        "seed hint",
+                    )
+                elif hint_rank is not None:
+                    val, rank, src = self.hints[path], hint_rank, "hint"
+                elif cfg.get("initval") is not None:
+                    val, rank, src = (
+                        to_scalar(cfg["initval"]) * factor,
+                        default_rank,
+                        "default",
+                    )
+                else:
+                    continue
+                # A defaults.yaml value seeds only a SAMPLED element: on a
+                # derived one it can never reach the model, so it is a fill
+                # (a value for a symbol nothing else determines), never a
+                # statement that can move another value.
+                kind = "seed" if (sampled or src != "default") else "fill"
+                tier = rank
+                if (
+                    kind == "seed"
+                    and path in self.likelihood_backed
+                    and tier < L["LIKELIHOOD_BACKED"]
+                ):
+                    tier = L["LIKELIHOOD_BACKED"]
+                anchors[path] = Anchor(
+                    float(val), kind, tier, rank, sampled, src
                 )
+        finally:
+            self.propagated_scales = saved_scales
 
-        # 1.5b LAYER IN THIS SEED'S HINT SET (PRECEDENCE_DERIVED_DATA)
-        # Same tier as the component hints above: a seeder's solution is a
-        # derivation from the data, not a user statement.  The guard is `<=`
-        # rather than `<` so a seed WINS a tie with an ordinary component
-        # hint -- a per-seed fit of the actual light curve is strictly more
-        # informative than the generic guess a component pushes for every
-        # seed alike.  (Today no real path is in both channels: the seeds
-        # carry source.0.{t_0,u_0,rho}, mulensevent.0.t_E and
-        # lens.1.{log_s,alpha,q}, and the only component hint that touches
-        # one of those, the lens.<j+1>.alpha display hint, is rank 20.  The
-        # rule is stated so a future overlap has a defined answer.)
-        # Anything above PRECEDENCE_DERIVED_DATA -- every user entry, in particular
-        # a scalar initval, which lives in user_provided_params -- wins.
-        for path_str, val in (seed_hints or {}).items():
-            if provenance.get(path_str, 0) <= PRECEDENCE_DERIVED_DATA:
-                resolved[path_str] = val
-                provenance[path_str] = PRECEDENCE_DERIVED_DATA
-
-        # 1.6 LAYER IN SCALE HINTS (correct indexed paths)
-        # The initialization loop above calls resolve() without an index, so a hint
-        # for star.0.logmass can bleed into star.1.logmass.  Apply scale_hints
-        # directly using their already-normalized full paths to fix that.
+        # Scale hints (exact, already-normalized paths) and user sigmas: a
+        # user's prior width is the best preliminary scale there is.
         for hint_path, hint_scale in self.scale_hints.items():
-            if hint_path in self.master_symbol_map:
-                resolved_scales[hint_path] = hint_scale
-                scale_provenance[hint_path] = PRECEDENCE_DERIVED_DATA
-
-        # 1.7 LAYER IN USER-SPECIFIED SIGMAS AS SCALES (PRECEDENCE_USER)
-        # A user-supplied Gaussian prior width is also the best available
-        # preliminary scale for that parameter, and the engine's per-relation
-        # Jacobian propagation (step 6 of _execute_solve) carries it into the
-        # scale of whatever gets solved from it.  The separate forward
-        # Jacobian PASS that used to run after the loop, filling every derived
-        # parameter's scale so it could set that parameter's soft-bound
-        # barrier steepness, is deleted -- those steepnesses are measured
-        # numerically now (whitening.measure_barrier_scales).  User
-        # init_scale entries no longer exist at this point -- they are
-        # stripped with a warning at construction (whitening scales are
-        # measured from the data instead; see exozippy/whitening.py).
-        for path_str in self.master_symbol_map:
-            up = user_entry(self.user_params, path_str)
+            if hint_path in seen:
+                declared[hint_path] = hint_scale
+                scale_rank[hint_path] = L["DERIVED_DATA"]
+        for path in self.master_symbol_map:
+            up = user_entry(self.user_params, path)
             if up is None:
                 continue
-            parts = path_str.split(".")
-            c_type, p_name = parts[0], parts[-1]
-            if (
-                "sigma" in up
-                and up.get("sigma") is not None
-                and float(up["sigma"]) > 0
-            ):
+            sig = up.get("sigma")
+            if sig is not None and not isinstance(sig, str) and float(sig) > 0:
+                parts = path.split(".")
                 factor = self.get_conversion_factor(
-                    c_type, p_name, full_path=path_str
+                    parts[0], parts[-1], full_path=path
                 )
-                resolved_scales[path_str] = float(up["sigma"]) * factor
-                scale_provenance[path_str] = PRECEDENCE_USER
+                declared[path] = float(sig) * factor
+                scale_rank[path] = L["USER"]
 
-        # 1.8 PREPARE USER-DEFINED LINK ASSIGNMENTS (directed, PRECEDENCE_USER)
-        # initval/mu links are directed: the target is defined in terms of its
-        # dependencies, never the reverse.  They are re-asserted every
-        # iteration so downstream physics relations always see the linked
-        # value, and PRECEDENCE_USER provenance protects it from being overridden.
+        # Directed user links (initval/mu): target := expr(deps), USER.
         directed_links = []
         for link_target, link_fields in self.links.items():
             for link_field, plink in link_fields.items():
@@ -4152,789 +4320,146 @@ class ConfigManager:
                         )
                     )
 
-        # 2. The Relaxation Engine
+        file_order = {}
+        for i, key in enumerate(self.user_params):
+            file_order.setdefault(key, i)
+
         logger.info(
-            "Solving for starting values/scales of sampled parameters given user/data/default initialization...."
+            "Solving for starting values/scales of sampled parameters given "
+            "user/data/default initialization...."
         )
-        iteration = 0
-        max_iter = 100  # Failsafe
-        _CYCLE_HIST = 6  # how many recent values to keep per variable
-        value_history = {}  # {var_name: [recent rounded values]}
-        pinned_vars = (
-            set()
-        )  # variables locked out of further updates due to cycle
-
-        while iteration < max_iter:
-            iteration += 1
-            resolved_snapshot = dict(resolved)
-            # Ranks are part of the state this loop converges, not just a
-            # by-product of it: see the convergence check below.
-            provenance_snapshot = dict(provenance)
-
-            self._apply_directed_links(
-                directed_links,
-                resolved,
-                provenance,
-                resolved_scales,
-                scale_provenance,
-                tolerance,
-                pinned_vars,
-            )
-
-            self._run_standalone_solvers(
-                resolved, provenance, resolved_scales, tolerance, pinned_vars
-            )
-
-            for eq in self.all_relations:
-                self._relax_equation(
-                    eq,
-                    resolved,
-                    provenance,
-                    resolved_scales,
-                    scale_provenance,
-                    tolerance,
-                    pinned_vars,
-                )
-
-            # Convergence check: compare end-of-iteration state to start-of-iteration.
-            # This correctly handles intra-iteration oscillation (two equations fighting
-            # over the same variable within one pass): individual updates may fire on
-            # each equation, but if the net state is unchanged the loop should stop.
-            # The SAME change test the updates use (_value_moved, in units of
-            # init_scale): a relative test here would call a solved epoch
-            # "unchanged" and stop the loop before anything downstream of it
-            # re-fired (review 1.1.9).
-            net_changed = False
-            for k, v in resolved.items():
-                old = resolved_snapshot.get(k)
-                if old is None:
-                    net_changed = True
-                    break
-                if _value_moved(v, old, resolved_scales.get(k), tolerance, k):
-                    net_changed = True
-                    break
-            if not net_changed and provenance != provenance_snapshot:
-                # A pass that moved no VALUE can still have improved a rank:
-                # a satisfied equation promotes its symbols to what it proves
-                # they are reachable from (see _relax_equation), and those
-                # promotions have to be allowed to propagate to whatever
-                # consumed them.  Stopping on values alone left a derived
-                # value holding the rank it happened to get on the pass that
-                # first set it -- order-dependent, and wrong whenever an
-                # input was promoted later (review 8.6.22).
-                net_changed = True
-            if not net_changed:
-                break
-
-            # Cycle detection: track per-variable history; pin any that oscillate.
-            # Pinning lets other variables keep converging instead of stopping the loop.
-            for k, v in resolved.items():
-                if k in pinned_vars:
-                    continue
-                if k not in resolved_snapshot or resolved_snapshot[k] != v:
-                    hist = value_history.setdefault(k, [])
-                    hist.append(round(v, 8))
-                    if len(hist) > _CYCLE_HIST:
-                        hist.pop(0)
-
-            for k, hist in value_history.items():
-                if k in pinned_vars:
-                    continue
-                if (
-                    len(hist) >= 4
-                    and hist[-1] == hist[-3]
-                    and hist[-2] == hist[-4]
-                    and hist[-1] != hist[-2]
-                ):
-                    logger.warning(
-                        f"Cycle: '{k}' oscillates between {hist[-2]:.6g} and {hist[-1]:.6g} — "
-                        f"pinned to {hist[-1]:.6g} (conflicting equal-rank constraints)."
-                    )
-                    pinned_vars.add(k)
-
-        if iteration == max_iter:
-            logger.warning(
-                "Relaxation engine reached max iterations — check for unstable circular dependencies."
-            )
-
-        logger.info(f"Done solving after {iteration} iterations.")
-
-        # (The old sympy scale passes are gone.  Backward -- inverse-Jacobian
-        # propagation of a user scale on a derived parameter to its sampled
-        # parents -- because sampled scales are only PRELIMINARY now: the
-        # whitening probe measures the real ones from the data, prior sigmas
-        # included.  Forward -- filling derived-parameter scales for their
-        # soft-bound barrier steepness -- because those are now measured
-        # numerically from the whitened model's actual unit-step response
-        # (whitening.measure_barrier_scales), which is both cheaper and more
-        # reliable than per-relation sp.solve with timeouts.  What remains in
-        # resolved_scales: defaults, component hints, user sigmas, and the
-        # engine's own solved-value scale sync.)
-
-        # Expose final scales for resolve() to use as a low-priority default
-        # (component scale hints still win; see resolve()).
-        self.propagated_scales = dict(resolved_scales)
-
-        # Snapshot provenance/scales/values for export_solution().  In the
-        # multi-seed loop seed 0 is solved last, so these end up reflecting the
-        # canonical seed-0 solution whose bounds/scales the model uses.
-        self._last_provenance = dict(provenance)
-        self._last_scale_provenance = dict(scale_provenance)
-        self._last_resolved = dict(resolved)
-
-        return resolved
-
-    def _run_standalone_solvers(
-        self,
-        resolved,
-        provenance,
-        resolved_scales,
-        tolerance,
-        pinned_vars=None,
-    ):
-        """
-        Run standalone-registered custom solvers once per relaxation
-        iteration, for every instance path of their target in the symbol
-        map.  A solver that raises (missing dependencies) is retried next
-        iteration; results carry PRECEDENCE_DERIVED_MIXED so user values and
-        data-derived hints always win, and re-fire as inputs refine.
-
-        "Always win" has to be enforced here, not just asserted: unlike the
-        equation path (``_attempt_solve``), which picks the LOWEST-ranked
-        symbol of a violated relation, a standalone solver writes its target
-        unconditionally.  ``_meaningful_change`` never REFUSES a write on
-        rank (it only waves a strictly higher one through), so before the guard below an explicit ``orbit.b.m_total`` in
-        params.yaml (PRECEDENCE_USER) was overwritten every iteration by the body
-        mass sum and its provenance DOWNGRADED to PRECEDENCE_DERIVED_MIXED --
-        exactly the inversion the ranking system exists to prevent.  A path
-        already held at a rank the solver cannot beat is therefore skipped;
-        one held at PRECEDENCE_DERIVED_MIXED or below (including the solver's own
-        previous answer) still re-fires as its inputs refine.
-        """
-        # Sorted: standalone_solvers is a set, and each solver both reads and
-        # writes `resolved`, so with two of them registered the walk order
-        # decides whether one sees the other's answer from this iteration or
-        # the last -- feeding _meaningful_change, the provenance ranks and
-        # the cycle history.  Only orbit.m_total is registered today.
-        for lookup_key in sorted(self.standalone_solvers):
-            solver_func = self.custom_solvers[lookup_key]
-            comp, param = lookup_key.split(".")[0], lookup_key.split(".")[-1]
-            for path in list(self.master_symbol_map):
-                parts = path.split(".")
-                if (
-                    len(parts) != 3
-                    or parts[0] != comp
-                    or parts[2] != param
-                    or not parts[1].isdigit()
-                ):
-                    continue
-                if pinned_vars and path in pinned_vars:
-                    continue
-                if provenance.get(path, 0) > PRECEDENCE_DERIVED_MIXED:
-                    logger.debug(
-                        f"Standalone solver for {path} skipped: already held "
-                        f"at rank {provenance.get(path)} > "
-                        f"{PRECEDENCE_DERIVED_MIXED}."
-                    )
-                    continue
-                try:
-                    val = float(
-                        solver_func(
-                            resolved, self.system_config, int(parts[1])
-                        )
-                    )
-                except Exception as e:
-                    logger.debug(f"Standalone solver for {path} deferred: {e}")
-                    continue
-                if not _meaningful_change(
-                    val,
-                    resolved.get(path),
-                    PRECEDENCE_DERIVED_MIXED,
-                    provenance.get(path, 0),
-                    tolerance,
-                    resolved_scales.get(path),
-                    path,
-                ):
-                    continue
-                resolved[path] = val
-                provenance[path] = PRECEDENCE_DERIVED_MIXED
-                self._last_solved_by[path] = (
-                    f"{lookup_key} (standalone solver)"
-                )
-                logger.debug(f"Updated {path} = {val:.4g} (standalone solver)")
-
-    def _apply_directed_links(
-        self,
-        directed_links,
-        resolved,
-        provenance,
-        resolved_scales,
-        scale_provenance,
-        tolerance,
-        pinned_vars=None,
-    ):
-        """
-        Assert user-defined link assignments (target := f(deps), internal units).
-
-        An 'initval' link IS the user's value for the target, so it always
-        wins (PRECEDENCE_USER).  A 'mu' link only seeds the starting point, so it
-        yields to an explicit numeric initval (which also carries PRECEDENCE_USER).
-        Scales propagate through the link Jacobian at PRECEDENCE_DERIVED_USER.
-        """
-        for target, fld, plink, expr_int in directed_links:
-            if pinned_vars and target in pinned_vars:
-                continue
-            if not all(d in resolved for d in plink.dep_paths):
-                continue
-            if fld == "mu" and provenance.get(target, 0) >= PRECEDENCE_USER:
-                continue
-            try:
-                val = float(expr_int.evalf(subs=resolved))
-            except (TypeError, ValueError) as e:
-                logger.debug(
-                    f"Link '{target} := {plink.expr_str}' not evaluable yet: {e}"
-                )
-                continue
-
-            if _meaningful_change(
-                val,
-                resolved.get(target),
-                PRECEDENCE_USER,
-                provenance.get(target, 0),
-                tolerance,
-                resolved_scales.get(target),
-                target,
-            ):
-                resolved[target] = val
-                provenance[target] = PRECEDENCE_USER
-                logger.debug(
-                    f"Updated {target} = {val:.4g} (user link: {plink.expr_str})"
-                )
-
-            # Scale propagation through the link Jacobian
-            if scale_provenance.get(target, 0) >= PRECEDENCE_USER:
-                continue
-            var = 0.0
-            any_input = False
-            for dep in plink.dep_paths:
-                dep_scale = resolved_scales.get(dep)
-                if dep_scale is None:
-                    continue
-                try:
-                    d = float(
-                        sp.diff(expr_int, sp.Symbol(dep)).evalf(subs=resolved)
-                    )
-                except (TypeError, ValueError):
-                    continue
-                if np.isfinite(d) and abs(d) < 1e15:
-                    var += (d * dep_scale) ** 2
-                    any_input = True
-            if (
-                any_input
-                and var > 0
-                and PRECEDENCE_DERIVED_USER > scale_provenance.get(target, 0)
-            ):
-                resolved_scales[target] = float(np.sqrt(var))
-                scale_provenance[target] = PRECEDENCE_DERIVED_USER
-
-    def _relax_equation(
-        self,
-        eq,
-        resolved,
-        provenance,
-        resolved_scales,
-        scale_provenance,
-        tolerance,
-        pinned_vars=None,
-    ):
-
-        if not isinstance(eq, sp.Eq):
-            return False
-
-        # Sorted: free_symbols is a set of Symbols whose hashes include the
-        # PYTHONHASHSEED-randomized name string, so bare iteration order
-        # varies per process.  The July-2026 init_scale flakiness came from
-        # exactly this in the (since-deleted) scale passes.
-        symbols_in_eq = sorted(str(s) for s in eq.free_symbols)
-
-        # 1. Gatekeeper: Skip if equation contains undefined variables
-        if not all(s in self.master_symbol_map for s in symbols_in_eq):
-            return False
-
-        def get_rank(s):
-            return provenance.get(s, 0)
-
-        unknowns = [s for s in symbols_in_eq if s not in resolved]
-        target = None
-        is_contradiction = False
-
-        # 2. Trigger Condition A: Missing Information
-        if len(unknowns) == 1:
-            target = unknowns[0]
-
-        # 3. Trigger Condition B: Physics Verification
-        elif len(unknowns) == 0:
-            try:
-                lhs = float(eq.lhs.evalf(subs=resolved))
-                rhs = float(eq.rhs.evalf(subs=resolved))
-                error = abs(lhs - rhs) / max(abs(lhs), abs(rhs), 1e-9)
-            except TypeError:
-                return False
-
-            if error <= tolerance:
-                # The VALUES are right, but a rank may still be understated.
-                # A rank is set when an equation fires, from the input ranks
-                # AT THAT MOMENT; a later iteration can promote an input
-                # without ever revisiting what consumed it, and this early
-                # return is where that revisit was being skipped.  So prove
-                # what the equation now proves: every symbol in a satisfied
-                # equation is reachable from the others, so its rank is at
-                # least theirs.  Condition B's floor is 0 and the cap is
-                # PRECEDENCE_DERIVED_USER, exactly as below -- same rule,
-                # not a second copy of it.
-                #
-                # RAISE-ONLY, so no value moves and nothing can outrank a
-                # real user entry.  The loop's convergence test watches
-                # provenance as well as values, so these promotions
-                # propagate over further passes until nothing improves.
-                for sym in symbols_in_eq:
-                    others = [s for s in symbols_in_eq if s != sym]
-                    if not others:
-                        continue
-                    reachable = min(
-                        PRECEDENCE_DERIVED_USER,
-                        min(get_rank(s) for s in others),
-                    )
-                    if reachable > get_rank(sym):
-                        provenance[sym] = reachable
-                return False  # Equation is perfectly satisfied. Stop here.
-
-            # Equation is broken. Find the weakest armor.
-            # Sort by Rank (Ascending), then Alphabetically (Deterministic Tie-Breaker)
-            candidates = sorted(symbols_in_eq, key=lambda s: (get_rank(s), s))
-            target = candidates[0]
-
-            # 4. The Contradiction Clause
-            if get_rank(target) >= PRECEDENCE_USER:
-                is_contradiction = True
-
-        if not target or len(unknowns) > 1:
-            return False
-
-        # Skip pinned variables so other variables can keep converging
-        if pinned_vars and target in pinned_vars:
-            return False
-
-        # 5. Calculate New Armor
-        # Use min(input_ranks) so a chain is only as strong as its weakest link.
-        inputs = [s for s in symbols_in_eq if s != target]
-        min_input_rank = (
-            min(get_rank(s) for s in inputs) if inputs else PRECEDENCE_DEFAULT
+        engine = Engine(
+            self,
+            anchors,
+            declared,
+            file_order,
+            directed_links,
+            periodic,
+            ladder=L,
+            keep_order_mode=KEEP_ORDER,
+            constants=self.constants,
         )
-        # Condition A floor: PRECEDENCE_DEFAULT-1 so an indirectly-derived value
-        #   (e.g. ecc from K when secosw/sesinw are unavailable) always yields
-        #   to an expression-path derivation or a default in Condition B.
-        # Condition B floor: 0, NOT PRECEDENCE_DEFAULT -- a duplicate of this comment
-        #   sat directly above and claimed PRECEDENCE_DEFAULT, which the line below
-        #   has never done.  0 lets low-rank inputs (e.g. pm defaults at rank
-        #   10) produce low-rank results, so they cannot block higher-rank
-        #   derivations from the t_E/theta_E/pi_rel chain.
-        rank_floor = PRECEDENCE_DEFAULT - 1 if len(unknowns) == 1 else 0
-        new_rank = max(
-            rank_floor, min(PRECEDENCE_DERIVED_USER, min_input_rank)
+        resolved = engine.solve()
+        logger.info(
+            f"Done solving ({engine.keep_report.get('wall_s', 0.0):.2f} s)."
         )
 
-        if is_contradiction:
-            # All variables in this equation were explicitly set by the user.
-            # Overriding any of them would silently discard user intent — this
-            # commonly happens with "default identity" relations like
-            # Eq(radiussed, radius) when the user intentionally gave the two
-            # parameters different MAP values on a second-iteration run.
-            # Leave every value untouched and let the sampler and likelihood
-            # sort out any inconsistency.
-            logger.debug(
-                f"Over-constrained: all variables in '{eq}' have user rank "
-                f"but equation is violated (error={error:.4g}). "
-                f"Leaving all user values unchanged."
-            )
-            self._record_diagnostic(
-                "error",
-                f"Over-constrained relation '{eq.lhs} = {eq.rhs}' is violated "
-                f"(relative error {error:.4g}): every parameter it links was "
-                f"set explicitly, so no value can be adjusted to satisfy it.",
-                symbols_in_eq,
-            )
-            return False
+        provenance = {p: r for p, r in engine.ranks.items() if p in resolved}
+        solved_by = {}
+        for st in engine.plan.steps:
+            solved_by[st.target] = st.label
+        for m, (a_m, x_m, tier_name) in engine.moved.items():
+            solved_by[m] = f"split among the {tier_name} starts"
+        for p, v in engine.solver_seeds.items():
+            solved_by.setdefault(p, "standalone solver")
+        from .diagnostics import USER_START_ATOL, USER_START_RTOL
 
-        return self._execute_solve(
-            eq,
-            target,
-            resolved,
-            provenance,
-            new_rank,
-            resolved_scales,
-            scale_provenance,
-            inputs,
-            pinned_vars=pinned_vars,
-            tolerance=tolerance,
-        )
-
-    def _execute_solve(
-        self,
-        eq,
-        target_str,
-        resolved,
-        provenance,
-        new_rank,
-        resolved_scales,
-        scale_provenance,
-        inputs,
-        pinned_vars=None,
-        tolerance=1e-3,
-    ):
-        if pinned_vars and target_str in pinned_vars:
-            return False
-
-        # 1. ALWAYS check custom solvers FIRST
-        parts = target_str.split(".")
-        lookup_key = f"{parts[0]}.{parts[-1]}"
-        idx = int(parts[1]) if len(parts) >= 3 else 0
-
-        if lookup_key in self.custom_solvers:
-            solver_func = self.custom_solvers[lookup_key]
-            try:
-                valid_val = float(
-                    solver_func(resolved, self.system_config, idx)
-                )
-                if not _meaningful_change(
-                    valid_val,
-                    resolved.get(target_str),
-                    new_rank,
-                    provenance.get(target_str, 0),
-                    tolerance,
-                    resolved_scales.get(target_str),
-                    target_str,
-                ):
-                    return False
-                resolved[target_str] = valid_val
-                provenance[target_str] = new_rank
-                self._last_solved_by[target_str] = f"{eq.lhs} = {eq.rhs}"
-                logger.debug(
-                    f"Updated {target_str} = {valid_val:.4g} (custom solver)"
-                )
-                return True
-            except Exception as e:
-                # A custom solver is a shortcut for one specific relation
-                # (e.g. K -> companion mass).  If it can't run (missing
-                # dependencies), fall through to the generic symbolic solver
-                # so OTHER equations targeting this parameter (e.g.
-                # q * M_primary = M_companion) still get their chance.
-                logger.debug(
-                    f"Custom solver failed for {target_str}: {e}; "
-                    f"falling back to symbolic solve."
-                )
-
-        # 2. Skip equations whose symbolic inversion has previously timed out
-        if target_str in self.symbolic_blacklist:
-            return False
-
-        # 3. Diagnostic Timing for the Symbolic Solver
-        logger.debug(f"Attempting to solve: {eq} for target: {target_str}")
-
-        # Print the equation with substituted numerical values ---
-        #
-        # GATED, and the gate wraps the whole block deliberately: it walks
-        # every free symbol and runs a re.sub per resolved one, then handed
-        # the string to logger.debug, which discarded it at every level
-        # anybody runs a fit at.  KEEP THE SORT inside -- it is load-bearing
-        # for determinism (see its own comment), which is also why the gate
-        # goes here rather than being pushed down into the loop.
-        if logger.isEnabledFor(logging.DEBUG):
-            try:
-                # Format as "lhs = rhs" instead of "Eq(lhs, rhs)"
-                eq_str = f"{eq.lhs} = {eq.rhs}"
-
-                # Replace only the known symbols so the math structure is
-                # preserved.  Sorted for the same reason as _execute_solve's
-                # walk (free_symbols is a set of Symbols whose hashes include
-                # the string hash): successive re.sub calls are not
-                # commutative when one symbol's name is a substring of
-                # another's, so an unsorted walk could render this line
-                # differently in two processes.  It is only a debug string
-                # today -- but a diagnostic that varies run to run is the one
-                # thing a diagnostic must not do.
-                for s in sorted(eq.free_symbols, key=str):
-                    s_str = str(s)
-                    if s_str in resolved:
-                        # Format to 5 sig figs (handles scientific notation)
-                        val_str = f"{float(resolved[s_str]):.5g}"
-                        # Word boundaries: replace exact variable names only
-                        eq_str = re.sub(
-                            rf"\b{re.escape(s_str)}\b", val_str, eq_str
-                        )
-
-                logger.debug(f"  Substituted: {eq_str}")
-            except Exception:
-                pass
-
-        start_time = time.time()
-
-        solutions = []
-        used_nsolve = False
-
-        # _sympy_time_limit, not a hand-armed alarm: this block used to install
-        # its own SIGALRM handler and never restore the previous one, so after
-        # the first symbolic solve the process handler was permanently this
-        # local TimeoutError-raiser -- any later code arming SIGALRM (the
-        # nsolve guard below is the near neighbour, but nothing stops a
-        # component or a downstream library doing it) got "Symbolic solver
-        # timed out!" out of a completely unrelated frame.  The context manager
-        # restores the prior handler in its finally, and carries the
-        # re-arm-before-raise hardening the hand-rolled copy lacked (see its
-        # docstring for the JAX gc-callback case that motivated it).
-        try:
-            target_sym = next(
-                s for s in eq.free_symbols if str(s) == target_str
-            )
-            # simplify=False + check=False: sp.solve's default post-simplify and
-            # its checksol() verification pass together dominate prepare()
-            # (sympy.simplify + sympy.checksol) and are redundant here -- every
-            # candidate solution is evaluated numerically, bounds-checked, and
-            # (for multiple roots) scored against the other relations below, so
-            # the code already does its own root validation. simplify only
-            # changes the expression's form (identical numeric value); check
-            # only pre-filters roots the numeric bounds/scoring pass re-filters.
-            # MEMOIZED.  sp.solve is a pure function of (equation, target)
-            # -- it knows nothing about the resolved values -- but the engine
-            # relaxes to a fixed point, and does so once per seed and again
-            # inside every probe_derivable snapshot, so the SAME inversion was
-            # recomputed dozens of times per prepare().  The only reuse before
-            # this was the timeout blacklist, i.e. we remembered the failures
-            # and forgot the successes.  Cached per ConfigManager (one per
-            # System), so nothing leaks between fits.  An empty result is
-            # cached too: "no closed form" is just as reproducible, and it is
-            # the case that costs the most to rediscover.
-            cache_key = (eq, target_sym)
-            if cache_key in self._symbolic_solve_cache:
-                solutions = list(self._symbolic_solve_cache[cache_key])
-                logger.debug(f"sp.solve cache hit for {target_str}")
-            else:
-                with _sympy_time_limit():  # POSIX only; see the constant
-                    solutions = sp.solve(
-                        eq,
-                        target_sym,
-                        dict=False,
-                        simplify=False,
-                        check=False,
-                    )
-                self._symbolic_solve_cache[cache_key] = list(solutions)
-                elapsed = time.time() - start_time
-                logger.debug(
-                    f"sp.solve finished in {elapsed:.4f}s for {target_str}"
-                )
-        except SymbolicTimeout:
-            logger.debug(
-                f"sp.solve timed out for {target_str} -- blacklisting."
-            )
-            self.symbolic_blacklist.add(target_str)
-            return False
-        except Exception as e:
-            logger.debug(f"sp.solve exception for {target_str}: {e}")
-            return False
-
-        # 3. Fallback to nsolve if analytical failed
-        if not solutions:
-            try:
-                with _sympy_time_limit():
-                    guess = float(resolved.get(target_str, 1.0))
-                    sub_dict = {s: resolved[str(s)] for s in inputs}
-                    expr = (eq.lhs - eq.rhs).subs(sub_dict).evalf()
-                    solutions = [sp.nsolve(expr, target_sym, guess)]
-                    used_nsolve = True
-            except Exception:
-                return False
-
-        # 4. Validation — collect all in-bounds solutions
-        cfg = self.resolve(parts[0], parts[-1], shape=(), element=idx)
-        lower = cfg["lower"][0] if cfg.get("lower") is not None else -np.inf
-        upper = cfg["upper"][0] if cfg.get("upper") is not None else np.inf
-
-        valid_solutions = []
-        for sol in solutions:
-            try:
-                val = (
-                    float(sol.evalf(subs=resolved))
-                    if not used_nsolve
-                    else float(sol)
-                )
-                if lower <= val <= upper:
-                    valid_solutions.append((val, sol))
-            except (TypeError, ValueError):
-                continue
-
-        if not valid_solutions:
-            return False
-
-        # When multiple roots exist (e.g. ± from a quadratic), pick the one that
-        # best satisfies other equations sharing this variable.  This prevents
-        # sign-ambiguity failures (e.g. mu_ra_rel getting the wrong sign and
-        # making pi_E_E irreconcilable).
-        if len(valid_solutions) == 1:
-            valid_val, valid_sol = valid_solutions[0]
-        else:
-            # Sorted by value: sp.solve's root order is not contractual, and
-            # the strict < below means equal-score roots go to whichever came
-            # first -- break that tie by value, not arrival order.
-            best_val, best_sol, best_score = None, None, float("inf")
-            for val, sol in sorted(valid_solutions, key=lambda vs: vs[0]):
-                temp = {**resolved, target_str: val}
-                score = 0.0
-                for other_eq in self.all_relations:
-                    other_syms = [str(s) for s in other_eq.free_symbols]
-                    if target_str not in other_syms or other_eq is eq:
-                        continue
-                    if not all(s in temp for s in other_syms):
-                        continue
-                    try:
-                        lhs = float(other_eq.lhs.evalf(subs=temp))
-                        rhs = float(other_eq.rhs.evalf(subs=temp))
-                        ref = max(abs(lhs), abs(rhs), 1e-9)
-                        score += ((lhs - rhs) / ref) ** 2
-                    except Exception:
-                        pass
-                if score < best_score:
-                    best_score = score
-                    best_val, best_sol = val, sol
-            valid_val, valid_sol = best_val, best_sol
-
-        # 5. Apply Value and Armor
-        if valid_val is not None:
-            if not _meaningful_change(
-                valid_val,
-                resolved.get(target_str),
-                new_rank,
-                provenance.get(target_str, 0),
-                tolerance,
-                resolved_scales.get(target_str),
-                target_str,
-            ):
-                return False
-            # 5b. Jacobian-filtered rank refinement.
-            # Replace raw min(input_ranks) with min(active_input_ranks), where
-            # "active" means the input has a non-negligible Jacobian contribution.
-            # This prevents incidentally-zero inputs (e.g. mu_ra_rel ≈ 0 in the
-            # mu_dec_rel = sqrt(mu_rel_mag² - mu_ra_rel²) equation) from dragging
-            # down the trustworthiness of the result.
-            jac_active_inputs = []
-            if (
-                not used_nsolve
-                and hasattr(valid_sol, "free_symbols")
-                and inputs
-            ):
-                for parent_str in inputs:
-                    parent_sym = sp.Symbol(parent_str)
-                    if not valid_sol.has(parent_sym):
-                        continue
-                    try:
-                        d = float(
-                            sp.diff(valid_sol, parent_sym).evalf(subs=resolved)
-                        )
-                        if np.isfinite(d) and abs(d) > 1e-6:
-                            jac_active_inputs.append(parent_str)
-                    except Exception:
-                        jac_active_inputs.append(
-                            parent_str
-                        )  # conservative: include on error
-
-            if jac_active_inputs:
-                min_jac_rank = min(
-                    provenance.get(s, PRECEDENCE_DEFAULT)
-                    for s in jac_active_inputs
-                )
-                # Refine upward only: never reduce a rank that was already determined
-                # by a valid floor (e.g. Condition A floor of PRECEDENCE_DEFAULT-1).
-                new_rank = max(
-                    new_rank, min(PRECEDENCE_DERIVED_USER, min_jac_rank)
-                )
-
-            resolved[target_str] = valid_val
-            provenance[target_str] = new_rank
-            self._last_solved_by[target_str] = f"{eq.lhs} = {eq.rhs}"
-            logger.debug(
-                f"Updated {target_str} = {valid_val:.4g} (rank: {new_rank})"
-            )
-
-            # 6. Independent Scale Propagation via Jacobian
-            if (
-                not used_nsolve
-                and hasattr(valid_sol, "free_symbols")
-                and inputs
-            ):
-                scale_variance = 0.0
-                valid_scale_inputs = []
-
-                for parent_str in inputs:
-                    parent_sym = sp.Symbol(parent_str)
-                    if not valid_sol.has(parent_sym):
-                        continue
-
-                    parent_scale = resolved_scales.get(parent_str, 1e-9)
-                    valid_scale_inputs.append(parent_str)
-
-                    try:
-                        derivative = sp.diff(valid_sol, parent_sym)
-                        sensitivity = float(derivative.evalf(subs=resolved))
-
-                        # Only update variance if the sensitivity is a sane number
-                        if (
-                            np.isfinite(sensitivity)
-                            and abs(sensitivity) < 1e15
-                        ):
-                            scale_variance += (sensitivity * parent_scale) ** 2
-
-                    except (OverflowError, FloatingPointError, TypeError):
-                        # If the derivative is explosive, we have reached a physical regime
-                        # where variance propagation is numerically invalid.
-                        # Treat the variance contribution as undefined/maxed out.
-                        scale_variance = np.inf
-                        break
-
-                if valid_scale_inputs:
-                    new_scale_rank = sum(
-                        scale_provenance.get(s, 0) for s in valid_scale_inputs
-                    ) / len(valid_scale_inputs)
-                    new_scale = float(np.sqrt(scale_variance))
-                    if new_scale_rank > scale_provenance.get(target_str, 0):
-                        resolved_scales[target_str] = new_scale
-                        scale_provenance[target_str] = new_scale_rank
-
-                    # Sync the solved scale back into user_params -- but only
-                    # when there IS one.  init_scale is optional at every
-                    # source (defaults.yaml, component hints, user sigmas), so
-                    # a target whose parents are ALL scale-less scores
-                    # new_scale_rank == 0, fails the guard above, and has no
-                    # entry from the default-armor pass either: reading
-                    # resolved_scales[target_str] here used to raise KeyError
-                    # straight out of prepare().  (Reproduced by naming
-                    # `orbit.<name>.a` in a params file -- it is solved
-                    # from m_total and period, and none of the three carries
-                    # an init_scale default.)  Skipping leaves the parameter
-                    # with no preliminary scale, which is the documented and
-                    # handled state: build_pymc falls back to a fraction of
-                    # the bound span, and the startup whitening probe measures
-                    # the real scale from the data regardless.
-                    if (
-                        target_str in resolved_scales
-                        and user_entry(self.user_params, target_str)
-                        is not None
+        for severity, message, paths_, kind in engine.diagnostics:
+            if kind == "dropped":
+                # The rule drops a value that does not hold EXACTLY; the
+                # user hears about it only where that is material, on the
+                # same footing check_user_starts reports a miss.  A
+                # published t_E rounded to 173 against a chain that implies
+                # 172.9987 is honored to 8e-6 and is not news.
+                p = paths_[0]
+                want = anchors[p].value
+                got = resolved.get(p)
+                if got is not None:
+                    diff = got - want
+                    per = periodic.get(p)
+                    if per:
+                        diff = (diff + 0.5 * per) % per - 0.5 * per
+                    if abs(diff) <= max(
+                        USER_START_ATOL, USER_START_RTOL * abs(want)
                     ):
-                        factor = self.get_conversion_factor(
-                            parts[0], parts[-1], full_path=target_str
-                        )
-                        self.user_params[target_str]["init_scale"] = (
-                            resolved_scales[target_str] / factor
-                        )
+                        continue
+            self._record_diagnostic(severity, message, paths_, kind=kind)
 
-            return True
+        # The preliminary scales the rest of the build reads (resolve()'s
+        # lowest-priority init_scale, the whitening probe's seed, and the
+        # soft barriers' preliminary steepness on derived bounds).  This
+        # decides nothing in the solve -- the split and the change test use
+        # engine.scale -- but the polish and the probe start from it, so it
+        # follows the Jacobian propagation the old engine exported:
+        #
+        # * a SAMPLED or pinned element exports its own scale (declared,
+        #   else propagated), except where the solve DERIVED it from inputs
+        #   whose DECLARED scales are better sourced (a user sigma on
+        #   star.mass, carried to the sampled logmass it determines);
+        # * a DERIVED element exports the scale propagated to it, at the
+        #   solved values, from its inputs' EXPORTED scales -- its own
+        #   defaults.yaml init_scale describes it only where it is sampled
+        #   (orbit.vcve's 0.1, against the 0.0034 its secosw/sesinw give),
+        #   and a scale propagated from the leaves at their ANCHORS (the
+        #   leaf pass) describes the defaults, not this start.
+        #
+        # Measured on kelt4_rvonly (tests/test_polish.py, the ulp test): the
+        # one-sided, anchor-based and declared-on-derived export changed
+        # the planet mass's scale by 15% and several barrier scales 4x, and
+        # one ulp-perturbed L-BFGS polish then reached the cos i ~ 0.98
+        # basin on a CI BLAS.  Only inputs with DECLARED scales count toward
+        # "better sourced": a propagated input scale carries no rank, and
+        # counting it let the RV K hint (absorbed by the planet mass)
+        # re-export the mass's scale from K's.
+        from .relaxation import _secant
 
-        return False
+        plan = engine.plan
+        scales = {}
+        srank = {}
+        for p in resolved:
+            s_p = engine.scale(p)
+            if s_p is not None:
+                scales[p] = s_p
+                srank[p] = scale_rank.get(p, 0)
+
+        def exported(st):
+            """RSS of st's response to each input's EXPORTED scale."""
+            base = plan.values.get(st.target)
+            if base is None:
+                return None
+            var = 0.0
+            for inp in st.inputs:
+                s_i = scales.get(inp)
+                if s_i is None:
+                    s_i = engine.scale(inp, plan)
+                if s_i is None or not s_i > 0:
+                    return None
+                d = _secant(
+                    st.fn,
+                    plan.values,
+                    inp,
+                    s_i,
+                    base,
+                    engine.periodic.get(st.target),
+                )
+                if not math.isfinite(d):
+                    return None
+                var += d * d
+            return math.sqrt(var) if var > 0.0 else None
+
+        for st in plan.steps:
+            if not st.inputs:
+                continue
+            derived = (
+                roles is not None
+                and roles.get(st.target, "derived") == "derived"
+            )
+            if not derived:
+                ins = [i for i in st.inputs if i in scale_rank]
+                if not ins or len(ins) != len(st.inputs):
+                    continue
+                mean_rank = sum(scale_rank[i] for i in ins) / len(ins)
+                if mean_rank <= srank.get(st.target, 0):
+                    continue
+            prop = exported(st)
+            if prop is not None:
+                scales[st.target] = prop
+                if not derived:
+                    srank[st.target] = mean_rank
+        self.propagated_scales = scales
+        self._last_scale_provenance = srank
+        self._last_provenance = provenance
+        self._last_resolved = dict(resolved)
+        self._last_solved_by = solved_by
+        self._last_keep_report = engine.keep_report
+        return resolved

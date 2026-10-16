@@ -18,6 +18,13 @@ lens_mass_total, primary_lens_mass = sp.symbols(
 )
 lens_distance, source_distance = sp.symbols("lens_distance source_distance")
 mu_ra_rel, mu_dec_rel = sp.symbols("mu_ra_rel mu_dec_rel")
+# The GEOCENTRIC relative proper motion the model evaluates t_E and pi_E
+# from (review 8.6.23), and Earth's velocity at t0_par projected on the sky
+# -- two exact per-event numbers MulensEvent supplies through
+# ConfigManager.add_constant, never parameters.
+mu_ra_rel_geo, mu_dec_rel_geo = sp.symbols("mu_ra_rel_geo mu_dec_rel_geo")
+mu_rel_geo_mag = sp.symbols("mu_rel_geo_mag")
+earth_vperp_e, earth_vperp_n = sp.symbols("earth_vperp_e earth_vperp_n")
 lens_pm_ra, source_pm_ra = sp.symbols("lens_pm_ra source_pm_ra")
 lens_pm_dec, source_pm_dec = sp.symbols("lens_pm_dec source_pm_dec")
 pi_E_N, pi_E_E = sp.symbols("pi_E_N pi_E_E")
@@ -165,6 +172,12 @@ def get_symbol_map(event_cfg, system_config):
             "mu_rel_mag": "mulensevent.0.mu_rel_mag",
             "mu_ra_rel": "mulensevent.0.mu_ra_rel",
             "mu_dec_rel": "mulensevent.0.mu_dec_rel",
+            "mu_ra_rel_geo": "mulensevent.0.mu_ra_rel_geo",
+            "mu_dec_rel_geo": "mulensevent.0.mu_dec_rel_geo",
+            "mu_rel_geo_mag": "mulensevent.0.mu_rel_geo_mag",
+            # Constants (ConfigManager.add_constant), not parameters.
+            "earth_vperp_e": "mulensevent.0.earth_vperp_e",
+            "earth_vperp_n": "mulensevent.0.earth_vperp_n",
             "lens_mass_total": lens_mass_total_path,
             "lens_distance": f"star.{l_idx}.distance",
             "lens_pm_ra": f"star.{l_idx}.pm_ra",
@@ -228,27 +241,36 @@ RELATIONS = [
     sp.Eq(theta_E**2, KAPPA * lens_mass_total * pi_rel),
     # Relative Parallax (dist in pc -> pi in mas)
     sp.Eq(pi_rel, (1000 / lens_distance) - (1000 / source_distance)),
-    # Einstein Time (mu in mas/yr -> t_E in days).  SEEDING APPROXIMATION:
-    # the runtime graph derives t_E from mu_rel_GEO (= mu_rel_helio -
-    # pi_rel * v_earth_perp(t0_par)/AU, Gould 2004), but t0_par and Earth's
-    # velocity are resolved at stage 1 -- after these relations are
-    # constructed -- so the engine seeds through the heliocentric value.
-    # Starts land a few percent off for large-pi_rel events; the samplers
-    # absorb that.  (Light-curve t_E seeds -- the peak finder's, or a
-    # published one -- are geocentric, so the back-solved pms are
-    # helio-approximate too.)
-    sp.Eq(t_E, theta_E / (mu_rel_mag / DAYS_PER_YEAR)),
-    # Relative Motion Magnitude
+    # Einstein Time (mu in mas/yr -> t_E in days), in the GEOCENTRIC frame
+    # the model evaluates it in (review 8.6.23): mulensevent's defaults.yaml
+    # derives t_E from mu_rel_GEO, mu_rel_helio - pi_rel * v_earth_perp(t0_par)
+    # (Gould 2004).  The engine used to seed through the HELIOCENTRIC
+    # mu_rel_mag, because Earth's velocity is known only at stage 1; it now
+    # arrives as two constants (MulensEvent.register_frame_constants), so a
+    # pinned t_E is produced exactly instead of 1-9% off (ob140939 8.6%,
+    # ob09020 3.3%, ob08092 1.3%).  Without microlensing data the constants
+    # are 0 and the geocentric motion IS the heliocentric one, as in the
+    # model.  It needed the KS rule (review 3.14.22) to land: under the old
+    # engine the solvable geocentric form handed a pinned t_E to the lens
+    # mass and cost 7.6e3-5.8e6 nats of start logp on 6 of 10 events.
+    sp.Eq(t_E, theta_E / (mu_rel_geo_mag / DAYS_PER_YEAR)),
+    # Relative Motion Magnitudes (heliocentric, reported; geocentric, used)
     sp.Eq(mu_rel_mag**2, mu_ra_rel**2 + mu_dec_rel**2),
+    sp.Eq(mu_rel_geo_mag**2, mu_ra_rel_geo**2 + mu_dec_rel_geo**2),
     # Proper Motion Vector Components
     sp.Eq(mu_ra_rel, lens_pm_ra - source_pm_ra),
     sp.Eq(mu_dec_rel, lens_pm_dec - source_pm_dec),
-    # Parallax Vector Components
-    sp.Eq(pi_E_N, (pi_rel / theta_E) * (mu_dec_rel / mu_rel_mag)),
-    sp.Eq(pi_E_E, (pi_rel / theta_E) * (mu_ra_rel / mu_rel_mag)),
+    # Heliocentric -> geocentric (physics.calc_mu_ra_rel_geo/_dec_rel_geo)
+    sp.Eq(mu_ra_rel_geo, mu_ra_rel - pi_rel * earth_vperp_e),
+    sp.Eq(mu_dec_rel_geo, mu_dec_rel - pi_rel * earth_vperp_n),
+    # Parallax Vector Components, along the GEOCENTRIC motion (the model's
+    # calc_pi_E_N / calc_pi_E_E)
+    sp.Eq(pi_E_N, (pi_rel / theta_E) * (mu_dec_rel_geo / mu_rel_geo_mag)),
+    sp.Eq(pi_E_E, (pi_rel / theta_E) * (mu_ra_rel_geo / mu_rel_geo_mag)),
     # Derived shortcut: pi_rel = kappa * mass * |pi_E|^2
     # (obtained by eliminating theta_E from the Einstein-radius and pi_E-magnitude
     # equations: |pi_E|^2 = (pi_rel/theta_E)^2 and theta_E^2 = kappa*mass*pi_rel).
+    # Frame-free: |pi_E| does not depend on which frame mu_rel is taken in.
     # This gives the solver a direct rank-100 path when mass and pi_E are both
     # user-supplied, bypassing the distance hint and avoiding sign ambiguity in
     # the quadratic for mu_ra_rel / mu_dec_rel.

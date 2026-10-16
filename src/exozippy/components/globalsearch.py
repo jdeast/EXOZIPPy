@@ -66,15 +66,16 @@ can only ever drift from the hint it shadows.
 
 Deliberately NOT seeded, and each for a reason worth not rediscovering:
 
-- **a/R\\* from the transit duration.**  ``planet.ar`` carries ``rank: 5`` in
-  its defaults.yaml precisely so the relaxation engine's Condition B always
-  rewrites IT rather than the period, mass or radius it is derived from, so a
-  hint there is discarded by design.  Forcing it through would invert exactly
-  the direction the ranking system exists to protect (a duration-derived
-  a/R\\* silently moving a stellar mass).  The duration is reported in the
+- **a/R\\* from the transit duration.**  ``planet.ar`` is a DERIVED
+  parameter, and a hint on it would be a data-level seed that the relaxation
+  engine honors over the period, mass and radius it is derived from (review
+  3.14.22: a hint on a derived element is a seed at its tier) -- a
+  duration-derived a/R\\* silently moving a stellar mass, which is exactly the
+  inversion provenance exists to prevent.  The duration is reported in the
   log and by the CLI utility instead.
-- **K from the Lomb-Scargle sinusoid.**  ``planet.K`` already gets a
-  data-driven hint, from ``RVInstrument._estimate_k_init``, and for a single
+- **K from the Lomb-Scargle sinusoid.**  The planet's mass already gets a
+  data-driven start from ``RVInstrument._estimate_k_init`` (through the
+  ``planet.K`` hint, ``Planet._push_rv_mass_hints``), and for a single
   circular signal ``sqrt(2) * std`` IS the semi-amplitude exactly.  Rather
   than add a second competing hint on the same parameter (planet's is pushed
   at stage 2 and would overwrite a stage-1a one regardless), the LS fit's

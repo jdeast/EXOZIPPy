@@ -28,6 +28,7 @@ def _toy_vector_model():
         initval=np.array([2.0, 5.0, 3.0]),
         lower=np.array([0.0, 0.0, 0.0]),
         upper=np.array([10.0, 10.0, 10.0]),
+        init_scale=1.0,
         sigma=np.array([np.nan, 0.0, np.nan]),
         shape=(3,),
     )

@@ -23,12 +23,11 @@ planet:
     internal_unit: ""
     latex: "\\log{q}"
     description: "$\\log_{10}{M_P/M_\\star}$"
-    # rank 5 (below mass's 10) is load-bearing: the relaxation engine's
-    # Condition B rewrites the LOWEST-rank symbol of a violated relation, so
-    # log_q always absorbs Eq(mass, 10**log_q * star_mass).  That both gives
-    # the right back-solve in log_q mode and makes the relation inert in
-    # linear mode, where log_q is never materialized.
-    rank: 5
+    # No `rank:` (review 3.14.22).  Its old rank 5 made log_q absorb
+    # Eq(mass, 10**log_q * star_mass) under Condition B.  Under the KS rule
+    # that is what the roles already say: in log_q mode a user mass (on the
+    # DERIVED mass) is kept and log_q is solved from it, and in linear mode
+    # log_q is not a parameter, so this initval is a fill that moves nothing.
   mass:
     initval: 1.0
     init_scale: 0.1
@@ -38,7 +37,10 @@ planet:
     internal_unit: "solMass"
     latex: "M_P"
     description: "planet mass"
-    rank: 10 # rank < 20 makes this the first to be overwritten if we have a constraint from somewhere else (e.g., K estimate)
+    # DEFAULT_WEAK: below every ordinary default, so where mass is sampled
+    # any other constraint (a K estimate, a mass ratio) moves this start
+    # first.
+    rank: DEFAULT_WEAK
     # `default` is used only in log_q mode and `from_msini` only in msini mode
     # (fitmsini, review 2.14.9); in linear mode the manifest declares mass free
     # and neither block is used (Planet.MASS_MODE_TABLE).
@@ -79,13 +81,15 @@ planet:
     initval: 1.0
     # Same as mass's: at the sin i ~ 1 start the two coordinates coincide.
     init_scale: 0.1
-    # rank 5 (below mass's 10) is load-bearing, exactly as log_q's is: the
-    # relaxation engine's Condition B rewrites the LOWEST-rank symbol of a
-    # violated relation, so msini always absorbs Eq(msini, mass * sini) --
-    # which back-solves a user planet.<i>.mass (or the K -> mass solver's
-    # result) into an msini start, and keeps the relation from moving mass
-    # or cos i where msini is merely reported.
-    rank: 5
+    # DEFAULT_WEAK, like mass's: where msini is SAMPLED, a user
+    # planet.<i>.mass (derived there) or the RV mass seed is a statement
+    # about the planet's mass, and it must move this vague 1 Mjup start, not
+    # the orbit's default cos i -- which the minimum-norm split inside one
+    # tier would otherwise share it with, turning a transit fit face-on
+    # (JDE 2026-10-14: K and mass/msini are one quantity).  Where msini is
+    # REPORTED this initval is a fill and moves nothing.  Pinned by
+    # tests/test_fitmsini.py and tests/test_ks_engine_examples.py.
+    rank: DEFAULT_WEAK
     unit: "jupiterMass"
     internal_unit: "solMass"
     latex: "M_P\\sin{i}"
@@ -120,7 +124,7 @@ planet:
     upper: 100.0
     initval: 1.0
     init_scale: 0.1
-    rank: 10
+    rank: DEFAULT_WEAK
     internal_unit: "solRad"
     latex: "R_P"
     description: "planet radius"
@@ -148,11 +152,9 @@ planet:
     internal_unit: "solRad"
     latex: "a"
     description: "Semi-major Axis"
-    # rank 5: the engine's Condition B rewrites the lowest-ranked
-    # symbol of a violated relation, and this one is DERIVED -- its
-    # runtime value is its expression -- so it must always be the
-    # side that absorbs, never the mass/radius/period it comes from.
-    rank: 5
+    # No `rank:` (review 3.14.22): this is DERIVED, so its defaults.yaml
+    # value is a fill and can never move the mass/radius/period it comes
+    # from -- which is what its old rank 5 was there to guarantee.
     expressions:
       default:
         func_name: "calc_arsun"
@@ -162,11 +164,9 @@ planet:
     internal_unit: ""
     latex: "a/R_*"
     description: "Semi-major Axis in $R_*$"
-    # rank 5: the engine's Condition B rewrites the lowest-ranked
-    # symbol of a violated relation, and this one is DERIVED -- its
-    # runtime value is its expression -- so it must always be the
-    # side that absorbs, never the mass/radius/period it comes from.
-    rank: 5
+    # No `rank:` (review 3.14.22): this is DERIVED, so its defaults.yaml
+    # value is a fill and can never move the mass/radius/period it comes
+    # from -- which is what its old rank 5 was there to guarantee.
     expressions:
       default:
         func_name: "calc_arstar"
@@ -259,11 +259,9 @@ planet:
     unit: "solMass"
     latex: "M_{\\rm tot}"
     description: "Total System Mass"
-    # rank 5: the engine's Condition B rewrites the lowest-ranked
-    # symbol of a violated relation, and this one is DERIVED -- its
-    # runtime value is its expression -- so it must always be the
-    # side that absorbs, never the mass/radius/period it comes from.
-    rank: 5
+    # No `rank:` (review 3.14.22): this is DERIVED, so its defaults.yaml
+    # value is a fill and can never move the mass/radius/period it comes
+    # from -- which is what its old rank 5 was there to guarantee.
     expressions:
       default:
         func_name: "calc_m_total"
