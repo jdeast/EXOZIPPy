@@ -3,6 +3,7 @@ import copy
 import dataclasses
 import importlib
 import logging
+import math
 import signal
 import time
 from pathlib import Path
@@ -4375,33 +4376,86 @@ class ConfigManager:
             self._record_diagnostic(severity, message, paths_, kind=kind)
 
         # The preliminary scales the rest of the build reads (resolve()'s
-        # lowest-priority init_scale, the whitening probe's seed).  The
-        # engine's own scale (declared, else propagated) everywhere, with
-        # the one refinement the export always had: a value the solve
-        # DERIVED from inputs whose scales are better sourced than its own
-        # declared one (a user sigma on star.mass, carried to the sampled
-        # logmass it determines) exports the scale propagated from them.
-        # This decides nothing in the solve -- the split and the change test
-        # use engine.scale -- it only keeps the whitening probe's starting
-        # scales what they were (the probe measures the real ones anyway).
+        # lowest-priority init_scale, the whitening probe's seed, and the
+        # soft barriers' preliminary steepness on derived bounds).  This
+        # decides nothing in the solve -- the split and the change test use
+        # engine.scale -- but the polish and the probe start from it, so it
+        # follows the Jacobian propagation the old engine exported:
+        #
+        # * a SAMPLED or pinned element exports its own scale (declared,
+        #   else propagated), except where the solve DERIVED it from inputs
+        #   whose DECLARED scales are better sourced (a user sigma on
+        #   star.mass, carried to the sampled logmass it determines);
+        # * a DERIVED element exports the scale propagated to it, at the
+        #   solved values, from its inputs' EXPORTED scales -- its own
+        #   defaults.yaml init_scale describes it only where it is sampled
+        #   (orbit.vcve's 0.1, against the 0.0034 its secosw/sesinw give),
+        #   and a scale propagated from the leaves at their ANCHORS (the
+        #   leaf pass) describes the defaults, not this start.
+        #
+        # Measured on kelt4_rvonly (tests/test_polish.py, the ulp test): the
+        # one-sided, anchor-based and declared-on-derived export changed
+        # the planet mass's scale by 15% and several barrier scales 4x, and
+        # one ulp-perturbed L-BFGS polish then reached the cos i ~ 0.98
+        # basin on a CI BLAS.  Only inputs with DECLARED scales count toward
+        # "better sourced": a propagated input scale carries no rank, and
+        # counting it let the RV K hint (absorbed by the planet mass)
+        # re-export the mass's scale from K's.
+        from .relaxation import _secant
+
+        plan = engine.plan
         scales = {}
         srank = {}
         for p in resolved:
-            s = engine.scale(p)
-            if s is not None:
-                scales[p] = s
+            s_p = engine.scale(p)
+            if s_p is not None:
+                scales[p] = s_p
                 srank[p] = scale_rank.get(p, 0)
-        for st in engine.plan.steps:
-            ins = [i for i in st.inputs if i in srank]
-            if not ins or len(ins) != len(st.inputs):
+
+        def exported(st):
+            """RSS of st's response to each input's EXPORTED scale."""
+            base = plan.values.get(st.target)
+            if base is None:
+                return None
+            var = 0.0
+            for inp in st.inputs:
+                s_i = scales.get(inp)
+                if s_i is None:
+                    s_i = engine.scale(inp, plan)
+                if s_i is None or not s_i > 0:
+                    return None
+                d = _secant(
+                    st.fn,
+                    plan.values,
+                    inp,
+                    s_i,
+                    base,
+                    engine.periodic.get(st.target),
+                )
+                if not math.isfinite(d):
+                    return None
+                var += d * d
+            return math.sqrt(var) if var > 0.0 else None
+
+        for st in plan.steps:
+            if not st.inputs:
                 continue
-            mean_rank = sum(srank[i] for i in ins) / len(ins)
-            if mean_rank <= srank.get(st.target, 0):
-                continue
-            prop = engine._plan_scale(engine.plan, st.target)
+            derived = (
+                roles is not None
+                and roles.get(st.target, "derived") == "derived"
+            )
+            if not derived:
+                ins = [i for i in st.inputs if i in scale_rank]
+                if not ins or len(ins) != len(st.inputs):
+                    continue
+                mean_rank = sum(scale_rank[i] for i in ins) / len(ins)
+                if mean_rank <= srank.get(st.target, 0):
+                    continue
+            prop = exported(st)
             if prop is not None:
                 scales[st.target] = prop
-                srank[st.target] = mean_rank
+                if not derived:
+                    srank[st.target] = mean_rank
         self.propagated_scales = scales
         self._last_scale_provenance = srank
         self._last_provenance = provenance

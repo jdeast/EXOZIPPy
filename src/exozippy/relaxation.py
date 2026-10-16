@@ -286,6 +286,33 @@ class _FDPartial:
         return (self.g(up) - self.g(dn)) / (2.0 * h)
 
 
+def _secant(fn, vals, inp, s, base, period):
+    """The response of `fn` to moving `inp` by its scale `s`: the LOCAL
+    derivative times s, by a central difference 1e-4 scale wide, which is
+    the Jacobian propagation the scales were always defined by (a curved
+    step -- logmass = log10 mass from a user sigma on the mass -- gets the
+    derivative's scale, not a one-sided secant 2% off it; the preliminary
+    whitening scales that seed the polish follow).  Where that is not finite
+    or is exactly zero (a kink: |mu_rel| at mu_rel = 0, where the derivative
+    is 0/0), the secant one whole scale wide, centered, then either side.
+    NaN when nothing finite is found."""
+    x = vals[inp]
+    for half in (1e-4 * s, 0.5 * s):
+        up, dn = dict(vals), dict(vals)
+        up[inp] = x + half
+        dn[inp] = x - half
+        delta = wrap(fn(up) - fn(dn), period) * (s / (2.0 * half))
+        if math.isfinite(delta) and delta != 0.0:
+            return delta
+    for sign in (1.0, -1.0):
+        trial = dict(vals)
+        trial[inp] = x + sign * s
+        delta = wrap(fn(trial) - base, period)
+        if math.isfinite(delta):
+            return delta
+    return math.nan
+
+
 def _compiled(cm, key, build):
     """A pure function of (expression, target) cached on the ConfigManager.
 
@@ -526,16 +553,10 @@ class Engine:
             s = self.scale(inp, plan)
             if s is None or not s > 0:
                 return None
-            delta = math.nan
-            for sign in (1.0, -1.0):
-                trial = dict(vals)
-                trial[inp] = vals[inp] + sign * s
-                delta = st.fn(trial) - base
-                if math.isfinite(delta):
-                    break
+            delta = _secant(st.fn, vals, inp, s, base, self.periodic.get(path))
             if not math.isfinite(delta):
                 return None
-            var += wrap(delta, self.periodic.get(path)) ** 2
+            var += delta**2
         return math.sqrt(var) if var > 0.0 else None
 
     def require_scale(self, path, why, plan=None):
@@ -1004,17 +1025,13 @@ class Engine:
                 if s is None or not s > 0:
                     ok = False
                     break
-                delta = math.nan
-                for sign in (1.0, -1.0):
-                    trial = dict(vals)
-                    trial[inp] = vals[inp] + sign * s
-                    delta = st.fn(trial) - base
-                    if math.isfinite(delta):
-                        break
+                delta = _secant(
+                    st.fn, vals, inp, s, base, self.periodic.get(st.target)
+                )
                 if not math.isfinite(delta):
                     ok = False
                     break
-                var += wrap(delta, self.periodic.get(st.target)) ** 2
+                var += delta**2
             if ok and var > 0.0:
                 scales[st.target] = math.sqrt(var)
         self.leaf_scales = scales
