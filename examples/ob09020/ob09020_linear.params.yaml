@@ -61,9 +61,10 @@ lens.L2.alpha:
 #     alpha(t) = alpha_0 - gamma_perp (t - t0_par)
 #
 # and their Table 1 "parallax + full orbit (with priors)" column gives
-# gamma_par = 0.10 +/- 0.06 /yr and gamma_perp = 2.3 +0.5/-0.3 /yr -- the
-# arXiv v1 values: the IOP edition's rates are not available here (its
-# gamma_z changed, 1.7 -> 1.5).
+# gamma_par = 0.10 +/- 0.06 /yr and gamma_perp = 2.3 +0.5/-0.3 /yr.  THESE
+# TWO RATES ARE FROM THE arXiv v1 EDITION, because the IOP edition's rates
+# were unavailable (JDE 2026-10-16); every other S11 value in this file is
+# the IOP edition's.
 # EXOZIPPy's two parameters are NOT those:
 #
 #   ds_dt is a RATE, not a fractional one -- Einstein radii of the TOTAL

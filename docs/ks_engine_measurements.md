@@ -27,7 +27,10 @@ user value the start does not reproduce.  A low start logp from faithful
 seeds is a question about the seeds or the fit, not about the engine; the
 start logp tables further down are kept as secondary context only.
 
-### Missed user starts, master 4e123970 vs this PR
+### Missed user starts, master vs this PR
+
+Re-measured 2026-10-16 against master c0d4ec25 (identical to the counts
+against 4e123970).
 
 Each config is measured with its own branch's `examples/`.  This PR
 changes the params files of `ob09020`, `ob09020_linear`,
