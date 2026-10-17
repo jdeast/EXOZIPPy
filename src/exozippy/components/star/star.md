@@ -3,11 +3,11 @@
 `src/exozippy/components/star/`, `components/galacticmodel/`, `components/mann/`,
 `components/torres/` and the planet-side mass coordinate in `components/planet/`: the mass
 priors (IMF, the FFP mass function), the distance prior, evolutionary-track readiness, the
-empirical stellar and planetary relations, and the `linear` vs `log_q` planet mass
-parameterization.
+empirical stellar and planetary relations, the `linear` vs `log_q` planet mass
+parameterization, and the planet radius prior (uniform in R_P/R_*).
 
 Read this before changing a prior on a stellar quantity, adding an empirical relation, or
-touching the planet mass coordinate. Related: `src/exozippy/components/parameter.md` (how a
+touching the planet mass coordinate or the planet radius prior. Related: `src/exozippy/components/parameter.md` (how a
 component declares the prior it adds, and the element roles the mode tables use),
 `src/exozippy/components/mulensing/mulensing.md` (the lens-side consumer).
 
@@ -197,3 +197,15 @@ An RV-only orbit measures `m sin i` and nothing measures `i`. Under the default 
 
 Tests: `tests/test_fitmsini.py`.
 
+
+## Planet radius prior: uniform in R_P/R_* (`Planet._add_radius_prior`)
+
+`planet.radius` is the sampled coordinate, and its logit transform alone is exactly uniform in R_P over `[lower, upper]` (`Parameter.build_pymc`'s section-C correction, `components/parameter.md`). EXOFASTv2 instead steps in p = R_P/R_* with a flat prior. The two are not the same prior: at fixed R_*, `|dp/dR_P| = 1/R_*`, so uniform in R_P is `R_*` times uniform in p on the joint (p, R_*) density, which tilts a transit fit toward a larger, less dense star -- hence a larger impact parameter and a larger p. Measured on HAT-3b against EXOFASTv2 (2026-10-16): p 0.109655 here vs 0.109200 there (+0.15 sigma); importance-reweighting the EXOZIPPy posterior by 1/R_* moved it to 0.10941, about half the gap.
+
+- **The term.** `Planet.build_likelihood` adds `planet.radius_jacobian = -sum log R_*` over the planets below, R_* being each planet's host through `star_map`, so the implied prior is uniform in (p, R_*). JDE 2026-10-16: match EXOFASTv2 for now; whether a prior uniform in log R_P would be more physical is open. The choice lives in ONE place, `planet/physics.py` `radius_base_prior_logp` (the log-density of the base prior relative to uniform in R_P), plus the Prior-column and prose strings declared beside the call; swapping the base prior is a change there.
+- **Which planets.** Every planet whose `radius` element is SAMPLED (`Parameter.element_is_sampled`), and only when an orbit exists (p and everything that reads R_P/R_* exist only then). A pinned radius (`sigma: 0`, including a hard link) gets nothing: the term would be a function of R_* alone, a prior on the star.
+- **Other radius priors multiply it.** A user `mu`/`sigma` on R_P and the Chen & Kipping relation are separate potentials on R_P; they compose with the flat-in-p base prior exactly as EXOFASTv2 applies both as penalties on its derived rp, so the Jacobian stays. The Prior column reports the user's Gaussian and the `$\propto 1/R_*$` term together.
+- **The bounds are still on R_P, not on p.** Where nothing constrains R_P (no transit, chen off, no user prior), the 1/R_* factor integrated over the fixed R_P interval is a 1/R_* prior on the host, which EXOFASTv2's p-bounded stepping does not have. Such a radius measures nothing. With chen on (an RV- or astrometry-only fit) EXOFASTv2 carries the same 1/R_* marginal, because the relation fixes R_P = p R_* at a mass-given value.
+- **R_* is floored strictly positive inside the log** (`physics.STAR_RADIUS_LOG_FLOOR`, the CLAUDE.md where-trap rule): `star.radius` defaults to `[0.1, 2000]` solRad, but a user may widen it to 0 or drop the bound for a Gaussian.
+
+Tests: `tests/test_radius_prior.py` -- carried from the raw coordinates to (p, R_*) through the model's own transform, the no-likelihood density is flat to 1e-6, and with the term removed it is off by exactly `+log R_*`.
