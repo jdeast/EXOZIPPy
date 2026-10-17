@@ -730,7 +730,8 @@ def test_beam_diluted_when_sed_dilution_active(tmp_path_factory):
     undiluted_beam = 1e-6 * _BEAM_PPM * np.sin(phase)
     expected = dil * undiluted_beam
 
-    actual = mu[idx] - baseline
+    # The baseline MULTIPLIES the relative model (mu = baseline * rel).
+    actual = mu[idx] / baseline - 1.0
     assert actual == pytest.approx(expected, rel=1e-6, abs=1e-9)
     # Sanity: the undiluted prediction should NOT match -- if it did, the
     # dilution-fold-in fix regressed back to skipping beam.

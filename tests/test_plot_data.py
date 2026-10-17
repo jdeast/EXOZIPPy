@@ -808,7 +808,8 @@ def test_phased_transit_data_uses_the_pinned_baseline(
     Given the same pinned-baseline fit,
     When plot_data builds the phased chart for the single planet,
     Then the cleaned flux is the data minus that baseline (one planet and
-    no GP, so nothing else is removed) rather than the data minus 1.0.
+    no GP, so nothing else is removed) rather than the data minus 1.0,
+    shown relative to the baseline (which multiplies the model).
     """
     system, _, point, _, flux = pinned_baseline_transit_system
     comp = system.transit
@@ -818,9 +819,9 @@ def test_phased_transit_data_uses_the_pinned_baseline(
     assert len(phased) == 1
     data_trace = [t for t in phased[0].traces if t.role == "data"][0]
 
-    expected = flux - _LC["baseline"]
+    expected = (flux - _LC["baseline"]) / _LC["baseline"]
     np.testing.assert_allclose(
-        np.sort(data_trace.y), np.sort(expected), atol=1e-6
+        np.sort(data_trace.y), np.sort(expected), atol=1e-12
     )
     # the pre-fix cleaned flux (data - 1.0) is off by the whole flux scale
     assert not np.allclose(data_trace.y, flux - 1.0, atol=1.0)

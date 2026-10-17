@@ -61,7 +61,7 @@ Because the design matrix is whitened at ingestion it is **dimensionless**, so *
 | component | the term | declared | why |
 |-----------|----------|----------|-----|
 | `rvinstrument` | `rv_model += pt.dot(detrend, c)` | `m/s` / `solRad/d` | `rv_model` is in the internal solRad/d, so the coefficient is too. **This one was wrong** (`""` / `""`) and is the item. |
-| `transit` | `lc_model += pt.dot(detrend, c)` | `""` / `""` | normalized flux really is dimensionless -- correct, and now said out loud in defaults.yaml rather than left as a bare `""` that reads like an omission. |
+| `transit` | `lc_model += pt.dot(detrend, c)` | `""` / `""` | the term is added AFTER the baseline multiplies, so the coefficient is in the data's own flux units: dimensionless for a normalized light curve -- correct, and now said out loud in defaults.yaml rather than left as a bare `""` that reads like an omission. A light curve in raw counts has coefficients in counts per unit column; no unit system names that either. |
 | `mulensinstrument` | `10.0 ** (-0.4 * pt.dot(detrend, c))` | `mag` / `mag` | **correct, and a trap.** The coefficient sits inside a MAGNITUDE exponent, so it is in magnitudes even though the component models flux. The `UNIT CHANGE: ... now in FLUX` comment a few lines below it in `mulensing/defaults.yaml` is about the three AMPLITUDES, not these coefficients; a quick audit that reads it as covering the block will invert a correct declaration and break mulens detrending silently. Do not change it. |
 | `astrometryinstrument` | -- | -- | has no detrending at all. If one is ever added, the rule gives `mas` directly. |
 
@@ -202,6 +202,34 @@ Optional, per data file, off by default -- with no `likelihood:` key the model i
 - **A robust likelihood supersedes an external tool's hard bad-data mask.** When the MMEXOFAST hand-off existed (removed 2026-10-01), its JSON's `excluded_points` were skipped for any file whose `likelihood_kinds[i]` was set: the robust likelihood refits the outlier verdict at every draw instead of freezing someone else's, and keeps the points auditable. `examples/DC2018/convert_mmexofast_json.py` keeps that rule when it turns such a JSON into `mask:` entries. A user's explicit `mask:` always applies.
 
 Tests: `tests/test_robust_likelihood.py`.
+
+## The transit light-curve model: the baseline MULTIPLIES
+
+**`transit.<name>.baseline` is a flux NORMALIZATION, so it multiplies the whole astrophysical model; it is not an offset** (JDE 2026-10-16). A planet blocks a FRACTION of the star's light, and that fraction is a fraction of whatever the light curve is normalized to. `Transit._lc_model` therefore builds a unit-normalized relative flux `rel` (exactly 1 out of transit, eclipse and phase variation) and multiplies it by the baseline at the very end. Per observation, for planets `p = 1..N` in config order:
+
+```
+rel_0 = 1
+rel_p = (rel_{p-1} - (1 - D) * <blocked_p - thermal_p * vis_p - reflect_p>
+                   + (1 - D) * beam_p) * (1 + (1 - D) * (E_p - 1))
+lc    = baseline * rel_N                        # Transit._lc_model
+mu    = lc + X . c                              # additive detrend (Instrument._detrended_model)
+y    ~ Normal(mu, sqrt(err^2 + jitter_variance))    or the celerite2 GP marginal on y - mu
+```
+
+- `blocked_p` is the limb-darkened fraction of the star's flux the planet covers (zero unless the planet is in front, `Z > 0`); `thermal_p` (`band.thermal`, ppm x 1e-6) and `reflect_p` (`band.reflect`) are the planet's own light, both times `vis_p`, the visible fraction of the planet's disk; `< >` is the exposure-smearing average over the row's `ninterp` sub-exposures (thermal and reflection are smeared, as in EXOFASTv2).
+- `beam_p` (`planet.beam`, Doppler beaming) and `E_p` (the ellipsoidal factor, `band.ellipsoidal`) are the STAR's flux, evaluated un-smeared at the star's light-travel-corrected time.
+- `D` is the file's `dilute` (0 when the file has none; next section).
+- With `D = 0` and one planet this is `baseline * (1 - <blocked> + <thermal*vis> + <reflect> + beam) * E`, and with every phase-curve term off it is `baseline * (1 - <blocked>)`.
+
+That is EXOFASTv2's `modelflux *= (f0 + ...)` in `exofast_chi2v2.pro` together with `f0*((model-1)*(1-dilute)+1)` in `exofast_tran.pro`. Until 2026-10-16 the baseline was ADDED (`baseline - dip`), which is exact only for a baseline of exactly 1: the dip of a light curve normalized to `f0` was modelled `f0` times too shallow in relative terms, so the fitted `p` came out high by a factor `sqrt(f0)`. On HAT-3b (`f0 = 1.0063`) that was +0.00035 in `R_P/R_*`, most of the gap to EXOFASTv2 (0.109655 vs 0.109200); for a light curve in raw counts the additive form was grossly wrong. Test: `tests/test_transit_multiplicative_baseline.py` (`mu(B) == B * mu(1)` for `B = 2` and `1e4`, the dilution identity, the per-planet decomposition and the phased panel).
+
+How the remaining pieces compose, and where they still differ from EXOFASTv2:
+
+- **Detrend columns (and `fitspline`) are ADDED after the baseline multiplies**, `mu = baseline * rel + X . c`, so a coefficient is in the data's flux units. EXOFASTv2's additive detrending enters before `f0` multiplies, `f0 * (rel + X . c')`; that is the same family of models with `c = f0 * c'`, so nothing is lost. EXOFASTv2's MULTIPLICATIVE detrending (`detrendmult`) has no transit counterpart here (`DETREND_SPACE` is `"additive"`); the spline's multiplicative-vs-additive difference is the parity approximation in the `fitspline` section above.
+- **A GP is additive on the final flux**: celerite2 models the residual `y - mu`, in the data's units, exactly as before this change (`components/gp.py`).
+- **Ellipsoidal** is applied per planet with the band's amplitude and diluted, on the running relative model. EXOFASTv2's `exofast_chi2v2.pro` applies `band.ellipsoidal` once, undiluted, to the summed model at the shortest period. Identical for the one-planet, undiluted case; this predates the baseline change and is not altered by it.
+- **The per-planet terms the plots draw** (`planet_terms`) are in the data's flux units: each is `baseline` times its planet's change to `rel`, so `baseline + sum(planet_terms) == lc` exactly. The **phased panels divide data, error bars and model by the baseline** (`Transit._phased_lc_arrays`): they show `flux / baseline - 1` against the planet's step of `rel`, so files in different units share a summary stack, and every plotted `(data - model) / err` is still the likelihood's own normalized residual. The unphased panels stay in the data's units.
+- The other flux-scale consumers were already relative: the BLS seed divides each file by its median and the timing-information seed divides the errors by the seeded baseline. Microlensing models total flux as `f_s * A + f_b` (magnification multiplies the source flux), and `dopptom`'s line-profile model has no flux normalization, so neither has an additive-baseline form to fix.
 
 ## Transit dilution (`fitdilute`, `seddeblend`; EXOFASTv2's DILUTE)
 

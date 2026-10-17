@@ -1016,27 +1016,45 @@ class Transit(Instrument):
                       cover ``t``; a file may appear in more than one block
                       and a file with no rows may be omitted.
 
+        THE BASELINE IS MULTIPLICATIVE.  The astrophysical model is built
+        as a unit-normalized relative flux ``rel`` (1 out of transit: the
+        star's own flux, minus every planet's diluted transit dip, plus its
+        diluted thermal/reflected light and beaming, times the ellipsoidal
+        factor) and only THEN multiplied by the file's ``baseline``:
+        ``lc_model = baseline * rel``.  ``baseline`` is a flux
+        NORMALIZATION -- the planet blocks a FRACTION of the star's light,
+        so the dip scales with whatever the light is normalized to -- which
+        is EXOFASTv2's ``modelflux *= f0`` (exofast_chi2v2.pro) and its
+        ``f0*((model-1)*(1-dilute)+1)`` (exofast_tran.pro).  Until the PR
+        that introduced this paragraph the baseline was ADDED
+        (``baseline - dip``), which underestimates the depth by a factor
+        ``baseline`` and is grossly wrong for a light curve in raw counts.
+        The full equation, and how detrending and a GP compose with it, is
+        in ``components/instrument.md`` ("The transit light-curve model").
+
         Returns ``(lc_model, planet_terms)``:
 
-        ``lc_model`` ``(N,)`` -- baseline + every planet's transit/eclipse/
-            thermal/reflection (exposure-smeared on each row's own
-            sub-exposure grid) + beaming + ellipsoidal (un-smeared, at the
-            flat per-observation time), WITHOUT the detrend term, which is
-            per observation and is added by ``build_likelihood`` alone.
+        ``lc_model`` ``(N,)`` -- ``baseline * rel`` with ``rel`` as above:
+            transit/eclipse/thermal/reflection exposure-smeared on each
+            row's own sub-exposure grid, beaming + ellipsoidal un-smeared
+            at the flat per-observation time.  WITHOUT the detrend term,
+            which is per observation and is added by ``build_likelihood``
+            alone.
         ``planet_terms`` ``(N, N_planets)`` -- the change planet p's step
-            makes to the running model, so ``baseline[inst] +
-            sum(planet_terms, axis=1)`` reproduces ``lc_model`` for ANY
-            planet count.  The ellipsoidal factor multiplies the running
-            total (baseline + the earlier planets), exactly as it does in
-            the model itself; the old plot path folded only the baseline
-            in per planet, which was exact for one planet and an
-            approximation for more (reviews 1.5.6, 7.14.1).
+            makes to the running model, IN THE DATA'S FLUX UNITS
+            (``baseline`` times the change to ``rel``), so
+            ``baseline[inst] + sum(planet_terms, axis=1)`` reproduces
+            ``lc_model`` for ANY planet count.  The ellipsoidal factor
+            multiplies the running total (1 + the earlier planets), exactly
+            as it does in the model itself; the old plot path folded only
+            the baseline in per planet, which was exact for one planet and
+            an approximation for more (reviews 1.5.6, 7.14.1).
 
-        The likelihood's numerics are pinned bit-identical on every shipped
-        example, so the op sequence in here is the op sequence the
-        likelihood always had -- including associations kept for a 1-ulp
-        reason (see the ``r_norm`` comment).  Change it only with the
-        start-logp table in hand.
+        The op sequence inside the planet loop is the one the likelihood
+        always had -- including associations kept for a 1-ulp reason (see
+        the ``r_norm`` comment).  The multiplicative baseline moved the
+        start logp of every example whose baseline is not exactly 1;
+        change the op sequence only with the start-logp table in hand.
         """
         orbits = system.orbit
         planets = system.planet
@@ -1055,8 +1073,12 @@ class Transit(Instrument):
         obs_band_map = self.band_map[inst_map]
         obs_band_map_t = pt.as_tensor_variable(obs_band_map).astype("int32")
 
-        # 1. Start with the photometric baseline
-        lc_model = self.baseline.value[inst_map_t]
+        # 1. The photometric baseline, a per-file flux NORMALIZATION.  It
+        # multiplies the finished relative model at the very end (see the
+        # docstring); everything in between is built on ``lc_model`` as a
+        # unit-normalized relative flux that starts at exactly 1.
+        baseline_obs = self.baseline.value[inst_map_t]  # (N,)
+        lc_model = pt.ones_like(baseline_obs)
 
         # 1b. Per-planet orbital vectors, gathered onto the planet index.
         ecc_p = orbits.ecc.value[planets.orbit_map]  # (N_planets,)
@@ -1166,8 +1188,9 @@ class Transit(Instrument):
 
         # 3b. Dilution (EXOFASTv2's exofast_tran.pro:157,
         # f0*((model-1)*(1-dilute)+1)): a fraction ``dilute`` of the
-        # aperture's flux comes from other sources, so every deviation from
-        # the baseline is scaled by 1 - dilute.  The SED constrains dilute
+        # aperture's flux comes from other sources, so every deviation of
+        # the relative model from 1 is scaled by 1 - dilute (and the
+        # baseline f0 then multiplies the result, step 5 below).  The SED constrains dilute
         # where seddeblend asks it to (_add_sed_deblend_prior); it does not
         # set it.
         dil_inst = None
@@ -1405,8 +1428,9 @@ class Transit(Instrument):
             ]
             lc_before = lc_model
             lc_model = lc_model - net_avg
-            # This planet's own change to the running model, accumulated
-            # alongside lc_model term by term (see the docstring).
+            # This planet's own change to the running RELATIVE model,
+            # accumulated alongside lc_model term by term (see the
+            # docstring); scaled by the baseline when it is reported.
             step = -net_avg
 
             tc_this = tc_p[p_idx]  # scalar, this planet's time of conjunction
@@ -1457,11 +1481,10 @@ class Transit(Instrument):
             # and dilute into exofast_tran, which adds beam at
             # exofast_tran.pro:146 and applies the dilution scaling at
             # exofast_tran.pro:157 (after beam, so beam is diluted too).
-            # Ellipsoidal is NOT diluted -- it's a multiplicative factor on
-            # the running lc_model (baseline + this planet's transit/
-            # eclipse/thermal/reflect/beam so far), not an additive flux
-            # term, so the dilution scaling doesn't apply to it the same
-            # way. Neither term is gated by planetvisible: both are stellar
+            # Ellipsoidal is a multiplicative factor on the running relative
+            # lc_model (1 + this planet's transit/eclipse/thermal/reflect/
+            # beam so far), not an additive flux term; its DEVIATION is
+            # diluted (see its own comment below). Neither term is gated by planetvisible: both are stellar
             # effects (the star's own RV motion / tidal shape), present
             # regardless of the planet's occultation state. Both are smooth
             # on-orbit and are deliberately NOT exposure-smeared -- they are
@@ -1478,8 +1501,8 @@ class Transit(Instrument):
                 step = step + beam_term
 
             # Ellipsoidal is multiplicative (exofast_tran.pro), applied to
-            # the running lc_model (baseline + this planet's transit/
-            # eclipse/thermal/reflect/beam so far). With >1 planet sharing
+            # the running relative lc_model (1 + the planets so far,
+            # this planet's transit/eclipse/thermal/reflect/beam included). With >1 planet sharing
             # a band, each planet's factor multiplies in turn -- order-
             # dependent for N>1, exact for the single-planet case this
             # targets.  Its DEVIATION is diluted like every other term:
@@ -1500,7 +1523,13 @@ class Transit(Instrument):
                 # (before + step) * (1 + dev) - before == step + (before +
                 # step) * dev: the factor acts on the whole running total.
                 step = step + (lc_before + step) * ellip_dev
-            planet_terms.append(step)
+            # Reported in the data's flux units: baseline * (1 + sum of
+            # the relative steps) == baseline + sum(baseline * step).
+            planet_terms.append(baseline_obs * step)
+
+        # 5. The normalization multiplies the WHOLE astrophysical model
+        # (EXOFASTv2's ``modelflux *= f0``): flux = baseline * rel.
+        lc_model = baseline_obs * lc_model
 
         return lc_model, pt.stack(planet_terms, axis=1)
 
@@ -1546,8 +1575,10 @@ class Transit(Instrument):
         # data by detrend_corrected (Instrument._detrended_model).
         lc_model = self._detrended_model(lc_model, "transit_detrend")
 
-        # Full per-observation model prediction (baseline + detrend +
-        # exposure-averaged transit decrement).
+        # Full per-observation model prediction:
+        # baseline * (relative astrophysical model) + detrend.  A GP, when
+        # a file asks for one, is additive on top of this (it models the
+        # residual flux y - mu; Instrument.add_observation_likelihood).
         self._model_flux_node = lc_model
 
         # 5. Likelihood (shared base helper: sqrt(err^2 + jitter_variance)).
@@ -1881,6 +1912,15 @@ class Transit(Instrument):
         ``_lc_model``, so the panel shows the exposure-smeared model the
         likelihood fit, with beaming/ellipsoidal un-smeared as there.
 
+        Everything here is DIVIDED BY the file's baseline, so the panel is
+        in relative flux (deviation from 1) whatever units the file is in:
+        the baseline is a multiplicative normalization
+        (``_lc_model``'s docstring), the model curve is then exactly the
+        planet's step of the unit-normalized model, and files on one
+        summary stack are comparable even when one is in raw counts.
+        Dividing the cleaned data, its error bars and the model by the same
+        constant leaves every (data - model) / err unchanged.
+
         ``shared`` is this point's ``_phased_lc_shared`` dict; omit it and
         one is built, which is what a standalone caller wants and what the
         per-planet loop must NOT do.
@@ -1918,17 +1958,17 @@ class Transit(Instrument):
             - baseline
             - other_terms
             - shared["extra_signals"][rows]
-        )
+        ) / baseline
         data_phases = ((self.time[rows] - tc_ref) / P_ref + 0.5) % 1.0 - 0.5
 
         return {
             "P_ref": P_ref,
             "tc_ref": tc_ref,
             "x_model": time_from_center_model[sort_m],
-            "y_model": y_planet[sort_m],
+            "y_model": y_planet[sort_m] / baseline,
             "x_data": data_phases * P_ref,
             "y_data": cleaned_flux,
-            "yerr_data": shared["err_corrected"][rows],
+            "yerr_data": shared["err_corrected"][rows] / baseline,
         }
 
     def plot(self, system, points, filename_prefix="debug"):
@@ -2178,7 +2218,8 @@ class Transit(Instrument):
                             + latex_escape(pname)
                             + " in "
                             + latex_escape(self.names[i])
-                            + ", baseline and other planets removed."
+                            + ", other planets removed and normalized "
+                            + "by the baseline."
                             + self.detrend_caption()
                         ),
                         # The phased DATA re-folds with tc/P and its cleaning
@@ -2226,7 +2267,7 @@ class Transit(Instrument):
                             },
                             title=f"Phased LC: {pname} -- {self.names[i]}",
                             xlabel=f"Time from Mid-Transit [d] (P = {prep['P_ref']:.5f} d)",
-                            ylabel="Flux - Baseline",
+                            ylabel="Flux / Baseline - 1",
                             traces=traces,
                             param_deps=matrix_deps,
                             x_range=x_range,

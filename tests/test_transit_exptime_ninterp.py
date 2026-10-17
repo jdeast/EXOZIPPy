@@ -371,8 +371,8 @@ def test_mixed_ninterp_model_flux_matches_instantaneous_only_for_ninterp_one(
 
     ref0, _ = tr._lc_at_times(param_values, 0, t)
     # inst1's instantaneous reference: the same band's un-smeared curve,
-    # on inst1's own baseline.
-    ref1 = baseline[1] + (ref0 - baseline[0])
+    # on inst1's own baseline (which multiplies the relative model).
+    ref1 = baseline[1] * (ref0 / baseline[0])
 
     # inst0 (ninterp=1): exact match, exptime is ignored.
     np.testing.assert_allclose(model_flux[inst0_rows], ref0, atol=1e-12)
