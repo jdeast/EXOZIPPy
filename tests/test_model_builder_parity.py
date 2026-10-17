@@ -320,8 +320,10 @@ def test_transit_plot_data_traces_come_from_the_same_expression(
     # The fold maps both ends of the period window, tc -/+ P/2, onto phase
     # -0.5, so the two endpoint samples share an x and were computed one
     # period apart -- equal to ~1e-11, not to 1e-14.  Compare the interior.
+    # The phased panel is in relative flux: the term over the baseline.
+    baseline = tr._point_value(point, tr.baseline, 0)
     np.testing.assert_allclose(
-        trace.y[1:-1], terms[1:-1, 0], rtol=0, atol=1e-14
+        trace.y[1:-1], terms[1:-1, 0] / baseline, rtol=0, atol=1e-14
     )
     assert len(unphased.param_deps) > 0 and len(phased.param_deps) > 0
 

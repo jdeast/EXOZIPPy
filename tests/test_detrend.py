@@ -450,7 +450,8 @@ def test_phased_transit_data_are_detrend_corrected(detrended_transit):
     Given the same fit,
     When plot_data builds the phased chart,
     Then the cleaned flux has the fitted trend removed along with the
-    baseline (one planet, no GP, so that is the whole cleaning).
+    baseline (one planet, no GP, so that is the whole cleaning), and is
+    shown relative to the baseline, which multiplies the model.
     """
     system, point, _, _ = detrended_transit
     comp = system.transit
@@ -462,7 +463,7 @@ def test_phased_transit_data_are_detrend_corrected(detrended_transit):
 
     baseline = comp._point_value(point, comp.baseline, 0)
     trend = comp.detrend_at_data(point)
-    expected = comp.flux - baseline - trend
+    expected = (comp.flux - baseline - trend) / baseline
     np.testing.assert_allclose(
         np.sort(data_trace.y), np.sort(expected), atol=1e-9
     )
