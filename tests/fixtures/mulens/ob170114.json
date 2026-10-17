@@ -1,6 +1,6 @@
 {
  "config": "examples/ob170114/ob170114.yaml",
- "n_terms": 91,
+ "n_terms": 92,
  "params": "examples/ob170114/ob170114.params.yaml",
  "platform": {
   "blas": "scipy-openblas",
@@ -143,6 +143,7 @@
   "POT:mulensevent.theta_E_singularity": -9.85967654375977e-305,
   "POT:orbit.e_collision_bound": -2.085910232944037e-82,
   "POT:planet.m_pos_constraint": -5.048057063443954e-110,
+  "POT:planet.radius_jacobian": 0.0,
   "POT:up_bound.lens.q": -9.85967654375977e-305,
   "POT:up_bound.lens.s": -9.85967654375977e-305,
   "POT:up_bound.mulensevent.mlens_total": -9.85967654375977e-305,

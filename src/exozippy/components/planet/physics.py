@@ -92,6 +92,39 @@ def msini_log_jacobian(cosi):
     return 0.5 * pt.log(_sini_radicand(cosi))
 
 
+# Floor on the host radius inside the planet-radius base prior's log.  The
+# CLAUDE.md where-trap rule again: the floor goes on the log's ARGUMENT and is
+# STRICTLY POSITIVE.  star.radius defaults to a logit bound of [0.1, 2000]
+# solRad and never reaches 0 there, but a user may widen the bound to 0 or
+# drop it for a Gaussian, and log(R*) of a non-positive radius is -inf/NaN.
+# pt.maximum returns every physical radius bit-for-bit.  Internal unit solRad.
+STAR_RADIUS_LOG_FLOOR = 1e-30
+
+
+def radius_base_prior_logp(star_radius):
+    """The base prior on a SAMPLED planet radius -- THE one place it is chosen.
+
+    `Parameter`'s logit transform already makes a bounded, sampled
+    `planet.radius` exactly uniform in physical R_P (its section-C
+    correction).  What this returns is ADDED on top of that, per planet, by
+    `Planet._add_radius_prior`, so it is the log-density of the chosen base
+    prior RELATIVE TO uniform in R_P.
+
+    Today: uniform in p = R_P / R_* (EXOFASTv2's convention, which steps in
+    p with a flat prior).  At fixed R_*, `|dp/dR_P| = 1/R_*`, so a density
+    flat in (p, R_*) is `1/R_*` in (R_P, R_*): the term is `-log R_*`.
+    Without it the prior is uniform in R_P, i.e. `R_*` times uniform in p,
+    which tilts a transit fit toward a larger, less dense star (and so a
+    larger impact parameter and a larger p).
+
+    A different base prior is a change HERE (and to the three strings next to
+    the call in `Planet._add_radius_prior`, which describe it): e.g. uniform
+    in log R_P would be `-log R_P`, which needs the planet radius as an
+    argument.  ``star_radius`` is the host radius per planet, solRad.
+    """
+    return -pt.log(pt.maximum(star_radius, STAR_RADIUS_LOG_FLOOR))
+
+
 @register_physics
 def calc_m_total(planet_mass, star_mass):
     return pt.maximum(star_mass + planet_mass, 1e-9)

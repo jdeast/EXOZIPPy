@@ -1010,6 +1010,7 @@ class Planet(Component):
             return
 
         orbits = system.orbit
+        self._add_radius_prior(system)
         self._add_msini_jacobian(system, orbits)
         self._add_duration_prose(system, orbits)
         # The eccentricity barrier used to live here, on
@@ -1023,6 +1024,97 @@ class Planet(Component):
 
         if self.n_elements >= 2:
             self._add_crossing_potential(system, orbits)
+
+    def _radius_prior_indices(self):
+        """Indices of the planets whose `radius` element is SAMPLED.
+
+        `Parameter.element_is_sampled` is the authoritative per-element
+        answer (stage 6 wrote the mask): a user's `sigma: 0` pin and a hard
+        link (sigma 0 by construction) are excluded, and so would be a
+        derived element, though `planet.radius` has no expression today.
+        """
+        return [
+            i
+            for i in range(self.n_elements)
+            if self.radius.element_is_sampled(i)
+        ]
+
+    def _add_radius_prior(self, system):
+        """The base prior on each sampled planet radius: uniform in R_P/R_*.
+
+        EXOFASTv2 steps in p = R_P/R_* with a flat prior; EXOZIPPy samples
+        `planet.radius`, whose logit transform is exactly uniform in R_P
+        (`Parameter.build_pymc`'s section-C correction).  Uniform in R_P is
+        `R_*` times uniform in p on the joint (p, R_*) density, which tilts a
+        transit fit toward a larger, less dense star: on HAT-3b EXOZIPPy's p
+        came out +0.15 sigma above EXOFASTv2's, and reweighting the posterior
+        by 1/R_* closed about half the gap.  At fixed R_*,
+        `|dp/dR_P| = 1/R_*`, so this ADDS `-log R_*` of the planet's host
+        (`star_map`) and the prior becomes uniform in p.  The term itself is
+        `physics.radius_base_prior_logp` -- the one place the base prior is
+        chosen (JDE 2026-10-16: match EXOFASTv2 for now; whether uniform in
+        log R_P is more physical is open), and the three strings below
+        describe it, so a change there changes them.
+
+        WHICH PLANETS: every planet whose radius element is SAMPLED
+        (`_radius_prior_indices`).  A pinned radius (`sigma: 0`) gets none:
+        the term would be a function of R_* alone, i.e. a spurious prior on
+        the star.  Only with an orbit (the caller returns first without one):
+        p and every other quantity that reads R_P/R_* exist only then, and
+        without an orbit nothing reads the host radius through the planet.
+
+        A user prior on R_P (`mu`/`sigma`) and the Chen & Kipping relation
+        (`_add_chen_potential`, a Gaussian in R_P from the mass) are separate
+        potentials that MULTIPLY this base prior; they do not replace it --
+        EXOFASTv2 likewise applies both as penalties on the derived rp on top
+        of its flat-in-p stepping.  So they keep the Jacobian, and the Prior
+        cell shows the user's Gaussian AND this term (`get_prior_str` never
+        drops an explicit sigma).
+
+        The base prior is against R_P's hard bounds, not p's: where nothing
+        constrains R_P (no transit, chen off, no user prior) the 1/R_* factor
+        integrates over the fixed R_P interval to a 1/R_* prior on the host,
+        which EXOFASTv2's p-bounded stepping does not have.  Such a radius is
+        not a measurement of anything; with chen on (an RV- or
+        astrometry-only fit) EXOFASTv2 has the same 1/R_* marginal, since the
+        relation pins R_P = p R_* at a mass-given value.
+
+        R_* is floored strictly positive inside the log
+        (`physics.STAR_RADIUS_LOG_FLOOR`, the CLAUDE.md where-trap rule).
+        The property test (the implied prior on (p, R_*) is flat, and is off
+        by exactly +log R_* without the term) is `tests/test_radius_prior.py`.
+        """
+        idx = self._radius_prior_indices()
+        if not idx:
+            return
+        take = np.asarray(idx, dtype="int32")
+        star = system.active_components["star"]
+        rstar = star.radius.value[self.star_map][take]
+        pm.Potential(
+            f"{self.prefix}.radius_jacobian",
+            pt.sum(physics.radius_base_prior_logp(rstar)),
+        )
+
+        names = [self.names[i] for i in idx]
+        self.radius.add_prior_contribution(
+            latex=r"$\propto 1/R_*$",
+            text="uniform in Rp/R* (1/R* Jacobian applied)",
+            elements=idx,
+            supersedes_bounds=True,
+            support_phrase="whose radius support is",
+        )
+        collector = get_collector(system)
+        if collector is not None:
+            noun = "planet" if len(names) == 1 else "planets"
+            collector.add(
+                f"For {noun} "
+                + join_names(latex_escape(n) for n in names)
+                + r" we sampled $R_P$ and multiplied by $1/R_*$, so that "
+                r"the prior is uniform in $R_P/R_*$ rather than in $R_P$, "
+                r"as in EXOFASTv2 \citep{Eastman:2019}.",
+                section="planetary",
+                key=f"{self.prefix}.radius_prior",
+            )
 
     def _msini_indices(self):
         """Indices of the planets sampling m sin i (empty for most systems)."""

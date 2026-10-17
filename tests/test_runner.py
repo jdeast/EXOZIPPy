@@ -312,6 +312,16 @@ def test_run_without_flag_writes_no_status(kelt4_workdir, tmp_path):
     with open(EXAMPLE_DIR / "kelt4_rvonly.yaml") as fh:
         config = yaml.safe_load(fh)
     config["prefix"] = str(out_prefix)
+    # The linear mass coordinate, as tests/test_integration_kelt4.py pins it:
+    # in the default msini coordinates the seed polish can walk this RV-only
+    # config to the cos i -> 1 corner (star.md, "The seed polish lands on a
+    # corner"), and since the planet radius prior became uniform in Rp/R* it
+    # does here -- a MAP artifact that roughly doubled this run's wall clock
+    # (polish 18 s -> 81 s, NUTS compile/tune at the corner) and pushed it
+    # past the 600 s subprocess timeout under -n4.  This test is about the
+    # GUI status files, not the mass coordinate.
+    for planet in config["planet"]:
+        planet["fitmsini"] = False
     config["sampler"] = {
         "method": "nuts",
         "tune": 2,
