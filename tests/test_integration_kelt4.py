@@ -265,17 +265,20 @@ KELT4_FLAT_RTOL = 5.0e-3  # relative, the prior-dominated flat direction
 # "flat" -> KELT4_FLAT_RTOL (a direction the data does not constrain).
 KELT4_START = {
     # label            value        units           kind
-    "star.A.logmass": (0.08052772, "dex(solMass)", "dex"),
-    "planet.b.mass": (0.96091637, "jupiterMass", "linear"),
+    # The four values below were re-recorded when the planet radius prior
+    # became uniform in Rp/R* (the 1/R* Jacobian; star.md "Planet radius
+    # prior"); before it: 0.08052772, 0.96091637, 0.47548642, 0.50012485.
+    "star.A.logmass": (0.08052994, "dex(solMass)", "dex"),
+    "planet.b.mass": (0.96220737, "jupiterMass", "linear"),
     # 0.47554391 until review 2.14.9: tc's one-period window at the TESS-era
     # seed epoch, ~1164 periods from these RVs, was truncating the period
     # (tc and P are 0.99 correlated there); with the conjunction sampled
     # near the RVs the polished period is 2.98873 d, not 2.98912 d.
-    "orbit.b.logP": (0.47548642, "dex(d)", "dex"),
+    "orbit.b.logP": (0.47548627, "dex(d)", "dex"),
     # cosi is here because the mass story below turns on it: it is the one
     # parameter the RV data says nothing about, which is also why it is the
     # only "flat" row and needs its own, looser tolerance.
-    "orbit.b.cosi": (0.50012485, "", "flat"),
+    "orbit.b.cosi": (0.49996592, "", "flat"),
 }
 
 # THE PLANET MASS AND m sin i ARE TWO DIFFERENT CLAIMS, AND EACH EARNS A
@@ -346,7 +349,8 @@ KELT4_START = {
 # reported parameter is review item 8.8.17 and is not this test's business.
 # 0.832109 until review 2.14.9, which moved the polished start with the
 # un-truncated period (see orbit.b.logP in KELT4_START).
-KELT4_START_MSINI = 0.833317  # Mjup; golden regression
+# 0.833317 until the planet radius prior became uniform in Rp/R*.
+KELT4_START_MSINI = 0.833315  # Mjup; golden regression
 # AND IT IS THE TIGHTEST PARAMETER ASSERTION IN THE FILE, which is the point
 # and is measured rather than hoped for.  Over the 16 harness arithmetics
 # in the table above, `orbit.b.cosi` moved by 8.6e-4 relative and
@@ -402,8 +406,15 @@ KELT4_PUBLISHED_MSINI_SIGMA = 0.066  # the lower error; we sit below
 # `tc` at the user's epoch that Jacobian was NOT flat across the posterior
 # (tc's ~1 d width against its +/-1.49 d window); on `tc_sampled` (0.11 d
 # wide) it is.  So the optimum of the raw-space density moved, by 0.4 nats.
-KELT4_BUILD_LOGP = -601.1  # lp at the build start, before the polish
-KELT4_START_LOGP = 82.3  # lp at the polished start the sampler uses
+#
+# The planet radius prior moved BOTH ends: -601.1 -> -601.6 and 82.3 -> 81.9.
+# planet.b.radius is sampled (constrained by Chen & Kipping from the mass),
+# so it now carries the 1/R* Jacobian that makes its prior uniform in Rp/R*
+# (EXOFASTv2's), i.e. a new -log R* term: -log(1.6101 solRad) = -0.476 nats
+# at the build start, and about the same at the polished one, where the
+# parameters moved only inside their tolerances.
+KELT4_BUILD_LOGP = -601.6  # lp at the build start, before the polish
+KELT4_START_LOGP = 81.9  # lp at the polished start the sampler uses
 KELT4_LOGP_ATOL = 0.2  # nats; 2x the 0.1-nat print resolution
 
 # One row of run.inspect_start's startup table, as the file log handler (always

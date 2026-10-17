@@ -87,6 +87,12 @@ f_source` -1.3863 -> ~1e-304 (at ~1e-8 fluxes the source flux sat inside
 its lower-bound barrier's transition width and paid log(1/4); at the
 published scale the barrier is inert).  Every other term is bit-identical.
 
+The ob170114 fixture gained one term when the planet radius prior became
+uniform in Rp/R* (components/star/star.md, "Planet radius prior"):
+`POT:planet.radius_jacobian` = -log R* of the lens star, exactly 0.0 at the
+stored start (R* = 1 solRad).  Every recorded value is kept bit-identical;
+only that term and `n_terms` were added.
+
 ob161003 (2S2L) is the ONE example whose model changes BY CONSTRUCTION
 (review R1): its per-source event-level vectors collapse to scalars.  Its
 replay fixture is re-recorded post-split; the stage-0 recording is kept at
