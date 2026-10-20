@@ -887,8 +887,9 @@ class MulensEvent(Component):
         Under the precedence ladder (#455) a USER pm (PRECEDENCE_USER)
         outranks this seed (PRECEDENCE_DERIVED_DATA) and is never traded
         against it, so a seed can no longer bend a user's value.  Hence:
-        a star whose pm the user set is simply not seeded
-        (``_seed_expected_pm``), and every OTHER star still is.  The gate
+        a star whose pm the user gave a VALUE (an initval or a mu; bounds
+        alone do not count) is simply not seeded (``_seed_expected_pm``),
+        and every OTHER star still is.  The gate
         stays for pi_E alone: two seeded proper motions would fight a user
         pi_E over the DIRECTION of mu_rel, and no distance can absorb a
         direction -- only the magnitude goes into theta_E.
@@ -1016,9 +1017,26 @@ class MulensEvent(Component):
         the absolute one: ``pm_ra_sgra`` is derived from ``pm_ra`` one to
         one, so a user value on it pins the proper motion just as directly
         (ob140939's source).  Sorted, for a stable log line.
+
+        ONLY AN ENTRY THAT GIVES A VALUE COUNTS (JDE 2026-10-20): an
+        ``initval`` or a prior mean ``mu``, written as a number or as a link
+        (a linked field lives in ``ConfigManager.links``, not in the entry).
+        A bounds-only entry (``lower``/``upper``/``sigma`` with no value)
+        states no proper motion, so it must not turn the seed off; the seed
+        then meets those bounds under the usual rules for any start.
         """
-        up = self.config_manager.user_params
+        cm = self.config_manager
         name = system.star.names[star_idx]
+
+        def gives_value(key):
+            entry = user_entry(cm.user_params, key)
+            if entry is not None and any(
+                entry.get(f) is not None for f in ("initval", "mu")
+            ):
+                return True
+            linked = cm.links.get(key, {})
+            return "initval" in linked or "mu" in linked
+
         return sorted(
             key
             for axis in ("pm_ra", "pm_dec", "pm_ra_sgra", "pm_dec_sgra")
@@ -1027,7 +1045,7 @@ class MulensEvent(Component):
                 f"star.{star_idx}.{axis}",
                 f"star.{name}.{axis}",
             )
-            if key in up
+            if gives_value(key)
         )
 
     def _seed_expected_pm(

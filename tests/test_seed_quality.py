@@ -350,3 +350,60 @@ def test_a_user_pi_e_still_turns_off_the_galactic_seeds():
                 f"star.{name}.{axis} start came from a galactic-model seed "
                 f"despite a user pi_E"
             )
+
+
+def test_a_bounds_only_pm_entry_does_not_turn_off_the_seed():
+    """Only a VALUE counts as the user setting a pm (JDE 2026-10-20, #93).
+
+    Given ob08092 with a bounds-only star.Source.pm_ra entry (lower/upper,
+    no initval and no mu) that contains the bulge mean,
+    When the model is built,
+    Then the source is still seeded at the bulge mean, from the "data"
+    tier, and nothing the user set is missed.
+
+    A bounds-only entry states no proper motion, so it must not turn the
+    seed off the way an initval or a mu does.
+    """
+    # Arrange / Act
+    _chi2, _reduced, _n, pms, misses, system = _seed_chi2(
+        "ob08092",
+        extra_params={"star.Source.pm_ra": {"lower": -20.0, "upper": 20.0}},
+    )
+
+    # Assert
+    assert misses == [], f"user starts not delivered: {misses}"
+    want_ra, want_dec = _bulge_mean_at(system, 1)
+    assert -20.0 < want_ra < 20.0, "the test's bounds must contain the seed"
+    assert pms["star.pm_ra"][1] == pytest.approx(want_ra, abs=1e-6)
+    assert pms["star.pm_dec"][1] == pytest.approx(want_dec, abs=1e-6)
+    for axis in ("pm_ra", "pm_dec"):
+        src = system.config_manager.initval_source(
+            "star", axis, element=1, name="Source"
+        )
+        assert src == "data", (
+            f"star.Source.{axis} start came from {src!r}: a bounds-only "
+            f"entry turned the galactic-model seed off"
+        )
+
+
+def test_a_seed_outside_a_bounds_only_pm_entry_fails_by_the_usual_rule():
+    """A seed that lands outside a bounds-only entry meets the usual rule.
+
+    Given ob08092 with a bounds-only star.Source.pm_ra entry whose support
+    [0, 20] excludes the bulge mean (about -3 mas/yr toward this event),
+    When the model is built,
+    Then the seed is still offered (the entry gives no value), and the
+    build refuses the out-of-support start exactly as it refuses any
+    data-derived start: naming the parameter and the "data" provenance,
+    and telling the user to seed it or widen the bound.  The seeder
+    neither clips nor silently stands down.
+    """
+    # Act / Assert
+    with pytest.raises(ValueError, match="outside its hard bounds") as exc:
+        _seed_chi2(
+            "ob08092",
+            extra_params={"star.Source.pm_ra": {"lower": 0.0, "upper": 20.0}},
+        )
+    msg = str(exc.value)
+    assert "star.Source.pm_ra" in msg
+    assert "start value from: data" in msg
