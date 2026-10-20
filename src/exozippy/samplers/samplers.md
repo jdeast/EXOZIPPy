@@ -873,6 +873,62 @@ here (the thread holds no lock across a log call; logging re-initializes its
 locks at fork). ptde_async has no step to time -- its per-evaluation stall
 is `eval_timeout`'s job. Tests: `tests/test_step_alarm.py`.
 
+## A run that cannot finish tune says so early (`tune_forecast`, 2026-10)
+
+`maxtime:` stops a PTDE run gracefully and keeps the draws it has -- but
+tune-phase states are never stored, so a run that reaches maxtime DURING
+TUNE saves nothing at all (`KeyboardInterrupt`, "no draws to save"). DC2018
+event 208 did exactly that: ~22 s per step against ~3 s normally, maxtime
+72000 s reached at step 3250 of 13000 (tune 5000), a 20-hour allocation
+with no trace and no restart file. The measured rate after 250 steps
+already projected ~79 h.
+
+`_common.TuneForecast` is the fix, shared by both loops: after
+`tune_forecast_after` steps of progress (default 250), and after every tune
+step from then on, it projects the end of tune from the measured rate
+(elapsed time on the maxtime clock over progress; that clock includes the
+start-up evaluation, so it errs slow). If that end is past maxtime,
+`sampler: {tune_forecast: ...}` decides:
+
+- **`shorten` (the default)** cuts tune so the run ends at
+  `TUNE_FORECAST_SAFETY` (0.9) x maxtime, splitting the steps that still
+  fit in the configured tune:draws ratio, never below the progress already
+  made. It logs `TUNE SHORTENED a -> b` as a WARNING, and the trace carries
+  `posterior.attrs["tune_requested"/"tune_used"/"tune_shortened"]` with a
+  second WARNING at the end of sampling. On 208's numbers: tune 5000 ->
+  1132, about 1800 draws.
+- `abort` raises `TuneWontFitError` at the forecast, naming the projection.
+- `off` keeps the old behavior.
+
+**Why shorten is the default.** Abort saves the rest of the allocation but
+nothing else: the job still has to be resubmitted with a larger maxtime,
+and nothing from the first 250 steps carries over. Shortening also ends in
+a resubmission when the result is not good enough, but it ends with a
+trace, a mode report and a restart file whose seeds are the run's own
+draws -- the next run starts where this one got to rather than from the
+original start. The cost is a short adaptation (fewer gamma/ladder windows
+than configured); the WARNING and the trace stamp make that visible, and
+the convergence summary judges the draws on their merits as for any run.
+The safety margin is what keeps a modest later slowdown from pushing the
+draw phase out again; a large one is caught because the check repeats
+every tune step.
+
+**A run that still reaches maxtime in tune saves nothing, deliberately.**
+That now takes `tune_forecast: off`, a rate that collapses within the last
+10% of the budget, or a run shorter than the warmup window. Tune-phase
+states come from a kernel that is still adapting, so they are not draws of
+the posterior and must not reach the tables; and the wrap-up needs draws
+(convergence, modes, the restart file's seeds), so there is no partial
+product to write.
+
+Progress means different things in the two loops, and that is the only
+asymmetry: the step count in `ptde`, the SLOWEST T=1 chain's iteration
+count in `ptde_async` (tune ends for the run when it ends for that chain).
+Async rebinds `tune` from `_maybe_stop`; every closure reads that one cell,
+so the gamma freeze and the draw recording move together. Tests:
+`tests/test_tune_forecast.py` (fake clocks; the parity test is parametrized
+over both samplers).
+
 ## Chain starts
 
 `store_hot_chains` (ptde_async only) takes `auto` / true / false / an integer

@@ -20,7 +20,11 @@ from matplotlib.backends.backend_pdf import PdfPages
 
 from exozippy.config import user_entry
 from exozippy.samplers import convergence, de_metropolis
-from exozippy.samplers._common import default_cores
+from exozippy.samplers._common import (
+    DEFAULT_TUNE_FORECAST,
+    DEFAULT_TUNE_FORECAST_AFTER,
+    default_cores,
+)
 from exozippy.samplers.ptde import ptde_sample
 from exozippy.samplers.ptde_async import ptde_async_sample
 from exozippy.system import KNOWN_BLOCK_KEYS, System
@@ -36,7 +40,13 @@ from .corner_utils import (
     histogram_grid_degenerate,
     save_corner_plot,
 )
-from .diagnostics import ModelAuditor, cap_alarm_findings, log_cap_alarms
+from .diagnostics import (
+    ModelAuditor,
+    bound_pileup_findings,
+    cap_alarm_findings,
+    log_bound_pileups,
+    log_cap_alarms,
+)
 from .logger import fmt_duration, setup_logging
 from .mkparam import write_param_file
 from .outputs.ledger import (
@@ -118,6 +128,8 @@ KNOWN_SAMPLER_KEYS = {
     "store_hot_chains",
     "de_partner_snapshot",
     "start_dispersion",
+    "tune_forecast",
+    "tune_forecast_after",
 }
 
 
@@ -434,6 +446,11 @@ METHOD_ONLY_SAMPLER_KEYS = {
     # Per-RUNG start dispersion (8.4.7): meaningless without a ladder, so it
     # is PTDE-only rather than an all-method key.
     "start_dispersion": _PTDE_METHODS,
+    # The tune-phase finish forecast (samplers._common.TuneForecast): both
+    # PTDE loops honor it; no other sampler has a tune it could shorten
+    # under maxtime.
+    "tune_forecast": _PTDE_METHODS,
+    "tune_forecast_after": _PTDE_METHODS,
     # store_hot_chains USED to read ("ptde_async",) here; it is now honored
     # by BOTH PTDE loops, because retaining a thinned copy of the hot rungs
     # has nothing to do with how proposals are scheduled
@@ -853,6 +870,12 @@ def _run_fit(config, gui, user_params=None):
     # known here, so _common.resolve_start_dispersion validates it against
     # the rung count and raises there (review 8.4.7).
     start_dispersion = sampler_cfg.get("start_dispersion", None)
+    # What the PTDE loops do when the measured step rate puts the end of
+    # TUNE past maxtime (samplers.md): "shorten" (default), "abort", "off".
+    tune_forecast = sampler_cfg.get("tune_forecast", DEFAULT_TUNE_FORECAST)
+    tune_forecast_after = int(
+        sampler_cfg.get("tune_forecast_after", DEFAULT_TUNE_FORECAST_AFTER)
+    )
     # Thinned hot-rung retention (ptde_async only): detector data for
     # post-hoc discovery of posterior-suppressed modes; see
     # outputs.ledger.discover_hot_modes.  "auto" | False | True (thin 20) |
@@ -1300,6 +1323,8 @@ def _run_fit(config, gui, user_params=None):
                     adapt_ladder=adapt_ladder,
                     de_mode_hop=de_mode_hop,
                     progress_callback=gui.progress_callback,
+                    tune_forecast=tune_forecast,
+                    tune_forecast_after=tune_forecast_after,
                 )
             elif method == "ptde_async":
                 # The non-blocking PTDE dispatch loop (see samplers.md)
@@ -1337,6 +1362,8 @@ def _run_fit(config, gui, user_params=None):
                     adapt_ladder=adapt_ladder,
                     de_mode_hop=de_mode_hop,
                     progress_callback=gui.progress_callback,
+                    tune_forecast=tune_forecast,
+                    tune_forecast_after=tune_forecast_after,
                 )
             elif method == "nested":
                 # Nested sampling on the full model (samplers/nested.py):
@@ -1767,6 +1794,10 @@ def _wrap_up(
     wrapup.stage("pile-at-cap check on data-capped parameters")
     cap_findings = cap_alarm_findings(system)
     log_cap_alarms(cap_findings, logger)
+    # Raw-z outliers the mode pass kept as a BOUND PILEUP (their lp is inside
+    # the bulk's range; outputs.modes.DEFAULT_PILEUP_LP_QUANTILE): name the
+    # parameter and the bound each one is against.
+    log_bound_pileups(bound_pileup_findings(system, mode_report), logger)
 
     # The robust-likelihood audit (outputs/outliers.py): per hogg file, the
     # nats the mixture forgives against a Gaussian, the outlier count and
