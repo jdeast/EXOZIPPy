@@ -837,25 +837,56 @@ def test_time_segments_split_at_gaps_longer_than_the_threshold():
     assert sp.time_segments(times, None) == [(4017.0, 4261.0)]
 
 
-def test_piece_ticks_stay_clear_of_the_breaks():
+def test_minor_ticks_divide_the_major_step_as_matplotlib_does():
     """
-    Given a wide piece (4113-4222, 5.5 in) and a narrow one (4013-4021,
-      0.8 in) of a broken axis,
-    When their ticks are chosen, trimming the edges that face a break,
-    Then the wide piece's ticks are round and none lies within
-      _BREAK_EDGE_IN of its trimmed left edge, and the narrow piece gets
-      one round tick inside its trimmed window.
+    Given major steps with mantissas 1, 2, 2.5 and 5,
+    When their minor step is taken,
+    Then it is the step AutoMinorLocator draws on the unbroken panels: a
+      fifth for 1, 2.5 and 5, a quarter for 2.
     """
-    wide = sp.piece_ticks(4113.0, 4222.0, 5.5, True, False)
-    narrow = sp.piece_ticks(4013.0, 4021.0, 0.8, False, True)
+    steps = [10.0, 20.0, 2.5, 5.0, 0.2]
 
-    per_in = (4222.0 - 4113.0) / 5.5
-    assert len(wide) >= 3
-    assert min(wide) >= 4113.0 + sp._BREAK_EDGE_IN * per_in
-    assert all(t % 10 == 0 for t in wide)
-    per_in = 8.0 / 0.8
-    assert narrow == [4015.0]
-    assert narrow[0] <= 4021.0 - sp._BREAK_EDGE_IN * per_in
+    minors = [sp.minor_step(s) for s in steps]
+
+    np.testing.assert_allclose(minors, [2.0, 5.0, 0.5, 1.0, 0.05])
+
+
+def test_every_piece_of_a_broken_axis_ticks_on_one_grid():
+    """
+    Given three pieces -- a lone observation near day 5, a 70-day season,
+      and a lone night near day 2115 -- the outer two 0.8 in wide and the
+      season 4.6 in,
+    When their ticks are chosen,
+    Then the season sets one major step (20 days) and minor step (5 days)
+      for all three: every tick on every piece is a multiple of 5, the
+      season's majors are multiples of 20 clear of its edges that face a
+      break, and each lone piece is labelled on that same 5-day grid
+      (5 and 2115) rather than at a step of its own.
+    """
+    limits = [(2.6, 7.6), (155.0, 225.0), (2112.4, 2117.4)]
+    widths_in = [0.8, 4.6, 0.8]
+
+    ticks = sp.broken_axis_ticks(limits, widths_in)
+
+    every = [t for majors, minors in ticks for t in majors + minors]
+    assert all(t % 5.0 == 0.0 for t in every)
+    (first, _), (season, season_minors), (last, _) = ticks
+    assert first == [5.0] and last == [2115.0]
+    assert season == [160.0, 180.0, 200.0, 220.0]
+    margin = sp._BREAK_EDGE_IN * 70.0 / 4.6
+    assert 155.0 + margin <= min(season) and max(season) <= 225.0 - margin
+    assert season_minors == [155.0 + 5.0 * k for k in range(15)]
+
+
+def test_broken_axis_labels_share_one_format():
+    """
+    Given labelled ticks that are all whole days, and others that are not,
+    When the label precision is chosen,
+    Then whole days are written without decimals (no "105.0" beside
+      "160"), and a half-day step gets exactly one decimal everywhere.
+    """
+    assert sp._label_decimals([105.0, 160.0, 2115.0]) == 0
+    assert sp._label_decimals([2.5, 5.0, 7.5]) == 1
 
 
 def _rv_time_chart():
@@ -894,15 +925,30 @@ def test_a_long_gap_breaks_the_rv_time_axis_and_its_oc():
     When the panel is drawn with breaks at 50 days, and again with none,
     Then it has two panel and two O-C pieces, each framing its own season;
       the facing spines are hidden, only the first piece carries the y
-      labels, and one x label is left; without breaks it is one piece.
+      labels, and one x label is left; both pieces tick on one grid, with
+      the same minor spacing and one label format, and have minor ticks
+      even with matplotlib's own default (no minor ticks) in force; without
+      breaks it is one piece.
     """
     chart = sp._prepared(_rv_time_chart(), {})
 
-    fig = plt.figure(figsize=(8, 6))
+    # matplotlib's own default, whatever another test's MulensModel import
+    # switched on for the process.
+    default = {"xtick.minor.visible": False, "ytick.minor.visible": False}
+    with plt.rc_context(default):
+        fig = plt.figure(figsize=(8, 6))
     try:
-        axes, oc_axes = sp._draw_rv(
-            fig, fig.add_gridspec(1, 1)[0, 0], chart, {0: "b"}, False, (), 50
-        )
+        with plt.rc_context(default):
+            axes, oc_axes = sp._draw_rv(
+                fig,
+                fig.add_gridspec(1, 1)[0, 0],
+                chart,
+                {0: "b"},
+                False,
+                (),
+                50,
+            )
+        fig.canvas.draw()
         xlims = [ax.get_xlim() for ax in axes]
         ylabels = [ax.get_ylabel() for ax in axes + oc_axes]
         xlabels = [ax.get_xlabel() for ax in axes + oc_axes]
@@ -912,6 +958,17 @@ def test_a_long_gap_breaks_the_rv_time_axis_and_its_oc():
             oc_axes[0].spines["right"].get_visible(),
             oc_axes[1].spines["left"].get_visible(),
         )
+        # matplotlib drops a minor tick that falls on a major, so the grid
+        # is the two together.
+        grid_gaps = [
+            np.diff(np.union1d(ax.xaxis.get_minorticklocs(), ax.get_xticks()))
+            for ax in axes
+        ]
+        minors = [ax.xaxis.get_minorticklocs() for ax in axes]
+        majors = [list(ax.get_xticks()) for ax in axes]
+        tick_labels = [
+            t.get_text() for ax in oc_axes for t in ax.get_xticklabels()
+        ]
     finally:
         plt.close(fig)
     fig = plt.figure(figsize=(8, 6))
@@ -929,6 +986,12 @@ def test_a_long_gap_breaks_the_rv_time_axis_and_its_oc():
     assert ylabels == ["RV [m/s]", "", sp.OC_YLABEL, ""]
     assert [x for x in xlabels if x] == ["Time [BJD - 2457000]"]
     assert [len(a) for a in unbroken] == [1, 1]
+    # One grid: both pieces have minor ticks, the same days apart, and
+    # labelled majors; whole days are written as whole days on both.
+    assert all(len(m) > 0 for m in minors)
+    assert len({round(float(g), 9) for gaps in grid_gaps for g in gaps}) == 1
+    assert all(m for m in majors)
+    assert tick_labels and all("." not in t for t in tick_labels)
 
 
 def test_rv_draws_are_faint_but_their_legend_swatch_is_not():
