@@ -1455,3 +1455,226 @@ def test_nearest_center_assignment_matches_the_full_broadcast():
 
         # ASSERT
         assert np.array_equal(got, want), trial
+
+
+# ----------------------------------------------------------------------
+# Bound pileups: raw-z outliers with an ordinary lp are not invalid
+#
+# DC2018 event 217 (2026-10): 20.93% of the draws were rejected, ALL by
+# raw-z, with err_scale_raw at its user cap and mann.ks_offset_raw at its
+# +/-10 walls, where the logit raw coordinate stretches to |raw| ~ 30.
+# Their lp was ordinary (median 70112 against a bulk median of 70194,
+# inside the bulk's 1-99% range), and the wrap-up raised and wrote nothing.
+# ----------------------------------------------------------------------
+
+
+def _wall_pileup_idata(rng, n_pile=2400, lp_shift=-70.0):
+    """A bulk in (a_raw, b_raw) plus ``n_pile`` draws whose b_raw sits ~100
+    bulk MADs out (150 raw units) -- a raw coordinate stretched against a wall -- with an
+    lp ``lp_shift`` nats from the bulk's median: more than the candidate-
+    mode margin below it, but inside the bulk's lp range."""
+    a = rng.normal(0.0, 1.0, N)
+    b = rng.normal(0.0, 1.0, N)
+    lp = rng.normal(1000.0, 40.0, N)  # 1st percentile ~ 907
+    pile = rng.choice(N, n_pile, replace=False)
+    b[pile] = rng.normal(150.0, 0.5, n_pile)
+    lp[pile] = rng.normal(1000.0 + lp_shift, 2.0, n_pile)
+    return _make_idata({"a_raw": a, "b_raw": b}, lp), pile
+
+
+def test_a_bound_pileup_with_an_ordinary_lp_is_kept_valid(caplog):
+    """
+    Given 20% of the draws far beyond raw-z in ONE dimension, with an lp
+      70 nats below the bulk's median (so the candidate-mode exemption does
+      not fire) but inside the bulk's lp range,
+    When identify_modes runs,
+    Then none is invalid: they are counted as a bound pileup, the dimension
+      is named with its draw count, a warning says so, the report text
+      carries the pileup line instead of the numerical-failure banner, and
+      the pileup is clustered with the bulk rather than reported as a
+      second mode (its stretched coordinate would otherwise split off).
+    """
+    rng = np.random.default_rng(217)
+    idata, pile = _wall_pileup_idata(rng)
+
+    with caplog.at_level("WARNING", logger="exozippy.outputs.modes"):
+        rep = identify_modes(idata)
+
+    assert rep.n_invalid == 0
+    assert rep.n_pileup == pile.size
+    assert rep.pileup_dims == {"b_raw": pile.size}
+    assert (rep.labels.reshape(-1)[pile] >= 0).all()
+    assert rep.n_modes == 1
+    assert "BOUND PILEUP" in caplog.text
+    text = rep.to_text()
+    assert "bound pileup" in text and "b_raw: 2400" in text
+    assert "WARNING" not in text
+    assert idata.posterior["mode"].attrs["n_pileup"] == pile.size
+
+
+def test_a_raw_z_outlier_below_the_bulk_lp_range_stays_invalid():
+    """
+    Given the same raw-z excursion but with lp 1000 nats below the bulk --
+      the runaway / stuck-chain signature, far below its 1st percentile,
+    When identify_modes runs,
+    Then the pileup exemption does not fire: the draws stay 'raw-z'
+      invalid and no pileup is reported.
+    """
+    rng = np.random.default_rng(218)
+    idata, pile = _wall_pileup_idata(rng, lp_shift=-1000.0)
+
+    rep = identify_modes(idata)
+
+    assert rep.n_pileup == 0
+    assert rep.invalid_reason_counts == {"raw-z": pile.size}
+    assert "rejected by the raw-z filter alone" in rep.to_text()
+
+
+def _reasons_report(reasons, n_total=1000):
+    rep = _fake_report(n_invalid=sum(reasons.values()), n_total=n_total)
+    rep.invalid_reason_counts = dict(reasons)
+    return rep
+
+
+def test_a_raw_z_only_excess_warns_instead_of_raising(caplog):
+    """
+    Given a report over max_invalid_frac whose EVERY rejection is raw-z,
+    When check_invalid_frac runs,
+    Then it does not raise (the wrap-up and the restart file go on) but
+      logs a loud warning saying the draws are excluded.
+    """
+    rep = _reasons_report({"raw-z": 209})
+
+    with caplog.at_level("WARNING", logger="exozippy.outputs.modes"):
+        check_invalid_frac(rep, max_invalid_frac=0.01)
+
+    assert "raw-z filter alone" in caplog.text
+    assert "EXCLUDED" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "reasons",
+    [
+        {"raw-z": 15, "nonfinite-lp": 5},
+        {"raw-z": 15, "lp-ceiling": 5},
+        {"nonfinite-raw": 20},
+    ],
+    ids=["raw-z+nonfinite-lp", "raw-z+lp-ceiling", "nonfinite-raw"],
+)
+def test_a_numerical_rejection_keeps_the_hard_error(reasons):
+    """
+    Given an excess over max_invalid_frac that includes a NUMERICAL reason,
+    When check_invalid_frac runs,
+    Then it still raises -- the downgrade is for raw-z alone.
+    """
+    with pytest.raises(RuntimeError, match="exceeding max_invalid_frac"):
+        check_invalid_frac(_reasons_report(reasons), max_invalid_frac=0.01)
+
+
+def test_an_all_raw_z_invalid_trace_still_raises():
+    """
+    Given the no-valid-draws status with raw-z as the only reason,
+    When check_invalid_frac runs,
+    Then it raises: with no valid draw there is nothing to report.
+    """
+    status = {
+        "state": MODE_NO_VALID_DRAWS,
+        "n_invalid": 1000,
+        "invalid_frac": 1.0,
+        "reasons": {"raw-z": 1000},
+    }
+    with pytest.raises(RuntimeError, match="ALL 1000 draws"):
+        check_invalid_frac(None, max_invalid_frac=0.01, status=status)
+
+
+class _PileParam:
+    """Just what bound_pileup_findings reads off a built Parameter."""
+
+    label = "inst.err_scale"
+    unit = None
+    lower = np.array([0.5, 0.5, 0.5])
+    upper = np.array([2.0, 2.0, 2.0])
+    # element 0 pinned; the raw vector holds elements 1 and 2
+    _raw_transform = {"sampled_idx": np.array([1, 2])}
+
+    def __init__(self, posterior):
+        self.posterior = posterior
+
+    def get_display_label(self, i):
+        return f"inst.err_scale[{i}]"
+
+    def from_internal(self, val, index=None):
+        return val
+
+
+class _PileSystem:
+    def __init__(self, params):
+        self._lookup = {p.label: p for p in params}
+
+    def get_parameter_lookup(self):
+        return self._lookup
+
+
+def test_bound_pileup_findings_name_the_element_and_its_bound(caplog):
+    """
+    Given a pileup in raw dimension err_scale_raw[1] -- the SECOND sampled
+      element, i.e. element 2 once the pinned element 0 is skipped -- whose
+      posterior has 30% of its draws at the upper bound 2.0,
+    When bound_pileup_findings / log_bound_pileups run,
+    Then the finding names element 2, its bounds and the fraction at each,
+      and the warning says PILED AT BOUND.
+    """
+    import logging
+
+    from exozippy.diagnostics import bound_pileup_findings, log_bound_pileups
+
+    rng = np.random.default_rng(3)
+    draws = np.vstack(
+        [
+            np.full(1000, 1.0),
+            np.full(1000, 1.0),
+            np.r_[np.full(300, 1.9999), rng.uniform(0.9, 1.1, 700)],
+        ]
+    )
+    system = _PileSystem([_PileParam(draws)])
+    rep = _fake_report(0)
+    rep.pileup_dims = {"inst.err_scale_raw[1]": 300}
+
+    findings = bound_pileup_findings(system, rep)
+
+    assert len(findings) == 1
+    f = findings[0]
+    assert f["display"] == "inst.err_scale[2]"
+    assert (f["lower"], f["upper"]) == (0.5, 2.0)
+    assert f["frac_upper"] == pytest.approx(0.3)
+    assert f["frac_lower"] == 0.0
+    log = logging.getLogger("test.pileup")
+    with caplog.at_level("WARNING", logger="test.pileup"):
+        log_bound_pileups(findings, log)
+    assert "PILED AT BOUND: inst.err_scale[2]" in caplog.text
+    assert bound_pileup_findings(system, _fake_report(0)) == []
+    assert bound_pileup_findings(system, None) == []
+
+
+def test_a_raw_z_dimension_nowhere_near_its_bounds_is_not_called_piled(
+    caplog,
+):
+    """
+    Given a pileup dimension whose posterior has no draw near either bound
+      (event 217's proper motions, bounds +/-1e5),
+    When log_bound_pileups runs,
+    Then it says FAR IN THE SAMPLED COORDINATE, not PILED AT BOUND.
+    """
+    import logging
+
+    from exozippy.diagnostics import bound_pileup_findings, log_bound_pileups
+
+    draws = np.vstack([np.ones(100), np.ones(100), np.ones(100)])
+    system = _PileSystem([_PileParam(draws)])
+    rep = _fake_report(0)
+    rep.pileup_dims = {"inst.err_scale_raw[0]": 10}
+    log = logging.getLogger("test.pileup")
+    with caplog.at_level("WARNING", logger="test.pileup"):
+        log_bound_pileups(bound_pileup_findings(system, rep), log)
+    assert "FAR IN THE SAMPLED COORDINATE: inst.err_scale[1]" in caplog.text
+    assert "PILED AT BOUND" not in caplog.text

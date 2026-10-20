@@ -2533,6 +2533,169 @@ def validate_shared_ptde_args(swap_schedule, de_mode_hop, label):
     return hop
 
 
+# The tune-phase finish forecast (samplers.md, "A run that cannot finish
+# tune says so early").  DC2018 event 208 (2026-10) ran at ~22 s per step
+# against ~3 s normally and hit maxtime 72000 s during TUNE, at step 3250 of
+# 13000, so it saved nothing: tune-phase states are not kept.  After 250
+# steps the measured rate already projected ~79 h.
+TUNE_FORECAST_MODES = ("shorten", "abort", "off")
+DEFAULT_TUNE_FORECAST = "shorten"
+DEFAULT_TUNE_FORECAST_AFTER = 250
+# A shortened tune is sized to end the run at this fraction of maxtime, so a
+# small slowdown after the forecast does not push the draw phase out again.
+TUNE_FORECAST_SAFETY = 0.9
+
+
+class TuneWontFitError(RuntimeError):
+    """`tune_forecast: abort` -- the measured step rate cannot finish tune
+    inside maxtime, so the run stops now instead of at maxtime with nothing
+    saved."""
+
+
+class TuneForecast:
+    """Project the end of TUNE from the measured step rate; act if it is
+    past maxtime.
+
+    Shared by both PTDE loops (samplers.md's parity rule): each passes its
+    own notion of progress -- the step count for the synchronous loop, the
+    SLOWEST T=1 chain's iteration count for the asynchronous one, since tune
+    ends for the run when it ends for that chain -- and gets back the tune
+    length to use from here on.
+
+    The rate is the elapsed time since ``t0`` (the clock maxtime is measured
+    on, so it includes the start-up evaluation, which errs slow) over the
+    progress made.  Nothing happens before ``after`` steps of progress, nor
+    after tune has ended, nor without a maxtime.  When the projected end of
+    tune is past maxtime:
+
+    * ``"shorten"`` (the default) cuts tune so the run ends at
+      ``TUNE_FORECAST_SAFETY * maxtime``, splitting the steps that fit in the
+      ratio of the configured tune to draws (never below the progress
+      already made), and logs a WARNING.  The trace is stamped
+      (``stamp``) so the shortening is on the record.
+    * ``"abort"`` raises ``TuneWontFitError`` now, naming the projection.
+    * ``"off"`` does nothing; a run that then reaches maxtime in tune saves
+      nothing, as before.
+
+    ``check`` is called after every tune step: a rate that degrades later is
+    caught by a later call, and a projection that fits costs one division.
+    """
+
+    def __init__(
+        self,
+        tune,
+        draws,
+        maxtime,
+        *,
+        mode=DEFAULT_TUNE_FORECAST,
+        after=DEFAULT_TUNE_FORECAST_AFTER,
+        t0=None,
+        label="PTDE",
+        log=logger,
+        safety=TUNE_FORECAST_SAFETY,
+    ):
+        mode = str(mode).lower() if mode is not None else "off"
+        if mode in ("false", "none"):
+            mode = "off"
+        if mode not in TUNE_FORECAST_MODES:
+            raise ValueError(
+                f"{label}: tune_forecast must be one of "
+                f"{', '.join(TUNE_FORECAST_MODES)}, got {mode!r}"
+            )
+        after = int(after)
+        if after < 1:
+            raise ValueError(
+                f"{label}: tune_forecast_after must be >= 1, got {after}"
+            )
+        self.requested_tune = int(tune)
+        self.tune = int(tune)
+        self.draws = int(draws)
+        self.maxtime = float(maxtime) if maxtime is not None else None
+        self.mode = mode
+        self.after = after
+        # The clock maxtime is measured on; a caller may set it later, once
+        # that clock starts.  No forecast is made while it is None.
+        self.t0 = None if t0 is None else float(t0)
+        self.label = label
+        self.log = log
+        self.safety = float(safety)
+        self.shortened = False
+        self._announced = False
+        self.active = (
+            mode != "off" and self.maxtime is not None and self.tune > 0
+        )
+
+    def check(self, progress, now):
+        """Return the tune length to use, given ``progress`` steps done."""
+        if (
+            not self.active
+            or self.t0 is None
+            or progress < self.after
+            or progress >= self.tune
+        ):
+            return self.tune
+        elapsed = float(now) - self.t0
+        rate = elapsed / float(progress)
+        tune_end = elapsed + rate * (self.tune - progress)
+        run_end = tune_end + rate * self.draws
+        h = 3600.0
+        if not self._announced:
+            self._announced = True
+            self.log.info(
+                f"{self.label}: finish forecast after {progress:.0f} steps "
+                f"at {rate:.2f} s/step -- tune ends at {tune_end / h:.1f} h, "
+                f"the run at {run_end / h:.1f} h, maxtime "
+                f"{self.maxtime / h:.1f} h"
+            )
+        if tune_end <= self.maxtime:
+            return self.tune
+        if self.mode == "abort":
+            raise TuneWontFitError(
+                f"{self.label}: at the measured {rate:.2f} s/step "
+                f"({progress:.0f} steps in {elapsed:.0f} s) tune would end "
+                f"at {tune_end / h:.1f} h, past maxtime "
+                f"{self.maxtime / h:.1f} h, and a run stopped by maxtime in "
+                f"tune saves nothing -- stopping now (`sampler: "
+                f"{{tune_forecast: abort}}`). Raise maxtime, lower tune, "
+                f"or set `tune_forecast: shorten` to keep draws."
+            )
+        remaining = max(0.0, self.safety * self.maxtime - elapsed)
+        n_fit = progress + remaining / rate
+        share = self.requested_tune / max(self.requested_tune + self.draws, 1)
+        new_tune = max(int(np.ceil(progress)), int(share * n_fit))
+        if new_tune >= self.tune:
+            return self.tune
+        self.log.warning(
+            f"{self.label}: TUNE SHORTENED {self.tune} -> {new_tune} steps. "
+            f"At the measured {rate:.2f} s/step ({progress:.0f} steps in "
+            f"{elapsed:.0f} s) tune would end at {tune_end / h:.1f} h, past "
+            f"maxtime {self.maxtime / h:.1f} h, and a run stopped by maxtime "
+            f"in tune saves nothing. About {max(0, int(n_fit) - new_tune)} "
+            f"draws now fit. The adaptation gets less time than configured: "
+            f"treat the result as a pilot and restart from its restart "
+            f"file. `sampler: {{tune_forecast: abort}}` stops instead; "
+            f"`off` disables the forecast."
+        )
+        self.tune = new_tune
+        self.shortened = True
+        return self.tune
+
+    def stamp(self, idata):
+        """Record the tune actually run on the trace, and say so again."""
+        attrs = idata.posterior.attrs
+        attrs["tune_requested"] = int(self.requested_tune)
+        attrs["tune_used"] = int(self.tune)
+        attrs["tune_shortened"] = int(self.shortened)
+        if self.shortened:
+            self.log.warning(
+                f"{self.label}: this trace was sampled after a SHORTENED "
+                f"tune ({self.tune} of {self.requested_tune} steps; the "
+                f"finish forecast cut it to fit maxtime) -- stamped on the "
+                f"trace as posterior.attrs['tune_shortened']."
+            )
+        return idata
+
+
 def progress_state(
     n_draws,
     n_chains,

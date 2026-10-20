@@ -1088,6 +1088,8 @@ def ptde_sample(
     lp_plausibility_ceiling=None,
     progress_callback=None,
     store_hot_chains="auto",
+    tune_forecast=_common.DEFAULT_TUNE_FORECAST,
+    tune_forecast_after=_common.DEFAULT_TUNE_FORECAST_AFTER,
 ):
     """
     Parallel Tempering + Differential Evolution sampler.
@@ -1191,6 +1193,15 @@ def ptde_sample(
                <job_id>` / `kill -TERM <pid>`) trigger the same graceful
                stop-after-this-step behavior on demand, without waiting for
                maxtime.
+    tune_forecast : {"shorten", "abort", "off"}  -- what to do when, after
+               tune_forecast_after steps, the measured step rate puts the
+               end of TUNE past maxtime (a run stopped by maxtime in tune
+               saves nothing).  "shorten" (default) cuts tune so draws fit,
+               warns, and stamps posterior.attrs['tune_shortened'];
+               "abort" raises _common.TuneWontFitError at once.  Inert
+               without maxtime.  See _common.TuneForecast.
+    tune_forecast_after : int  -- steps of measured rate before the first
+               forecast (default _common.DEFAULT_TUNE_FORECAST_AFTER).
     lp_plausibility_ceiling : float | None  — |lp| threshold above which a
                T=1 chain's logp is logged as a loud one-time warning, since
                no realistic dataset's logp reaches this scale: it always
@@ -1210,6 +1221,17 @@ def ptde_sample(
     -------
     arviz.InferenceData with posterior and sample_stats["lp"] from T=1 chains.
     """
+    # Validated before the (expensive) prologue; its clock starts with
+    # maxtime's, below.
+    forecast = _common.TuneForecast(
+        tune,
+        draws,
+        maxtime,
+        mode=tune_forecast,
+        after=tune_forecast_after,
+        label="PTDE",
+        log=logger,
+    )
     # ONE shared prologue for both PTDE loops (_common.prepare_ptde_run).
     # It validates, resolves the ladder and the chain count, compiles the
     # logp and the conversions, builds the rung populations, plots the start
@@ -1291,6 +1313,7 @@ def ptde_sample(
     stop_requested = False
     actual_draws = 0
     start_time = time.time()
+    forecast.t0 = start_time  # the clock maxtime is measured on
     n_eval_timeouts = 0  # incremented by _eval_logps_safe (nonlocal)
     n_nan_logp = 0  # NaN logps returned (review 2.4.23); ditto
     rung_times = [
@@ -1482,6 +1505,10 @@ def ptde_sample(
         adapt_every = adaptation_window(tune, log_every)
 
         for step in range(total_steps):
+            # The finish forecast (section 7) can only SHORTEN tune, and
+            # total_steps with it, so the range above is an upper bound.
+            if step >= total_steps:
+                break
             phase = "tune" if step < tune else "draw"
             draw_idx = step - tune
             _t0 = time.time()
@@ -1782,6 +1809,18 @@ def ptde_sample(
                 )
 
             # 7. early-stop checks
+            # The finish forecast: from tune_forecast_after steps on, a tune
+            # whose projected end is past maxtime is shortened (or the run
+            # aborted) NOW rather than lost whole at maxtime.  Shrinking
+            # `tune` moves the tune -> draw boundary (and its counter reset)
+            # forward; it never moves behind the step just completed.
+            if phase == "tune":
+                new_tune = forecast.check(step + 1, time.time())
+                if new_tune != tune:
+                    tune = new_tune
+                    total_steps = tune + draws
+                    adapt_every = adaptation_window(tune, log_every)
+
             if stop_requested:
                 if actual_draws == 0:
                     logger.warning(
@@ -1887,4 +1926,5 @@ def ptde_sample(
         rung_times=rung_times if collect_rung_timing else None,
         rung_step_times=rung_step_times if collect_rung_timing else None,
     )
+    forecast.stamp(idata)
     return idata

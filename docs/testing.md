@@ -289,7 +289,9 @@ The wrap-up's invalid-draw gate is forced there (`modes: {force: true}`,
 test-local), because on a few dozen untuned draws its 1% threshold fails on
 any single rejection and one of its four reasons, `raw-z`, is a z-score
 against the trace's own median/MAD -- a property of the sample size (review
-7.13.9); the three numerical reasons are asserted directly instead. It exists because the shipped
+7.13.9); the three numerical reasons are asserted directly instead. (A
+raw-z-only excess now warns rather than raises -- `src/exozippy/outputs/outputs.md`,
+"Invalid draws" -- so the force guards the numerical three.) It exists because the shipped
 microlensing examples were otherwise only `prepare()`-tested or replayed for
 their logp terms, and `examples/ob09020` shipped from 2026-09-07 to 09-25 with a
 TypeError in its first start-point plot (the orbit-derived lens geometry listed

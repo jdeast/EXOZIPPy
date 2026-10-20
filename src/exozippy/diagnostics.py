@@ -114,6 +114,139 @@ def log_cap_alarms(findings, log, top_frac=CAP_TOP_FRAC):
         )
 
 
+# A bound-pileup draw's physical value counts as AT a bound when it lies
+# within this fraction of the element's [lower, upper] span of it.
+BOUND_PILE_TOL_FRAC = 0.01
+
+
+def _split_feature_dim(name):
+    """``'a.b_raw[3]'`` -> ``('a.b_raw', 3)``; ``'a.b_raw'`` -> ``(.., 0)``."""
+    if name.endswith("]") and "[" in name:
+        base, _, j = name[:-1].rpartition("[")
+        try:
+            return base, int(j)
+        except ValueError:
+            pass
+    return name, 0
+
+
+def bound_pileup_findings(system, mode_report, tol_frac=BOUND_PILE_TOL_FRAC):
+    """Resolve a mode report's bound-pileup dimensions to Parameters.
+
+    ``identify_modes`` keeps a raw-z outlier whose lp is inside the bulk's
+    lp range as VALID and records, per feature dimension, how many such
+    draws were beyond raw-z there (``ModeReport.pileup_dims``).  It works
+    from the trace alone, so it cannot name a bound; this does, from the
+    System.  For each dimension it maps the ``<label>_raw[j]`` feature to
+    its Parameter and element (through the build's ``sampled_idx``, since a
+    raw vector holds only the FREE elements) and measures the fraction of
+    the distributed posterior within ``tol_frac`` of the span of the lower
+    and of the upper bound, in USER units (``from_internal``).  Call after
+    ``System.distribute_posterior``.  Component-agnostic, like
+    ``cap_alarm_findings``.  Returns a list of dicts -- ``dim``,
+    ``display``, ``n_draws`` (pileup draws beyond raw-z there), ``lower``,
+    ``upper``, ``unit``, ``frac_lower``, ``frac_upper`` (None when not
+    measurable: no Parameter, no posterior, or an unbounded side).
+    """
+    dims = dict(getattr(mode_report, "pileup_dims", None) or {})
+    if not dims:
+        return []
+    lookup = system.get_parameter_lookup()
+    findings = []
+    for dim, n in sorted(dims.items(), key=lambda kv: (-kv[1], kv[0])):
+        raw_name, j = _split_feature_dim(dim)
+        label = raw_name[: -len("_raw")] if raw_name.endswith("_raw") else None
+        p = lookup.get(label) if label else None
+        f = {
+            "dim": dim,
+            "display": dim,
+            "n_draws": int(n),
+            "lower": None,
+            "upper": None,
+            "unit": "",
+            "frac_lower": None,
+            "frac_upper": None,
+        }
+        if p is not None:
+            transform = getattr(p, "_raw_transform", None) or {}
+            sampled = transform.get("sampled_idx")
+            i = (
+                int(sampled[j])
+                if sampled is not None and j < len(sampled)
+                else j
+            )
+            f["display"] = p.get_display_label(i)
+            f["unit"] = str(p.unit) if p.unit is not None else ""
+            post = p.posterior
+            if post is not None:
+                arr = np.asarray(getattr(post, "values", post), dtype=float)
+                draws = arr[i] if arr.ndim > 1 else arr
+                draws = draws[np.isfinite(draws)]
+            else:
+                draws = np.array([])
+            lo = hi = None
+            if p.lower is not None:
+                lo = float(p.from_internal(np.atleast_1d(p.lower)[i], index=i))
+            if p.upper is not None:
+                hi = float(p.from_internal(np.atleast_1d(p.upper)[i], index=i))
+            f["lower"] = lo if lo is not None and np.isfinite(lo) else None
+            f["upper"] = hi if hi is not None and np.isfinite(hi) else None
+            if (
+                draws.size
+                and f["lower"] is not None
+                and f["upper"] is not None
+            ):
+                tol = tol_frac * (f["upper"] - f["lower"])
+                f["frac_lower"] = float(np.mean(draws <= f["lower"] + tol))
+                f["frac_upper"] = float(np.mean(draws >= f["upper"] - tol))
+        findings.append(f)
+    return findings
+
+
+def log_bound_pileups(findings, log, tol_frac=BOUND_PILE_TOL_FRAC):
+    """One WARNING per bound-pileup dimension, naming the bound if known.
+
+    An element whose posterior is measurably NOT at either bound (both
+    fractions zero) is said so in its own words rather than as "PILED AT
+    BOUND": on DC2018 event 217 the star proper motions (bounds +/-1e5
+    mas/yr) were raw-z outliers with an ordinary lp but nowhere near a wall.
+    """
+    for f in findings:
+        unit = f" {f['unit']}" if f.get("unit") else ""
+        measured = f["frac_lower"] is not None and f["frac_upper"] is not None
+        if not measured:
+            head = "FAR IN THE SAMPLED COORDINATE"
+            where = (
+                "no finite [lower, upper] to compare against, so the "
+                "excursion is in the sampled coordinate only"
+            )
+        else:
+            at_bound = max(f["frac_lower"], f["frac_upper"]) > 0
+            head = (
+                "PILED AT BOUND"
+                if at_bound
+                else "FAR IN THE SAMPLED COORDINATE"
+            )
+            where = (
+                f"{100 * f['frac_lower']:.1f}% of its posterior draws lie "
+                f"within {100 * tol_frac:g}% of the span of its lower bound "
+                f"{f['lower']:.4g}{unit} and {100 * f['frac_upper']:.1f}% "
+                f"of its upper bound {f['upper']:.4g}{unit}"
+            )
+        log.warning(
+            "%s: %s carried %d draws beyond the raw-z threshold with an "
+            "ordinary lp, kept as valid posterior draws; %s.  A posterior "
+            "against a bound is real mass there: if the bound is a "
+            "modelling choice rather than a physical limit, widen it in the "
+            "params file; if the run is short, these may be chains that "
+            "have not yet equilibrated.",
+            head,
+            f["display"],
+            f["n_draws"],
+            where,
+        )
+
+
 class ModelAuditor:
     def __init__(self, model, system, transformed_inits):
         self.model = model

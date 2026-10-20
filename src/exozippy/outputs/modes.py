@@ -13,6 +13,10 @@ Pipeline (see identify_modes):
   2. Reject invalid draws: non-finite features or lp, implausible |lp|, or
      raw values astronomically far from the bulk (robust z-score).  These are
      runaway/stuck chains pinned at parameter bounds, not posterior modes.
+     A raw-z outlier is kept when its lp says otherwise: near or above the
+     bulk's median it is a candidate mode (DEFAULT_LP_EXEMPT_MARGIN), and
+     inside the bulk's lp range it is a bound pileup -- a draw against a
+     wall, where the raw coordinate stretches (DEFAULT_PILEUP_LP_QUANTILE).
   3. Cluster the valid draws with k-means, selecting k by BIC.
   4. Merge over-split clusters with a density-dip test along the segment
      connecting each pair of cluster centers: if the empirical density does
@@ -79,13 +83,44 @@ DEFAULT_Z_MAX = 50.0
 # carries e^-50 of its mass and loses nothing by staying flagged.
 DEFAULT_LP_EXEMPT_MARGIN = 50.0
 
+# Bound-pileup exemption from the raw-z filter: a z-failing draw (not
+# already a candidate mode) whose lp lies inside the z-passing bulk's lp
+# range -- at or above this quantile of the bulk's lp -- is a draw against a
+# parameter bound, not a runaway.  At a wall a logit-type raw coordinate
+# stretches without limit while the physical value and the lp stay
+# ordinary: on DC2018 event 217 (2026-10) err_scale at its user cap and
+# mann.ks_offset at its +/-10 walls sat at |raw| ~ 30, >50 MADs from the
+# bulk, and the 33075 draws (20.93%) rejected as 'raw-z' had a median lp of
+# 70112 against a bulk median of 70194 -- inside the bulk's 1-99% range,
+# none non-finite, none near the |lp| ceiling.  The rejected fraction fell
+# 35/26/15/7.5% by quarter: an unequilibrated, truncated run, not a
+# numerical failure, and the wrap-up refused to write anything.  Such draws
+# are kept as VALID (they are posterior mass, at the bound), counted as
+# ``n_pileup`` and reported as a bound pileup -- in the mode report and by
+# the wrap-up's ``diagnostics.bound_pileup_findings``.  A runaway sits far
+# below this quantile (>~1000 nats, see DEFAULT_LP_EXEMPT_MARGIN) and stays
+# 'raw-z' invalid, whether or not it is pinned at a bound: that is the
+# stuck-chain case this filter was written for.
+DEFAULT_PILEUP_LP_QUANTILE = 0.01
+
 # With the runaway-lp cancellation bug fixed, ONLY a model or sampler bug
-# should produce invalid draws.  Above this fraction of the trace, run.py
-# refuses to emit final tables (evidence -- trace + mode report -- is written
-# first); below it, invalid draws still complain loudly but do not block.
+# should produce NUMERICALLY invalid draws.  Above this fraction of the
+# trace, run.py refuses to emit final tables (evidence -- trace + mode
+# report -- is written first); below it, invalid draws still complain
+# loudly but do not block.  Only the numerical reasons block; see
+# _NUMERICAL_REASONS.
 DEFAULT_MAX_INVALID_FRAC = 0.01
 
 _INVALID_REASONS = ("nonfinite-raw", "nonfinite-lp", "lp-ceiling", "raw-z")
+
+# The reasons that mean the stored numbers are BROKEN (non-finite, or an lp
+# no dataset can produce).  'raw-z' is different in kind: a finite draw with
+# a finite, sane lp far from the bulk in the sampled coordinates, which an
+# unequilibrated or truncated run produces with no numerical failure at all.
+# check_invalid_frac keeps its hard error for these and downgrades an
+# excess to a loud warning only when EVERY rejection is 'raw-z' (the draws
+# are still excluded); ModeReport.to_text words its banner by the same split.
+_NUMERICAL_REASONS = ("nonfinite-raw", "nonfinite-lp", "lp-ceiling")
 
 # Below this effective sample size the occupancy weights carry an error bar
 # comparable to the weights themselves and the report says so in plain
@@ -201,6 +236,13 @@ def check_invalid_frac(
     ``force=True`` (config ``modes: {force: true}``) or a higher
     ``max_invalid_frac`` re-enables processing of a known-bad trace.
 
+    The hard error is kept for the NUMERICAL reasons
+    (``_NUMERICAL_REASONS``: a non-finite raw value or lp, or |lp| over the
+    ceiling).  When EVERY rejection is 'raw-z' the excess is logged as a
+    loud warning instead and this returns: those draws are finite with a
+    sane lp, the signature of an unequilibrated run rather than of a model
+    or sampler bug.  An all-invalid trace raises whatever the reasons.
+
     ``mode_report`` may be None, which is ambiguous on its own and so is
     disambiguated by ``status`` (the dict build_mode_reports fills in):
 
@@ -230,6 +272,33 @@ def check_invalid_frac(
         return
 
     if not n_invalid or frac <= max_invalid_frac:
+        return
+    # Raw-z ONLY, positively: a report with no reason breakdown at all (an
+    # older or hand-built one) says nothing about the draws and still raises.
+    raw_z_only = {r for r, c in reason_counts.items() if c} == {"raw-z"}
+    if raw_z_only and not all_invalid:
+        # Every rejection is 'raw-z': finite draws with finite, sane lp that
+        # sit far from the bulk in the sampled coordinates and below the
+        # bulk's lp range (bound pileups inside it were already kept as
+        # valid by identify_modes).  That is an unequilibrated or truncated
+        # run, not broken numbers, so it warns instead of refusing to write
+        # the tables and the restart file -- DC2018 events 131, 214, 217,
+        # 226 and 289 (2026-10) lost their whole wrap-up to this raise.  The
+        # draws stay excluded from every summary.
+        logger.warning(
+            "modes: %d draws (%.2f%%) were rejected by the raw-z filter "
+            "alone, above max_invalid_frac=%.2f%% -- they are finite, with "
+            "finite lp, but far from the bulk in the sampled coordinates "
+            "and below the bulk's lp range: chains that have not "
+            "equilibrated. They are EXCLUDED from every table and from the "
+            "restart file's seeds, which therefore describe the remaining "
+            "draws only. Run longer (or restart from the restart file) "
+            "before trusting the results. reasons=%s",
+            n_invalid,
+            100 * frac,
+            100 * max_invalid_frac,
+            reason_counts,
+        )
         return
     if force:
         logger.warning(
@@ -400,6 +469,14 @@ class ModeReport:
     notes: List[str] = field(default_factory=list)
     invalid_reason_counts: dict = field(default_factory=dict)
     invalid_per_chain: Optional[np.ndarray] = None
+    # Bound pileups (DEFAULT_PILEUP_LP_QUANTILE): draws beyond raw-z whose
+    # lp is inside the bulk's lp range, kept VALID and counted here.
+    # ``pileup_dims`` maps each feature dimension (``name`` or
+    # ``name[j]``) to the number of those draws in which it is beyond
+    # z_max -- the parameters against a bound, which
+    # diagnostics.bound_pileup_findings resolves to Parameters and bounds.
+    n_pileup: int = 0
+    pileup_dims: dict = field(default_factory=dict)
     # Mode-change bookkeeping (see transition_stats).  These are counts of
     # MODE changes in the stored draws, not the sampler's temperature-swap
     # statistics; ladder_round_trips below carries the latter when the
@@ -473,6 +550,7 @@ class ModeReport:
         ]
         da.attrs["provenance"] = self.provenance
         da.attrs["n_invalid"] = int(self.n_invalid)
+        da.attrs["n_pileup"] = int(self.n_pileup)
         da.attrs["n_transitions"] = int(self.n_transitions)
         da.attrs["n_round_trips"] = int(self.n_round_trips)
         da.attrs["n_chains_no_switch"] = int(self.n_chains_no_switch)
@@ -491,13 +569,40 @@ class ModeReport:
         )
         if self.n_invalid:
             lines.append("")
-            lines.append(
-                f"*** WARNING: {self.n_invalid} draws ({self.invalid_frac:.2%}) "
-                "rejected as numerically invalid -- this indicates a model "
-                "or sampler bug; investigate before trusting this report. "
-                f"reasons={self.invalid_reason_counts} ***"
+            numerical = any(
+                r in _NUMERICAL_REASONS for r in self.invalid_reason_counts
             )
+            if numerical:
+                lines.append(
+                    f"*** WARNING: {self.n_invalid} draws "
+                    f"({self.invalid_frac:.2%}) rejected as numerically "
+                    "invalid -- this indicates a model or sampler bug; "
+                    "investigate before trusting this report. "
+                    f"reasons={self.invalid_reason_counts} ***"
+                )
+            else:
+                lines.append(
+                    f"*** WARNING: {self.n_invalid} draws "
+                    f"({self.invalid_frac:.2%}) rejected by the raw-z "
+                    "filter alone: finite, with finite lp, but far from the "
+                    "bulk in the sampled coordinates and below its lp range "
+                    "-- chains that have not equilibrated; run longer "
+                    "before trusting this report. "
+                    f"reasons={self.invalid_reason_counts} ***"
+                )
             lines.append("")
+        if self.n_pileup:
+            n_total_ = max(n_total, 1)
+            top = sorted(
+                self.pileup_dims.items(), key=lambda kv: (-kv[1], kv[0])
+            )
+            lines.append(
+                f"bound pileup: {self.n_pileup} draws "
+                f"({self.n_pileup / n_total_:.2%}) lie beyond raw-z but with "
+                "lp inside the bulk's lp range -- draws against a parameter "
+                "bound, KEPT as valid. Dimensions beyond raw-z (draw "
+                "counts): " + ", ".join(f"{k}: {v}" for k, v in top)
+            )
         lines.append(f"modes found: {self.n_modes}")
         lines.append(f"weight provenance: {self.provenance}")
         lines.extend(self._mixing_lines())
@@ -1279,6 +1384,7 @@ def identify_modes(
     z_max: float = DEFAULT_Z_MAX,
     lp_abs_max: float = DEFAULT_LP_ABS_MAX,
     lp_exempt_margin: float = DEFAULT_LP_EXEMPT_MARGIN,
+    pileup_lp_quantile: float = DEFAULT_PILEUP_LP_QUANTILE,
     merge_ratio: float = 0.5,
     subsample: int = 20000,
     seed: int = 20260711,
@@ -1301,6 +1407,10 @@ def identify_modes(
     lp_exempt_margin : a draw beyond z_max whose lp is within this many
         nats of the z-passing bulk's median (or better) is exempted from
         raw-z invalidation and clustered as a candidate mode.
+    pileup_lp_quantile : a remaining draw beyond z_max whose lp is at or
+        above this quantile of the z-passing bulk's lp is a bound pileup:
+        kept valid and counted in ``ModeReport.n_pileup``.  Skipped when
+        the trace has no lp.
     merge_ratio : density-dip merge threshold; higher merges more eagerly.
     subsample : cluster on at most this many draws (assignment of the rest
         is by nearest center); keeps k selection fast on huge traces.
@@ -1345,6 +1455,9 @@ def identify_modes(
         )
 
     # ---- invalid-draw filter -------------------------------------------
+    n_pileup = 0
+    pileup_dims = {}
+    pileup = np.zeros(n_samples, dtype=bool)
     finite = np.isfinite(X).all(axis=1)
     if has_lp:
         lp_ok = np.isfinite(lp) & (np.abs(lp) <= lp_abs_max)
@@ -1389,6 +1502,39 @@ def identify_modes(
                     f"not a runaway."
                 )
                 z_ok |= exempt
+            # Bound-pileup exemption (DEFAULT_PILEUP_LP_QUANTILE): a
+            # remaining z-failing draw whose lp is inside the bulk's lp
+            # range is a draw against a bound, where a logit-type raw
+            # coordinate stretches without limit -- valid posterior mass,
+            # reported as a pileup, not a numerical failure.  A runaway
+            # sits far below the bulk's lp range and stays invalid.
+            lp_bulk_lo = np.quantile(
+                lp[valid & z_ok & ~exempt], pileup_lp_quantile
+            )
+            pileup = valid & ~z_ok & (lp >= lp_bulk_lo)
+            n_pileup = int(pileup.sum())
+            if n_pileup:
+                beyond = (np.nan_to_num(z[pileup], nan=np.inf) > z_max).sum(
+                    axis=0
+                )
+                pileup_dims = {
+                    dim_names[j]: int(beyond[j])
+                    for j in np.flatnonzero(beyond)
+                }
+                top = sorted(pileup_dims.items(), key=lambda kv: -kv[1])[:8]
+                msg = (
+                    f"{n_pileup} draws ({n_pileup / n_samples:.2%}) beyond "
+                    f"raw-z {z_max:g} kept as a BOUND PILEUP: their lp is "
+                    f"inside the bulk's lp range (>= its "
+                    f"{100 * pileup_lp_quantile:g}th percentile, "
+                    f"{lp_bulk_lo:.2f}), so they are draws against a "
+                    f"parameter bound, where the raw coordinate stretches, "
+                    f"not runaways. Dimensions beyond raw-z (draw counts): "
+                    + ", ".join(f"{k}: {v}" for k, v in top)
+                )
+                notes.append(msg)
+                logger.warning("identify_modes: %s", msg)
+                z_ok |= pileup
         valid &= z_ok
         reasons[(reasons == "") & ~z_ok] = "raw-z"
 
@@ -1437,6 +1583,16 @@ def identify_modes(
         dropped = [n for n, k_ in zip(dim_names, keep) if not k_]
         notes.append(f"constant dimensions dropped from clustering: {dropped}")
     Xs = (Xv[:, keep] - med[keep]) / mad[keep]
+    # A bound pileup is the bulk continued against a wall, not a basin of
+    # its own: its stretched raw coordinate would leave a density gap that
+    # the dip and ridge merges below read as a second mode.  Cluster it at
+    # the bulk's edge instead -- clipped, for clustering and assignment
+    # only, to the range the other valid draws span; the mode centers and
+    # widths below still read the unclipped draws.
+    if n_pileup:
+        pv = pileup[valid]
+        if (~pv).any():
+            Xs[pv] = np.clip(Xs[pv], Xs[~pv].min(axis=0), Xs[~pv].max(axis=0))
 
     rng = np.random.default_rng(seed)
     if Xs.shape[0] > subsample:
@@ -1693,6 +1849,8 @@ def identify_modes(
         notes=notes,
         invalid_reason_counts=invalid_reason_counts,
         invalid_per_chain=invalid_per_chain,
+        n_pileup=n_pileup,
+        pileup_dims=pileup_dims,
         transitions_per_chain=transitions_per_chain,
         n_round_trips=n_round_trips,
         thin_factor=thin_factor,
