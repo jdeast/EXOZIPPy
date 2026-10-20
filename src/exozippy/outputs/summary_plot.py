@@ -102,9 +102,10 @@ _OC_HEIGHT_RATIOS = (3, 1)
 # A broken RV time axis: each piece padded by this fraction of the time the
 # pieces cover (at least _BREAK_MIN_PAD_DAYS), as wide as its padded span
 # but never narrower than _BREAK_MIN_WIDTH of the whole, and the pieces
-# _BREAK_WSPACE apart.  Its x ticks are about _BREAK_TICK_IN apart, none
-# within _BREAK_EDGE_IN of an edge facing another piece, where its label
-# would run into the neighbor's.
+# _BREAK_WSPACE apart.  All pieces tick on one grid, its major step about
+# _BREAK_TICK_IN apart on the widest piece; no labelled tick sits within
+# _BREAK_EDGE_IN of an edge facing another piece, where its label would run
+# into the neighbor's.
 _BREAK_PAD_FRAC = 0.04
 _BREAK_MIN_PAD_DAYS = 1.0
 _BREAK_MIN_WIDTH = 0.12
@@ -134,6 +135,14 @@ _FONT_RC = {
     "font.size": 13,
     "axes.labelsize": 15,
     "legend.fontsize": 13,
+}
+# Minor ticks on every axis.  The figure has always had them, but only
+# because importing MulensModel (which EXOZIPPy does to register its
+# microlensing components) calls PlotUtils.apply_defaults(), switching them
+# on for the whole process; the figure states it rather than inherit it.
+_TICK_RC = {
+    "xtick.minor.visible": True,
+    "ytick.minor.visible": True,
 }
 _TICK_LABELSIZE = 13
 # The dense transit points are rasterized inside the vector page; this is
@@ -1094,52 +1103,91 @@ def _broken_axes(fig, cell, with_oc, widths):
     return columns
 
 
-def piece_ticks(lo, hi, width_in, trim_left, trim_right):
-    """Round x ticks for one piece ``(lo, hi)`` of a broken axis,
-    ``width_in`` inches wide: as many as fit ``_BREAK_TICK_IN`` apart, none
-    within ``_BREAK_EDGE_IN`` of an edge marked to be trimmed (one facing
-    another piece), and never none -- a piece too narrow for those gets the
-    roundest value near its middle."""
+def _grid(lo, hi, step):
+    """The multiples of ``step`` in ``[lo, hi]``."""
+    first = np.ceil(lo / step - 1e-9)
+    last = np.floor(hi / step + 1e-9)
+    return [float(np.round(k * step, 9)) for k in np.arange(first, last + 1)]
+
+
+def minor_step(step):
+    """The minor tick spacing matplotlib's AutoMinorLocator gives a major
+    step: 5 parts for a step of 1, 2.5 or 5 times a power of ten, else 4 --
+    the subdivision the unbroken panels show."""
+    mantissa = 10 ** (np.log10(step) % 1)
+    return step / (5 if np.isclose(mantissa, [1, 2.5, 5, 10]).any() else 4)
+
+
+def broken_axis_ticks(limits, widths_in):
+    """Every piece's x ticks on ONE grid, ``[(majors, minors), ...]``.
+
+    ``limits`` are the pieces' x limits, left to right, and ``widths_in``
+    their widths in inches.  The major step is the one MaxNLocator picks
+    for the widest piece at about one tick per ``_BREAK_TICK_IN``, and the
+    minor step divides it as on the unbroken panels (``minor_step``), so a
+    tick means the same days on every piece -- the axis is drawn as one,
+    with only its gaps cut out.  Minor ticks run edge to edge.  Majors stay
+    ``_BREAK_EDGE_IN`` clear of an edge facing another piece; a piece left
+    with none (a lone observation, say) is labelled at the minor-grid point
+    nearest its middle, still on the shared grid, so every piece shows
+    where it lies.
+    """
     from matplotlib.ticker import MaxNLocator
 
-    per_in = (hi - lo) / width_in
-    keep_lo = lo + (_BREAK_EDGE_IN * per_in if trim_left else 0.0)
-    keep_hi = hi - (_BREAK_EDGE_IN * per_in if trim_right else 0.0)
-    if keep_lo >= keep_hi:
-        keep_lo, keep_hi = lo, hi
-    nbins = max(1, int(width_in / _BREAK_TICK_IN))
-    ticks = MaxNLocator(nbins=nbins, steps=[1, 2, 2.5, 5, 10]).tick_values(
+    widest = int(np.argmax(widths_in))
+    lo, hi = limits[widest]
+    nbins = max(1, int(widths_in[widest] / _BREAK_TICK_IN))
+    locs = MaxNLocator(nbins=nbins, steps=[1, 2, 2.5, 5, 10]).tick_values(
         lo, hi
     )
-    ticks = [float(t) for t in ticks if keep_lo <= t <= keep_hi]
-    if ticks:
-        return ticks
-    center = 0.5 * (keep_lo + keep_hi)
-    exponent = int(np.floor(np.log10(hi - lo)))
-    for e in range(exponent, exponent - 6, -1):
-        for mantissa in (5.0, 2.0, 1.0):
-            step = mantissa * 10.0**e
-            tick = round(center / step) * step
-            if keep_lo <= tick <= keep_hi:
-                return [float(tick)]
-    return [center]
+    step = float(locs[1] - locs[0])
+    minor = minor_step(step)
+    last = len(limits) - 1
+    ticks = []
+    for i, ((lo, hi), width_in) in enumerate(zip(limits, widths_in)):
+        margin = _BREAK_EDGE_IN * (hi - lo) / width_in
+        keep_lo = lo + (margin if i > 0 else 0.0)
+        keep_hi = hi - (margin if i < last else 0.0)
+        majors = _grid(keep_lo, keep_hi, step)
+        if not majors:
+            middle = 0.5 * (lo + hi)
+            options = _grid(keep_lo, keep_hi, minor) or _grid(lo, hi, minor)
+            majors = [min(options, key=lambda t: abs(t - middle))]
+        ticks.append((majors, _grid(lo, hi, minor)))
+    return ticks
+
+
+def _label_decimals(values):
+    """The fewest decimals that write every value in ``values`` exactly."""
+    for decimals in range(7):
+        if all(abs(round(v, decimals) - v) < 1e-9 for v in values):
+            return decimals
+    return 6
 
 
 def _join_broken(columns, limits):
     """Make ``columns`` (``_broken_axes``, each already finished) read as
-    one broken axis: each piece at its ``limits`` with ``piece_ticks``, the
+    one broken axis: each piece at its ``limits``, every piece ticked on
+    the one grid of ``broken_axis_ticks`` and labelled in one format, the
     facing spines and their ticks removed and marked with diagonals, the y
     labels on the first piece only, and one x label, centered under the
     whole."""
-    from matplotlib.ticker import FixedLocator
+    from matplotlib.ticker import FixedLocator, FuncFormatter
 
     last = len(columns) - 1
-    for i, ((ax, ax_oc), lim) in enumerate(zip(columns, limits)):
+    for (ax, _), lim in zip(columns, limits):
         ax.set_xlim(*lim)
-        width_in = ax.get_position().width * ax.figure.get_figwidth()
-        ax.xaxis.set_major_locator(
-            FixedLocator(piece_ticks(*lim, width_in, i > 0, i < last))
-        )
+    widths_in = [
+        ax.get_position().width * ax.figure.get_figwidth() for ax, _ in columns
+    ]
+    ticks = broken_axis_ticks(limits, widths_in)
+    decimals = _label_decimals([t for majors, _ in ticks for t in majors])
+    label = FuncFormatter(lambda x, _pos: f"{x:.{decimals}f}")
+    for i, ((ax, ax_oc), (majors, minors)) in enumerate(zip(columns, ticks)):
+        # Each O-C shares its panel's x axis, locators and formatter too.
+        ax.xaxis.set_major_locator(FixedLocator(majors))
+        ax.xaxis.set_minor_locator(FixedLocator(minors))
+        ax.xaxis.set_major_formatter(label)
         for a in (ax, ax_oc):
             if a is None:
                 continue
@@ -1697,7 +1745,7 @@ def summary_figure(
         )
     width, height = figsize
 
-    with plt.rc_context(_FONT_RC):
+    with plt.rc_context({**_FONT_RC, **_TICK_RC}):
         fig = plt.figure(figsize=(width, height))
         try:
             y = 1.0 - 0.1 / height
