@@ -1676,6 +1676,42 @@ class MulensEvent(Component):
         t_delta = (np.asarray(t, dtype=float) - t0)[:, np.newaxis]  # (N, 1)
         return xyz_abs - (pos + vel * t_delta)
 
+    # The event window's half-width is 1 t_E, but never thinner than this
+    # (days): a 0.35-day t_E makes "within 1 t_E" a sliver that holds almost
+    # no data, and the enrichment ratio is then noise (the DC2026 team's
+    # anomsweep.py floor, kept so the numbers agree).
+    EVENT_WINDOW_MIN_HALF_WIDTH = 0.5
+
+    def event_windows(self, system, point):
+        """The time ranges where this event's signal lives, at ``point``.
+
+        The hook the post-fit robust-likelihood audit
+        (``outputs/outliers.py``) duck-types for: a list of ``(lo, hi)``
+        epochs (BJD_TDB days, the instruments' time system) -- here
+        ``|t - t_0| < max(t_E, EVENT_WINDOW_MIN_HALF_WIDTH)`` around every
+        source's ``t_0``.  The audit compares where the hogg mixture's
+        outlier-component points fall against this window; it never learns
+        what a microlensing event is.  ``point`` is a plotting point
+        (internal units, the form ``plot_data`` takes); a parameter it does
+        not carry falls back to its initval.
+        """
+        source = system.source
+
+        def value(param):
+            return np.atleast_1d(
+                np.asarray(point.get(param.label, param.initval), dtype=float)
+            )
+
+        t_E = float(value(self.t_E)[0])
+        half = max(t_E, self.EVENT_WINDOW_MIN_HALF_WIDTH)
+        if not np.isfinite(half):
+            return []
+        return [
+            (float(t0) - half, float(t0) + half)
+            for t0 in value(source.t_0)
+            if np.isfinite(t0)
+        ]
+
     def uses_op(self, index=0):
         """True if get_magnification_op will dispatch to the MulensModel Op.
 

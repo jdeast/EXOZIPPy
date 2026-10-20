@@ -1745,6 +1745,17 @@ def _wrap_up(
     cap_findings = cap_alarm_findings(system)
     log_cap_alarms(cap_findings, logger)
 
+    # The robust-likelihood audit (outputs/outliers.py): per hogg file, the
+    # nats the mixture forgives against a Gaussian, the outlier count and
+    # how concentrated those points are in the signal's event window, at
+    # the highest-lp and the median draw.  Writes <prefix>_outliers.txt
+    # only when some file uses the mixture; WARNs per flagged file.
+    from .outputs.outliers import has_robust_audit, write_robust_audit
+
+    if has_robust_audit(system):
+        wrapup.stage("robust-likelihood audit (outlier enrichment)")
+        write_robust_audit(system, idata, prefix, log=logger)
+
     # Announced like every other wrap-up step (review 2.3.12).
     wrapup.stage("convergence summary")
     summary_path = Path(str(prefix) + "_summary.txt")

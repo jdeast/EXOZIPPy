@@ -156,6 +156,7 @@ class RVInstrument(Instrument):
             cls._label_config_schema(),
             cls._gp_config_schema(),
             cls._likelihood_config_schema(),
+            cls._out_frac_prior_config_schema(),
         ]
 
     def load_data(self, system):

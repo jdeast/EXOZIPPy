@@ -349,22 +349,35 @@ def median_draw_point(system, idata):
         distance2 += np.sum(z**2, axis=-1)
     distance2 = np.where(valid, distance2, np.inf)
     chain, draw = np.unravel_index(int(np.argmin(distance2)), shape)
+    return (
+        point_at_draw(system, idata, chain, draw),
+        (int(chain), int(draw)),
+        float(np.sqrt(distance2[chain, draw])),
+    )
 
+
+def point_at_draw(system, idata, chain, draw):
+    """One posterior draw of ``idata`` as a plotting point.
+
+    Every posterior variable but ``mode`` and the report-only
+    Deterministics, in INTERNAL units (through ``Parameter.to_internal``,
+    the trace being in user units) -- the form ``Component.plot_data`` and
+    the compiled plotters take.  ``median_draw_point`` builds its point
+    here, and so does the robust-likelihood audit's highest-lp draw
+    (``outputs/outliers.py``).
+    """
+    posterior = idata.posterior
     lookup = system.get_parameter_lookup()
     skip = set(system.report_only_labels()) | {"mode"}
     point = {}
     for var in posterior.data_vars:
         if var in skip:
             continue
-        val = posterior[var].isel(chain=chain, draw=draw).values
+        val = posterior[var].isel(chain=int(chain), draw=int(draw)).values
         if var in lookup and not var.endswith("_raw"):
             val = lookup[var].to_internal(val)
         point[var] = val
-    return (
-        point,
-        (int(chain), int(draw)),
-        float(np.sqrt(distance2[chain, draw])),
-    )
+    return point
 
 
 # ---------------------------------------------------------------------------
