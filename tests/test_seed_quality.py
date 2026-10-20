@@ -34,6 +34,8 @@ import pytensor
 import pytest
 import yaml
 
+from exozippy.components.galacticmodel.physics import expected_proper_motion
+from exozippy.diagnostics import ModelAuditor
 from exozippy.system import System
 
 EXAMPLES_DIR = pathlib.Path(__file__).parent / ".." / "examples"
@@ -53,13 +55,18 @@ CEILINGS = [
 ]
 
 
-def _seed_chi2(name, strip_prefixes=()):
+def _seed_chi2(name, strip_prefixes=(), extra_params=None):
     """chi2 and chi2/N of the mulens observation at the raw start point.
 
     `strip_prefixes` drops matching keys from the params file before
     building, which is how the multi-source proper-motion seeding is reached
-    at all: ob161003 pins all four pm components, and the seeding's earlier
-    blocker returns on any pm/parallax entry.
+    for every star at once: ob161003 pins the pm of two of its four stars,
+    and a star whose pm the user set is not seeded (#93).  `extra_params`
+    is merged in after the strip (already-standardized entries).
+
+    Returns ``(chi2, chi2/N, N, pms, misses, system)``: ``misses`` is
+    ``ModelAuditor.check_user_starts`` at the build start, the metric the
+    seeding is judged by (requested vs produced).
     """
     src = EXAMPLES_DIR / name
     # PREFER THE CANONICAL CONFIG, <name>.yaml, AND SORT THE FALLBACK.
@@ -109,6 +116,7 @@ def _seed_chi2(name, strip_prefixes=()):
             for key in list(user_params):
                 if key.startswith(tuple(strip_prefixes)):
                     user_params.pop(key)
+        user_params.update(extra_params or {})
 
         system = System(config, user_params)
         system.prepare()
@@ -144,7 +152,10 @@ def _seed_chi2(name, strip_prefixes=()):
             for p in system.get_all_parameters()
             if p.label.endswith((".pm_ra", ".pm_dec"))
         }
-        return chi2, chi2 / data.size, data.size, pms
+        misses = ModelAuditor(
+            model, system, system.get_mcmc_init(model)
+        ).check_user_starts()
+        return chi2, chi2 / data.size, data.size, pms, misses, system
     finally:
         os.chdir(cwd)
         shutil.rmtree(tmproot, ignore_errors=True)
@@ -161,7 +172,7 @@ def test_seed_is_a_sensible_starting_point(name, ceiling):
     regression; see the module docstring.
     """
     # Arrange / Act
-    chi2, reduced, n, _pms = _seed_chi2(name)
+    chi2, reduced, n, _pms, _misses, _system = _seed_chi2(name)
 
     # Assert
     assert np.isfinite(chi2), f"{name}: chi2 at the seed is not finite"
@@ -183,11 +194,13 @@ def test_a_multi_source_event_is_seeded_from_the_galactic_model():
     event, resolved through source body 0, so the same mean is information:
     source body 1's pm feeds only its own distance/rho chain.
 
-    ob161003 cannot show this as shipped -- it pins all four pm components,
-    and the seeding's earlier blocker returns on any pm/parallax entry, so
-    the multi-source gate was unreachable for the only multi-source example
-    and its retirement left every pinned number byte-identical.  Stripping
-    those pins reaches it.  Measured 2026-09-07:
+    ob161003 cannot show this as shipped -- it pins the pm of the Lens and
+    SourceA.  Since #93 the shipped config seeds SourceB, but the engine
+    derives SourceB's pm from the user Lens pm and the event's one mu_rel
+    (PRECEDENCE_DERIVED_USER, which outranks the seed), so the start is
+    byte-identical.
+    Stripping those pins leaves the galactic model as the only source of a
+    proper motion for every star.  Measured 2026-09-07 (old engine):
 
         gate present (no pm seeded)   chi2/N 10.91
         gate retired (pm seeded)      chi2/N  6.94
@@ -200,7 +213,7 @@ def test_a_multi_source_event_is_seeded_from_the_galactic_model():
     # every other published value stays.  (Stripping `star.Source`/
     # `star.Lens` wholesale would also drop the distances and radii, and the
     # numbers above would not be the numbers being measured.)
-    chi2, reduced, n, pms = _seed_chi2(
+    chi2, reduced, n, pms, _misses, _system = _seed_chi2(
         "ob161003",
         strip_prefixes=(
             "star.SourceA.pm_",
@@ -235,3 +248,105 @@ def test_a_multi_source_event_is_seeded_from_the_galactic_model():
         f"seeding measured 6.94, so above 8.0 means the multi-source "
         f"seeding has stopped helping and its retirement needs revisiting."
     )
+
+
+def _bulge_mean_at(system, star_idx):
+    """The galactic model's bulge pm mean at star ``star_idx``'s position.
+
+    Computed from the RESOLVED ra/dec with the same helper and the same
+    8 kpc the seeding uses, so the comparison carries no constant of its own.
+    """
+    cm = system.config_manager
+    n = system.star.n_elements
+    ra = np.atleast_1d(cm.resolve("star", "ra", shape=(n,))["initval"])
+    dec = np.atleast_1d(cm.resolve("star", "dec", shape=(n,))["initval"])
+    pm_ra, pm_dec, _rv = expected_proper_motion(
+        float(np.radians(ra[star_idx])),
+        float(np.radians(dec[star_idx])),
+        8000.0,
+        "bulge",
+    )
+    return pm_ra, pm_dec
+
+
+def test_a_user_lens_pm_seeds_the_source_and_keeps_the_lens():
+    """A user pm on one star no longer turns off the other star's seed (#93).
+
+    Given ob08092 with a user lens proper motion and no pi_E,
+    When the model is built,
+    Then the source is seeded at the galactic model's bulge mean, the lens
+    starts at exactly the user's pm, and check_user_starts reports no miss.
+
+    Before #93 any user pm skipped ALL galactic seeding, so the engine
+    derived the source pm itself (measured: mu_rel_geo PA 172.8 deg, against
+    32.4 deg for the shipped config).  Under the precedence ladder (#455)
+    the user pm (PRECEDENCE_USER) outranks the seed
+    (PRECEDENCE_DERIVED_DATA), so a seed could not bend it and that star
+    needs none; the source still gets its seed, and t_E is absorbed through
+    the lens distance.
+    """
+    # Arrange / Act
+    lens_pm = (-2.0, -5.0)
+    _chi2, reduced, _n, pms, misses, system = _seed_chi2(
+        "ob08092",
+        extra_params={
+            "star.Lens.pm_ra": {"initval": lens_pm[0]},
+            "star.Lens.pm_dec": {"initval": lens_pm[1]},
+        },
+    )
+
+    # Assert: nothing the user set is missed (the metric the engine is
+    # judged by), and the lens pm is the user's.  Element order is star
+    # config order: 0=Lens, 1=Source.
+    assert misses == [], f"user starts not delivered: {misses}"
+    assert pms["star.pm_ra"][0] == pytest.approx(lens_pm[0], abs=1e-9)
+    assert pms["star.pm_dec"][0] == pytest.approx(lens_pm[1], abs=1e-9)
+
+    # Assert: the source is seeded at the bulge mean, as a data-tier start.
+    want_ra, want_dec = _bulge_mean_at(system, 1)
+    assert pms["star.pm_ra"][1] == pytest.approx(want_ra, abs=1e-6)
+    assert pms["star.pm_dec"][1] == pytest.approx(want_dec, abs=1e-6)
+    for axis in ("pm_ra", "pm_dec"):
+        src = system.config_manager.initval_source(
+            "star", axis, element=1, name="Source"
+        )
+        assert src == "data", (
+            f"star.Source.{axis} start came from {src!r}, not from the "
+            f"galactic-model seed"
+        )
+
+    # Assert: still a sensible start (the shipped config's ceiling).
+    assert reduced < 2.5, f"chi2/N at the seed is {reduced:.3f}"
+
+
+def test_a_user_pi_e_still_turns_off_the_galactic_seeds():
+    """The one remaining gate: a user pi_E fixes the direction of mu_rel.
+
+    Given ob08092 with a user pi_E and no user proper motion,
+    When the model is built,
+    Then neither star's pm start comes from the galactic model, and the
+    user pi_E is delivered.
+
+    Two seeded proper motions would fight a user pi_E over the DIRECTION of
+    mu_rel, and no distance can absorb a direction (#93).
+    """
+    # Arrange / Act
+    _chi2, _reduced, _n, _pms, misses, system = _seed_chi2(
+        "ob08092",
+        extra_params={
+            "mulensevent.pi_E_N": {"initval": 0.3},
+            "mulensevent.pi_E_E": {"initval": -0.1},
+        },
+    )
+
+    # Assert
+    assert misses == [], f"user starts not delivered: {misses}"
+    for i, name in enumerate(system.star.names):
+        for axis in ("pm_ra", "pm_dec"):
+            src = system.config_manager.initval_source(
+                "star", axis, element=i, name=name
+            )
+            assert src != "data", (
+                f"star.{name}.{axis} start came from a galactic-model seed "
+                f"despite a user pi_E"
+            )
