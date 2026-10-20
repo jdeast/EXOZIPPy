@@ -776,6 +776,13 @@ def calc_rho_from_log(log_rho):
 
 
 @register_physics
+def calc_q_flux_from_log(log_q_flux):
+    # Binary-source flux ratio f_s2/f_s1 from the sampled log10 (a light
+    # curve with `fitlogqflux: true`), mirroring calc_rho_from_log.
+    return pt.power(10.0, log_q_flux)
+
+
+@register_physics
 def calc_s(log_s):
     # Projected binary separation from the sampled log10(s).  Sampling log_s
     # makes close/wide an exact reflection log_s -> -log_s (|J| = 1).

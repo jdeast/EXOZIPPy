@@ -62,7 +62,9 @@ def build_config(name, files, prefix, args):
             {
                 "name": f"Roman_{b}",
                 "file": files[b],
-                "data_format": "flux",
+                # The file's own format: the full release is magnitudes,
+                # the MMEXOFAST copy flux (dc18_common.LAYOUT_FORMAT).
+                "data_format": getattr(args, "data_format", "flux"),
                 "observer_location": "roman_simulated_2018dc",
                 "band": b,
                 # Hogg inlier/outlier mixture on every light curve, in
@@ -316,6 +318,7 @@ def main(argv=None):
     data_dir = dc.data_dir_or_raise(args.data_dir)
     bands = [b.strip() for b in args.bands.split(",") if b.strip()]
     files = dc.light_curve_files(data_dir, args.event, bands)
+    args.data_format = dc.LAYOUT_FORMAT[dc.data_layout(data_dir)][0]
     ra, dec = dc.event_coords(data_dir, args.event)
 
     name = f"DC2018_{args.event:03d}"
