@@ -1398,6 +1398,24 @@ class Instrument(TimeSystem, Component):
                 key=f"{self.prefix}.robust.hogg",
                 rank=40,
             )
+        beta = sorted(getattr(self, "_out_frac_beta", {}) or {})
+        if beta:
+            shapes = ", ".join(
+                f"{names[i]}: $a = {self._out_frac_beta[i][0]:.3g}$, "
+                f"$b = {self._out_frac_beta[i][1]:.3g}$"
+                for i in beta
+            )
+            prose.add(
+                "The outlier fraction of "
+                + join_names([names[i] for i in beta])
+                + " carried a Beta prior favouring a small outlier "
+                "fraction, renormalized on its allowed range ("
+                + shapes
+                + ").",
+                section="noise",
+                key=f"{self.prefix}.robust.hogg.beta",
+                rank=41,
+            )
         if robust["studentt"]:
             prose.add(
                 "For " + join_names(robust["studentt"]) + " we adopted a "
@@ -1602,6 +1620,7 @@ class Instrument(TimeSystem, Component):
         caught at construction.
         """
         self.likelihood_kinds = []
+        self._out_frac_prior_specs = []
         for i, c in enumerate(self.config):
             label = f"{self.prefix}[{self.names[i]}]"
             kind = robust_support.parse_likelihood_spec(
@@ -1621,7 +1640,23 @@ class Instrument(TimeSystem, Component):
                     f"likelihood is Gaussian-only, so a robust observation "
                     f"model cannot be marginalized through it. Choose one."
                 )
+            prior_spec = c.get(robust_support.OUT_FRAC_PRIOR_KEY)
+            if (
+                kind != "hogg"
+                and robust_support.parse_out_frac_prior(
+                    prior_spec, context=label
+                )
+                is not None
+            ):
+                raise ValueError(
+                    f"[{label}] '{robust_support.OUT_FRAC_PRIOR_KEY}:' is a "
+                    f"prior on the hogg mixture's outlier fraction, but this "
+                    f"file's likelihood is "
+                    f"'{kind or 'gaussian'}'. Add 'likelihood: hogg' or "
+                    f"remove the key."
+                )
             self.likelihood_kinds.append(kind)
+            self._out_frac_prior_specs.append(prior_spec)
         self.has_robust_likelihood = any(self.likelihood_kinds)
 
         # Element index -> indices into the concatenated observation arrays
@@ -1630,10 +1665,18 @@ class Instrument(TimeSystem, Component):
         # per-file symbolic outlier log-odds (filled by
         # _add_robust_likelihoods), their lazily compiled evaluators, and the
         # linear values of log-sampled parameters.
+        # Also: the per-element Beta shapes of an opted-in out_frac prior
+        # (filled by _prepare_robust, which knows each file's N), and the
+        # per-file symbolic (Gaussian, hogg) log-likelihood sums the post-fit
+        # audit evaluates (filled by _add_robust_likelihoods) with their
+        # lazily compiled evaluator.
         self._robust_obs_index = {}
         self._robust_scale_caps = {}
+        self._out_frac_beta = {}
         self._hogg_logodds = {}
         self._hogg_prob_fns = None
+        self._hogg_logl = {}
+        self._hogg_logl_fns = None
         self._robust_linear = {}
 
     def _robust_elements(self, kind):
@@ -1644,6 +1687,12 @@ class Instrument(TimeSystem, Component):
     def _likelihood_config_schema():
         """The shared ``likelihood`` config-schema entry; children append it."""
         return robust_support.likelihood_config_schema_entry()
+
+    @staticmethod
+    def _out_frac_prior_config_schema():
+        """The shared ``out_frac_prior`` config-schema entry; children
+        append it next to ``_likelihood_config_schema``."""
+        return robust_support.out_frac_prior_config_schema_entry()
 
     def _prepare_robust(self, err, inst_map, user_factor=1.0):
         """Stage 1: index the robust files and seed the mixture scale.
@@ -1690,6 +1739,13 @@ class Instrument(TimeSystem, Component):
                     f"is set but the file contributed no observations."
                 )
             self._robust_obs_index[i] = sel
+            if kind == "hogg":
+                shapes = robust_support.parse_out_frac_prior(
+                    self._out_frac_prior_specs[i],
+                    context=f"{self.prefix}[{self.names[i]}]",
+                )
+                if shapes is not None:
+                    self._out_frac_beta[i] = shapes
 
             scale_param = robust_support.LIKELIHOOD_SCALE_PARAM.get(kind)
             if scale_param is None:
@@ -1790,6 +1846,8 @@ class Instrument(TimeSystem, Component):
         # fewer files cannot leave a stale entry either.
         self._hogg_logodds = {}
         self._hogg_prob_fns = None
+        self._hogg_logl = {}
+        self._hogg_logl_fns = None
 
         self._build_robust_deterministics()
         for i in sorted(self._robust_obs_index):
@@ -1810,6 +1868,16 @@ class Instrument(TimeSystem, Component):
                     self.out_frac.value[i],
                     self.out_scale.value[i],
                 )
+                # The audit's pair: the same residuals and the same sigma
+                # (err_scale/jitter included) scored both ways, so their
+                # difference is exactly what the mixture forgives.
+                self._hogg_logl[i] = (
+                    pt.sum(robust_support.gaussian_logl(resid, sigma[idx])),
+                    pt.sum(logp),
+                    self.out_scale.value[i],
+                )
+                if i in self._out_frac_beta:
+                    self._add_out_frac_beta_prior(i)
             else:  # "studentt"
                 pm.StudentT(
                     f"{name}.t.{self.names[i]}",
@@ -1825,6 +1893,126 @@ class Instrument(TimeSystem, Component):
                 kind,
                 idx.size,
             )
+
+    def _add_out_frac_beta_prior(self, i):
+        """File ``i``'s opted-in Beta(a, b) prior on ``out_frac``.
+
+        A normalized ``pm.Potential`` over the element's own resolved
+        ``[lower, upper]`` (default [0, 0.5]), declared with
+        ``add_prior_contribution(supersedes_bounds=True)`` so the Prior
+        column says Beta rather than Uniform -- the parameter.md rule for a
+        component-added prior.  It REPLACES the flat prior the logit
+        transform implies; a user's own ``mu``/``sigma`` on out_frac still
+        multiplies it.  A pinned element (``sigma: 0``, the easy way to fix
+        f) gets no term: it would be a constant.
+        """
+        param = self.out_frac
+        if hasattr(param, "element_is_sampled") and param._built_roles():
+            if not param.element_is_sampled(i):
+                return
+        a, b = self._out_frac_beta[i]
+
+        def bound(field, default):
+            vec = np.atleast_1d(getattr(param, field, default))
+            try:
+                return float(vec[min(i, vec.size - 1)])
+            except TypeError:  # a linked (symbolic) bound
+                return float("nan")
+
+        # out_frac is unitless, so the internal bound IS the user bound.
+        lower, upper = bound("lower", 0.0), bound("upper", 0.5)
+        if not (np.isfinite(lower) and np.isfinite(upper)):
+            raise ValueError(
+                f"[{self.prefix}[{self.names[i]}]] "
+                f"{robust_support.OUT_FRAC_PRIOR_KEY} needs numeric, finite "
+                f"bounds on out_frac to normalize over; got "
+                f"[{lower}, {upper}]."
+            )
+        pm.Potential(
+            f"{self.prefix}.out_frac.beta.{self.names[i]}",
+            robust_support.beta_logp(
+                param.value[i], a, b, lower=lower, upper=upper
+            ),
+        )
+        if hasattr(param, "add_prior_contribution"):
+            param.add_prior_contribution(
+                rf"$\mathcal{{B}}({a:.3g}, {b:.3g})$",
+                text=f"Beta({a:.3g}, {b:.3g})",
+                elements=[i],
+                supersedes_bounds=True,
+            )
+
+    def robust_fit_summary(self, system, point):
+        """Per hogg file, what the mixture did at ``point``.
+
+        The instrument half of the post-fit robust-likelihood audit
+        (``outputs/outliers.py`` is the other): a list of dicts, one per
+        file with ``likelihood: hogg``, each holding ``name``, ``n``,
+        ``gauss_logl`` and ``hogg_logl`` (the file's summed log-likelihood
+        under a plain Gaussian and under the mixture, the SAME residuals and
+        the same err_scale-inflated sigma), ``membership`` (per-point
+        posterior outlier probability), ``times`` (the epochs, or None if
+        this component keeps none) and ``scale_frac`` (out_scale at the
+        point over its upper bound -- the data-driven cap -- both internal,
+        so the ratio is unit-free; None when the bound is not a finite
+        number).  Empty when no file uses the mixture.
+        Compiled lazily against ``system.plot_params`` like
+        ``outlier_prob_at_data``.
+        """
+        if not self._hogg_logl:
+            return []
+        if self._hogg_logl_fns is None:
+            import pytensor
+
+            param_symbols = [p.value for p in system.plot_params]
+            self._hogg_logl_fns = {
+                i: pytensor.function(
+                    inputs=param_symbols,
+                    outputs=list(nodes),
+                    on_unused_input="ignore",
+                )
+                for i, nodes in self._hogg_logl.items()
+            }
+        values = self._point_to_plot_params(point, system)
+        prob = self.outlier_prob_at_data(system, point)
+        times = getattr(self, "time", None)
+        out = []
+        for i in sorted(self._hogg_logl_fns):
+            idx = self._robust_obs_index[i]
+            gauss, hogg, scale = self._hogg_logl_fns[i](*values)
+            cap = self._out_scale_upper(i)
+            out.append(
+                {
+                    "name": self.names[i],
+                    "index": i,
+                    "n": int(idx.size),
+                    "gauss_logl": float(gauss),
+                    "hogg_logl": float(hogg),
+                    "membership": np.asarray(prob[idx], dtype=float),
+                    "scale_frac": (
+                        None if cap is None else float(scale) / cap
+                    ),
+                    "times": (
+                        None
+                        if times is None
+                        else np.asarray(times, dtype=float)[idx]
+                    ),
+                }
+            )
+        return out
+
+    def _out_scale_upper(self, i):
+        """Element ``i``'s resolved ``out_scale`` upper bound (internal
+        unit), or None when it is absent, symbolic or not positive."""
+        upper = getattr(self.out_scale, "upper", None)
+        if upper is None:
+            return None
+        try:
+            vec = np.atleast_1d(np.asarray(upper, dtype=float))
+        except (TypeError, ValueError):
+            return None
+        val = float(vec[min(i, vec.size - 1)])
+        return val if np.isfinite(val) and val > 0 else None
 
     def outlier_prob_at_data(self, system, point):
         """Posterior outlier probability of every observation, at ``point``.

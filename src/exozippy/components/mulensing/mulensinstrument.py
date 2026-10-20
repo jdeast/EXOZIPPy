@@ -367,6 +367,7 @@ class MulensInstrument(Instrument):
             cls._label_config_schema(),
             cls._gp_config_schema(),
             cls._likelihood_config_schema(),
+            cls._out_frac_prior_config_schema(),
         ]
 
     def _reference_index(self):

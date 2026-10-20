@@ -55,6 +55,10 @@ call site should say `.err_plus` and be immune.
 
 **Row labels are `Parameter.get_display_label`, the params-file spelling.** For a vector whose elements are not one per instance (`element_owners`; `detrend_coeffs`, one per column) that is `transit.<owner>.detrend_coeffs_<k>`, never instance i's name, and the LaTeX table puts them under their owner's sub-head with a `_k` subscript (`src/exozippy/components/parameter.md`, "A vector that is not one per instance").
 
+## `<prefix>_outliers.txt`: the robust-likelihood audit (`outputs/outliers.py`)
+
+Written at wrap-up only when some data file uses `likelihood: hogg`; a fit without the mixture gets no new file. One row per hogg file per point (the highest-lp valid draw, `MAP`, and `median_draw_point`'s draw): Gaussian and hogg logL, their difference, the count of outlier-membership > 0.5 points, the event-window enrichment ratio, `out_scale / cap`, and the flags, each labelled by kind (`ANOMALY`, `VARIABILITY`, `FORGIVEN`, `AT_CAP`) with its reason. Each flagged row is also a WARNING in the log. The rationale, thresholds and the two duck-typed hooks it reads (`robust_fit_summary`, `event_windows`) are in `src/exozippy/components/instrument.md`, "Robust observation likelihoods"; nothing in the writer names a component. The highest-lp draw's point is built by `summary_plot.point_at_draw`, the same helper `median_draw_point` uses, so the two points cannot be marshalled differently.
+
 ## The credible-interval width is a setting, and the caption is generated from it
 
 `src/exozippy/reporting.py` holds ONE run-level width, read by
