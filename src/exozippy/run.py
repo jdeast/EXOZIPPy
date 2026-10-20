@@ -39,7 +39,14 @@ from .corner_utils import (
 from .diagnostics import ModelAuditor, cap_alarm_findings, log_cap_alarms
 from .logger import fmt_duration, setup_logging
 from .mkparam import write_param_file
-from .outputs.ledger import ledger_from_json, ledger_to_json
+from .outputs.ledger import (
+    HOT_FAILED,
+    HOT_NOT_SEARCHED,
+    hot_search_from_json,
+    hot_search_to_json,
+    ledger_from_json,
+    ledger_to_json,
+)
 from .outputs.modeling import build_modeling_output, compile_modeling_pdf
 from .outputs.modes import DEFAULT_MAX_INVALID_FRAC, mode_suffix
 from .outputs.report_pipeline import build_mode_reports
@@ -50,6 +57,7 @@ from .polish import (
     resolve_polish_timeout,
 )
 from .trace_meta import (
+    HOT_SEARCH_ATTR,
     POSTERIOR_UNITS,
     POSTERIOR_UNITS_UNFINISHED,
     SEED_LEDGER_ATTR,
@@ -57,6 +65,7 @@ from .trace_meta import (
     apply_metadata,
     check_trace_coordinates,
     check_trace_freshness,
+    stamp_trace_attr,
     structural_metadata,
 )
 from .whitening import prepare_whitening
@@ -1184,7 +1193,7 @@ def _run_fit(config, gui, user_params=None):
 
         if reusing_trace:
             # if we've already done the sampling and don't want to redo it, load it
-            idata = az.from_netcdf(trace_path)
+            idata = _load_trace(trace_path)
             # ...but only if it was sampled from THIS model. The raw draws
             # decode through this build's bounds/links/whitening, so a trace
             # from an edited config would be relabeled and reported as if it
@@ -1679,24 +1688,38 @@ def _wrap_up(
     # predates review 2.14.12's three-phase ruling (post-save failures
     # raise) and is retired separately; meanwhile the exception type and
     # message reach the report.
+    # The search reads only the saved hot draws, so on a REUSED trace it
+    # would recompute what the run that wrote the trace already found -- and
+    # it is the most expensive wrap-up stage by far (the candidate polish:
+    # 41 of 47 minutes of a replot of examples/KMT-2021-BLG-1122L).  A
+    # completed search is therefore stamped on the trace in place
+    # (trace_meta.HOT_SEARCH_ATTR) and read back here; `modes:
+    # {rerun_hot_search: true}` asks for a fresh one (a code fix to the
+    # search itself is the case).  A FAILED search is never stamped.
     from .outputs.ledger import run_hot_mode_discovery
 
-    wrapup.stage(
-        "hot-chain suppressed-mode search (cluster, then polish each "
-        "candidate to its basin optimum)"
-    )
-    seed_ledger, hot_status = run_hot_mode_discovery(
-        system,
-        model,
-        idata,
-        seed_ledger,
-        # The core grant the sampler just used.  Without it the candidate
-        # polish ran serial on one core -- the same omission run.py's own
-        # polish call above already carries a comment about, missed at this
-        # second call site (review 6.11.3).  Measured on examples/ob09020:
-        # 1 core of 36 busy for 38+ minutes on a single candidate.
-        cores=cores,
-    )
+    persisted = _hot_search_from_trace(idata, modes_cfg)
+    if persisted is not None:
+        seed_ledger, hot_status = persisted
+    else:
+        wrapup.stage(
+            "hot-chain suppressed-mode search (cluster, then polish each "
+            "candidate to its basin optimum)"
+        )
+        seed_ledger, hot_status = run_hot_mode_discovery(
+            system,
+            model,
+            idata,
+            seed_ledger,
+            # The core grant the sampler just used.  Without it the
+            # candidate polish ran serial on one core -- the same omission
+            # run.py's own polish call above already carries a comment
+            # about, missed at this second call site (review 6.11.3).
+            # Measured on examples/ob09020: 1 core of 36 busy for 38+
+            # minutes on a single candidate.
+            cores=cores,
+        )
+        _persist_hot_search(trace_path, idata, seed_ledger, hot_status)
 
     wrapup.stage("burn-in + stuck-chain analysis")
     # The REPORT-ONLY Deterministics (review 2.6.14) are in the trace so a
@@ -2850,6 +2873,85 @@ def _finish_saved_trace(idata, model, system, trace_path, cores=None):
     idata.attrs[UNITS_ATTR] = POSTERIOR_UNITS
     _write_trace_atomic(idata, trace_path)
     return True
+
+
+def _load_trace(trace_path):
+    """Read a saved trace fully into memory and release the file.
+
+    ``az.from_netcdf`` hands back a LAZY DataTree that keeps its HDF5 handle
+    open for the life of the process, and HDF5 refuses to open a file for
+    writing while this process holds it read-only -- which is what the
+    wrap-up's in-place stamp (trace_meta.stamp_trace_attr, after the
+    hot-chain search) does to this very file.  Every consumer below reads
+    the whole trace anyway, so load it and close the handle here, once.
+    """
+    idata = az.from_netcdf(trace_path)
+    idata.load()
+    idata.close()
+    return idata
+
+
+def _hot_search_from_trace(idata, modes_cfg):
+    """The hot-chain search a REUSED trace already carries, or None.
+
+    Returns ``(seed_ledger, hot_status)`` from trace_meta.HOT_SEARCH_ATTR
+    when the trace was stamped with a completed search and the user did not
+    ask for a fresh one (``modes: {rerun_hot_search: true}``); None means
+    "search now" -- the stamp is absent (a fresh fit, a trace whose wrap-up
+    never reached the search, or one written before the stamp existed).
+    Only completed searches are ever stamped (_persist_hot_search), so a
+    stamp carrying a FAILED state is not this code's output and raises.
+    """
+    if modes_cfg.get("rerun_hot_search", False):
+        if HOT_SEARCH_ATTR in idata.attrs:
+            logger.info(
+                "hot-chain suppressed-mode search: the trace carries a "
+                "completed search, but modes: {rerun_hot_search: true} asks "
+                "for a fresh one; searching again."
+            )
+        return None
+    blob = idata.attrs.get(HOT_SEARCH_ATTR)
+    if blob is None:
+        return None
+    seed_ledger, hot_status = hot_search_from_json(blob)
+    if hot_status["state"] in (HOT_FAILED, HOT_NOT_SEARCHED):
+        raise RuntimeError(
+            f"the trace's {HOT_SEARCH_ATTR} stamp records a "
+            f"'{hot_status['state']}' search; only completed searches are "
+            "stamped, so this stamp was not written by exozippy"
+        )
+    n_hot = sum(1 for rec in (seed_ledger or []) if rec.source == "hot-chain")
+    logger.info(
+        "hot-chain suppressed-mode search: reusing the completed search "
+        "stamped on the trace (state '%s', %d hot-chain record(s)) instead "
+        "of clustering and polishing the hot draws again; set modes: "
+        "{rerun_hot_search: true} to search afresh.",
+        hot_status["state"],
+        n_hot,
+    )
+    return seed_ledger, hot_status
+
+
+def _persist_hot_search(trace_path, idata, seed_ledger, hot_status):
+    """Stamp a COMPLETED hot-chain search on the trace, in place.
+
+    A search that did not run (no hot draws) costs nothing to repeat, and a
+    FAILED one must be repeated, so neither is stamped.  The in-memory
+    ``idata.attrs`` gets the same stamp, so everything downstream in this
+    process (mkparam reloads the file; the summary reads attrs) sees one
+    trace.
+    """
+    if hot_status["state"] in (HOT_FAILED, HOT_NOT_SEARCHED):
+        return
+    blob = hot_search_to_json(seed_ledger, hot_status)
+    stamp_trace_attr(trace_path, HOT_SEARCH_ATTR, blob)
+    idata.attrs[HOT_SEARCH_ATTR] = blob
+    logger.info(
+        "hot-chain suppressed-mode search stamped on %s (%s); a "
+        "recompute_trace: false rerun reuses it.",
+        trace_path,
+        HOT_SEARCH_ATTR,
+    )
 
 
 def _seed_ledger_from_trace(idata, trace_path):

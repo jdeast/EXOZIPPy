@@ -106,7 +106,9 @@ RESERVED_CONFIG_KEYS = frozenset(
 # KNOWN_SAMPLER_KEYS and RESERVED_CONFIG_KEYS.  Add a key here in the same
 # edit that consumes it.
 KNOWN_BLOCK_KEYS = {
-    "modes": frozenset({"ledger", "max_invalid_frac", "force", "weights"}),
+    "modes": frozenset(
+        {"ledger", "max_invalid_frac", "force", "weights", "rerun_hot_search"}
+    ),
     "mkparam": frozenset({"n_seeds", "force"}),
     "gui": frozenset({"snapshot"}),
     "modeling": frozenset({"compile"}),

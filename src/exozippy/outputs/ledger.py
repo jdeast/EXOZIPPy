@@ -172,6 +172,63 @@ def ledger_from_json(blob):
     return records
 
 
+# The status dict discover_hot_modes fills (run_hot_mode_discovery adds the
+# states it never reaches).  Every value is a JSON scalar; `state` is the
+# one key every consumer reads (hot_status_to_text), so a blob without it is
+# not this code's output.
+_HOT_STATUS_REQUIRED = ("state",)
+
+
+def hot_search_to_json(ledger, status):
+    """Serialize a COMPLETED hot-chain search -- the ledger it extended and
+    its status dict -- to JSON text for trace_meta.HOT_SEARCH_ATTR.
+
+    Stamped in place on the trace right after run_hot_mode_discovery
+    returns, so a `recompute_trace: false` rerun reads the result instead of
+    clustering and polishing the same hot draws again (run.md, "The hot-chain
+    search travels with the trace").  The ledger goes through
+    ledger_to_json, so its records round-trip element for element.
+    """
+    import json
+
+    if not isinstance(status, dict) or "state" not in status:
+        raise ValueError(
+            "hot_search_to_json: the status must be the dict "
+            "run_hot_mode_discovery returned, with a 'state' key; got "
+            f"{status!r}"
+        )
+    return json.dumps(
+        {"ledger": json.loads(ledger_to_json(ledger)), "status": status}
+    )
+
+
+def hot_search_from_json(blob):
+    """Inverse of ``hot_search_to_json``: ``(ledger, status)``.
+
+    The blob is this code's own stamp, so anything else raises naming what
+    is wrong -- never a partial ledger or a status without a state.
+    """
+    import json
+
+    data = json.loads(blob)
+    if (
+        not isinstance(data, dict)
+        or set(data) != {"ledger", "status"}
+        or not isinstance(data["status"], dict)
+    ):
+        raise ValueError(
+            "hot-chain search JSON is not {'ledger': ..., 'status': {...}}: "
+            f"got {type(data).__name__} with keys "
+            f"{sorted(data) if isinstance(data, dict) else 'n/a'}"
+        )
+    missing = [k for k in _HOT_STATUS_REQUIRED if k not in data["status"]]
+    if missing:
+        raise ValueError(
+            f"hot-chain search status lacks {missing}: {data['status']!r}"
+        )
+    return ledger_from_json(json.dumps(data["ledger"])), data["status"]
+
+
 def build_seed_ledger(system, model, raw_starts, seed_indices, logp_fn=None):
     """Measure a Laplace record for every (polished) seed start.
 
