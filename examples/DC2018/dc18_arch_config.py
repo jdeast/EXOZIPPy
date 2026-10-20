@@ -74,7 +74,8 @@ WHAT CONFIG CANNOT MAKE IDENTICAL (and the README says so):
 
 RUN SETTINGS (per mode, seeded from ONE grid mode): ptde, seed_polish false,
 overdisperse true, n_temps / tune / draws from the command line (4 / 300 /
-8000 by default; being tuned on event 194), and sampler.maxtime ALWAYS
+8000 by default; being tuned on event 194; --n-temps auto lets the sampler
+size the ladder), and sampler.maxtime ALWAYS
 written, with headroom below the job's wall time.
 
 SEEDS ARE STARTS, NEVER PRIORS: only the `initval` field of a --seed file is
@@ -613,6 +614,27 @@ def build(ev, arch, outdir, run, seed=None):
     return cfg_path
 
 
+def n_temps_arg(text):
+    """`--n-temps`: a positive integer, or the sampler's own "auto".
+
+    "auto" is passed through as the string, so the written config says
+    `n_temps: auto` and the ladder is sized at run time from the model's
+    dimension (samplers/ladder.py, resolve_n_temps) -- the generator does
+    not know that dimension and must not guess it.
+    """
+    if str(text).strip().lower() == "auto":
+        return "auto"
+    try:
+        n = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            "--n-temps must be a positive integer or 'auto', got %r" % text
+        )
+    if n < 1:
+        raise argparse.ArgumentTypeError("--n-temps must be >= 1, got %d" % n)
+    return n
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description=__doc__,
@@ -623,7 +645,13 @@ def main(argv=None):
     ap.add_argument("--seed", default=None, help="params YAML of starts")
     ap.add_argument("--out", default=None)
     ap.add_argument("--data-dir", default=None)
-    ap.add_argument("--n-temps", type=int, default=4)
+    ap.add_argument(
+        "--n-temps",
+        type=n_temps_arg,
+        default=4,
+        help="an integer rung count, or 'auto' (samplers/ladder.py "
+        "resolve_n_temps sizes the ladder from the model's dimension)",
+    )
     ap.add_argument("--tune", type=int, default=300)
     ap.add_argument("--draws", type=int, default=8000)
     ap.add_argument(
