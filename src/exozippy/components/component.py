@@ -1083,6 +1083,12 @@ class Component(ABC):
                 out.setdefault(key, {})[idx] = {
                     "fn": make_fn(),
                     "intra_deps": {j for (j, _) in self_refs.values()},
+                    # Every path the expression reads (standardized index
+                    # form), so a consumer can tell "tied to exactly one
+                    # other element of this parameter" from a link that
+                    # also reads something else -- galacticmodel's
+                    # linked-star rule (star.md) keys on that.
+                    "dep_paths": tuple(plink.dep_paths),
                 }
 
         return out or None

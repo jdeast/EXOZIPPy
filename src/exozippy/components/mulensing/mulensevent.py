@@ -1140,6 +1140,11 @@ class MulensEvent(Component):
         # -- the shape finally matches the physics.
         mu_rel_geo = self.mu_rel_geo_mag.value
         theta_E = self.theta_E.value
+        # Deliberately UNNORMALIZED (mulensing.md, "The event-rate prior"):
+        # its normalizer E_prior[mu_rel theta_E] is common to 1L1S, 1L1S_fs
+        # and a linked 1L2S, and differs for 2L1S by exactly
+        # E_q[sqrt(1 + q)] -- the physical rate ratio of a heavier lens,
+        # which the evidence is meant to keep.
 
         pm.Potential(
             f"{self.prefix}.event_rate_prior",
