@@ -90,6 +90,19 @@ Sections A/A2 of `build_pymc` add an **unnormalized** Gaussian on top of the rep
 
 Tests: `tests/test_linked_params.py`.
 
+### The model logp is a prior density only up to a constant, and the evidence adds it back
+
+The sampled logp is correct for sampling and deliberately **not** normalized. Two constants are missing from it, and both matter as soon as a log evidence is compared across runs or across models (`outputs/evidence.py`, "Normalization"):
+
+- **Every logit element is off by `ln s + ln sqrt(2 pi)`**, `s` its CURRENT `scale_logit`. Section C leaves the raw density at `q(1-q)/sqrt(2 pi)`, which integrates to `1/(sqrt(2 pi) s)`; a normalized `U(lower, upper)` pulled back to raw is `q(1-q) s`. `s` is measured from the data at every startup (`src/exozippy/whitening.md`), so a bridge lnZ taken straight from `model.compile_logp` drifted run to run by `-sum(ln s_i)` -- of order +150 nats on a DC2018 binary-lens fit. This is not the `-log(span)` review 1.5 removed: that was a term INSIDE the logp, which biased a bound source; this is a constant outside it.
+- **A sigma on a bounded element is an unnormalized `exp(-z^2/2)`** times the uniform, so `ln span - ln(sigma sqrt(2 pi)) - ln Z` is owed (for a LINKED bound A3 already supplies `ln span - ln Z`, so only `-ln(sigma sqrt(2 pi))` is). The xalpha/yalpha `N(0, 1)` pair inside `U(-100, 100)` -- binary lens only -- was worth a spurious -8.8 nats against a point lens. Once normalized the pair IS a 2-D standard normal, whose angle marginal is `U(0, 2 pi)`, so the circular embedding owes no further Jacobian: a von Mises likelihood on the angle must give evidence `I0(kappa)`, and the test asserts it.
+
+**Ruling: the constant is computed, never put in the model.** It moves nothing a sampler sees, but putting it in the logp would shift every start logp and every logged `lp`, break every bit-identical-logp test, and tie a term to a whitening scale that moves after the build (the probe, a restored `_whitening.json`), so it would need rebuilding every time the scale moves. `build_pymc` records the inputs (`_evidence_spec`, section A4); `Parameter.evidence_log_norm_terms()` evaluates them at the current `scale_logit`; `System.evidence_log_norm()` sums them; `report_pipeline` passes the sum to `estimate_mode_evidences(log_norm=...)`, which adds it to every mode's lnZ (the bridge's own number stays in `status["lnZ_bridge"]`). The constant is the same for every mode, so mode weights, `re2` and refusals are unchanged.
+
+Conventions where no exact constant exists: a sigma (static or linked) on a DERIVED or reported element, or a `mu` link on an unbounded element, is normalized as an independent Gaussian measurement, `-ln(sigma sqrt(2 pi))`; a `mu` link on a statically bounded logit element takes the truncated-normal term with `Z = 1` (there Z depends on the link's centre; the term is exact when the Gaussian sits well inside the bounds).
+
+**Not covered.** Each of these is a term whose normalization is not a constant this layer can compute, so a cross-model lnZ comparison carries it: component potentials (the galactic kinematic prior and the IMF/FFP mass function multiplying a mass's uniform, `galacticmodel`; the microlensing event-rate prior; the SED blend prior); the soft barriers of section B (derived and half-bounded elements) and the components' own (`source_behind_lens`, the beta < 1 rope `bound_orbit`); and the linear path's implicit `N(initval, init_scale)` prior, normalized in raw but centred on a start value. Coordinate-change Jacobians (`fitpirel`, `fitu0te`, `msini`, `chord`) are exact changes of variable and need nothing. Tests: `tests/test_evidence_normalization.py`.
+
 ### A LINKED bound is not a bound, and a DERIVED element cannot take one
 
 Two different mechanisms share the params-file words `lower:`/`upper:`, and

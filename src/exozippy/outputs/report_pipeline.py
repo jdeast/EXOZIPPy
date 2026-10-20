@@ -309,7 +309,19 @@ def build_mode_reports(
                 estimate_mode_evidences,
             )
 
-            evidences = estimate_mode_evidences(model, idata, mode_report)
+            # The normalization constant is read at the whitening now in
+            # place, which is the one the trace was sampled (or restored)
+            # under -- see evidence.py, "Normalization".
+            log_norm, norm_rows = system.evidence_log_norm(breakdown=True)
+            logger.info(
+                "Evidence normalization: %+.3f nat over %d prior term(s) "
+                "added to every mode's bridge lnZ",
+                log_norm,
+                len(norm_rows),
+            )
+            evidences = estimate_mode_evidences(
+                model, idata, mode_report, log_norm=log_norm
+            )
             # idata= keeps posterior['mode'].attrs in step with the rewritten
             # weights/provenance instead of leaving the occupancy values
             # attached to the trace that ships to disk.

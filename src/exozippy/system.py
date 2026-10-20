@@ -1291,6 +1291,31 @@ class System(Component):
                     params.append(attr)
         return params
 
+    def evidence_log_norm(self, breakdown=False):
+        """Constant (nats) that normalizes the model logp's prior terms.
+
+        The sum of every Parameter's ``evidence_log_norm_terms`` at the
+        CURRENT whitening -- call it once the whitening the trace was
+        sampled under is in place (it is, at report time).  Adding it to a
+        bridge-sampling lnZ computed from ``model.compile_logp`` turns that
+        lnZ into the normalized log evidence, comparable across runs (whose
+        whitening scales differ) and across model architectures.  The
+        model's sampled logp is left unnormalized on purpose: the constant
+        moves nothing a sampler sees.  See
+        ``Parameter.evidence_log_norm_terms`` for the terms and parameter.md
+        for what is not covered.
+
+        With ``breakdown=True`` returns ``(total, rows)``, rows being
+        ``(label, element, kind, value)``.
+        """
+        total = 0.0
+        rows = []
+        for par in self.get_all_parameters():
+            for i, kind, value in par.evidence_log_norm_terms():
+                total += value
+                rows.append((par.label, i, kind, value))
+        return (total, rows) if breakdown else total
+
     def get_raw_start(self, model):
         """
         Build the raw-space starting point explicitly from each Parameter's

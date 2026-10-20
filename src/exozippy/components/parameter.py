@@ -227,6 +227,24 @@ def _log_normal_mass(alpha, beta):
     return pt.log(pt.maximum(mass, np.finfo(float).tiny))
 
 
+def _log_normal_mass_np(alpha, beta):
+    """Float twin of ``_log_normal_mass``: same per-side branches, same floor.
+
+    Used where the bounds are constants (the evidence normalization), so no
+    graph is needed.  Kept beside the symbolic one so the two cannot drift
+    about which branch is safe where.
+    """
+    root2 = math.sqrt(2.0)
+    a, b = alpha / root2, beta / root2
+    if alpha >= 0.0:
+        mass = 0.5 * (math.erfc(a) - math.erfc(b))
+    elif beta <= 0.0:
+        mass = 0.5 * (math.erfc(-b) - math.erfc(-a))
+    else:
+        mass = 0.5 * (math.erf(b) - math.erf(a))
+    return math.log(max(mass, np.finfo(float).tiny))
+
+
 def _tighten_bounds(
     lower: Optional[Number],
     upper: Optional[Number],
@@ -1040,6 +1058,12 @@ class Parameter:
     # created until finalize_deferred has patched the value.  See build_pymc
     # section A.
     _deferred_potentials: Optional[dict] = field(default=None, init=False)
+    # Numpy-only record of the prior terms build_pymc added, from which
+    # evidence_log_norm_terms computes the constant that turns the model's
+    # raw-space logp into a NORMALIZED prior density (the logit branch's
+    # 1/(sqrt(2 pi) * scale_logit) and the unnormalized Gaussians).  Reset
+    # on every build.  See evidence_log_norm_terms and parameter.md.
+    _evidence_spec: Optional[dict] = field(default=None, init=False)
     # True when build_pymc made this parameter's Deterministic ONLY so the
     # early-saved trace carries a reported derived quantity (review 2.6.14),
     # as opposed to a node the parameter always had (something sampled, a
@@ -2978,6 +3002,35 @@ class Parameter:
                 pt.log(span_t) - _log_normal_mass(alpha, beta),
             )
 
+        # A4. EVIDENCE NORMALIZATION RECORD (no logp term).  What sections A,
+        #     A2, A3 and C add is a prior density correct only UP TO A
+        #     CONSTANT -- harmless for sampling, wrong for an evidence.  The
+        #     constant depends on the whitening scale, which moves after this
+        #     build, so only its INPUTS are recorded here and
+        #     evidence_log_norm_terms evaluates it on demand.  See that method
+        #     and parameter.md, "The model logp is a prior density only up to
+        #     a constant".
+        logit_now = (
+            is_sampled & use_logit
+            if (np.any(use_logit) and expr_raw is None)
+            else np.zeros(n_elements, dtype=bool)
+        )
+        self._evidence_spec = {
+            "logit": logit_now.copy(),
+            "lowers": lowers.copy(),
+            "uppers": uppers.copy(),
+            "sigmas": sigmas.copy(),
+            "prior_mus": prior_mus.copy(),
+            # static-centre Gaussians (section A, both phases)
+            "gauss": gaussian_prior_mask.copy(),
+            "mu_link": np.array(
+                [i in mu_links for i in range(n_elements)], dtype=bool
+            ),
+            "dyn": np.array(
+                [i in dyn_bounds for i in range(n_elements)], dtype=bool
+            ),
+        }
+
         # B. Soft bounds for derived params (and the rare half-bounded sampled
         #    param, where only one bound is finite so the logit transform does
         #    not apply). Fully-bounded sampled params: sigmoid is a hard
@@ -3987,6 +4040,114 @@ class Parameter:
                 return False
             bs["sv"].set_value(b)
         return True
+
+    def evidence_log_norm_terms(self):
+        """The constants that normalize this parameter's prior terms.
+
+        Returns a list of ``(element, kind, value)``: ``value`` (nats) is
+        what must be ADDED to the model's raw-space logp so that the prior
+        terms this parameter put in it integrate to one.  The model's
+        sampled logp is deliberately left unnormalized -- these are
+        constants, so the posterior, the start logp and every sampler step
+        are untouched -- and ``outputs.evidence`` adds the sum to each
+        mode's bridge lnZ instead.  Recomputed on every call, because the
+        whitening scale it reads moves after the build (the probe, a
+        restored ``_whitening.json``).
+
+        Kinds, per element (s = the CURRENT ``scale_logit``, span = upper -
+        lower, ``z`` the standardized bounds):
+
+        - ``uniform`` (every sampled logit element): ``ln s + ln sqrt(2 pi)``.
+          Section C leaves the raw density at ``q(1-q)/sqrt(2 pi)``, which
+          integrates to ``1/(sqrt(2 pi) s)``; a normalized U(lower, upper)
+          pulled back to raw is ``q(1-q) s``.  This is the term that made
+          lnZ move run to run with the probe-measured scale.
+        - ``truncated_normal`` (a static-centre ``sigma`` on a sampled logit
+          element, the xalpha/yalpha pair included):
+          ``ln span - ln(sigma sqrt(2 pi)) - ln Z``, Z = Phi(beta) -
+          Phi(alpha).  Section A multiplies the uniform's 1/span by an
+          UNNORMALIZED exp(-z^2/2); the normalized prior is the truncated
+          normal.  For xalpha/yalpha (N(0, 1) inside U(-100, 100), Z = 1)
+          the pair is then an exactly normalized 2-D standard normal, whose
+          angle marginal is U(0, 2 pi) -- so no extra Jacobian is owed for
+          the circular embedding.
+        - ``gaussian`` (a sigma on an element with a LINKED bound): section
+          A3 already supplies ``ln span - ln Z`` at every step, so only
+          ``-ln(sigma sqrt(2 pi))`` is missing.
+        - ``gaussian_link`` (a soft ``mu`` link on a sampled logit element
+          with static bounds): as ``truncated_normal`` with Z taken as 1.
+          Z here depends on the link's centre, so it is not a constant;
+          exact when the linked Gaussian lies well inside the bounds.
+        - ``gaussian_constraint`` (a sigma, static or linked, on a DERIVED
+          or reported element, or a link on an unbounded one): treated as an
+          independent measurement, normalized as a Gaussian density,
+          ``-ln(sigma sqrt(2 pi))``.  The prior it implies on the sampled
+          coordinates has no closed-form normalization; this is the
+          convention that makes it a fixed, run-independent constant.
+
+        Terms NOT covered (component potentials, soft barriers, the
+        half-bounded linear path) are listed in parameter.md.
+        """
+        spec = self._evidence_spec
+        if not spec:
+            return []
+        ln_sqrt_2pi = 0.5 * math.log(2.0 * math.pi)
+        logit = spec["logit"]
+        gauss = spec["gauss"]
+        mu_link = spec["mu_link"]
+        dyn = spec["dyn"]
+        lowers, uppers = spec["lowers"], spec["uppers"]
+        sigmas, mus = spec["sigmas"], spec["prior_mus"]
+        scale_logits = None
+        if np.any(logit):
+            ws = self._whiten_state
+            if ws is None:
+                raise RuntimeError(
+                    f"Parameter '{self.label}': logit elements are sampled "
+                    f"but no whitening state exists; cannot normalize."
+                )
+            scale_logits = np.asarray(
+                ws["sv_scale_logits"].get_value(), dtype=float
+            )
+        terms = []
+        for i in range(logit.size):
+            has_gauss = bool(gauss[i] or mu_link[i])
+            if logit[i]:
+                s = abs(float(scale_logits[i]))
+                terms.append((i, "uniform", math.log(s) + ln_sqrt_2pi))
+                if not has_gauss:
+                    continue
+                sig = float(sigmas[i])
+                if dyn[i]:
+                    terms.append((i, "gaussian", -math.log(sig) - ln_sqrt_2pi))
+                    continue
+                lo, up = float(lowers[i]), float(uppers[i])
+                if gauss[i]:
+                    mu = float(mus[i])
+                    kind = "truncated_normal"
+                    ln_z = _log_normal_mass_np(
+                        (lo - mu) / sig, (up - mu) / sig
+                    )
+                else:
+                    kind = "gaussian_link"
+                    ln_z = 0.0
+                terms.append(
+                    (
+                        i,
+                        kind,
+                        math.log(up - lo) - math.log(sig) - ln_sqrt_2pi - ln_z,
+                    )
+                )
+            elif has_gauss:
+                sig = float(sigmas[i])
+                terms.append(
+                    (i, "gaussian_constraint", -math.log(sig) - ln_sqrt_2pi)
+                )
+        return terms
+
+    def evidence_log_norm(self):
+        """Sum of ``evidence_log_norm_terms`` (nats); 0.0 when there are none."""
+        return float(sum(v for _i, _k, v in self.evidence_log_norm_terms()))
 
     def element_phys_from_raw(self, index, raw):
         """Physical value(s) for element ``index`` from raw coordinate(s).
