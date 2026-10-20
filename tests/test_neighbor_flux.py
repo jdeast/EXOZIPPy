@@ -112,23 +112,34 @@ def test_gated_manifest_pins_and_scales(kmt_nb_system):
     When the model is built,
     Then neighbor_flux element 0 is sampled and elements 1-2 are pinned at
     the defaults.yaml 0.0, and upper/initval scale with each light curve's
-    bootstrapped baseline flux.
+    MEDIAN OBSERVED flux -- a property of the data, not of the bootstrap's
+    seed-dependent baseline (fs_init), so the same light curve gets the same
+    prior support whatever the seed or the model topology.
     """
     system, model, point = kmt_nb_system
     inst = system.mulensinstrument
     nb = inst.neighbor_flux
-    scale = np.asarray(inst.fs_init, dtype=float)
+    scale = np.asarray(inst.flux_median_init, dtype=float)
+    # Non-vacuity: the median and the bootstrap genuinely differ here, so
+    # the assertions below say which one the bound reads.
+    assert not np.allclose(
+        scale, np.asarray(inst.fs_init, dtype=float), rtol=1e-6, atol=0.0
+    )
 
     i_on = list(inst.names).index("KMTC04")
     assert nb.element_is_sampled(i_on)
-    assert np.isclose(nb.initval[i_on], 0.05 * scale[i_on])
+    assert np.isclose(
+        nb.initval[i_on], 0.05 * scale[i_on], rtol=1e-12, atol=0.0
+    )
     for i in range(inst.n_elements):
         if i == i_on:
             continue
         assert not nb.element_is_sampled(i)
         assert nb.sigma[i] == 0.0
         assert nb.initval[i] == 0.0  # NaN override leaves the default alone
-    assert np.allclose(np.asarray(nb.upper, dtype=float), 2.0 * scale)
+    assert np.allclose(
+        np.asarray(nb.upper, dtype=float), 2.0 * scale, rtol=1e-12, atol=0.0
+    )
 
 
 def test_blend_potential_matches_hand_formula(kmt_nb_system):

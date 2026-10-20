@@ -17,7 +17,7 @@ from exozippy.ephemeris import get_observer_position
 from exozippy.outputs.prose import get_collector
 from exozippy.skyframe import observer_sky_offset
 
-from ..parameterization import pin_unselected
+from ..parameterization import mode_manifest, pin_unselected
 from ..sed.magsys import AB, parse_magsys
 from . import mmplot, peakfind
 from .physics import (
@@ -309,6 +309,21 @@ class MulensInstrument(Instrument):
                 ),
             },
             {
+                "key": "fitlogqflux",
+                "kind": "option",
+                "accepts": [True, False],
+                "required": False,
+                "doc": (
+                    "Binary source only: sample log10 of this light curve's "
+                    "flux ratio q_flux = f_s2/f_s1 (log_q_flux, uniform on "
+                    "its bounds) instead of q_flux itself, which is then "
+                    "derived. Default false (q_flux uniform on its linear "
+                    "bounds). A coordinate choice like fitu0te, and so a "
+                    "choice of PRIOR: uniform in log q_flux is the scale-free "
+                    "prior on a ratio."
+                ),
+            },
+            {
                 "key": "sed_constrains_blend",
                 "kind": "option",
                 "accepts": [True, False],
@@ -444,6 +459,11 @@ class MulensInstrument(Instrument):
         # system to a magnitude, which is what an sed: block needs.
         self._dia_zp = {}
         self.q_flux_init = []  # per-instrument f_s2/f_s1 (binary source)
+        # Per-file median of the observed flux (the file's own flux system),
+        # a property of the DATA alone -- unlike fs_init, which is the flux
+        # bootstrap's baseline and so moves with the seed geometry and the
+        # model topology.  neighbor_flux's bound reads it (see there).
+        self.flux_median_init = []
         blocks = self._concat_blocks()
 
         # n_elements, not star_map: this is stage 1, and the source
@@ -559,6 +579,10 @@ class MulensInstrument(Instrument):
             if fmt not in ("flux", "dia"):
                 f, e = mag_to_flux(f, e)
 
+            ok = np.isfinite(f) & np.isfinite(e) & (e > 0)
+            self.flux_median_init.append(
+                float(np.median(f[ok])) if np.any(ok) else float("nan")
+            )
             per_file.append((t, f, e, df))
 
         # THE BUILT-IN PEAK FINDER (8.4.9).  Runs HERE, after pass 1, so it
@@ -1748,6 +1772,8 @@ class MulensInstrument(Instrument):
         # (sources have different colors, so the ratio is chromatic).
         # _n_sources is set at the top of load_data (stage 1), before this.
         n_sources = self._n_sources
+        # Per-light-curve binary-source flux-ratio coordinate (below).
+        fitlogqflux = [bool(c.get("fitlogqflux", False)) for c in self.config]
         if n_sources > 1:
             if n_sources > 2:
                 raise NotImplementedError(
@@ -1756,13 +1782,61 @@ class MulensInstrument(Instrument):
                     "handles 2 sources. The per-source magnification path is "
                     "generic; generalize the flux parameterization to add more."
                 )
-            self.manifest["q_flux"] = None
-            for i in range(self.n_elements):
-                self.config_manager.add_hint(
-                    f"{self.prefix}.{i}.q_flux",
-                    float(self.q_flux_init[i]),
-                    rank=PRECEDENCE_DERIVED_DATA,
+            # The coordinate is a per-light-curve choice (`fitlogqflux`):
+            # q_flux itself, uniform on its bounds (the default), or
+            # log10(q_flux), uniform in the log -- the scale-free prior on a
+            # ratio that spans decades, and the one that does not put 99.9%
+            # of the prior mass on q_flux > 1 (the linear [0, 1000] does).
+            # Same shape as log_s/s and log_rho/rho: the log is sampled and
+            # q_flux is derived from it, so every reader of q_flux is
+            # unchanged.  The bootstrap's ratio seeds whichever is sampled.
+            modes = ["log" if flag else "lin" for flag in fitlogqflux]
+            table = {
+                "lin": {"q_flux": None},
+                "log": {"q_flux": "from_log_q_flux", "log_q_flux": None},
+            }
+            self.manifest.update(
+                mode_manifest(
+                    modes,
+                    table,
+                    options={"log_q_flux": {"inactive_value": 0.0}},
+                    where=self.prefix,
                 )
+            )
+            for i in range(self.n_elements):
+                q_est = float(self.q_flux_init[i])
+                if fitlogqflux[i]:
+                    if not (np.isfinite(q_est) and q_est > 0):
+                        continue  # the defaults.yaml start stands
+                    # Held a tenth of the declared span inside the bounds
+                    # (read through resolve, so a user's tighter bound
+                    # counts): the bootstrap's ratio is clipped to
+                    # [1e-3, 1e3], i.e. exactly onto the default walls,
+                    # where the logit start diverges.
+                    cfg = self.config_manager.resolve(
+                        self.prefix, "log_q_flux", element=i, names=self.names
+                    )
+                    lo, hi = (
+                        float(np.asarray(cfg[f], dtype=float).reshape(-1)[0])
+                        for f in ("lower", "upper")
+                    )
+                    pad = 0.1 * (hi - lo)
+                    self.config_manager.add_hint(
+                        f"{self.prefix}.{i}.log_q_flux",
+                        float(np.clip(np.log10(q_est), lo + pad, hi - pad)),
+                        rank=PRECEDENCE_DERIVED_DATA,
+                    )
+                else:
+                    self.config_manager.add_hint(
+                        f"{self.prefix}.{i}.q_flux",
+                        q_est,
+                        rank=PRECEDENCE_DERIVED_DATA,
+                    )
+        elif any(fitlogqflux):
+            logger.warning(
+                f"{self.prefix}: fitlogqflux is set but the event has one "
+                "source, so there is no flux ratio to sample; ignoring it."
+            )
 
         # Map each instrument to a Band instance by name.
         self.band_map = self._band_indices(system)
@@ -1827,17 +1901,30 @@ class MulensInstrument(Instrument):
             # line-of-sight stars dominate the blend; the lens supplies a
             # median 15% of it) -- into the correct inequality
             # f_blend >= f_lens_pred, positivity doing the work.  upper and
-            # the selected elements' initval scale with the bootstrapped
-            # baseline flux, the same reasoning as _scale_flux_amplitudes:
-            # the file's flux zeropoint is arbitrary.  Pinned elements keep
-            # the defaults.yaml 0.0 (NaN initval = leave alone).
+            # the selected elements' initval scale with the light curve's
+            # flux, the same reasoning as _scale_flux_amplitudes: the file's
+            # flux zeropoint is arbitrary.  Pinned elements keep the
+            # defaults.yaml 0.0 (NaN initval = leave alone).
+            #
+            # The scale is the MEDIAN OBSERVED FLUX, not the bootstrapped
+            # baseline f_total_init.  The upper bound is the prior's support,
+            # and the bootstrap's baseline is a function of the seed
+            # geometry and the topology (it solves F = f_s A + f_b at the
+            # seeded t_0/u_0/t_E, and a binary or a second source changes
+            # A) -- so the same event fit as 1L1S, 1L2S and 2L1S, or from two
+            # different seeds, got a different uniform width on this
+            # parameter, i.e. a different prior normalization, which makes
+            # their evidences incomparable by an arbitrary log(span ratio).
+            # The median is a property of the data alone.  A file whose
+            # median is not positive (difference imaging with a negative
+            # baseline) falls back to the bootstrap, as before.
             nb_selected = [
                 bool(c.get("sed_constrains_blend", False)) for c in self.config
             ]
             if any(nb_selected):
                 entry = pin_unselected(self.n_elements, nb_selected)
                 overrides = dict(entry.get("overrides") or {})
-                scale = np.asarray(f_total_init, dtype=float)
+                scale = self._neighbor_flux_scale(f_total_init)
                 overrides["upper"] = (2.0 * scale).tolist()
                 overrides["initval"] = [
                     (0.05 * float(sc) if sel else float("nan"))
@@ -1858,6 +1945,29 @@ class MulensInstrument(Instrument):
                         )
 
             self._seed_source_star_from_flux(system)
+
+    def _neighbor_flux_scale(self, f_total_init):
+        """Per-file flux scale of ``neighbor_flux``'s bound and start.
+
+        The data median (``flux_median_init``) where it is a positive finite
+        number, else the bootstrapped baseline ``f_total_init`` with a
+        warning naming the file -- see the call site for why the median.
+        """
+        boot = np.asarray(f_total_init, dtype=float)
+        med = np.asarray(
+            getattr(self, "flux_median_init", None) or [np.nan] * boot.size,
+            dtype=float,
+        )
+        good = np.isfinite(med) & (med > 0)
+        for i in np.flatnonzero(~good):
+            logger.warning(
+                f"{self.prefix}.{self.names[i]}: the median observed flux "
+                f"({med[i]:.4g}) is not positive, so neighbor_flux is scaled "
+                f"by the bootstrapped baseline ({boot[i]:.4g}) instead -- "
+                "which depends on the seed geometry, so its bound may differ "
+                "between fits of this light curve."
+            )
+        return np.where(good, med, boot)
 
     # Main-sequence dwarf locus for source seeding, from the shared
     # Mamajek-table reader (components/star/mamajek.py).
