@@ -804,7 +804,7 @@ class MulensEvent(Component):
         self.config_manager.add_scale_hint(f"star.{l_idx}.pm_ra", 3.0)
         self.config_manager.add_scale_hint(f"star.{l_idx}.pm_dec", 3.0)
         self.config_manager.add_scale_hint(f"star.{l_idx}.rv", 1e5)
-        self._seed_expected_pm(pm_expected, l_idx, "thin_disk", 4000.0)
+        self._seed_expected_pm(pm_expected, l_idx, "thin_disk", 4000.0, system)
 
         # Every source body gets the same bulge-source seeding: each source
         # star's distance and pm still get their own start (the secondary's
@@ -821,7 +821,7 @@ class MulensEvent(Component):
             self.config_manager.add_scale_hint(f"star.{s_idx}.pm_ra", 3.0)
             self.config_manager.add_scale_hint(f"star.{s_idx}.pm_dec", 3.0)
             self.config_manager.add_scale_hint(f"star.{s_idx}.rv", 1e5)
-            self._seed_expected_pm(pm_expected, s_idx, "bulge", 8000.0)
+            self._seed_expected_pm(pm_expected, s_idx, "bulge", 8000.0, system)
 
         # Companion lens bodies (everything beyond the primary)
         for l2_type, l2_idx in self.lens_bodies[1:]:
@@ -873,22 +873,64 @@ class MulensEvent(Component):
         free.  That gap is what the engine used to fill by inventing a
         direction (issue #93).
 
-        But where a config DOES imply the proper motion, a prior mean
-        dropped on top fights it.  Measured at the seed (raw = 0), chi2/N
-        ungated vs gated:
+        THE GATE, AND WHY IT IS ONLY pi_E NOW (#93, JDE 2026-10-20).  Until
+        #93 any user pi_E_N/pi_E_E OR any user pm_ra/pm_dec (any star)
+        skipped ALL seeding, because a prior mean dropped on top of a value
+        the config implied fought it.  Measured then, under the OLD engine,
+        chi2/N at the seed, ungated vs gated:
 
             ob140939 (pi_E_N/pi_E_E measured, Yee+2015)  3.04 -> 179.1 | 3.04
             ob161003 (two sources, t_E + rho each)       1.72 ->   3.9 | 1.72
             DC2018_128 (t_0/u_0/t_E/s/q/alpha/rho)       1.42 ->   1.21 (kept)
             ob08092 (t_0/u_0/t_E only, PSPL)             1.50 ->   1.42 (kept)
 
-        So the gate below is what keeps this from making published
-        solutions worse.  Filling only the *direction* and leaving the
-        magnitude to the data would serve every case at once, but the
-        direction is not a symbol, so provenance cannot express it
-        per-symbol; that needs a basis change (mu_rel_mag, mu_rel_pa) which
-        is a sampling-geometry question and does not belong here.
-        tests/test_seed_quality.py pins all four numbers.
+        Under the precedence ladder (#455) a USER pm (PRECEDENCE_USER)
+        outranks this seed (PRECEDENCE_DERIVED_DATA) and is never traded
+        against it, so a seed can no longer bend a user's value.  Hence:
+        a star whose pm the user gave a VALUE (an initval or a mu; bounds
+        alone do not count) is simply not seeded (``_seed_expected_pm``),
+        and every OTHER star still is.  The gate
+        stays for pi_E alone: two seeded proper motions would fight a user
+        pi_E over the DIRECTION of mu_rel, and no distance can absorb a
+        direction -- only the magnitude goes into theta_E.
+
+        Re-measured 2026-10-20 under the new engine.  The metric is
+        check_user_starts (requested vs produced), with start logp as
+        context.  With the narrowed gate EVERY shipped microlensing config
+        starts BYTE-IDENTICAL to the old gate (ob08092, ob140939, ob161003,
+        ob09020, ob09020_linear, KMT-2019-BLG-1806, ob07224, ob170114,
+        OGLE_0383LD, DC2018_128, ob161045, kb180087_obj3,
+        KMT-2021-BLG-1122L): each one either sets pi_E, sets the pm of every
+        seedable star, or sets none (seeded before and after).  The one
+        that changes path is ob161003, which now seeds SourceB; the engine
+        derives SourceB's pm from the user Lens pm and the event's one
+        mu_rel (DERIVED_USER, which outranks the seed), so its start does
+        not move either.  The case the ruling is about, ob08092 with only a user
+        star.Lens pm of (-2, -5) mas/yr:
+
+                         seeded   mu_rel_geo PA  |mu_rel_geo|  logp     misses
+            old gate     none     172.8 deg     11.55         6240.48  0
+            pi_E only    Source    75.5 deg      1.05         6249.94  0
+
+        the source sits at the bulge mean, the lens keeps the user's pm, and
+        t_E is absorbed through the lens distance.  Removing the pi_E gate
+        too (seeding over a user pi_E) still delivers pi_E and leaves chi2/N
+        unchanged -- the old 179.1 blow-up does not return -- but the engine
+        then has to throw the proper motions far out to hold the direction:
+        ob08092 + pi_E (0.3, -0.1) moves the pms to ~40 mas/yr and logp
+        6240.25 -> 5880.32; KMT-2019-BLG-1806 to ~55 mas/yr and logp
+        45542.37 -> 44784.14.  That is the gate's measured reason.  A user
+        Sgr-A*-relative pm (``pm_ra_sgra``) counts as setting the pm: seeding
+        ob140939's source over its user pm_ra_sgra put both pms at ~240
+        mas/yr and logp at -320466 against -1233.58.
+
+        WITH NO galacticmodel BLOCK there is no direction information at
+        all, so nothing is seeded and the engine picks one (ob08092: PA -86
+        deg, almost all in RA); left as is.  If a direction is ever wanted
+        there, the honest fix is a mu_rel position-angle parameter (the
+        (mu_rel_mag, mu_rel_pa) basis), a sampling-geometry question that
+        does not belong here.  tests/test_seed_quality.py pins the gate and
+        the per-star skip.
 
         THE MULTI-SOURCE GATE IS RETIRED (stage 4).  It refused to seed any
         event with more than one source, because pre-split each source
@@ -903,8 +945,8 @@ class MulensEvent(Component):
         examples come out BYTE-IDENTICAL with the gate gone, which on its
         own proves nothing -- ob161003's params file pins
         star.Source*/star.Lens pm_ra/pm_dec (added with the du-sign work),
-        so the earlier blocker returns first and this gate is unreachable
-        for the only multi-source example shipped.  Stripping those four
+        so the then-blanket pm/pi_E gate returned first and this one was
+        unreachable for the only multi-source example shipped.  Stripping those four
         pins to reach it, chi2/N at the seed:
 
             gate present (no pm seeded)   10.91
@@ -917,21 +959,19 @@ class MulensEvent(Component):
         """
         if "galacticmodel" not in getattr(system, "config", {}):
             return None
-        # Skip when something already implies the direction or the
-        # magnitude.
+        # The one remaining gate: a user pi_E fixes the DIRECTION of
+        # mu_rel, and two seeded proper motions would fight it over that
+        # direction, which no distance can absorb.  A user proper motion
+        # is NOT a reason to skip here: it outranks the seed, so it is
+        # handled per star in _seed_expected_pm (#93, JDE 2026-10-20).
         up = self.config_manager.user_params
-        blockers = [
-            k
-            for k in up
-            if k.endswith((".pi_E_N", ".pi_E_E"))
-            or ".pm_ra" in k
-            or ".pm_dec" in k
-        ]
+        blockers = [k for k in up if k.endswith((".pi_E_N", ".pi_E_E"))]
         if blockers:
             logger.info(
-                f"[{self.prefix}] proper motion or parallax already given "
+                f"[{self.prefix}] microlens parallax already given "
                 f"({', '.join(sorted(blockers))}); not seeding from the "
-                f"galactic model, which would contradict it."
+                f"galactic model, whose proper motions would contradict "
+                f"its direction."
             )
             return None
         try:
@@ -969,8 +1009,54 @@ class MulensEvent(Component):
             float(np.radians(np.atleast_1d(dec_all)[source_ndx])),
         )
 
-    def _seed_expected_pm(self, line_of_sight, star_idx, population, dist_pc):
+    def _user_pm_keys(self, system, star_idx):
+        """The params-file keys that set star ``star_idx``'s proper motion.
+
+        All three spellings (broadcast ``star.pm_ra``, index ``star.2.pm_ra``,
+        name ``star.Source.pm_ra``), and the Sgr-A*-relative pair as well as
+        the absolute one: ``pm_ra_sgra`` is derived from ``pm_ra`` one to
+        one, so a user value on it pins the proper motion just as directly
+        (ob140939's source).  Sorted, for a stable log line.
+
+        ONLY AN ENTRY THAT GIVES A VALUE COUNTS (JDE 2026-10-20): an
+        ``initval`` or a prior mean ``mu``, written as a number or as a link
+        (a linked field lives in ``ConfigManager.links``, not in the entry).
+        A bounds-only entry (``lower``/``upper``/``sigma`` with no value)
+        states no proper motion, so it must not turn the seed off; the seed
+        then meets those bounds under the usual rules for any start.
+        """
+        cm = self.config_manager
+        name = system.star.names[star_idx]
+
+        def gives_value(key):
+            entry = user_entry(cm.user_params, key)
+            if entry is not None and any(
+                entry.get(f) is not None for f in ("initval", "mu")
+            ):
+                return True
+            linked = cm.links.get(key, {})
+            return "initval" in linked or "mu" in linked
+
+        return sorted(
+            key
+            for axis in ("pm_ra", "pm_dec", "pm_ra_sgra", "pm_dec_sgra")
+            for key in (
+                f"star.{axis}",
+                f"star.{star_idx}.{axis}",
+                f"star.{name}.{axis}",
+            )
+            if gives_value(key)
+        )
+
+    def _seed_expected_pm(
+        self, line_of_sight, star_idx, population, dist_pc, system
+    ):
         """Seed one star's pm_ra/pm_dec at the galactic model's prior mean.
+
+        Skipped for a star whose proper motion the user set
+        (``_user_pm_keys``): a user value (PRECEDENCE_USER) outranks this
+        seed, so the seed could never move it and is only noise in the log
+        and the ledger.  The OTHER stars are still seeded (#93).
 
         PRECEDENCE_DERIVED_DATA: this is derived from the galactic model
         the same way an RV offset is derived from the data, so it belongs
@@ -997,6 +1083,14 @@ class MulensEvent(Component):
         proper motion for a place the star is not.
         """
         if line_of_sight is None:
+            return
+        user_keys = self._user_pm_keys(system, star_idx)
+        if user_keys:
+            logger.info(
+                f"[{self.prefix}] star.{star_idx} proper motion given "
+                f"({', '.join(user_keys)}); not seeding it from the "
+                f"galactic model."
+            )
             return
         ra_rad, dec_rad = line_of_sight
         try:
