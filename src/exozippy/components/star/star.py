@@ -1199,6 +1199,32 @@ class Star(Component):
                         self.manifest[key] = merge_options(
                             self.manifest.get(key), **pin
                         )
+                        # ...and INACTIVE wherever the user wrote nothing
+                        # for it: a pinned knob is still a row in every
+                        # table ("A_V = 0.01", "R_SED = 1 solRad" on a lens
+                        # nobody photometers), and so is everything derived
+                        # from it (loggsed, luminositysed, fbolsed inherit
+                        # the role through Component._inherit_inactivity).
+                        # A knob the user wrote a field for keeps the pin
+                        # path, which their entry outranks, so "a params
+                        # entry frees one" still holds.
+                        wrote = np.zeros(self.n_elements, dtype=bool)
+                        for field in (
+                            "initval",
+                            "mu",
+                            "sigma",
+                            "lower",
+                            "upper",
+                        ):
+                            wrote |= self.user_wrote_field(key, field)
+                        active = [
+                            bool(seen[i] or wrote[i])
+                            for i in range(self.n_elements)
+                        ]
+                        if not all(active):
+                            self.manifest[key] = merge_options(
+                                self.manifest[key], mask=active
+                            )
                     self.manifest["loggsed"] = merge_options(
                         self.manifest["loggsed"],
                         **self._unread_loggsed_bounds(unread),
@@ -1206,7 +1232,9 @@ class Star(Component):
                     names = ", ".join(self.names[i] for i in unread)
                     logger.info(
                         f"[{self.prefix}] nothing reads the SED flux of "
-                        f"{names}: {'/'.join(inv.star_knobs)} pinned and "
+                        f"{names}: {'/'.join(inv.star_knobs)} pinned (and "
+                        f"inactive, with what derives from them, unless a "
+                        f"params entry names one) and "
                         f"the BC grid's loggsed barrier lifted (radius/teff/"
                         f"feh follow the structure-activity rule; mass, "
                         f"distance and proper motion stay). An SED row, a "

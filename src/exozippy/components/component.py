@@ -1,3 +1,4 @@
+import logging
 import weakref
 from abc import ABC, abstractmethod
 
@@ -8,6 +9,8 @@ from ..config import NUMERIC_KEYS, user_entry
 from ..manifest import interpret_manifest_entry
 from ..physics_registry import PHYSICS_REGISTRY
 from .parameter import ElementExpression, OwnPrePatchRef, Parameter
+
+logger = logging.getLogger(__name__)
 
 
 def layer_options(cfg, options):
@@ -728,7 +731,71 @@ class Component(ABC):
             if not hasattr(self, "_built_for_model"):
                 self._built_for_model = {}
             self._built_for_model[param_name] = weakref.ref(model)
-        return param_obj.build_pymc()
+        node = param_obj.build_pymc()
+        self._inherit_inactivity(param_obj, entry, selections, n_elements)
+        return node
+
+    def _inherit_inactivity(self, param_obj, entry, selections, n_elements):
+        """A derived element built from an INACTIVE local dependency is
+        inactive too: a function of a bookkeeping value is a bookkeeping
+        value, not a result.
+
+        The structural inactive tier holds an element nothing reads at a
+        bookkeeping pin (``star.radius`` on a lens nobody photometers), and
+        the reporting layer suppresses it -- but ``star.logg``, ``density``,
+        ``luminosity`` and ``fbol`` kept computing from that pin and
+        reaching every table as if measured (a 0.11 Msun lens at logg 3.48
+        and one solar luminosity, examples/KMT-2021-BLG-1122L).  The manifest
+        cannot say it: a derived element is never masked out (the mask
+        means "not built", and the value is still needed by whatever reads
+        it), so the role is inherited HERE, after the build, by clearing
+        ``is_active`` on the elements whose dependency element is inactive.
+        The Deterministic is built as before; only the reports change.
+
+        Inheritance runs only through dependencies whose alignment is
+        provable the way ``_element_expression``'s slicing requires: a bare
+        LOCAL parameter name with the same element count.  A
+        cross-component path, a mapped dependency and a context node are
+        skipped -- "entry i belongs to element i" is not known there, and
+        guessing would hide live rows.  Dependencies are built before their
+        dependents (``graph.py``), so a chain (radius -> luminosity -> fbol)
+        inherits level by level.
+        """
+        if not selections or not param_obj._built_roles():
+            return
+        active = np.array(param_obj.is_active, dtype=bool).reshape(-1)
+        if active.size != n_elements:
+            return
+        every = np.ones(n_elements, dtype=bool)
+        inherited = []
+        for sel in selections:
+            if sel.output_only:
+                continue
+            covered = (
+                every
+                if sel.mask is None
+                else np.asarray(sel.mask, dtype=bool).reshape(-1)
+            )
+            for d in entry.dep_names(sel.config):
+                if "." in d or "[" in d:
+                    continue  # cross-component or mapped: not provably aligned
+                dep = getattr(self, d, None)
+                if not isinstance(dep, Parameter) or not dep._built_roles():
+                    continue
+                dep_active = np.array(dep.is_active, dtype=bool).reshape(-1)
+                if dep_active.size != n_elements:
+                    continue
+                off = covered & ~dep_active & active
+                if off.any():
+                    active &= ~off
+                    inherited.append((d, np.nonzero(off)[0].tolist()))
+        if inherited:
+            param_obj.is_active = active
+            logger.debug(
+                "%s: element(s) inactive because a dependency is: %s",
+                param_obj.label,
+                "; ".join(f"{d} -> {idx}" for d, idx in inherited),
+            )
 
     def _element_expression(
         self, model, system, context_nodes, entry, sel, where
