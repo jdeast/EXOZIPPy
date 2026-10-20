@@ -85,6 +85,35 @@ Each profile is then fitted:
 comes back exactly, and a profile with a cliff comes back to the
 cliff-free coefficients after the remap.
 
+## Validation against Claret (2026-10-20)
+
+`scripts/compare_ld_sources.py`, 30 (band, node) pairs over TESS, V,
+Kepler, Cousins I, 2MASS J and Sloan g at five nodes inside both boxes,
+A_V = 0, PHOENIX minus Claret (ATLAS, least squares):
+
+| quantity | mean +/- sd |
+|---|---|
+| u1 + u2 (the limb intensity) | -0.012 +/- 0.025 |
+| linear u | -0.025 +/- 0.043 |
+| u1 alone | +0.080 +/- 0.055 |
+| u2 alone | -0.091 +/- 0.041 |
+
+The limb intensity and the linear coefficient agree inside the tie's 0.05
+width; the split between u1 and u2 differs by ~0.08 with opposite signs,
+which is the known difference between a flux-conserving fit and a
+least-squares one on the same profile (the two laws' fluxes agree, their
+shapes near the limb do not). The largest departures are at the 3600 K
+node, the edge of the ATLAS tables. The first pass of the generator
+fitted every node of a [Fe/H] plane on one node's mu grid and this same
+comparison read +0.20 in u1 + u2, which is how the per-node mu was found.
+
+The tables' complete box is Teff 2300-9400 K, logg 2.0-6.0, [Fe/H] -4 to
++1, A_V 0-20 (60 x 9 x 9 x 20 nodes): the hot end above 9400 K and the
+planes below logg 2.0 are the archive's incomplete edges, which
+`complete_axes` trims; 284 interior holes per table were filled along
+Teff. A_V matters at the level expected: Bessell V at the Sun moves from
+(0.545, 0.163) at A_V = 0 to (0.514, 0.169) at A_V = 10.
+
 ## Holes
 
 The archive is not a rectangle: hot stars are absent at the lowest
