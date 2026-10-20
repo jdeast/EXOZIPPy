@@ -96,6 +96,70 @@ C24). Architecture selection -- orbital motion, binary-star lenses, binary
 sources, the challenge's CV and free-floating-planet classes -- is the
 roadmap item after static 2L1S works.
 
+## Architecture configs for evidence comparison (`dc18_arch_config.py`)
+
+    python dc18_arch_config.py --event 194 --arch all --out sweep_arch/194 \
+        [--seed seed.yaml] [--n-temps 4 --tune 300 --draws 8000] \
+        [--maxtime 72000] [--hogg] [--data-dir DIR]
+    python dc18_arch_config.py --check sweep_arch/194/*_{1L1S,1L1S_fs,1L2S,2L1S}.yaml
+
+writes one config + params file per architecture -- `1L1S` (PSPL),
+`1L1S_fs` (FSPL), `1L2S` (binary source) and `2L1S` (binary lens) -- with
+IDENTICAL priors on every parameter they share, so `ln Z` can be compared
+across them: a shared prior that differs in support or normalization adds an
+arbitrary constant to the ratio. The shared part is built by functions that
+take no architecture argument; `check_shared` then compares the WRITTEN files
+(starts stripped, architecture-only parameters dropped) byte for byte, and
+each params file's header carries that view's sha256. `--arch all` runs the
+check on what it wrote; `tests/test_dc18_arch_config.py` additionally builds
+all four models and compares every shared element's role, bounds, prior and
+barrier scale. Either data layout works (`dc18_common.data_layout`): the full
+release (`lc/ulwdc1_NNN_{W149,Z087}.txt`, magnitudes, zeropoint 0 AB) or the
+MMEXOFAST copy (`n20180816.*.txt`, flux on a 22.0 AB zeropoint). CV-class
+events (`dccv` in the answer key, 93 of 293) are refused unless `--allow-cv`;
+`dc18_common.non_cv_events` lists the other 200.
+
+**The canonical prior set.**
+
+| parameter | prior | architectures |
+|---|---|---|
+| `source.Source.t_0` | uniform, data span +/- 90 d (`T0_PAD_DAYS`) | all |
+| `source.Source.u_0` | `fitu0te` everywhere: `u0te` uniform [-5000, 5000] d with its 1/t_E Jacobian; soft `|u_0| <= 3` | all |
+| `log_f_total` | log10(median data flux) +/- 2 dex, per band | all |
+| `err_scale` | uniform [0.5, 2] | all |
+| likelihood | Gaussian; `--hogg` restores the mixture (out_scale <= 10x median error) | all |
+| `neighbor_flux` | uniform [0, 2 x median data flux] (set by the component) | all |
+| `zeropoint` | `magsys: AB`; W149 N(layout zeropoint, hypot(0.02, grey)), Z087 linked to it, 0.02 sqrt(2) on the difference | all |
+| stars, SED | `dc18_sweep_config.py`'s recipe (av from the clump colour, lens feh N(0, 0.5), torres / mann / mamajek, galactic model on the source) | all |
+| `source.Source.rho` | defaults.yaml soft cap 10 (FFPs can exceed 1); report-only on 1L1S | 1L1S, 1L1S_fs |
+| `source.*.rho` | soft cap 1, `bound_scale: 0.01` (~440 nats at 1.01: hard in practice) | 2L1S, 1L2S |
+| `planet.Companion.log_q` | uniform [-6, 0] (the 83 stellar binaries are inside) | 2L1S |
+| `lens.Companion.log_s`, `alpha` | uniform [-1, 1]; alpha uniform (structural) | 2L1S |
+| `star.Source2` | distance, pm, av, feh hard-linked to Source (one bound pair); torres | 1L2S |
+| `source.Source2.t_0`, `u_0` | Source's bounds | 1L2S |
+| `log_q_flux` | uniform [-3, 3] per band (`fitlogqflux: true`) | 1L2S |
+
+Run settings, per mode (one grid mode per fit): `ptde`, `seed_polish: false`,
+`overdisperse: true`, `n_temps`/`tune`/`draws` from the command line, and
+`sampler.maxtime` always written -- keep it below the job's wall time with
+headroom, and forward SIGTERM. A `--seed` file contributes `initval`s only,
+and only for parameters the architecture has: a seed is a start, never a
+prior.
+
+**What config cannot make identical** -- read these before quoting a ratio:
+
+- **1L2S has three star bodies, the others two.** The galactic model's
+  per-star density prior is unnormalized (`galacticmodel.py`), so Source2
+  adds a term with no fixed normalization; with its distance linked to
+  Source's it is a second density factor on `D_s`, not a pure constant.
+  `ln Z(1L2S)` is offset from the others by it. Not fixed here.
+- **rho's cap differs** between 1L1S_fs (soft 10) and 2L1S/1L2S (soft 1),
+  by design; the barrier removes the prior mass above the cap without
+  renormalizing, so that mass enters the ratio.
+- **A 2L1S companion is a `planet` body**: it has mass (through `log_q`) but
+  no light, so a stellar-binary lens's companion flux goes into
+  `neighbor_flux` rather than being predicted.
+
 ## MMEXOFAST JSONs -> params files (2026-10-01)
 
 The `mmexofast:` (and `mmexofast_options:`) config key was removed with the

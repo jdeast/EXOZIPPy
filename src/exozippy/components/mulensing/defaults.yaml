@@ -656,6 +656,9 @@ mulensinstrument:
     latex: "q_s"
     description: "source flux fraction ($q_s$)"
   q_flux:
+    # Uniform on [0, 1000] when sampled (the default).  A light curve with
+    # `fitlogqflux: true` samples log_q_flux instead and derives q_flux from
+    # it, so these bounds then act as soft barriers on the derived value.
     initval: 1.0
     init_scale: 0.1
     lower: 0.0
@@ -664,6 +667,25 @@ mulensinstrument:
     internal_unit: ""
     latex: "q_F"
     description: "binary source flux ratio"
+    expressions:
+      from_log_q_flux:
+        func_name: "calc_q_flux_from_log"
+        deps: [ "log_q_flux" ]
+  log_q_flux:
+    # Sampled ONLY on a light curve with `fitlogqflux: true` (binary source);
+    # absent otherwise.  log10(f_s2/f_s1), uniform: the scale-free prior on a
+    # flux ratio, where a uniform q_flux on [0, 1000] puts 99.9% of its mass
+    # on the second source being the BRIGHTER one.  [-3, 3] is the same
+    # 1000x either way the linear upper bound allows, symmetric so that
+    # relabelling the two sources maps the domain onto itself.
+    lower: -3.0
+    upper: 3.0
+    initval: 0.0
+    init_scale: 0.05
+    unit: ""
+    internal_unit: ""
+    latex: "\\log{q_F}"
+    description: "log10 binary source flux ratio"
   f_source:
     lower: 0.0
     upper: 1000.0
@@ -743,8 +765,11 @@ mulensinstrument:
     # -- with the tie off, f_blend is already free and a neighbor term is
     # exactly degenerate with it in ANY light curve, finite-source or not
     # (the light curve measures only the sum).  upper/initval are installed
-    # per light curve from the bootstrapped baseline flux, like the other
-    # flux amplitudes: the file's flux zeropoint is arbitrary.
+    # per light curve from the MEDIAN OBSERVED flux (2x and 0.05x), since
+    # the file's flux zeropoint is arbitrary -- not from the bootstrapped
+    # baseline, which moves with the seed and the topology and would make
+    # this prior's width differ between fits of one light curve
+    # (mulensing.md, "Priors that must not depend on the seed").
     lower: 0.0
     upper: 1.0e+30
     initval: 0.0

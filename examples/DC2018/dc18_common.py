@@ -1,7 +1,20 @@
 """Shared helpers for the DC2018 (2018 Roman Data Challenge) workflow.
 
-Data layout (--data-dir / $DC18_DATA, default the MMEXOFAST source checkout):
-    n20180816.{W149,Z087}.WFIRST18.<NNN>.txt   flux light curves (BJD flux err)
+Two data layouts are read, told apart by what is on disk (data_layout):
+
+  "full" -- the challenge's own release (data-challenge-1, all 293 events):
+    lc/ulwdc1_<NNN>_{W149,Z087}.txt             MAGNITUDE light curves
+                                                (BJD mag err), AB, so the
+                                                fit's flux system is
+                                                F = 10**(-0.4 m): zeropoint 0
+  "mmexofast" -- the MMEXOFAST checkout's converted copy (~48 events):
+    n20180816.{W149,Z087}.WFIRST18.<NNN>.txt   FLUX light curves
+                                                (BJD flux err), F =
+                                                10**(-0.4 (m - 22)): the same
+                                                photometry on a zeropoint of
+                                                22.0 (AB), errors propagated
+                                                exactly as mag_to_flux does
+  and in both (--data-dir / $DC18_DATA, default the MMEXOFAST checkout):
     event_info.txt                              per-event RA/Dec (degrees)
     Answers/master_file.txt                     simulation truth, one row per
                                                 event, POSITIONAL lookup:
@@ -97,27 +110,111 @@ def data_dir_or_raise(data_dir=None):
     return d
 
 
+# Per layout: (mulensinstrument data_format, AB magnitude of unit flux in
+# the fit's flux system).  The second number is the zeropoint a config
+# states for the light curve (magsys: AB): the challenge's photometry is AB
+# (dc18_photometric_leg.py), the full release's files are those magnitudes
+# themselves (F = 10**(-0.4 m), zeropoint 0), and the MMEXOFAST copy put
+# them on a zeropoint of 22.0.  Verified on event 194: flux 0.76435 against
+# 22.29178 mag, and errors 0.0138862 against 0.019725 mag.
+LAYOUT_FORMAT = {
+    "full": ("magnitude", 0.0),
+    "mmexofast": ("flux", 22.0),
+}
+
+
+def _full_lc(data_dir, event, band):
+    return Path(data_dir) / "lc" / f"ulwdc1_{event:03d}_{band}.txt"
+
+
+def _mmexofast_lc(data_dir, event, band):
+    return Path(data_dir) / f"n20180816.{band}.WFIRST18.{event:03d}.txt"
+
+
+def data_layout(data_dir):
+    """'full' (lc/ulwdc1_NNN_<band>.txt) or 'mmexofast' (flat flux files).
+
+    Decided by what is on disk: an lc/ directory holding ulwdc1 files is the
+    full release.  Raises when neither is present, rather than guessing.
+    """
+    d = Path(data_dir)
+    if (d / "lc").is_dir() and any((d / "lc").glob("ulwdc1_*_W149.txt")):
+        return "full"
+    if any(d.glob("n20180816.W149.WFIRST18.*.txt")):
+        return "mmexofast"
+    raise FileNotFoundError(
+        f"DC18 data dir '{d}' holds neither lc/ulwdc1_NNN_W149.txt (the full "
+        "release) nor n20180816.W149.WFIRST18.NNN.txt (the MMEXOFAST copy)."
+    )
+
+
 def available_events(data_dir):
     """Sorted event numbers that have a W149 light curve on disk."""
     events = []
-    for f in Path(data_dir).glob("n20180816.W149.WFIRST18.*.txt"):
-        tag = f.name.split(".")[-2]
-        if tag.isdigit():
-            events.append(int(tag))
+    if data_layout(data_dir) == "full":
+        for f in (Path(data_dir) / "lc").glob("ulwdc1_*_W149.txt"):
+            tag = f.name.split("_")[1]
+            if tag.isdigit():
+                events.append(int(tag))
+    else:
+        for f in Path(data_dir).glob("n20180816.W149.WFIRST18.*.txt"):
+            tag = f.name.split(".")[-2]
+            if tag.isdigit():
+                events.append(int(tag))
     return sorted(events)
 
 
 def light_curve_files(data_dir, event, bands=("W149", "Z087")):
     """{band: absolute path} for this event, raising on missing files."""
+    path = _full_lc if data_layout(data_dir) == "full" else _mmexofast_lc
     files = {}
     for band in bands:
-        f = Path(data_dir) / f"n20180816.{band}.WFIRST18.{event:03d}.txt"
+        f = path(data_dir, int(event), band)
         if not f.exists():
             raise FileNotFoundError(
                 f"No {band} light curve for event {event}: {f}"
             )
         files[band] = str(f.resolve())
     return files
+
+
+def read_light_curve(path, data_format):
+    """(t, flux, flux_err) of one file, in the flux system the FIT uses.
+
+    A magnitude file goes through mulensinstrument.mag_to_flux, the one
+    owner of that conversion, so anything a generator derives from the data
+    (a median flux, a bound) is in the same system as the model's fluxes.
+    Non-finite rows and non-positive errors are dropped.
+    """
+    d = np.loadtxt(path)
+    t, y, e = d[:, 0], d[:, 1], d[:, 2]
+    if data_format == "magnitude":
+        from exozippy.components.mulensing.mulensinstrument import mag_to_flux
+
+        y, e = mag_to_flux(y, e)
+    elif data_format != "flux":
+        raise ValueError(f"unknown data_format {data_format!r}")
+    ok = np.isfinite(t) & np.isfinite(y) & np.isfinite(e) & (e > 0)
+    return t[ok], y[ok], e[ok]
+
+
+def event_class(data_dir, event):
+    """The answer key's class label of one event ('dccv', 'ombin', ...)."""
+    return load_master_row(data_dir, event)[1]
+
+
+# The challenge's cataclysmic-variable class: not microlensing, skipped by
+# every fit of the sample (93 of the 293 events).
+CV_CLASS = "dccv"
+
+
+def non_cv_events(data_dir):
+    """The events on disk whose answer-key class is not a CV."""
+    return [
+        ev
+        for ev in available_events(data_dir)
+        if event_class(data_dir, ev) != CV_CLASS
+    ]
 
 
 def event_coords(data_dir, event):
