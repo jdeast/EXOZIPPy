@@ -542,12 +542,19 @@ def write_bc_table(
     df_out.attrs = {"meta": meta}
 
     path.parent.mkdir(parents=True, exist_ok=True)
+    # Write beside and replace, never in place: a published table in the
+    # package tree is a read-only HARD LINK into the machine download cache
+    # (utilities/zenodo.py), so opening it for writing fails -- and if it
+    # did not, it would rewrite the cached copy under its pinned md5.  The
+    # replace gives the merged table a new inode and leaves the cache alone.
+    tmp = path.with_name(path.name + ".tmp")
     df_out.to_parquet(
-        path,
+        tmp,
         compression="snappy",
         index=False,
         row_group_size=_ROW_GROUP_SIZE,
     )
+    os.replace(tmp, path)
     return df_out
 
 

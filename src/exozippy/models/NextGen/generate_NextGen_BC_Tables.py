@@ -47,6 +47,7 @@ from exozippy.components.sed.bc_grid import (
     ensure_bc_tables,
     facility_from_svo_name,
     read_bc_meta,
+    read_bc_table,
     resolve_filter_name,
     write_bc_table,
 )
@@ -358,6 +359,7 @@ def process_missing_spectra(
     raw_path: Path = SPECTRA_RAW_PATH_DEFAULT,
     processed_path: Path = SPECTRA_PROCESSED_PATH_DEFAULT,
     n_workers: int = 4,
+    skip_unavailable: bool = False,
 ) -> Dict[float, int]:
     """
     Step 1, incrementally: bring every feh parquet up to the (teff, logg,
@@ -369,13 +371,46 @@ def process_missing_spectra(
     when there is something to add. The Av axis needs no spectra, so an
     extension along Av alone makes this a no-op.
 
+    The raw grid is not a rectangle (logg 5.5 stops at 5000 K).  With
+    ``skip_unavailable`` the nodes SVO's index does not list at any alpha
+    (fetch_raw_spectra.available_nodes, the pipeline's authority on what
+    exists) are left out instead of raising; pad_missing_nodes then fills
+    their BC rows from the nearest lower-gravity plane.
+
     Returns {feh: number of nodes processed}.
     """
     grid = read_grid_yaml() if grid is None else grid
+    unavailable = set()
+    if skip_unavailable:
+        from exozippy.models.NextGen.fetch_raw_spectra import (
+            available_nodes,
+            svo_index,
+        )
+
+        exists = available_nodes(svo_index(raw_path))
+        unavailable = {
+            (float(t), float(g), float(z))
+            for z in grid["feh"]
+            for g in grid["logg"]
+            for t in grid["teff"]
+            if (round(float(t), 6), round(float(g), 6), round(float(z), 6))
+            not in exists
+        }
+        if unavailable:
+            print(
+                f"{len(unavailable)} grid node(s) have no BT-NextGen spectrum "
+                f"on SVO at any alpha and are skipped (pad_missing_nodes "
+                f"fills their BC rows)"
+            )
     done = {}
     for feh in grid["feh"]:
         path = processed_path / _processed_filename(feh)
-        want = {_node_key(t, g) for t in grid["teff"] for g in grid["logg"]}
+        want = {
+            _node_key(t, g)
+            for t in grid["teff"]
+            for g in grid["logg"]
+            if (float(t), float(g), float(feh)) not in unavailable
+        }
         if path.exists():
             have = pd.read_parquet(path, columns=["teff", "logg"])
             want -= {_node_key(t, g) for t, g in zip(have.teff, have.logg)}
@@ -680,6 +715,155 @@ def generate_bc_tables(
         for fac, frames in out.items()
         if frames
     }
+
+
+# -------------------------------------------------------------------
+# Padding: the grid nodes no spectrum exists for
+# -------------------------------------------------------------------
+
+
+def unavailable_grid_nodes(
+    grid: dict | None = None,
+    raw_path: Path = SPECTRA_RAW_PATH_DEFAULT,
+) -> list:
+    """The (teff, logg, feh) nodes of `grid` that SVO lists no BT-NextGen
+    spectrum for at any alpha -- the index is the authority, never the
+    local raw directory, which is empty on most machines."""
+    from exozippy.models.NextGen.fetch_raw_spectra import (
+        available_nodes,
+        svo_index,
+    )
+
+    grid = read_grid_yaml() if grid is None else grid
+    exists = available_nodes(svo_index(raw_path))
+    return [
+        (float(t), float(g), float(z))
+        for z in grid["feh"]
+        for g in grid["logg"]
+        for t in grid["teff"]
+        if (round(float(t), 6), round(float(g), 6), round(float(z), 6))
+        not in exists
+    ]
+
+
+def pad_missing_nodes(
+    filter_sets: Dict[str, List[str]] = FILTER_SETS,
+    model_root: Path = DEFAULT_MODEL_ROOT,
+    raw_path: Path = SPECTRA_RAW_PATH_DEFAULT,
+    grid: dict | None = None,
+    save: bool = True,
+) -> Dict[str, int]:
+    """
+    Fill the BC rows of the grid nodes NO spectrum exists for from the
+    nearest lower-gravity plane that has one, so the tables stay a full
+    rectangle on the extended logg axis.
+
+    Why.  BT-NextGen's raw grid is ragged: the logg 5.5 plane exists only
+    to 5000 K (logg 6.0 to 4000 K).  The loader (bc_grid.complete_axes)
+    reads only the largest COMPLETE box of a table, so a half plane at 5.5
+    would be trimmed away -- or cost the hot end of the Teff axis -- and
+    the ceiling would stay at 5.0, where an M dwarf below ~0.2 Msun sits
+    above it (logg 5.16 at 0.11 Msun) and the grid barrier pushes its
+    mass.  No star lives at logg 5.5 and 6000 K, so the padded cells are
+    never interpolated near a real star; they exist to make the box
+    rectangular.
+
+    What.  For each unavailable node (teff, logg, feh), the row of
+    (teff, logg', feh) with the largest logg' < logg that the table holds
+    is copied, at every Av and for every filter column of the facility,
+    into the node.  `alpha` is copied with it (it is the provenance of the
+    spectrum actually used) and the padding is recorded in the table's
+    metadata, ``meta["padding"]``: one record per padded node naming the
+    plane it was copied from.  Runs BEFORE step 2 (generate_bc_tables),
+    which then plans nothing for those nodes.
+
+    Returns {facility: number of padded rows}.
+    """
+    grid = read_grid_yaml(model_root) if grid is None else grid
+    missing = unavailable_grid_nodes(grid, raw_path)
+    if not missing:
+        print(
+            "pad_missing_nodes: every grid node has a spectrum; nothing to pad"
+        )
+        return {}
+    ensure_bc_tables(
+        model_root, MODEL, list(filter_sets), allow_local_changes=True
+    )
+    loggs = sorted(float(g) for g in grid["logg"])
+    counts: Dict[str, int] = {}
+    for fac in filter_sets:
+        path = bc_table_path(model_root, MODEL, fac)
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"pad_missing_nodes: {path} does not exist; step 2 has to have "
+                f"written the facility's table once before it can be padded"
+            )
+        df = read_bc_table(path)
+        meta = df.attrs.get("meta", {})
+        fcols = bc_table_filter_columns(path)
+        have = {
+            (round(t, 6), round(g, 6), round(z, 6))
+            for t, g, z in zip(df.teff, df.logg, df.feh)
+        }
+        rows, records = [], []
+        for teff, logg, feh in missing:
+            if (round(teff, 6), round(logg, 6), round(feh, 6)) in have:
+                continue  # already padded (a rerun)
+            source = None
+            for g in reversed([g for g in loggs if g < logg]):
+                if (round(teff, 6), round(g, 6), round(feh, 6)) in have:
+                    source = g
+                    break
+            if source is None:
+                raise ValueError(
+                    f"pad_missing_nodes: no lower-gravity row to pad "
+                    f"teff={teff}, logg={logg}, feh={feh} from in {path}"
+                )
+            src = df[
+                np.isclose(df.teff, teff)
+                & np.isclose(df.logg, source)
+                & np.isclose(df.feh, feh)
+            ]
+            if src.empty or src[fcols].isna().any().any():
+                raise ValueError(
+                    f"pad_missing_nodes: the source plane logg={source} is "
+                    f"itself incomplete at teff={teff}, feh={feh} in {path}; "
+                    f"finish step 2 for it first"
+                )
+            # to_dict, not itertuples: a column named like 2MASS_J is
+            # renamed positionally by namedtuples.
+            for r in src.to_dict("records"):
+                rec = {
+                    "teff": teff,
+                    "logg": logg,
+                    "feh": feh,
+                    "Av": float(r["Av"]),
+                }
+                rec.update({c: r[c] for c in ["alpha", "Rv"] + fcols})
+                rows.append(rec)
+            records.append(
+                {"teff": teff, "logg": logg, "feh": feh, "from_logg": source}
+            )
+        if not rows:
+            counts[fac] = 0
+            continue
+        new = pd.DataFrame(rows)[BC_PARAM_COLS + fcols]
+        padding = list(meta.get("padding", [])) + records
+        counts[fac] = len(rows)
+        if save:
+            write_bc_table(
+                new,
+                path,
+                filter_meta={
+                    c: meta.get("filters", {}).get(c, {}) for c in fcols
+                },
+                table_meta={"padding": padding},
+                allow_new_nodes=True,
+            )
+            print(
+                f"{fac}: padded {len(records)} node(s), {len(rows)} rows -> {path}"
+            )
+    return counts
 
 
 # -------------------------------------------------------------------

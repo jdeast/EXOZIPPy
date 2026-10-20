@@ -1,0 +1,72 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 8
+#$ -q mThM.q
+#$ -l use_himem=TRUE
+#$ -cwd
+#$ -j y
+#$ -N nextgen55
+#$ -o scripts/build_nextgen_logg55.$JOB_ID.log
+#
+# Extend the published NextGen BC tables to the logg 5.5 plane: fetch the
+# raw BT-NextGen spectra of that plane from SVO (it exists to 5000 K),
+# resample them (step 1), pad the hotter nodes from logg 5.0, compute the
+# new cells (step 2) and report the loader's complete box per facility.
+# The tables land in the package tree (git-ignored); publish them as a new
+# version of Zenodo record 23074950 and update the pin afterwards
+# (docs/zenodo.md).
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export OMP_NUM_THREADS=1
+cd $HOME/python/EXOZIPPy
+echo "commit $(git rev-parse --short HEAD) on $(git branch --show-current)   $(date)   slots $NSLOTS"
+python -u - <<'PY'
+import time
+from pathlib import Path
+
+from exozippy.components.sed.bc_grid import (
+    DEFAULT_MODEL_ROOT, bc_table_path, complete_axes, read_bc_meta, read_bc_table,
+    bc_table_filter_columns,
+)
+from exozippy.models.NextGen import generate_NextGen_BC_Tables as gen
+from exozippy.models.NextGen.fetch_raw_spectra import (
+    fetch_nodes, grid_nodes_from_yaml, svo_index,
+)
+
+raw = Path.home() / "spectra" / "BT-NextGen_AGSS2009"
+proc = Path.home() / "spectra" / "BT-NextGen_AGSS2009_processed"
+grid = gen.read_grid_yaml()
+plane = {**grid, "logg": [5.5]}
+t0 = time.time()
+
+print("== fetch: logg 5.5 plane")
+idx = svo_index(raw)
+out = fetch_nodes(grid_nodes_from_yaml(plane), raw, index=idx, n_workers=8)
+print({k: len(v) for k, v in out.items()}, f"{time.time()-t0:.0f} s")
+
+print("== step 1: resample the plane (skipping what SVO lacks)")
+print(gen.process_missing_spectra(plane, raw_path=raw, processed_path=proc, n_workers=8, skip_unavailable=True))
+print(f"{time.time()-t0:.0f} s")
+
+print("== pad: the nodes with no spectrum, from logg 5.0")
+print(gen.pad_missing_nodes(raw_path=raw))
+print(f"{time.time()-t0:.0f} s")
+
+print("== step 2: the new cells")
+gen.generate_bc_tables(processed_path=proc, save=True)
+print(f"{time.time()-t0:.0f} s")
+
+print("== verify: complete box per facility")
+for fac in gen.FILTER_SETS:
+    p = bc_table_path(DEFAULT_MODEL_ROOT, "NextGen", fac)
+    df = read_bc_table(p)
+    box = complete_axes(df, bc_table_filter_columns(p))
+    pad = read_bc_meta(p).get("padding", [])
+    print(f"{fac:12s} rows {len(df):6d}  logg {box['logg_pts'].min():.1f}-{box['logg_pts'].max():.1f}"
+          f"  teff {box['teff_pts'].min():.0f}-{box['teff_pts'].max():.0f}  padded nodes {len(pad)}")
+print("DONE", f"{time.time()-t0:.0f} s")
+PY
+echo "exit $?   $(date)"
