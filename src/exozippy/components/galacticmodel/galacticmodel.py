@@ -353,6 +353,273 @@ def ffp_logmass_logp(logmass, alpha, param):
     # ---------------------------------------------------------------------
 
 
+# ----------------------------------------------------------------------
+# The kinematic prior's pieces, one owner each.
+#
+# The density of the three branches is shared by the PyMC graph and by the
+# numpy position normalizer (log_position_norm), so the constant cannot drift
+# from the density it normalizes.  The linked-star analysis
+# (linked_star_structure) is static -- it reads which star.* elements are
+# HARD-linked -- and decides which stars carry a position term of their own.
+# The rulings are in components/star/star.md, "Linked stars: one position,
+# one density term".
+# ----------------------------------------------------------------------
+
+_LOG_2PI = float(np.log(2.0 * np.pi))
+#: log of the rv column of the velocity Jacobian: the Gaussians are in km/s,
+#: the sampled rv is in m/s.
+_LOG_KMS_PER_MS = float(np.log(1e-3))
+
+#: Branch order of every per-branch list below (and of the logsumexp).
+BRANCHES = ("thin_disk", "thick_disk", "bulge")
+
+#: (v_r, v_phi, v_z) dispersions in km/s, per branch.
+BRANCH_SIGMAS = {
+    "thin_disk": (
+        DISK_VELOCITY_SIGMA_U,
+        DISK_VELOCITY_SIGMA_V,
+        DISK_VELOCITY_SIGMA_W,
+    ),
+    "thick_disk": (
+        THICK_DISK_VELOCITY_SIGMA_U,
+        THICK_DISK_VELOCITY_SIGMA_V,
+        THICK_DISK_VELOCITY_SIGMA_W,
+    ),
+    "bulge": (
+        BULGE_VELOCITY_SIGMA_1,
+        BULGE_VELOCITY_SIGMA_2,
+        BULGE_VELOCITY_SIGMA_3,
+    ),
+}
+
+#: The velocity coordinates of a star, in the column order of the
+#: (pm_ra, pm_dec, rv) -> galactocentric map.
+VELOCITY_COORDS = ("pm_ra", "pm_dec", "rv")
+
+# Log-spaced trapezoid for the position normalizer.  The default distance
+# support spans 18.4 e-folds (1 mpc to 100 kpc); 2e5 intervals put the step at
+# 9e-5 in ln d, i.e. ~0.7 pc at the bulge, against the 50 pc hinge width and
+# the >100 pc scale lengths.  Measured: 4x the points moves log Z by < 1e-9.
+_POSITION_QUAD_POINTS = 200001
+
+
+def _hinge(t, xp):
+    # Smooth max(t, 0) (C-infinity), transition width ~50 pc in kpc units --
+    # keeps the plateau/cutoff kinks differentiable.
+    return 0.5 * (t + xp.sqrt(t * t + 0.0025))
+
+
+def branch_log_number_densities(x, y, z, r, xp=pt):
+    """log number density (stars/pc^3) of each branch, in BRANCHES order.
+
+    ``x, y, z`` galactocentric kpc (physics.galactic_xyz), ``r`` the
+    SMOOTHED cylindrical radius ``sqrt(x^2 + y^2 + 1e-6)`` the velocity
+    frame also uses.  ``xp`` is ``pt`` for the potential and ``np`` for the
+    position normalizer -- one form, two backends, as
+    ``chabrier_logmass_logp`` does for the IMF.
+    """
+    z_smooth = xp.sqrt(z**2 + 1e-6)
+
+    # 1. Thin disk.  Radial profile: exponential with Rd = 2.6 kpc, held
+    # FLAT inside R = DISK_RDBREAK (genulens's DISK=2 inner plateau) -- a
+    # plain exponential over-weights near-GC disk lenses by ~3x at R = 1
+    # kpc.  Anchored to the local (R0, midplane) number density.
+    r_beyond_sun = SUN_GC_DISTANCE - DISK_RDBREAK
+    log_dens_thin = (
+        np.log(DISK_LOCAL_NUMBER_DENSITY)
+        - (_hinge(r - DISK_RDBREAK, xp) - r_beyond_sun) / DISK_SCALE_LENGTH
+        - z_smooth / DISK_SCALE_HEIGHT
+    )
+
+    # 2. Thick disk -- same plateau, its own scale length/height.
+    log_dens_thick = (
+        np.log(THICK_DISK_LOCAL_NUMBER_DENSITY)
+        - (_hinge(r - DISK_RDBREAK, xp) - r_beyond_sun)
+        / THICK_DISK_SCALE_LENGTH
+        - z_smooth / THICK_DISK_SCALE_HEIGHT
+    )
+
+    # 3. Bulge/bar, anchored at its center.  The Gaussian cylindrical cutoff
+    # beyond BULGE_RC (genulens Rc/srob) is what confines the bar: without
+    # it the shallow exp(-r_s/2) profile is still 9% of central at a 4-kpc
+    # lens distance (vs ~4e-6 in genulens), flooding the disk range with
+    # spurious bulge stars.
+    cos_bar = np.cos(BULGE_BAR_ANGLE)
+    sin_bar = np.sin(BULGE_BAR_ANGLE)
+    x_bar = x * cos_bar + y * sin_bar
+    y_bar = -x * sin_bar + y * cos_bar
+    r_bulge_coord = xp.sqrt(
+        (x_bar / BULGE_DENSITY_X_0) ** 2
+        + (y_bar / BULGE_DENSITY_Y_0) ** 2
+        + (z / BULGE_DENSITY_Z_0) ** 2
+    )
+    log_dens_bulge = (
+        np.log(BULGE_CENTRAL_NUMBER_DENSITY)
+        - 0.5 * r_bulge_coord
+        - 0.5 * (_hinge(r - BULGE_RC, xp) / BULGE_RC_WIDTH) ** 2
+    )
+    return log_dens_thin, log_dens_thick, log_dens_bulge
+
+
+def _log_total_number_density(d_pc, cosl_cosb, sinl_cosb, sinb):
+    """numpy log sum_b n_b (stars/pc^3) at distance(s) ``d_pc`` along the
+    sight line, with the graph's own 1 mpc clamp."""
+    d_kpc = np.maximum(np.asarray(d_pc, dtype=float), 1e-3) / 1e3
+    x, y, z = _galactic_xyz_np(d_kpc, cosl_cosb, sinl_cosb, sinb)
+    r = np.sqrt(x**2 + y**2 + 1e-6)
+    dens = branch_log_number_densities(x, y, z, r, xp=np)
+    return np.logaddexp.reduce(np.stack(dens), axis=0)
+
+
+def log_position_norm(lower_pc, upper_pc, cosl_cosb, sinl_cosb, sinb):
+    """log of int_lower^upper sum_b n_b(d) d^2 dd along the sight line.
+
+    The number of stars per steradian in the cone out to ``upper`` -- the
+    normalizer of the position half of the kinematic prior, whose density
+    in the sampled ``star.distance`` (pc) is ``sum_b n_b(d) d^2``.  The
+    sight line is the anchor's and the bounds are static, so this is one
+    constant, computed once at build time (the same legitimacy argument as
+    ``_chabrier_log_norm``).  Trapezoid in ``ln d`` (integrand ``n d^3``)
+    with the peak factored out.
+    """
+    lnd = np.linspace(
+        np.log(float(lower_pc)), np.log(float(upper_pc)), _POSITION_QUAD_POINTS
+    )
+    f = (
+        _log_total_number_density(np.exp(lnd), cosl_cosb, sinl_cosb, sinb)
+        + 3.0 * lnd
+    )
+    peak = float(np.max(f))
+    return float(np.log(np.trapezoid(np.exp(f - peak), lnd)) + peak)
+
+
+def _hard_links(param):
+    """{element: link spec} of a Parameter's HARD links (sigma: 0 initval
+    links), or {} -- a mock or an unlinked parameter has none."""
+    links = getattr(param, "element_links", None) or {}
+    return links.get("hard", {}) or {}
+
+
+def linked_star_structure(stars, n_star, prefix="star"):
+    """Which stars carry a position of their own, and which velocity
+    coordinates of each star are hard-linked.
+
+    Returns ``(root_of, vel_linked, refused)``:
+
+    - ``root_of[k]`` is the star whose position star ``k`` shares.  A star
+      whose ``distance`` is HARD-linked to exactly one other star's
+      distance, and to nothing else, joins that star's group (chains are
+      followed to the end); every other star is its own root.
+    - ``vel_linked[k]`` is the sorted tuple of column indices (into
+      ``VELOCITY_COORDS``) of star ``k``'s hard-linked velocity
+      coordinates, for every star that has any.
+    - ``refused`` lists ``(k, dep_paths)`` for a hard-linked distance that
+      reads anything other than ONE other star's distance: that star keeps
+      its own position term (and the caller warns), because there is no
+      single partner whose position it is.
+    """
+    parent = list(range(n_star))
+    refused = []
+    for k, spec in sorted(_hard_links(stars.distance).items()):
+        k = int(k)
+        intra = set(spec.get("intra_deps", ()) or ())
+        paths = tuple(spec.get("dep_paths", ()) or ())
+        foreign = [
+            p
+            for p in paths
+            if not (
+                len(p.split(".")) == 3
+                and p.split(".")[0] == prefix
+                and p.split(".")[2] == "distance"
+            )
+        ]
+        if len(intra) == 1 and not foreign and k not in intra:
+            parent[k] = int(next(iter(intra)))
+        else:
+            refused.append((k, paths))
+
+    root_of = np.arange(n_star)
+    for k in range(n_star):
+        j, seen = k, set()
+        while parent[j] != j:
+            if j in seen:  # a cycle the link engine should have refused
+                raise ValueError(
+                    f"galacticmodel: the hard links on {prefix}.distance "
+                    f"form a cycle through element {k}; a cycle of hard "
+                    f"links has no value."
+                )
+            seen.add(j)
+            j = parent[j]
+        root_of[k] = j
+
+    vel_linked = {}
+    for c, name in enumerate(VELOCITY_COORDS):
+        param = getattr(stars, name, None)
+        if param is None:
+            continue
+        for k in _hard_links(param):
+            vel_linked.setdefault(int(k), set()).add(c)
+    vel_linked = {k: tuple(sorted(v)) for k, v in vel_linked.items()}
+    return root_of, vel_linked, refused
+
+
+def _log_velocity_marginal(cols, c, s, xprime, vphi_mean, sigmas, m_rot, v0):
+    """log density of the hard-linked velocity coordinates ``cols`` of ONE
+    star under ONE branch, in the km/s coordinates ``xprime``.
+
+    The branch is a Gaussian in ``u = (v_r, v_phi, v_z)`` with mean
+    ``(0, vphi_mean, 0)`` and covariance ``diag(sigmas^2)``, and
+    ``u = Q (v0 + M_rot x')`` with ``Q`` get_polar_velocity's map
+    ``[[c, s, 0], [-s, c, 0], [0, 0, 1]]``.  ``c, s`` are built from the
+    SMOOTHED radius (``r^2 = x^2 + y^2 + 1e-6``), so ``Q`` is a rotation
+    times ``rho2 = c^2 + s^2`` on its first two rows, 1 - 1e-4 for a source
+    0.1 kpc from the Galactic center -- not negligible against an exact
+    normalization, so it is carried exactly: ``x' = B (u - Q v0)`` with
+    ``B = M_rot^T Q^-1`` (``M_rot`` IS a rotation), hence
+    ``x' ~ N(B (m - Q v0), B S B^T)`` and the marginal of any subset is
+    the matching sub-block.  The caller adds ``log |det Q| = log rho2``,
+    which the full density (written in u) leaves out.  Written element by
+    element for |cols| in {1, 2} -- the only sizes a CONDITIONAL needs (0
+    linked is the full density, 3 linked leaves nothing to condition).
+    """
+    m = np.asarray(m_rot, dtype=float)
+    rho2 = c * c + s * s
+    # Q^-1 = [[c, -s, 0], [s, c, 0], [0, 0, rho2]] / rho2, as columns n.
+    qinv = [
+        [c / rho2, -s / rho2, 0.0],
+        [s / rho2, c / rho2, 0.0],
+        [0.0, 0.0, 1.0],
+    ]
+    # B[i][n] = sum_k M[k, i] Qinv[k][n]
+    b_mat = [
+        [sum(m[k, i] * qinv[k][n] for k in range(3)) for n in range(3)]
+        for i in range(3)
+    ]
+    qv0 = [c * v0[0] + s * v0[1], -s * v0[0] + c * v0[1], v0[2]]
+    du = [0.0 - qv0[0], vphi_mean - qv0[1], 0.0 - qv0[2]]
+    var = [float(sg) ** 2 for sg in sigmas]
+
+    mean = {i: sum(b_mat[i][n] * du[n] for n in range(3)) for i in cols}
+
+    def cov(i, j):
+        return sum(b_mat[i][n] * b_mat[j][n] * var[n] for n in range(3))
+
+    if len(cols) == 1:
+        (i,) = cols
+        cii = cov(i, i)
+        dx = xprime[i] - mean[i]
+        return -0.5 * dx**2 / cii - 0.5 * (_LOG_2PI + pt.log(cii))
+    if len(cols) == 2:
+        i, j = cols
+        cii, cjj, cij = cov(i, i), cov(j, j), cov(i, j)
+        det = cii * cjj - cij**2
+        dxi = xprime[i] - mean[i]
+        dxj = xprime[j] - mean[j]
+        quad = (cjj * dxi**2 - 2.0 * cij * dxi * dxj + cii * dxj**2) / det
+        return -0.5 * quad - _LOG_2PI - 0.5 * pt.log(det)
+    raise ValueError(f"a velocity marginal over {len(cols)} coordinates")
+
+
 class GalacticModel(Component):
     # The only mass function implemented below.  ``IMF:`` is validated
     # against this in __init__ rather than silently ignored: the key selected
@@ -853,7 +1120,6 @@ class GalacticModel(Component):
         # we still need to be able to calculate a likelihood,
         distance = pt.maximum(stars.distance.value, 1e-3) / 1e3  # kpc
         x, y, z = get_galactic_xyz(distance)
-        z_smooth = pt.sqrt(z**2 + 1e-6)
         r = pt.sqrt(x**2 + y**2 + 1e-6)
 
         vel = get_galactocentric_velocity(
@@ -862,121 +1128,47 @@ class GalacticModel(Component):
         v_x, v_y, v_z = vel[:, 0], vel[:, 1], vel[:, 2]
         v_r, v_phi = get_polar_velocity(x, y, r, v_x, v_y)
 
-        # match the density distribution of the galaxy
-        cos_bar = np.cos(BULGE_BAR_ANGLE)
-        sin_bar = np.sin(BULGE_BAR_ANGLE)
-        x_bar = x * cos_bar + y * sin_bar
-        y_bar = -x * sin_bar + y * cos_bar
-
-        def hinge(t):
-            # Smooth max(t, 0) (C-infinity), transition width ~50 pc in
-            # kpc units -- keeps the plateau/cutoff kinks differentiable.
-            return 0.5 * (t + pt.sqrt(t * t + 0.0025))
-
         # Each mixture branch must carry its own normalization: constants
         # cancel within a single Potential but NOT across the logsumexp.
         # Velocity Gaussians contribute -log(sigma1*sigma2*sigma3) (the
-        # shared (2*pi)^(3/2) is identical in all branches and dropped);
-        # the density anchors (stars/pc^3, genulens's number-density
-        # channel, see constants.py) set the physical population ratios.
-
-        # 1. Thin disk (Spatial + Kinematic)
-        # Radial profile: exponential with Rd = 2.6 kpc, held FLAT inside
-        # R = DISK_RDBREAK (genulens's DISK=2 inner plateau) -- a plain
-        # exponential over-weights near-GC disk lenses by ~3x at R = 1
-        # kpc.  Anchored to the local (R0, midplane) number density.
+        # shared (2*pi)^(3/2) is identical in all branches and dropped
+        # here, and reported by evidence_log_norm); the density anchors
+        # (stars/pc^3, genulens's number-density channel, see constants.py)
+        # set the physical population ratios.  The densities live in
+        # branch_log_number_densities, shared with the position normalizer.
+        #
         # Galactic rotation is AZIMUTHAL: the circular-speed offset belongs
-        # on v_phi (paired with the azimuthal dispersion sigma_V) and the
-        # radial component v_r is zero-centered (sigma_U). These centers
-        # were swapped until 2026-08: the prior penalized an EXACTLY
-        # circular co-rotating orbit by ~49 nats and was maximized by a
-        # star plunging radially at the rotation speed (pinned by
-        # tests/test_galactic_model.py). On examples/ob140939 the swap
-        # gave the anti-rotation parallax solution +5 nats and flipped the
-        # mode weights to 0.98/0.02 AGAINST the Yee et al. 2015 proper-
-        # motion-preferred solution. Sign convention: v_phi as computed by
-        # get_polar_velocity is positive for co-rotation at every position
-        # (verified against astropy Galactocentric), so the center is
-        # +DISK_ROTATION_VELOCITY.
-        r_beyond_sun = SUN_GC_DISTANCE - DISK_RDBREAK
-        log_dens_thin = (
-            np.log(DISK_LOCAL_NUMBER_DENSITY)
-            - (hinge(r - DISK_RDBREAK) - r_beyond_sun) / DISK_SCALE_LENGTH
-            - z_smooth / DISK_SCALE_HEIGHT
+        # on v_phi (paired with the azimuthal dispersion) and the radial
+        # component v_r is zero-centered. These centers were swapped until
+        # 2026-08: the prior penalized an EXACTLY circular co-rotating orbit
+        # by ~49 nats and was maximized by a star plunging radially at the
+        # rotation speed (pinned by tests/test_galactic_model.py). On
+        # examples/ob140939 the swap gave the anti-rotation parallax
+        # solution +5 nats and flipped the mode weights to 0.98/0.02 AGAINST
+        # the Yee et al. 2015 proper-motion-preferred solution. Sign
+        # convention: v_phi as computed by get_polar_velocity is positive
+        # for co-rotation at every position (verified against astropy
+        # Galactocentric).  The thick disk's mean rotation (170 km/s) is the
+        # asymmetric drift; the bulge rotates cylindrically, Omega * r.
+        log_dens = branch_log_number_densities(x, y, z, r)
+        vphi_means = (
+            DISK_ROTATION_VELOCITY,
+            THICK_DISK_ROTATION_VELOCITY,
+            BULGE_ROTATION_ANGULAR_VELOCITY * r,
         )
-        log_vel_thin = (
-            (-0.5 / DISK_VELOCITY_SIGMA_U**2) * v_r**2
-            + (-0.5 / DISK_VELOCITY_SIGMA_V**2)
-            * (v_phi - DISK_ROTATION_VELOCITY) ** 2
-            + (-0.5 / DISK_VELOCITY_SIGMA_W**2) * v_z**2
-        )
-        L_thin = (
-            log_dens_thin
-            + log_vel_thin
-            - np.log(
-                DISK_VELOCITY_SIGMA_U
-                * DISK_VELOCITY_SIGMA_V
-                * DISK_VELOCITY_SIGMA_W
+        log_vel = []
+        log_sig = []
+        for name, vphi_mean in zip(BRANCHES, vphi_means):
+            s1, s2, s3 = BRANCH_SIGMAS[name]
+            log_vel.append(
+                (-0.5 / s1**2) * v_r**2
+                + (-0.5 / s2**2) * (v_phi - vphi_mean) ** 2
+                + (-0.5 / s3**2) * v_z**2
             )
-        )
-
-        # 2. Thick disk (Spatial + Kinematic) -- same plateau, its own
-        # scale length/height; kinematics include the asymmetric drift
-        # (mean rotation 170 km/s) and hotter dispersions.
-        log_dens_thick = (
-            np.log(THICK_DISK_LOCAL_NUMBER_DENSITY)
-            - (hinge(r - DISK_RDBREAK) - r_beyond_sun)
-            / THICK_DISK_SCALE_LENGTH
-            - z_smooth / THICK_DISK_SCALE_HEIGHT
-        )
-        log_vel_thick = (
-            (-0.5 / THICK_DISK_VELOCITY_SIGMA_U**2) * v_r**2
-            + (-0.5 / THICK_DISK_VELOCITY_SIGMA_V**2)
-            * (v_phi - THICK_DISK_ROTATION_VELOCITY) ** 2
-            + (-0.5 / THICK_DISK_VELOCITY_SIGMA_W**2) * v_z**2
-        )
-        L_thick = (
-            log_dens_thick
-            + log_vel_thick
-            - np.log(
-                THICK_DISK_VELOCITY_SIGMA_U
-                * THICK_DISK_VELOCITY_SIGMA_V
-                * THICK_DISK_VELOCITY_SIGMA_W
-            )
-        )
-
-        # 3. Bulge/bar (Spatial + Kinematic), anchored at its center.
-        # The Gaussian cylindrical cutoff beyond BULGE_RC (genulens Rc/
-        # srob) is what confines the bar: without it the shallow
-        # exp(-r_s/2) profile is still 9% of central at a 4-kpc lens
-        # distance (vs ~4e-6 in genulens), flooding the disk range with
-        # spurious bulge stars.
-        r_bulge_coord = pt.sqrt(
-            (x_bar / BULGE_DENSITY_X_0) ** 2
-            + (y_bar / BULGE_DENSITY_Y_0) ** 2
-            + (z / BULGE_DENSITY_Z_0) ** 2
-        )
-        log_dens_bulge = (
-            np.log(BULGE_CENTRAL_NUMBER_DENSITY)
-            - 0.5 * r_bulge_coord
-            - 0.5 * (hinge(r - BULGE_RC) / BULGE_RC_WIDTH) ** 2
-        )
-        # Bulge cylindrical rotation is azimuthal too (same fix as above).
-        bulge_rot = BULGE_ROTATION_ANGULAR_VELOCITY * r
-        log_vel_bulge = (
-            (-0.5 / BULGE_VELOCITY_SIGMA_1**2) * v_r**2
-            + (-0.5 / BULGE_VELOCITY_SIGMA_2**2) * (v_phi - bulge_rot) ** 2
-            + (-0.5 / BULGE_VELOCITY_SIGMA_3**2) * v_z**2
-        )
-        L_bulge = (
-            log_dens_bulge
-            + log_vel_bulge
-            - np.log(
-                BULGE_VELOCITY_SIGMA_1
-                * BULGE_VELOCITY_SIGMA_2
-                * BULGE_VELOCITY_SIGMA_3
-            )
-        )
+            log_sig.append(np.log(s1 * s2 * s3))
+        branch_logp = [
+            dens + lv - ls for dens, lv, ls in zip(log_dens, log_vel, log_sig)
+        ]
 
         volume_element = 2.0 * pt.log(distance * 1000.0)
 
@@ -985,17 +1177,63 @@ class GalacticModel(Component):
         # v = M_rot @ (K*pm_ra*d, K*pm_dec*d, rv/1e3) + v0 needs
         # |det dv/d(pm_ra, pm_dec, rv)| = (K*d)^2 * 1e-3 (M_rot is a pure
         # rotation, det = 1; the constant 1e-3 from m/s -> km/s is
-        # dropped).  Without the +2*log(d) the intended prior
-        # rho * d^2 * f(v) * (K*d)^2 was applied as rho * d^2 * f(v),
-        # under-weighting large distances by d^2.
+        # dropped here and reported by evidence_log_norm).  Without the
+        # +2*log(d) the intended prior rho * d^2 * f(v) * (K*d)^2 was
+        # applied as rho * d^2 * f(v), under-weighting large distances by
+        # d^2.
         velocity_jacobian = 2.0 * pt.log(K_VEL_CONVERSION * distance)
 
-        # 4. Combine them using LogSumExp
-        # log(exp(L_thin) + exp(L_thick) + exp(L_bulge))
-        kinematic_penalty = pt.sum(
-            pm.math.logsumexp(pt.stack([L_thin, L_thick, L_bulge]), axis=0)
-            + volume_element
-            + velocity_jacobian
+        # Linked stars (star.md, "Linked stars: one position, one density
+        # term").  A star whose distance is HARD-linked to another star's
+        # has no position of its own: the system it belongs to has one
+        # position along the line of sight, so it gets one density and one
+        # d^2 volume element, and the linked star contributes only the
+        # density of its own still-free velocity coordinates, inside the
+        # same branch (one population for the whole system).
+        n_star = int(
+            getattr(stars, "n_elements", 0)
+            or np.atleast_1d(stars.distance.initval).size
+        )
+        root_of, vel_linked, refused = linked_star_structure(
+            stars, n_star, prefix=getattr(stars, "prefix", "star")
+        )
+        self._linked_star_report(stars, root_of, vel_linked, refused)
+        roots = sorted(set(int(j) for j in root_of))
+        members = [k for k in range(n_star) if root_of[k] != k]
+
+        if not members and not vel_linked:
+            # Every star independent: exactly the expression this component
+            # has always built (bit-identical start logp on every shipped
+            # example).
+            kinematic_penalty = pt.sum(
+                pm.math.logsumexp(pt.stack(branch_logp), axis=0)
+                + volume_element
+                + velocity_jacobian
+            )
+        else:
+            kinematic_penalty = self._grouped_kinematic_logp(
+                stars,
+                distance,
+                x,
+                y,
+                r,
+                log_dens,
+                log_vel,
+                log_sig,
+                vphi_means,
+                volume_element,
+                velocity_jacobian,
+                root_of,
+                vel_linked,
+                m_rot_np,
+                v0_arr,
+            )
+
+        self._evidence_log_norm = self._kinematic_evidence_log_norm(
+            stars,
+            roots,
+            vel_linked,
+            (cosl_cosb_np, sinl_cosb_np, sinb_np),
         )
         pm.Potential(f"{self.prefix}.kinematic_prior", kinematic_penalty)
 
@@ -1011,6 +1249,264 @@ class GalacticModel(Component):
             key=f"{self.prefix}.kinematic",
             rank=20,
         )
+
+    # ------------------------------------------------------------------
+    # Linked stars and the normalization (star.md, "Linked stars: one
+    # position, one density term").
+    # ------------------------------------------------------------------
+
+    def _linked_star_report(self, stars, root_of, vel_linked, refused):
+        """Say, once per build, which stars share a position and what each
+        linked star still contributes -- and warn for a hard-linked
+        distance the rule cannot place."""
+        names = list(getattr(stars, "names", None) or [])
+
+        def label(k):
+            return names[k] if k < len(names) else str(k)
+
+        for k, j in enumerate(root_of):
+            if j == k:
+                continue
+            linked = vel_linked.get(k, ())
+            free = [
+                VELOCITY_COORDS[c] for c in range(3) if c not in set(linked)
+            ]
+            what = (
+                "nothing further (its velocity is hard-linked too)"
+                if not free
+                else "the density of its free velocity coordinate(s) "
+                + ", ".join(free)
+                + (
+                    " conditional on the linked "
+                    + ", ".join(VELOCITY_COORDS[c] for c in linked)
+                    if linked
+                    else ""
+                )
+                + ", in the same Galactic population"
+            )
+            logger.info(
+                f"[{self.prefix}] star '{label(k)}' shares the position of "
+                f"star '{label(int(j))}' (hard-linked distance): one "
+                f"position, one density and d^2 volume term; '{label(k)}' "
+                f"contributes {what}."
+            )
+        for k, paths in refused:
+            logger.warning(
+                f"[{self.prefix}] star '{label(k)}' has a hard-linked "
+                f"distance that does not name exactly one other star's "
+                f"distance (it reads {list(paths) or 'nothing'}), so there "
+                f"is no single partner whose position it shares. It keeps "
+                f"its own Galactic density term, which is then a factor on "
+                f"the link's sources rather than a density of a coordinate "
+                f"of its own. Link it as 'initval: star.<other>.distance' "
+                f"with 'sigma: 0' to share that star's position instead."
+            )
+
+    def _grouped_kinematic_logp(
+        self,
+        stars,
+        distance,
+        x,
+        y,
+        r,
+        log_dens,
+        log_vel,
+        log_sig,
+        vphi_means,
+        volume_element,
+        velocity_jacobian,
+        root_of,
+        vel_linked,
+        m_rot_np,
+        v0_arr,
+    ):
+        """The kinematic prior with linked stars grouped onto one position.
+
+        Per group g with root r and members k (root included):
+
+            log p_g = logsumexp_b [ log n_b(d_r)
+                                    + sum_k log f_b(x_free,k | x_linked,k) ]
+                      + 2 log d_r + (branch-independent Jacobians)
+
+        so the group has ONE density and ONE volume element, and ONE
+        population (the branch is shared by the whole system).  A member
+        with no hard-linked velocity coordinate contributes the full,
+        exactly normalized velocity density; one with some contributes the
+        exactly normalized CONDITIONAL density of the rest; one with all
+        three contributes nothing.  Every per-star vector is assembled with
+        pt.set_subtensor (never pt.where -- CLAUDE.md).
+        """
+        n_star = len(root_of)
+        roots = sorted(set(int(j) for j in root_of))
+        members = [k for k in range(n_star) if root_of[k] != k]
+
+        # Per-branch per-star velocity term V_b and branch-independent J.
+        # Default (an independent star): the unnormalized Gaussian and the
+        # (K d)^2 Jacobian, exactly the fast path's terms.
+        V = [lv - ls for lv, ls in zip(log_vel, log_sig)]
+        J = velocity_jacobian
+
+        # A member with no linked velocity: the FULL velocity density,
+        # exactly normalized -- the constants the root's term leaves to
+        # evidence_log_norm are owed here in the model, because a member's
+        # term must integrate to exactly 1 over its free coordinates for a
+        # linked config to compare exactly against an unlinked one.
+        for k in members:
+            if k in vel_linked:
+                continue
+            # |det Q| of the smoothed polar map (_log_velocity_marginal) is
+            # owed too: 1 - 1e-4 for a star 0.1 kpc from the Galactic center.
+            log_det_q = pt.log((x[k] ** 2 + y[k] ** 2) / r[k] ** 2)
+            J = pt.set_subtensor(
+                J[k], J[k] + _LOG_KMS_PER_MS - 1.5 * _LOG_2PI + log_det_q
+            )
+
+        # A star (root or member) with hard-linked velocity coordinates: the
+        # conditional density of its free coordinates given the linked ones,
+        # log f(x) - log f_L(x_L), in the SAMPLED coordinates (each column's
+        # Jacobian: K d for a proper motion, 1e-3 for rv).
+        for k, cols in sorted(vel_linked.items()):
+            if len(cols) == 3:
+                for b in range(len(V)):
+                    V[b] = pt.set_subtensor(V[b][k], 0.0)
+                J = pt.set_subtensor(J[k], 0.0)
+                continue
+            d_k = distance[k]
+            log_jac_col = (
+                pt.log(K_VEL_CONVERSION * d_k),
+                pt.log(K_VEL_CONVERSION * d_k),
+                _LOG_KMS_PER_MS,
+            )
+            xprime = (
+                K_VEL_CONVERSION * stars.pm_ra.value[k] * d_k,
+                K_VEL_CONVERSION * stars.pm_dec.value[k] * d_k,
+                stars.rv.value[k] / 1e3,
+            )
+            c_k = x[k] / r[k]
+            s_k = y[k] / r[k]
+            full_jac = J[k] + _LOG_KMS_PER_MS  # (K d)^2 * 1e-3
+            # |det Q| of the smoothed polar map (see _log_velocity_marginal).
+            log_det_q = pt.log(c_k * c_k + s_k * s_k)
+            linked_jac = sum(log_jac_col[c] for c in cols)
+            for b, name in enumerate(BRANCHES):
+                vphi_mean = vphi_means[b]
+                if not np.isscalar(vphi_mean):
+                    vphi_mean = vphi_mean[k]
+                log_marg = _log_velocity_marginal(
+                    cols,
+                    c_k,
+                    s_k,
+                    xprime,
+                    vphi_mean,
+                    BRANCH_SIGMAS[name],
+                    m_rot_np,
+                    v0_arr,
+                )
+                cond = (
+                    V[b][k]
+                    - 1.5 * _LOG_2PI
+                    + full_jac
+                    + log_det_q
+                    - (log_marg + linked_jac)
+                )
+                V[b] = pt.set_subtensor(V[b][k], cond)
+            J = pt.set_subtensor(J[k], 0.0)
+
+        # W[g, k] = 1 when star k belongs to group g (its root's row).
+        W = np.zeros((len(roots), n_star))
+        for k in range(n_star):
+            W[roots.index(int(root_of[k])), k] = 1.0
+        W = pt.as_tensor_variable(W)
+        roots_idx = np.asarray(roots, dtype=np.int64)
+        group_branch = [
+            dens[roots_idx] + pt.dot(W, v) for dens, v in zip(log_dens, V)
+        ]
+        return (
+            pt.sum(pm.math.logsumexp(pt.stack(group_branch), axis=0))
+            + pt.sum(volume_element[roots_idx])
+            + pt.sum(J)
+        )
+
+    def _kinematic_evidence_log_norm(self, stars, roots, vel_linked, los):
+        """The constant to ADD to a log evidence for the kinematic prior to
+        be a normalized density (outputs/evidence's sign convention: the
+        bridge integrates exp(model logp), and lnZ_norm = lnZ + this).
+
+        Per ROOT (a star with a position of its own), the term in the model
+        is the normalized density over (distance, pm_ra, pm_dec, rv) plus
+
+            log Z_pos + (3/2) log(2 pi) - log(1e-3)
+
+        where Z_pos = int sum_b n_b(d) d^2 dd over the root's static
+        distance bounds (log_position_norm) -- the stars per steradian in
+        the cone -- and the last two are the Gaussians' (2 pi)^(3/2) and
+        the rv column's m/s -> km/s Jacobian.  A root whose own velocity is
+        partly hard-linked is already exactly conditional (no Gaussian
+        constant owed).  A root whose distance is PINNED owes log of its
+        density times d^2 at the pin instead of Z_pos (the remaining
+        velocity mixture is then normalized).  A member owes nothing: its
+        term is exact in the model.  Velocity bounds are treated as
+        infinite (pm +/- 1e5 mas/yr is > 400 km/s beyond 1 pc).
+        """
+        cosl_cosb, sinl_cosb, sinb = los
+        bounds = _sampled_bounds(stars.distance)
+        is_derived = getattr(stars.distance, "element_is_derived", None)
+        links = getattr(stars.distance, "element_links", None) or {}
+        if links.get("lower") or links.get("upper"):
+            logger.warning(
+                f"[{self.prefix}] star.distance carries a linked lower/upper "
+                f"bound; the kinematic prior's position normalizer uses the "
+                f"STATIC bounds, so evidence_log_norm is approximate there."
+            )
+        total = 0.0
+        cache = {}
+        for k in roots:
+            sampled = stars.distance.element_is_sampled(k) or bool(
+                is_derived(k) if callable(is_derived) else False
+            )
+            if sampled:
+                if bounds is None:
+                    logger.warning(
+                        f"[{self.prefix}] cannot read finite star.distance "
+                        f"bounds; the kinematic prior's position normalizer "
+                        f"is omitted from evidence_log_norm."
+                    )
+                    c = 0.0
+                else:
+                    lo = float(
+                        np.atleast_1d(bounds[0])[
+                            min(k, np.size(bounds[0]) - 1)
+                        ]
+                    )
+                    hi = float(
+                        np.atleast_1d(bounds[1])[
+                            min(k, np.size(bounds[1]) - 1)
+                        ]
+                    )
+                    if (lo, hi) not in cache:
+                        cache[(lo, hi)] = log_position_norm(
+                            lo, hi, cosl_cosb, sinl_cosb, sinb
+                        )
+                    c = cache[(lo, hi)]
+            else:
+                d0 = float(stars.distance.element_start(k))
+                c = float(
+                    _log_total_number_density(d0, cosl_cosb, sinl_cosb, sinb)
+                ) + 2.0 * np.log(max(d0, 1e-3))
+            if k not in vel_linked:
+                c += 1.5 * _LOG_2PI - _LOG_KMS_PER_MS
+            total -= c
+        return float(total)
+
+    def evidence_log_norm(self):
+        """Constant that makes this component's potentials normalized priors
+        in a log evidence (ADD it to lnZ; see _kinematic_evidence_log_norm).
+
+        Covers the kinematic prior only -- the IMF/FFP potential is already
+        normalized over star.logmass's support.  Available after
+        build_likelihood; 0.0 before.
+        """
+        return float(getattr(self, "_evidence_log_norm", 0.0))
 
     def compile_plotters(self, model, system):
         pass
