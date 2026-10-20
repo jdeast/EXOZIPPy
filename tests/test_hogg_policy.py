@@ -44,8 +44,10 @@ class _QuietConfigManager(_DummyConfigManager):
 
 
 class _FakeParam:
-    def __init__(self, values):
+    def __init__(self, values, upper=None):
         self.value = pt.as_tensor_variable(np.asarray(values, dtype=float))
+        if upper is not None:
+            self.upper = np.asarray(upper, dtype=float)
 
 
 def _make(config):
@@ -62,27 +64,29 @@ def _make(config):
         ("uniform", None),
         ("flat", None),
         (False, None),
-        ("beta", (1.0, 50.0)),
-        (True, (1.0, 50.0)),
+        ("beta", (1.0, 100.0)),
+        (True, (1.0, 100.0)),
         ({"b": 20}, (1.0, 20.0)),
+        ({"a": 2}, (2.0, 100.0)),
         ({"a": 2, "b": 3}, (2.0, 3.0)),
     ],
 )
 def test_out_frac_prior_spellings(value, expected):
-    """``beta`` defaults to Beta(1, N/10); absent/uniform keeps flat."""
-    assert robust_support.parse_out_frac_prior(value, 500) == expected
+    """``beta`` is the fixed Beta(1, 100), whatever the file's size;
+    absent/uniform keeps flat; ``{a, b}`` is the per-file override."""
+    assert robust_support.parse_out_frac_prior(value) == expected
 
 
 @pytest.mark.parametrize("bad", ["gamma", {"a": -1}, {"c": 1}, [1, 2]])
 def test_out_frac_prior_rejects_bad_values(bad):
     with pytest.raises(ValueError):
-        robust_support.parse_out_frac_prior(bad, 100)
+        robust_support.parse_out_frac_prior(bad)
 
 
 @pytest.mark.parametrize(
     "a, b, lower, upper",
     [
-        (1.0, 50.0, 0.0, 0.5),  # the default on a 500-point file
+        (1.0, 100.0, 0.0, 0.5),  # the default, Beta(1, 100)
         (1.0, 0.4, 0.0, 0.5),  # b < 1: density rises toward the cap
         (0.5, 5.0, 0.0, 0.5),  # a < 1: integrable 1/sqrt(f) spike
         (2.0, 3.0, 0.1, 0.4),  # a user-tightened support
@@ -151,18 +155,18 @@ def test_beta_prior_adds_exactly_its_normalized_term():
     """
     Given the second file with ``out_frac_prior: beta`` (50 points),
     When the likelihood is built,
-    Then the shapes are Beta(1, 5), one named prior Potential is added, and
+    Then the shapes are Beta(1, 100), one named prior Potential is added, and
     the model logp differs from the flat-prior model by exactly the
     normalized Beta logpdf at out_frac.
     """
     inst, model, _ = _dispatched(prior="beta")
-    assert inst._out_frac_beta == {1: (1.0, 5.0)}
+    assert inst._out_frac_beta == {1: (1.0, 100.0)}
     assert "dummy.out_frac.beta.1" in {v.name for v in model.potentials}
 
     _, flat, _ = _dispatched(prior=None)
     diff = float(model.compile_logp()({})) - float(flat.compile_logp()({}))
-    expected = stats.beta.logpdf(0.03, 1.0, 5.0) - np.log(
-        stats.beta.cdf(0.5, 1.0, 5.0)
+    expected = stats.beta.logpdf(0.03, 1.0, 100.0) - np.log(
+        stats.beta.cdf(0.5, 1.0, 100.0)
     )
     assert diff == pytest.approx(expected, rel=1e-10)
 
@@ -182,7 +186,7 @@ class _Event:
         return [(T0 - TE, T0 + TE)]
 
 
-def _light_curve_system(kind, n=500, n_bad=8, out_frac=0.05):
+def _light_curve_system(kind, n=500, n_bad=8, out_frac=0.05, cap=None):
     """A flat light curve, model = 1 exactly, with ``n_bad`` 30-sigma
     excursions either CLUSTERED at the event (a missed anomaly) or
     SCATTERED evenly over the season (bad data / variability)."""
@@ -205,7 +209,7 @@ def _light_curve_system(kind, n=500, n_bad=8, out_frac=0.05):
     inst._prepare_robust(err, inst.inst_map)
     with pm.Model():
         inst.out_frac = _FakeParam([out_frac])
-        inst.out_scale = _FakeParam([10 * 0.01])
+        inst.out_scale = _FakeParam([10 * 0.01], upper=cap)
         inst.add_observation_likelihood(
             "m",
             mu=pt.as_tensor_variable(np.ones(n)),
@@ -234,8 +238,8 @@ def test_audit_flags_a_clustered_anomaly_by_its_enrichment():
     base = np.mean(np.abs(t - T0) <= TE)
     assert row["enrich"] == pytest.approx(1.0 / base, rel=1e-12)
     assert row["delta_logl"] < -robust_support.FORGIVEN_NATS_FLAG
-    assert any("concentrated" in f for f in row["flags"])
-    assert any("forgives" in f for f in row["flags"])
+    kinds = {k for k, _ in row["flags"]}
+    assert kinds == {"ANOMALY", "FORGIVEN"}
 
 
 def test_audit_does_not_call_scattered_outliers_an_anomaly():
@@ -243,8 +247,9 @@ def test_audit_does_not_call_scattered_outliers_an_anomaly():
     Given the same eight excursions spread evenly over the season,
     When the audit runs,
     Then enrich ~ 1 (one of the eight happens to fall in the window: 1.25)
-    and the only flag is the forgiven-nats one -- the case DC2026's
-    starspot fits need the mixture for.
+    and the flags are VARIABILITY (1.6% of the points, not at the event)
+    and FORGIVEN -- never ANOMALY: the case DC2026's starspot fits need the
+    mixture for.
     """
     system, (t, _, _, bad) = _light_curve_system("scattered")
     (row,) = outliers.audit_point(system, {}, "MAP")
@@ -253,8 +258,10 @@ def test_audit_does_not_call_scattered_outliers_an_anomaly():
     expected = np.mean(inside[bad]) / np.mean(inside)
     assert row["enrich"] == pytest.approx(expected, rel=1e-12)
     assert row["enrich"] < robust_support.ENRICH_FLAG
-    assert not any("concentrated" in f for f in row["flags"])
-    assert any("forgives" in f for f in row["flags"])
+    # 8 of 500 (1.6% > 1%) spread over the baseline: VARIABILITY, the
+    # DC2026-093 shape, and never ANOMALY.
+    kinds = {k for k, _ in row["flags"]}
+    assert kinds == {"VARIABILITY", "FORGIVEN"}
 
 
 def test_audit_reports_the_mixture_numbers_in_closed_form():
@@ -293,7 +300,7 @@ def test_write_robust_audit_writes_the_table_and_warns(
         rows = outliers.write_robust_audit(system, None, tmp_path / "fit")
     text = (tmp_path / "fit_outliers.txt").read_text()
     assert len(rows) == 1
-    assert "dummy.W149" in text and "FLAG:" in text
+    assert "dummy.W149" in text and "ANOMALY:" in text
     assert "ROBUST LIKELIHOOD" in caplog.text
 
 
@@ -386,7 +393,7 @@ def _rv_system(files, prior):
 def test_rv_system_beta_prior_is_the_only_change(tmp_path):
     """
     Given the same two-file RV system with and without ``out_frac_prior:
-    beta`` on its hogg file (40 points -> Beta(1, 4)),
+    beta`` on its hogg file (Beta(1, 100), independent of its 40 points),
     When both models are built,
     Then the logp at the shared start differs by exactly the normalized
     Beta logpdf at the start out_frac, the Prior column of that element
@@ -399,20 +406,20 @@ def test_rv_system_beta_prior_is_the_only_change(tmp_path):
     sys_beta, m_beta = _rv_system(files, "beta")
     sys_flat, m_flat = _rv_system(files, None)
     rv = sys_beta.rvinstrument
-    assert rv._out_frac_beta == {0: (1.0, 4.0)}
+    assert rv._out_frac_beta == {0: (1.0, 100.0)}
 
     point = m_flat.initial_point()
     diff = float(m_beta.compile_logp()(point)) - float(
         m_flat.compile_logp()(point)
     )
     f0 = float(np.atleast_1d(rv.out_frac.initval)[0])
-    expected = stats.beta.logpdf(f0, 1.0, 4.0) - np.log(
-        stats.beta.cdf(0.5, 1.0, 4.0)
+    expected = stats.beta.logpdf(f0, 1.0, 100.0) - np.log(
+        stats.beta.cdf(0.5, 1.0, 100.0)
     )
     assert diff == pytest.approx(expected, rel=1e-9)
 
     texts = [c.text for c in rv.out_frac.prior_contributions_at(0)]
-    assert texts == ["Beta(1, 4)"]
+    assert texts == ["Beta(1, 100)"]
     assert rv.out_frac.prior_contributions_at(1) == []
 
     (summary,) = rv.robust_fit_summary(sys_beta, point)
@@ -421,3 +428,46 @@ def test_rv_system_beta_prior_is_the_only_change(tmp_path):
     assert np.isfinite(summary["gauss_logl"]) and np.isfinite(
         summary["hogg_logl"]
     )
+
+
+def test_audit_reports_out_scale_at_its_cap_as_a_look_harder_flag():
+    """out_scale at 0.1 against a 0.104 cap (96%) adds AT_CAP; against a
+    1.0 cap (10%) it does not, and the fraction is reported either way."""
+    system, _ = _light_curve_system("clustered", cap=[0.104])
+    (row,) = outliers.audit_point(system, {}, "MAP")
+    assert row["scale_frac"] == pytest.approx(0.1 / 0.104, rel=1e-12)
+    assert "AT_CAP" in {k for k, _ in row["flags"]}
+
+    system, _ = _light_curve_system("clustered", cap=[1.0])
+    (row,) = outliers.audit_point(system, {}, "MAP")
+    assert row["scale_frac"] == pytest.approx(0.1)
+    assert "AT_CAP" not in {k for k, _ in row["flags"]}
+
+
+@pytest.mark.parametrize(
+    "n_high, enrich, expected",
+    [
+        (4155, 0.1, {"VARIABILITY"}),  # DC2026 093: starspots
+        (344, 18.6, {"ANOMALY"}),  # DC2026 094: the missed anomaly
+        (7, 0.9, set()),  # DC2026 072: clean
+        (2, 50.0, set()),  # too few points to call an anomaly
+    ],
+)
+def test_flag_kinds_separate_the_dc2026_validation_cases(
+    n_high, enrich, expected
+):
+    flags = robust_support.robust_flags(
+        float("nan"), enrich, n_high, n=46000, scale_frac=None
+    )
+    assert {k for k, _ in flags} == expected
+
+
+def test_outliers_file_labels_the_flag_kinds(tmp_path, monkeypatch):
+    system, _ = _light_curve_system("clustered")
+    monkeypatch.setattr(outliers, "audit_points", lambda s, i: {"MAP": {}})
+    outliers.write_robust_audit(system, None, tmp_path / "a")
+    assert "ANOMALY: " in (tmp_path / "a_outliers.txt").read_text()
+    system, _ = _light_curve_system("scattered")
+    outliers.write_robust_audit(system, None, tmp_path / "b")
+    text = (tmp_path / "b_outliers.txt").read_text().splitlines()[-1]
+    assert "VARIABILITY: " in text and "ANOMALY: " not in text

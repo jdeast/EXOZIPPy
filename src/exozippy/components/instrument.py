@@ -1408,8 +1408,10 @@ class Instrument(TimeSystem, Component):
             prose.add(
                 "The outlier fraction of "
                 + join_names([names[i] for i in beta])
-                + " carried a Beta prior favouring few outliers, "
-                "renormalized on its allowed range (" + shapes + ").",
+                + " carried a Beta prior favouring a small outlier "
+                "fraction, renormalized on its allowed range ("
+                + shapes
+                + ").",
                 section="noise",
                 key=f"{self.prefix}.robust.hogg.beta",
                 rank=41,
@@ -1642,7 +1644,7 @@ class Instrument(TimeSystem, Component):
             if (
                 kind != "hogg"
                 and robust_support.parse_out_frac_prior(
-                    prior_spec, 1, context=label
+                    prior_spec, context=label
                 )
                 is not None
             ):
@@ -1740,7 +1742,6 @@ class Instrument(TimeSystem, Component):
             if kind == "hogg":
                 shapes = robust_support.parse_out_frac_prior(
                     self._out_frac_prior_specs[i],
-                    sel.size,
                     context=f"{self.prefix}[{self.names[i]}]",
                 )
                 if shapes is not None:
@@ -1873,6 +1874,7 @@ class Instrument(TimeSystem, Component):
                 self._hogg_logl[i] = (
                     pt.sum(robust_support.gaussian_logl(resid, sigma[idx])),
                     pt.sum(logp),
+                    self.out_scale.value[i],
                 )
                 if i in self._out_frac_beta:
                     self._add_out_frac_beta_prior(i)
@@ -1949,8 +1951,11 @@ class Instrument(TimeSystem, Component):
         ``gauss_logl`` and ``hogg_logl`` (the file's summed log-likelihood
         under a plain Gaussian and under the mixture, the SAME residuals and
         the same err_scale-inflated sigma), ``membership`` (per-point
-        posterior outlier probability) and ``times`` (the epochs, or None if
-        this component keeps none).  Empty when no file uses the mixture.
+        posterior outlier probability), ``times`` (the epochs, or None if
+        this component keeps none) and ``scale_frac`` (out_scale at the
+        point over its upper bound -- the data-driven cap -- both internal,
+        so the ratio is unit-free; None when the bound is not a finite
+        number).  Empty when no file uses the mixture.
         Compiled lazily against ``system.plot_params`` like
         ``outlier_prob_at_data``.
         """
@@ -1974,7 +1979,8 @@ class Instrument(TimeSystem, Component):
         out = []
         for i in sorted(self._hogg_logl_fns):
             idx = self._robust_obs_index[i]
-            gauss, hogg = self._hogg_logl_fns[i](*values)
+            gauss, hogg, scale = self._hogg_logl_fns[i](*values)
+            cap = self._out_scale_upper(i)
             out.append(
                 {
                     "name": self.names[i],
@@ -1983,6 +1989,9 @@ class Instrument(TimeSystem, Component):
                     "gauss_logl": float(gauss),
                     "hogg_logl": float(hogg),
                     "membership": np.asarray(prob[idx], dtype=float),
+                    "scale_frac": (
+                        None if cap is None else float(scale) / cap
+                    ),
                     "times": (
                         None
                         if times is None
@@ -1991,6 +2000,19 @@ class Instrument(TimeSystem, Component):
                 }
             )
         return out
+
+    def _out_scale_upper(self, i):
+        """Element ``i``'s resolved ``out_scale`` upper bound (internal
+        unit), or None when it is absent, symbolic or not positive."""
+        upper = getattr(self.out_scale, "upper", None)
+        if upper is None:
+            return None
+        try:
+            vec = np.atleast_1d(np.asarray(upper, dtype=float))
+        except (TypeError, ValueError):
+            return None
+        val = float(vec[min(i, vec.size - 1)])
+        return val if np.isfinite(val) and val > 0 else None
 
     def outlier_prob_at_data(self, system, point):
         """Posterior outlier probability of every observation, at ``point``.

@@ -12,9 +12,18 @@ reports, at the highest-lp draw ("MAP") and at the median draw:
     window)``: how concentrated those points are where the signal lives.
     A missed planetary anomaly sits AT the event (DC2026 validation: 18.6);
     bad data and stellar variability are spread over the baseline (<= 0.9).
-  * a FLAG, with its reason, when ``enrich > 3`` with at least 3 such points
-    or when the mixture forgives more than 10 nats (thresholds in
-    ``components/likelihood.py``).
+  * ``scale/cap`` -- out_scale over its data-driven cap.
+  * FLAGs, each labelled by kind (thresholds in ``components/likelihood.py``):
+    ANOMALY -- ``enrich > 3`` with at least 3 such points: the outliers sit
+    at the event, likely a missed signal the mixture is absorbing;
+    VARIABILITY -- more than 1% of the points are outliers and ``enrich <
+    2``: diffuse variability or bad data over the baseline, which the
+    mixture is right to take; FORGIVEN -- the mixture forgives more than 10
+    nats; AT_CAP -- out_scale above 95% of its cap, a "look harder" trigger
+    (the background WIDTH is what lets the mixture absorb a signal).
+    DC2026 validation: 093 (starspots, 4155 points, enrich 0.1) is
+    VARIABILITY, 094 (344 points, enrich 18.6) is the ANOMALY, 072 (7
+    points) is clean.
 
 Why (measured on DC2018 traces, 2026-10): on a no-planet "plateau" fit the
 background width pinned at its cap and 2-6 planetary-anomaly points took
@@ -90,8 +99,13 @@ def audit_point(system, point, label):
                     "delta_logl": float(delta),
                     "n_high": n_high,
                     "enrich": enrich,
+                    "scale_frac": f.get("scale_frac"),
                     "flags": robust_support.robust_flags(
-                        delta, enrich, n_high
+                        delta,
+                        enrich,
+                        n_high,
+                        n=f["n"],
+                        scale_frac=f.get("scale_frac"),
                     ),
                 }
             )
@@ -130,6 +144,15 @@ def has_robust_audit(system):
     )
 
 
+def _frac(value):
+    return "nan" if value is None else f"{value:.3f}"
+
+
+def _flag_text(flags):
+    """``KIND: reason; KIND: reason`` for a row's flags."""
+    return "; ".join(f"{kind}: {text}" for kind, text in flags)
+
+
 def format_audit(rows):
     """The ``<prefix>_outliers.txt`` text."""
     lines = [
@@ -139,13 +162,20 @@ def format_audit(rows):
         f"{robust_support.MEMBERSHIP_THRESHOLD:g};",
         "# enrich = P(in event window | membership > "
         f"{robust_support.MEMBERSHIP_THRESHOLD:g}) / P(in event window).  "
-        f"FLAG when enrich > {robust_support.ENRICH_FLAG:g} with n_out >= "
-        f"{robust_support.ENRICH_MIN_POINTS}, or dlogL < "
-        f"-{robust_support.FORGIVEN_NATS_FLAG:g}.",
+        "# scale/cap = out_scale over its data-driven cap.",
+        f"# ANOMALY: enrich > {robust_support.ENRICH_FLAG:g} with n_out >= "
+        f"{robust_support.ENRICH_MIN_POINTS} (outliers AT the event).  "
+        f"VARIABILITY: n_out > "
+        f"{100 * robust_support.VARIABILITY_FRAC:g}% of n with enrich < "
+        f"{robust_support.VARIABILITY_MAX_ENRICH:g} (spread over the "
+        "baseline).",
+        f"# FORGIVEN: dlogL < -{robust_support.FORGIVEN_NATS_FLAG:g}.  "
+        f"AT_CAP: scale/cap > {robust_support.CAP_FLAG_FRAC:g} (look "
+        "harder).",
         "# See src/exozippy/components/instrument.md, 'Robust observation "
         "likelihoods'.",
         f"{'point':<7} {'file':<32} {'n':>7} {'gaussL':>14} {'hoggL':>14} "
-        f"{'dlogL':>10} {'n_out':>6} {'enrich':>8}  flag",
+        f"{'dlogL':>10} {'n_out':>6} {'enrich':>8} {'scale/cap':>9}  flags",
     ]
     for r in rows:
         name = f"{r['component']}.{r['name']}"
@@ -153,8 +183,8 @@ def format_audit(rows):
             f"{r['point']:<7} {name:<32} {r['n']:>7d} "
             f"{r['gauss_logl']:>14.3f} {r['hogg_logl']:>14.3f} "
             f"{r['delta_logl']:>10.3f} {r['n_high']:>6d} "
-            f"{r['enrich']:>8.2f}  "
-            + ("FLAG: " + "; ".join(r["flags"]) if r["flags"] else "-")
+            f"{r['enrich']:>8.2f} {_frac(r.get('scale_frac')):>9}  "
+            + (_flag_text(r["flags"]) if r["flags"] else "-")
         )
     return "\n".join(lines) + "\n"
 
@@ -175,15 +205,21 @@ def write_robust_audit(system, idata, prefix, log=logger):
         fh.write(format_audit(rows))
     for r in rows:
         if r["flags"]:
+            kinds = {kind for kind, _ in r["flags"]}
+            advice = (
+                "The mixture may be absorbing a real signal: inspect the "
+                "residuals in the event window and fit each mode "
+                "separately; the out_frac prior does not prevent this."
+                if robust_support.FLAG_ANOMALY in kinds
+                else "Inspect the residuals."
+            )
             log.warning(
-                "ROBUST LIKELIHOOD (%s draw): %s.%s -- %s.  The mixture may "
-                "be absorbing a real signal: inspect the residuals in the "
-                "event window, compare against a fit with "
-                "'out_frac_prior: beta' or without the mixture (see %s).",
+                "ROBUST LIKELIHOOD (%s draw): %s.%s -- %s.  %s  (see %s)",
                 r["point"],
                 r["component"],
                 r["name"],
-                "; ".join(r["flags"]),
+                _flag_text(r["flags"]),
+                advice,
                 path,
             )
     return rows

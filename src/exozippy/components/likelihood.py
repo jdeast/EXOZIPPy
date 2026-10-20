@@ -59,7 +59,7 @@ against out_frac's 0.5) is reported at wrap-up as an alarm
 (``LIKELIHOOD_CAP_ALARM``): the noise model wants more freedom than the cap
 allows, and the residuals decide whether that is junk or signal.
 ``out_frac``'s prior is flat on its bounds unless the file sets
-``out_frac_prior: beta`` (``Beta(1, N/10)``) or ``{a: ..., b: ...}``: a
+``out_frac_prior: beta`` (``Beta(1, 100)``) or ``{a: ..., b: ...}``: a
 normalized Beta restricted to those bounds (``beta_logp``), which charges
 the mixture for every point it claims.  After the fit, the audit helpers
 at the bottom of this module (``enrichment_ratio``, ``robust_flags``) feed
@@ -216,10 +216,9 @@ def out_frac_prior_config_schema_entry():
         "doc": (
             "Prior on this file's hogg outlier fraction (needs 'likelihood: "
             "hogg'). Absent or 'uniform' keeps the flat prior on "
-            "[0, 0.5]. 'beta' adopts a normalized Beta(1, N/10) "
-            "(N = the file's number of points), which expects about ten "
-            "outliers and makes the mixture pay for every point it claims; "
-            "a mapping {a: ..., b: ...} sets the shapes. To FIX the "
+            "[0, 0.5]. 'beta' adopts a normalized Beta(1, 100) (median "
+            "f = 0.0069), which removes the flat prior's inflation of f on "
+            "clean fits; a mapping {a: ..., b: ...} sets the shapes. To FIX the "
             "fraction instead, pin it in the params file: "
             "'<prefix>.<name>.out_frac: {initval: 0.01, sigma: 0}'."
         ),
@@ -294,33 +293,42 @@ def hogg_outlier_logodds(resid, sigma, out_frac, out_scale):
 # traces, 2026-10): with the flat prior, a no-planet "plateau" fit pins
 # out_scale at its cap and hands 2-6 planetary-anomaly points membership ~1;
 # each then costs ~11 nats instead of ~600, which subsidizes the simpler,
-# wrong model by up to ~1200 nats.  A prior that expects FEW outliers makes
-# the mixture pay for every point it claims.
+# wrong model by up to ~1200 nats.  The prior does NOT cure that: the subsidy
+# rides on out_scale's WIDTH (review 8.6.3, see _prepare_robust), not on the
+# count, and a handful of claimed points barely moves any sane f prior.  The
+# protection against anomaly absorption is the post-fit audit's ANOMALY flag
+# plus per-mode fits.  What the prior does fix is the prior-driven
+# inflation: with a flat prior, f on clean fits is prior-dominated at ~0.17.
 OUT_FRAC_PRIOR_KEY = "out_frac_prior"
 _OUT_FRAC_PRIOR_OFF = {"none", "off", "false", "no", "", "uniform", "flat"}
 
-# ``out_frac_prior: beta`` with no shape given: Beta(1, N/10), N the file's
-# number of points.  a = 1 keeps the density finite and maximal at f = 0
-# (no 1/f spike); b = N/10 puts the prior mean near 10/N, i.e. "about ten
-# outliers expected", with the density falling by e every ~10/N in f.
+# ``out_frac_prior: beta`` with no shape given: Beta(1, 100), a FIXED
+# modelling choice, independent of the file's size (PI ruling, 2026-10).
+# a = 1 keeps the density finite and maximal at f = 0 (no 1/f spike); the
+# median is 1 - 0.5**(1/100) = 0.0069, which removes the ~0.17 prior-driven
+# inflation on clean fits.  It was briefly Beta(1, N/10) -- "about ten bad
+# points per file whatever N" -- and that is wrong for real variability: on
+# DC2026 five starspot events have 1,500-4,700 discrepant points out of
+# 46k, which N/10 excludes by 66-215 orders of magnitude, pushing the misfit
+# into err_scale instead.  ``{a: ..., b: ...}`` is the per-file override.
 BETA_DEFAULT_A = 1.0
-BETA_DEFAULT_B_PER_POINT = 0.1
+BETA_DEFAULT_B = 100.0
 
 
-def parse_out_frac_prior(value, n_points, context=""):
+def parse_out_frac_prior(value, context=""):
     """Normalize one file's ``out_frac_prior:`` value to ``(a, b)`` or None.
 
     ``None`` (absent, ``uniform``, ``flat``, ``none``, ``false``) is the
     default flat prior.  ``beta`` (or ``true``) is ``Beta(BETA_DEFAULT_A,
-    BETA_DEFAULT_B_PER_POINT * n_points)``.  A mapping ``{a: ..., b: ...}``
-    sets either shape explicitly; an omitted one takes the same default.
-    Both shapes must be finite and positive.
+    BETA_DEFAULT_B)`` = Beta(1, 100), whatever the file's size.  A mapping
+    ``{a: ..., b: ...}`` sets either shape explicitly; an omitted one takes
+    the same default.  Both shapes must be finite and positive.
     """
     if value is None or value is False:
         return None
     if isinstance(value, str) and value.strip().lower() in _OUT_FRAC_PRIOR_OFF:
         return None
-    default_b = BETA_DEFAULT_B_PER_POINT * float(n_points)
+    default_b = BETA_DEFAULT_B
     if value is True or (
         isinstance(value, str) and value.strip().lower() == "beta"
     ):
@@ -406,9 +414,26 @@ MEMBERSHIP_THRESHOLD = 0.5
 # at least ENRICH_MIN_POINTS of them (fewer is noise), ...
 ENRICH_FLAG = 3.0
 ENRICH_MIN_POINTS = 3
+# ... (the ANOMALY flag), or when MORE than VARIABILITY_FRAC of the file's
+# points are outlier-component members and they are NOT concentrated at the
+# event (enrich < VARIABILITY_MAX_ENRICH): diffuse variability over the
+# baseline (the VARIABILITY flag).  DC2026 validation: 093 (starspots, 4155
+# points, enrich 0.1) is VARIABILITY; 094 (344 points, enrich 18.6) is the
+# missed ANOMALY; 072 (7 points) is clean.
+VARIABILITY_FRAC = 0.01
+VARIABILITY_MAX_ENRICH = 2.0
 # ... or when the mixture forgives more than this many nats relative to a
 # plain Gaussian with the same sigma (Gaussian logL - hogg logL < -this).
 FORGIVEN_NATS_FLAG = 10.0
+# out_scale above this fraction of its data-driven cap is a "look harder"
+# trigger: the background width is what lets the mixture absorb a signal.
+CAP_FLAG_FRAC = 0.95
+
+# The flag kinds, as labelled in <prefix>_outliers.txt.
+FLAG_ANOMALY = "ANOMALY"
+FLAG_VARIABILITY = "VARIABILITY"
+FLAG_FORGIVEN = "FORGIVEN"
+FLAG_CAP = "AT_CAP"
 
 
 def gaussian_logl(resid, sigma):
@@ -448,8 +473,17 @@ def enrichment_ratio(
     return float(inside[high].mean()) / base, n_high
 
 
-def robust_flags(delta_logl, enrich, n_high):
-    """The reasons a file's mixture fit deserves a look ([] when none)."""
+def robust_flags(delta_logl, enrich, n_high, n=None, scale_frac=None):
+    """The reasons a file's mixture fit deserves a look ([] when none).
+
+    Returns ``(kind, text)`` pairs, ``kind`` one of ``FLAG_ANOMALY`` (the
+    outlier points sit at the event: likely a missed signal),
+    ``FLAG_VARIABILITY`` (many outlier points spread over the baseline:
+    real noise the mixture is right to take), ``FLAG_FORGIVEN`` (the
+    mixture forgives > FORGIVEN_NATS_FLAG nats) and ``FLAG_CAP`` (out_scale
+    at > CAP_FLAG_FRAC of its cap; ``scale_frac`` is out_scale / cap, None
+    when unknown).  ``n`` is the file's number of points.
+    """
     reasons = []
     if (
         np.isfinite(enrich)
@@ -457,13 +491,47 @@ def robust_flags(delta_logl, enrich, n_high):
         and n_high >= ENRICH_MIN_POINTS
     ):
         reasons.append(
-            f"{n_high} outlier-component points are {enrich:.1f}x "
-            f"concentrated in the event window (> {ENRICH_FLAG:g}): "
-            f"likely a real signal the model is missing"
+            (
+                FLAG_ANOMALY,
+                f"{n_high} outlier-component points are {enrich:.1f}x "
+                f"concentrated in the event window (> {ENRICH_FLAG:g}): "
+                f"likely a real signal the model is missing",
+            )
+        )
+    if (
+        n
+        and np.isfinite(enrich)
+        and n_high > VARIABILITY_FRAC * n
+        and enrich < VARIABILITY_MAX_ENRICH
+    ):
+        reasons.append(
+            (
+                FLAG_VARIABILITY,
+                f"{n_high} of {n} points ({100.0 * n_high / n:.1f}%) are "
+                f"outlier-component members spread over the baseline "
+                f"(enrich {enrich:.2f} < {VARIABILITY_MAX_ENRICH:g}): "
+                f"diffuse variability or bad data, not the event",
+            )
         )
     if np.isfinite(delta_logl) and delta_logl < -FORGIVEN_NATS_FLAG:
         reasons.append(
-            f"the mixture forgives {-delta_logl:.1f} nats relative to a "
-            f"Gaussian (> {FORGIVEN_NATS_FLAG:g})"
+            (
+                FLAG_FORGIVEN,
+                f"the mixture forgives {-delta_logl:.1f} nats relative to "
+                f"a Gaussian (> {FORGIVEN_NATS_FLAG:g})",
+            )
+        )
+    if (
+        scale_frac is not None
+        and np.isfinite(scale_frac)
+        and scale_frac > CAP_FLAG_FRAC
+    ):
+        reasons.append(
+            (
+                FLAG_CAP,
+                f"out_scale is at {100.0 * scale_frac:.0f}% of its cap: the "
+                f"background width is what lets the mixture absorb a "
+                f"signal, look harder",
+            )
         )
     return reasons
