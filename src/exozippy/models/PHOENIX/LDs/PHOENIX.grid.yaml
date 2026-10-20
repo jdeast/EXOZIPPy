@@ -1,0 +1,29 @@
+model: PHOENIX
+# The axes the limb-darkening tables are built on.  teff/logg/feh are the
+# PHOENIX-ACES-AGSS-COND-SPECINT-2011 grid's own nodes (Husser et al.
+# 2013; the archive is not a full rectangle -- hot stars are absent at the
+# lowest gravities and 5000 K is missing at several metallicities -- so
+# the generator fills interior holes by linear interpolation of the
+# band-integrated intensities along teff, recording each one in the
+# table's meta['padding'], and the loader's complete box trims the
+# incomplete edge planes).  av is the NextGen BC tables' axis, verbatim:
+# reddening tilts the spectral weighting inside a band, so the
+# coefficients depend on it (notes 2026-08-04, "Av IS a table axis").
+grid:
+  teff: [ 2300.,  2400.,  2500.,  2600.,  2700.,  2800.,  2900.,  3000.,
+          3100.,  3200.,  3300.,  3400.,  3500.,  3600.,  3700.,  3800.,
+          3900.,  4000.,  4100.,  4200.,  4300.,  4400.,  4500.,  4600.,
+          4700.,  4800.,  4900.,  5000.,  5100.,  5200.,  5300.,  5400.,
+          5500.,  5600.,  5700.,  5800.,  5900.,  6000.,  6100.,  6200.,
+          6300.,  6400.,  6500.,  6600.,  6700.,  6800.,  6900.,  7000.,
+          7200.,  7400.,  7600.,  7800.,  8000.,  8200.,  8400.,  8600.,
+          8800.,  9000.,  9200.,  9400.,  9600.,  9800., 10000., 10200.,
+         10400., 10600., 10800., 11000., 11200., 11400., 11600., 11800.,
+         12000.]
+  logg: [0. , 0.5, 1. , 1.5, 2. , 2.5, 3. , 3.5, 4. , 4.5, 5. , 5.5, 6. ]
+  feh: [-4. , -3. , -2. , -1.5, -1. , -0.5,  0. ,  0.5,  1. ]
+  av: [0.  , 0.05, 0.1 , 0.15, 0.2 , 0.3 , 0.4 , 0.6 , 0.8 , 1.  , 2.  ,
+       4.  , 6.  , 8.  , 10.  , 12.  , 14.  , 16.  , 18.  , 20.  ]
+url: "https://phoenix.astro.physik.uni-goettingen.de/data/SpecIntFITS/PHOENIX-ACES-AGSS-COND-SPECINT-2011/"
+note: "specific intensities I(lambda, mu), 78 mu angles, 500-26000 A at 1 A; streamed per node by generate_PHOENIX_LD_Tables.py and never rehosted"
+citation: "Husser:2013"
