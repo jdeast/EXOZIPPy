@@ -95,9 +95,13 @@ def test_the_consumers_read_their_pins_from_the_registry():
         name: (meta["size"], meta["md5"])
         for name, meta in bc_tables._BC_TABLE_FILES.items()
     } == {name: (p.size, p.md5) for name, p in bc.files.items()}
-    assert bc_tables._assets(bc_tables.published_tables()) == (
-        zenodo_assets.assets("nextgen_bc_tables")
-    )
+    # The record also carries the publish script's MANIFEST.txt, which the
+    # owner lists among no table and never fetches (the Claret record's rule).
+    assert bc_tables._assets(bc_tables.published_tables()) == {
+        name: asset
+        for name, asset in zenodo_assets.assets("nextgen_bc_tables").items()
+        if name.endswith(".bc.parquet")
+    }
 
 
 def test_the_registry_is_internally_consistent():
