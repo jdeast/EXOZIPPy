@@ -47,6 +47,7 @@ FIT_FIELDS = (
     "lpcheck", "equilibrated", "converged", "max_rhat", "worst_rhat_var",
     "min_ess", "stuck_frac", "lp_rhat", "invalid_frac", "out_scale_rhat",
     "t0_par", "bands", "finite_source", "arch", "fit", "hit_maxtime",
+    "event", "unlisted_mode_params", "rawz_frac", "rawz_param_counts",
 )  # fmt: skip
 
 
@@ -117,6 +118,17 @@ def build_event(ev, recs):
             [sols[j]["solution_id"] for j in pr["groups"][g]] if g >= 0 else []
         )
         arch_prob[s["arch"]] = arch_prob.get(s["arch"], 0.0) + s["p_robust"]
+    comp = R.refused_competitors(
+        [s["lnZ"] for s in sols], [s["accepted"] for s in sols]
+    )
+    for i, d in comp:
+        msg = (
+            "REFUSED mode %s has indicative lnZ %+.1f nats from the best "
+            "accepted mode: the accepted probabilities may be missing its mass"
+            % (sols[i]["solution_id"], d)
+        )
+        for s in sols:
+            s["warnings"].append(msg)
     missing = list(skipped) + errors
     for arch in (R.ARCH_PSPL, R.ARCH_BINARY):
         if arch not in {s["arch"] for s in sols}:

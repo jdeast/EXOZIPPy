@@ -337,3 +337,82 @@ def test_wrapup_banners_are_parsed(R):
     assert clean["burnin"] == 0 and not clean["unconverged"]
     assert clean["not_equilibrated"] is False
     assert "not_equilibrated" not in R.parse_wrapup_text("", None)
+
+
+# --- POSSIBLE_UNLISTED_MODE and the forced set --------------------------------
+
+_DIMS = ["source.t_0_raw", "source.u_0_raw", "star.pm_ra_raw[0]",
+         "star.pm_ra_raw[1]", "mulensinstrument.err_scale_raw[2]"]  # fmt: skip
+
+
+def _beyond(rows):
+    return np.array([[d in r for d in _DIMS] for r in rows], dtype=bool)
+
+
+def test_a_rejection_concentrated_in_t0_is_a_possible_unlisted_mode(R):
+    """173's shape: 28% of the draws rejected, all out of range in
+    source.t_0_raw only -> POSSIBLE_UNLISTED_MODE (source.t_0_raw)."""
+    B = _beyond([{"source.t_0_raw"}] * 28)
+    assert R.unlisted_mode_params(B, _DIMS, n_total=100) == ["source.t_0_raw"]
+    bad, warn = R.reliability_flags(
+        _sol(unlisted_mode_params=["source.t_0_raw"], rawz_frac=0.28,
+             invalid_frac=0.28)
+    )  # fmt: skip
+    assert bad == []
+    assert any(w.startswith("POSSIBLE_UNLISTED_MODE (source.t_0_raw)") for w in warn)
+    # it replaces, not duplicates, the generic invalid-fraction warning
+    assert not any(w.startswith("invalid draws") for w in warn)
+
+
+def test_two_elements_of_one_vector_count_as_one_parameter(R):
+    B = _beyond([{"star.pm_ra_raw[0]", "star.pm_ra_raw[1]"}] * 10)
+    assert R.unlisted_mode_params(B, _DIMS, n_total=100) == ["star.pm_ra_raw"]
+
+
+def test_a_small_or_diffuse_or_noise_rejection_is_not(R):
+    """016's shape (2.8%, below 5%) does not fire; nor does a rejection
+    spread over three parameters, nor one in a NOISE parameter."""
+    one = [{"source.t_0_raw"}]
+    assert R.unlisted_mode_params(_beyond(one * 3), _DIMS, 100) == []
+    diffuse = [{"source.t_0_raw"}, {"source.u_0_raw"}, {"star.pm_ra_raw[0]"}] * 4
+    assert R.unlisted_mode_params(_beyond(diffuse), _DIMS, 100) == []
+    noise = [{"mulensinstrument.err_scale_raw[2]"}] * 20
+    assert R.unlisted_mode_params(_beyond(noise), _DIMS, 100) == []
+    _, warn = R.reliability_flags(_sol(invalid_frac=0.12))
+    assert warn == ["invalid draws 12.0%"]
+
+
+def test_two_geometric_parameters_can_carry_it(R):
+    rows = [{"source.t_0_raw"}] * 6 + [{"source.t_0_raw", "source.u_0_raw"}] * 4
+    got = R.unlisted_mode_params(_beyond(rows), _DIMS, 100)
+    assert got == ["source.t_0_raw", "source.u_0_raw"] or got == ["source.t_0_raw"]
+    # 6/10 covered by t_0 alone (< 0.8), so the pair is needed
+    assert got == ["source.t_0_raw", "source.u_0_raw"]
+
+
+@pytest.mark.parametrize("ev", [16, 163, 173])
+def test_forced_events_are_unreliable_whatever_else(R, ev):
+    bad, _ = R.reliability_flags(_sol(event=ev))
+    assert len(bad) == 1 and bad[0].startswith("forced:")
+    assert R.reliability_flags(_sol(event=94)) == ([], [])
+
+
+def test_a_refused_mode_near_the_top_is_reported(R):
+    """Given an accepted mode at 100 and refused ones at 103 and 90, the
+    refused 103 is reported (+3 nats), the one 10 below (beyond 3 floors =
+    6 nats) is not; with nothing accepted, nothing is reported."""
+    lnz = [100.0, 103.0, 90.0]
+    assert R.refused_competitors(lnz, [True, False, False]) == [(1, 3.0)]
+    assert R.refused_competitors(lnz, [False, False, False]) == []
+
+
+def test_a_trace_older_than_its_config_or_whitening_is_stale(R):
+    """015/022/187's shape: configs regenerated after the fit; 015 also has
+    a re-fit under way that has overwritten its whitening."""
+    assert R.staleness_from_mtimes(100.0, 50.0, 50.0, 40.0) == ""
+    why = R.staleness_from_mtimes(100.0, 200.0, 200.0, 40.0)
+    assert "config is newer" in why and "params file is newer" in why
+    assert "re-fit" in R.staleness_from_mtimes(100.0, 50.0, 50.0, 500.0)
+    # a whitening written in the same minute as the trace is not a re-fit
+    assert R.staleness_from_mtimes(100.0, 50.0, 50.0, 130.0) == ""
+    assert R.staleness_from_mtimes(None, 1.0, 1.0, 1.0) == "no trace"

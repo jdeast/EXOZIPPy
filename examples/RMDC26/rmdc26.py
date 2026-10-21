@@ -91,6 +91,35 @@ OUT_SCALE_RHAT_MAX = 1.1
 #: describe those chains only.
 MIN_MODE_CHAINS = 3
 
+#: POSSIBLE_UNLISTED_MODE: more than INVALID_FRAC_MAX of the draws are
+#: raw-z rejected AND at least UNLISTED_COVERAGE of those rejected draws are
+#: out of range ONLY in one or two GEOMETRIC parameters.  That is a coherent
+#: displaced basin the mode pass threw away (173: 28% rejected, all in
+#: source.t_0_raw, 10 of 36 chains, ~25,000 nats below the bulk), so the
+#: mode list may be incomplete.  Diffuse, many-parameter rejection keeps
+#: the generic invalid-fraction warning.
+UNLISTED_COVERAGE = 0.8
+UNLISTED_MAX_PARAMS = 2
+#: Sampled (raw) parameters that set the light-curve geometry: the
+#: trajectory, the lens, and the physical parameters t_E / pi_E / rho are
+#: derived from.  Noise and flux parameters (err_scale, out_frac,
+#: out_scale, q_source, log_f_total) are not modes of the event.
+GEOMETRIC_RAW = (
+    "source.t_0_raw", "source.u_0_raw", "lens.log_s_raw", "planet.log_q_raw",
+    "lens.xalpha_raw", "lens.yalpha_raw", "star.logmass_raw",
+    "star.distance_raw", "star.pm_ra_raw", "star.pm_dec_raw",
+    "star.radius_raw",
+)  # fmt: skip
+
+#: Events every solution of which is UNRELIABLE whatever its lnZ, with the
+#: reason (DC2026 campaign agent, 2026-10-21).
+FORCED_UNRELIABLE = {
+    16: "forced: err_scale F213 21.0 (the noise model carries the fit)",
+    163: "forced: err_scale F087 3.2 (the noise model carries the fit)",
+    173: "forced: err_scale F213 8.1; VARIABILITY + FORGIVEN + AT_CAP in "
+    "all three bands; a third of the chains in a worse t_0 mode",
+}
+
 #: The outlier-audit kinds (exozippy.components.likelihood FLAG_*).
 OUTLIER_KINDS = ("ANOMALY", "VARIABILITY", "FORGIVEN", "AT_CAP")
 
@@ -154,6 +183,48 @@ def ld_pinned_zero(params):
         if float(v.get("initval", np.nan)) != 0.0 or v.get("sigma") != 0:
             return False
     return True
+
+
+def staleness_from_mtimes(trace, config, params, whitening):
+    """Why a trace cannot belong to the files beside it, or "" (pure).
+
+    All arguments are mtimes (seconds; None when the file is missing).  A
+    config or params file written AFTER the trace means the configs were
+    regenerated after this fit ran (2026-10-20 03:46: the switch to zero
+    limb darkening), so the trace is the OLD model's.  A whitening file
+    written after the trace means a new fit of this event has started and
+    overwritten it: the trace's draws no longer decode.
+    """
+    why = []
+    if trace is None:
+        return "no trace"
+    for name, t in (("config", config), ("params file", params)):
+        if t is not None and t > trace:
+            why.append("%s is newer than the trace (regenerated after this fit)" % name)
+    if whitening is None:
+        why.append("no whitening file")
+    elif whitening > trace + 60:
+        why.append("whitening is newer than the trace (a re-fit is under way)")
+    return "; ".join(why)
+
+
+def trace_staleness(fit_dir):
+    d = Path(fit_dir)
+
+    def mt(paths):
+        paths = list(paths)
+        return paths[0].stat().st_mtime if paths else None
+
+    cfg = config_path(d)
+    import yaml
+
+    pf = (yaml.safe_load(cfg.read_text()) or {}).get("parameter_file")
+    return staleness_from_mtimes(
+        mt((d / "fitresults").glob("*_trace.nc")),
+        cfg.stat().st_mtime,
+        (d / pf).stat().st_mtime if pf and (d / pf).exists() else None,
+        mt((d / "fitresults").glob("*_whitening.json")),
+    )
 
 
 def candidate_fit_dirs(ev, root=CAMPAIGN):
@@ -334,6 +405,28 @@ def robust_probabilities(lnz, bridge_err, floor=SYSTEMATIC_FLOOR):
     }
 
 
+def refused_competitors(lnz, accepted, n_sigma=3.0, floor=SYSTEMATIC_FLOOR):
+    """Refused modes whose INDICATIVE lnZ is not far below the best accepted.
+
+    A refused bridge contributes no probability, so a refused mode that the
+    estimate puts above, or within ``n_sigma`` floors of, the best ACCEPTED
+    mode means the accepted probabilities may be missing real mass.  Returns
+    [(index, lnZ_refused - lnZ_best_accepted)], largest first.  Empty when
+    nothing is accepted (the event is then INDICATIVE as a whole).
+    """
+    lnz = np.asarray(lnz, dtype=float)
+    acc = np.asarray(accepted, dtype=bool)
+    if not acc.any():
+        return []
+    best = float(np.max(lnz[acc]))
+    out = [
+        (int(i), float(lnz[i] - best))
+        for i in np.flatnonzero(~acc & np.isfinite(lnz))
+        if lnz[i] >= best - n_sigma * floor
+    ]
+    return sorted(out, key=lambda t: -t[1])
+
+
 def active_and_renormalized(p, eligible=None, min_prob=ACTIVE_MIN_PROB):
     """(is_active, relative_probability) per solution.
 
@@ -355,6 +448,52 @@ def active_and_renormalized(p, eligible=None, min_prob=ACTIVE_MIN_PROB):
 # ---------------------------------------------------------------------------
 # Flags
 # ---------------------------------------------------------------------------
+
+
+def base_param(dim):
+    """'star.pm_ra_raw[1]' -> 'star.pm_ra_raw'."""
+    return dim.split("[", 1)[0]
+
+
+def unlisted_mode_params(beyond, dim_names, n_total,
+                         frac_min=INVALID_FRAC_MAX,
+                         coverage=UNLISTED_COVERAGE,
+                         max_params=UNLISTED_MAX_PARAMS,
+                         geometric=GEOMETRIC_RAW):  # fmt: skip
+    """The geometric parameter(s) a raw-z rejection concentrates in, or [].
+
+    ``beyond`` is a boolean (n_rejected, n_dims) matrix: which dimensions of
+    each raw-z-REJECTED draw lie beyond the robust-z cut; ``n_total`` the
+    draws the mode pass saw.  Fires when rejected / total > frac_min and a
+    set of at most ``max_params`` geometric parameters (elements of one
+    vector count as one parameter) contains EVERY out-of-range dimension of
+    at least ``coverage`` of the rejected draws.  The smallest such set is
+    returned, most-implicated first.
+    """
+    B = np.asarray(beyond, dtype=bool)
+    if B.ndim != 2 or B.shape[0] == 0 or n_total <= 0:
+        return []
+    if B.shape[0] / n_total <= frac_min:
+        return []
+    params = sorted({base_param(d) for d in dim_names})
+    col = {p: np.array([base_param(d) == p for d in dim_names]) for p in params}
+    counts = {p: int(B[:, col[p]].any(axis=1).sum()) for p in params}
+    cands = [p for p in sorted(params, key=lambda p: -counts[p])
+             if p in geometric and counts[p] > 0][: max(4, max_params)]  # fmt: skip
+    from itertools import combinations
+
+    for k in range(1, max_params + 1):
+        best = None
+        for S in combinations(cands, k):
+            inside = np.zeros(len(dim_names), bool)
+            for p in S:
+                inside |= col[p]
+            cov = float((~B[:, ~inside].any(axis=1)).mean())
+            if cov >= coverage and (best is None or cov > best[0]):
+                best = (cov, S)
+        if best is not None:
+            return sorted(best[1], key=lambda p: -counts[p])
+    return []
 
 
 def outlier_kinds(rows):
@@ -381,6 +520,9 @@ def reliability_flags(sol):
       partial bridge, the other outlier kinds, out_scale Rhat.
     """
     bad, warn = [], []
+    forced = FORCED_UNRELIABLE.get(sol.get("event"))
+    if forced:
+        bad.append(forced)
     lc = sol.get("lpcheck") or {}
     if lc and not lc.get("dlp_max_abs", 0.0) < LPCHECK_TOL:
         bad.append(
@@ -417,7 +559,14 @@ def reliability_flags(sol):
         )
     if sol.get("lp_rhat", 1.0) > LP_RHAT_MAX:
         warn.append("lp Rhat %.3g" % sol["lp_rhat"])
-    if sol.get("invalid_frac", 0.0) > INVALID_FRAC_MAX:
+    unl = sol.get("unlisted_mode_params") or []
+    if unl:
+        warn.append(
+            "POSSIBLE_UNLISTED_MODE (%s): %.1f%% of draws raw-z rejected, "
+            "concentrated there -- the mode list may be incomplete"
+            % (", ".join(unl), 100 * sol.get("rawz_frac", float("nan")))
+        )
+    elif sol.get("invalid_frac", 0.0) > INVALID_FRAC_MAX:
         warn.append("invalid draws %.1f%%" % (100 * sol["invalid_frac"]))
     re2 = sol.get("re2", 0.0)
     if not sol.get("bridge_refused") and np.isfinite(re2) and re2 > RE2_FLAG:

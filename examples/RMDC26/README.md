@@ -73,6 +73,15 @@ probability.
 
 For each fit of each listed event:
 
+0. **Stale traces are skipped** (`rmdc26.trace_staleness`). A config or
+   params file newer than the trace means the configs were regenerated
+   after the fit ran. On 2026-10-20 03:46 they were rewritten for zero
+   limb darkening, so a trace from before then is the free-u1 model's. A
+   whitening file newer than the trace means a re-fit has started and
+   overwritten it. On 2026-10-21 this skipped 015 (both reasons), 022 and
+   187. Before this rule existed, the lp check caught 015 on its own
+   (max abs(dlp) = 200 nats, against its re-fit's new whitening), and 022
+   raised `StaleWhiteningError` ("'band.u1' is no longer whitened").
 1. **Stage and rebuild.** The config and params are copied into
    `$RMDC26_REPORT/work/` with `prefix:` repointed there, and the trace
    and whitening files are symlinked. The model is rebuilt on this tree
@@ -118,7 +127,10 @@ each is pinned by `tests/test_rmdc26_report.py`.
    fit passed the lp check contribute an lnZ. A refused mode gets 0 and is
    inactive. If no mode of the event is accepted, the refused estimates
    are used instead, and everything for that event is labelled
-   `INDICATIVE`.
+   `INDICATIVE`. A refused mode whose indicative lnZ is above the best
+   accepted mode, or less than 3 floors (6 nats) below it, adds a warning
+   to every solution of the event (`rmdc26.refused_competitors`). Its mass
+   is then missing from the accepted probabilities.
 2. **Raw probabilities.** `p_raw` is a softmax of lnZ over ALL modes of
    ALL architectures of the event (1S1L and 1S2L together). lnZ is
    normalized, so the architectures share one scale.
@@ -160,7 +172,26 @@ when any of these holds:
   model, is then carrying the fit. The known cases are 016 F213 21.0,
   173 F213 8.1 and 163 F087 3.2;
 - there is an ANOMALY outlier flag: the mixture is absorbing points AT the
-  event, which means this model is missing a signal.
+  event, which means this model is missing a signal;
+- the event is in `FORCED_UNRELIABLE` (016, 163, 173, set by the campaign
+  agent 2026-10-21). 173 also flags VARIABILITY + FORGIVEN + AT_CAP in all
+  three bands, and a third of its chains sit in a worse t_0 mode.
+
+**POSSIBLE_UNLISTED_MODE (<param>)** is its own warning, meaning the mode
+list may be incomplete. It fires when more than 5% of the draws are raw-z
+rejected AND at least 80% of the rejected draws are out of range ONLY in
+one or two GEOMETRIC parameters: the trajectory, the lens, or the physical
+parameters that t_E, pi_E and rho derive from. Noise and flux parameters
+do not count. The shape it catches is 173, where 28% of the draws are
+rejected, all in `source.t_0_raw`, and come from 10 of 36 chains sitting
+~25,000 nats below the bulk: a coherent displaced basin, not noise.
+identify_modes reports its rejections only by reason, so `01_evidence.py`
+(`rawz_info`) recomputes the robust z of the -1 draws the same way the
+mode pass does. When the flag fires it REPLACES the generic
+invalid-fraction warning, which is kept for diffuse, multi-parameter
+rejection. 016's 2.8% (one chain, all bound pileup) does not fire. To
+patch records written before this rule existed, run
+`01_evidence.py --update-rawz`, which skips the bridge.
 
 **Warnings** cover: unconverged (Rhat/ESS against the config's own
 thresholds), stuck chains (> 10% of chains with a second-half mean lp more

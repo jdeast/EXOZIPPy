@@ -151,6 +151,42 @@ def mode_subset(idata, mask):
     return xr.DataTree.from_dict({"posterior": sub})
 
 
+def rawz_info(post, rep):
+    """Which parameters the raw-z-rejected draws are out of range in.
+
+    identify_modes reports its rejections only as counts by reason, so the
+    robust z is recomputed here exactly as it computes it (median and
+    1.4826 MAD per raw dimension over the finite draws, cut at
+    DEFAULT_Z_MAX) for the draws it labelled -1.  A -1 draw with no
+    dimension beyond the cut was dropped for another reason (a minor
+    cluster, a non-finite value) and is not counted.
+    """
+    from exozippy.outputs import modes as M
+
+    X, names = M._feature_matrix(post, rep.feature_vars)
+    finite = np.isfinite(X).all(axis=1)
+    med, mad = M._robust_center_scale(X[finite])
+    scale = np.where(mad > 0, mad, 1.0)
+    lab = np.asarray(post["mode"].values, dtype=int).reshape(-1)
+    rej = (lab < 0) & finite
+    z = np.abs((X[rej] - med) / scale)
+    beyond = np.nan_to_num(z, nan=np.inf) > M.DEFAULT_Z_MAX
+    beyond = beyond[beyond.any(axis=1)]
+    counts = {}
+    for j, d in enumerate(names):
+        p = R.base_param(d)
+        counts[p] = counts.get(p, 0)
+    for p in counts:
+        cols = np.array([R.base_param(d) == p for d in names])
+        counts[p] = int(beyond[:, cols].any(axis=1).sum()) if len(beyond) else 0
+    n_total = X.shape[0]
+    return {
+        "rawz_frac": float(len(beyond) / max(n_total, 1)),
+        "rawz_param_counts": {k: v for k, v in counts.items() if v},
+        "unlisted_mode_params": R.unlisted_mode_params(beyond, names, n_total),
+    }
+
+
 def audit(system, point, label):
     from exozippy.outputs.outliers import audit_point
 
@@ -179,7 +215,7 @@ def fit_wall_hours(fit_dir):
     return (end - start).total_seconds() / 3600.0
 
 
-def one_fit(fit_dir, max_draws, allow_free_ld, lp_n=50):
+def one_fit(fit_dir, max_draws, allow_free_ld, lp_n=50, rawz_only=False):
     import arviz as az
     import yaml
 
@@ -206,6 +242,10 @@ def one_fit(fit_dir, max_draws, allow_free_ld, lp_n=50):
     if not ld0 and not allow_free_ld:
         rec["skipped"] = "limb darkening not pinned at u1 = 0"
         return rec
+    stale = R.trace_staleness(fit_dir)
+    if stale:
+        rec["skipped"] = "STALE trace: " + stale
+        return rec
 
     t0 = time.time()
     work = R.OUT / "work" / "evidence" / fit_dir.name
@@ -228,9 +268,12 @@ def one_fit(fit_dir, max_draws, allow_free_ld, lp_n=50):
     rec["stuck_frac"] = R.stuck_fraction(lp_full)
     sc = config0.get("sampler", {})
     rec["hit_maxtime"] = bool(lp_full.shape[1] < int(sc.get("draws") or 0))
-    lc = lpcheck.compare_lp(model, idata.posterior, lp_full, n=lp_n, seed=1)
-    lc.pop("rows")
-    rec["lpcheck"] = lc
+    if not rawz_only:
+        lc = lpcheck.compare_lp(
+            model, idata.posterior, lp_full, n=lp_n, seed=1
+        )
+        lc.pop("rows")
+        rec["lpcheck"] = lc
 
     fold_degeneracies(system, model, idata)
     report_only = set(system.report_only_labels())
@@ -286,6 +329,9 @@ def one_fit(fit_dir, max_draws, allow_free_ld, lp_n=50):
         mode_provenance=rep.provenance,
     )
     post = trimmed.posterior
+    rec.update(rawz_info(post, rep))
+    if rawz_only:
+        return rec
     lp = np.asarray(trimmed.sample_stats["lp"].values, dtype=float)
     rec["lp_rhat"] = R.split_rhat(lp)
     osr = {}
@@ -351,6 +397,12 @@ def main(argv=None):
                     help="an explicit fit directory (repeatable)")  # fmt: skip
     ap.add_argument("--allow-free-ld", action="store_true")
     ap.add_argument("--max-draws", type=int, default=R.MAX_POSTERIOR_DRAWS)
+    ap.add_argument(
+        "--update-rawz",
+        action="store_true",
+        help="patch EXISTING records with the raw-z rejection breakdown "
+        "(POSSIBLE_UNLISTED_MODE) without re-running the bridge",
+    )
     ap.add_argument("--force", action="store_true",
                     help="recompute even when the record exists")  # fmt: skip
     a = ap.parse_args(argv)
@@ -366,6 +418,21 @@ def main(argv=None):
     rc = 0
     for ev, d in jobs:
         out = R.OUT / "evidence" / R.ev3(ev) / (d.name + ".json")
+        if a.update_rawz:
+            if not out.exists():
+                continue
+            old = json.loads(out.read_text())
+            if "modes" not in old or "unlisted_mode_params" in old:
+                continue
+            new = one_fit(d, a.max_draws, a.allow_free_ld, rawz_only=True)
+            for k in ("rawz_frac", "rawz_param_counts",
+                      "unlisted_mode_params"):  # fmt: skip
+                old[k] = new[k]
+            R.dump_json(old, out)
+            print("%s %s: raw-z %.1f%%, unlisted %s"
+                  % (R.ev3(ev), d.name, 100 * new["rawz_frac"],
+                     new["unlisted_mode_params"]), flush=True)  # fmt: skip
+            continue
         if out.exists() and not a.force:
             print("%s: exists, skipping (--force to redo)" % out, flush=True)
             continue
