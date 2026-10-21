@@ -211,3 +211,33 @@ def test_report_baseline_and_truth_section(B):
     head, tail = txt.split("VALIDATION ONLY")
     assert "1.1384" not in head and "s=1.1384" in tail
     assert "mirror side" in tail and "truth side" in tail
+
+
+def test_all_refused_gives_no_weights_only_labelled_indicative(B):
+    """
+    Given every bridge refused (re2 above the limit) -- what 069's runs
+    produced -- with two runs in one basin,
+    When the report is built,
+    Then no mode gets an evidence weight, the status says so, the refused
+    estimates appear only as INDICATIVE weights, and the duplicate is
+    resolved by the sub-mode re2 (the lower one is kept).
+    """
+
+    def refused(mode, mean, lnz_ind, re2):
+        r = _run(B, mode, mean, float("nan"), float("inf"), err=float("inf"))
+        r["bridge_status"] = "refused"
+        r["lnZ_indicative"] = lnz_ind
+        r["submodes"] = [{"re2": re2, "state": "re2-too-large"}]
+        return r
+
+    a = refused("m0", (-0.07, -3.71, -71.9), 10.0, 0.63)
+    a2 = refused("m2", (-0.0705, -3.712, -71.92), 9.0, 0.37)
+    b = refused("m1", (0.067, -3.73, -71.9), 10.0, 0.37)
+    rep = B.build_report([a, a2, b])
+    assert rep["weights_status"].startswith("NO mode accepted")
+    assert all(m["weight_2L1S"] == 0.0 for m in rep["modes"])
+    assert [d["mode"] for d in rep["duplicates"]] == ["m0"]
+    iw = {m["mode"]: m["weight_2L1S_indicative"] for m in rep["modes"]}
+    assert iw["m1"] == pytest.approx(1 / (1 + math.exp(-1.0)))
+    txt = B.report_text(rep)
+    assert "INDICATIVE" in txt and "NOT a weight" in txt

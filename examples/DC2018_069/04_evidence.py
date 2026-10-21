@@ -113,10 +113,12 @@ def one_run(name, burn_frac, max_draws):
     from exozippy.whitening import restore_whitening_for_trace
 
     d = B.run_dir("modes", name)
+    # The config is DC2018_069_<arch>.yaml: a stem with no dot.  The params
+    # file, the SED file and the run's restart file (.params.2.yaml) all
+    # carry one.
     cfg_path = next(
-        p for p in sorted(d.glob(B.NAME + "_*.yaml"))
-        if not p.name.endswith((".params.yaml", ".sed.yaml"))
-    )  # fmt: skip
+        p for p in sorted(d.glob(B.NAME + "_*.yaml")) if "." not in p.stem
+    )
     arch = cfg_path.stem.split("_", 2)[-1]
     cfg = yaml.safe_load(open(cfg_path))
     prefix = cfg["prefix"]
@@ -250,7 +252,13 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("runs", nargs="+", help="run names under modes/")
     ap.add_argument("--burn-frac", type=float, default=0.5)
-    ap.add_argument("--max-draws", type=int, default=4000)
+    # 20000, not evidence.py's 4000: re2 is dominated by the PROPOSAL term,
+    # which falls as 1/N_proposal, and estimate_mode_evidences caps the
+    # proposal count at max_posterior_draws.  At 4000 every 069 run was
+    # refused (re2 0.37-0.63, itself a noisy estimate there); at 20000 re2 is
+    # 0.03-0.04 (README, "Why the bridge refused at 4000").  Cost: ~40k extra
+    # logp evaluations per mode, ~5 min on 16 cores.
+    ap.add_argument("--max-draws", type=int, default=20000)
     a = ap.parse_args(argv)
     outdir = B.run_dir("evidence")
     outdir.mkdir(parents=True, exist_ok=True)
