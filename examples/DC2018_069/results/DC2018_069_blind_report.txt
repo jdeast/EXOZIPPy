@@ -1,0 +1,71 @@
+DC2018_069 blind 2L1S mode report
+=================================
+blind: grid -> modes -> one PTDE run per mode -> dedupe -> normalized per-mode lnZ (bridge) -> softmax
+dedupe: same sign(u_0) and Mahalanobis(log s, log q, alpha) < 3.0; keep lower re2
+lnZ is the NORMALIZED log evidence (System.evidence_log_norm added to the bridge lnZ), so it compares across runs and architectures.
+
+mode origin                           lnZ     err    w(2L1S)     w(all)      lnL_max
+m2   minimum 2                        nan     inf          0          0    923408.15
+     bridge refused (estimate below, NOT a weight)
+m1   minimum 1                        nan     inf          0          0    923408.92
+     bridge refused (estimate below, NOT a weight)
+m3   mirror of minimum 2              nan     inf          0          0    922765.20
+     bridge refused (estimate below, NOT a weight)
+base 1L1S_fs (no companion)           nan     inf          -          0    919949.97
+  best 2L1S minus 1L1S_fs: dlnZ = nan (accepted); 3444.5 (INDICATIVE, refused estimates)
+
+Weights: NO mode accepted by the bridge: there are no evidence weights; weight_2L1S_indicative is from the REFUSED estimates
+Bridge per mode (re2 limit 0.25), and the INDICATIVE
+softmax of the refused estimates (never a weight):
+  m2   re2-too-large                            re2 0.369    lnZ_ind     923258.06  w_ind 0.227
+  m1   re2-too-large                            re2 0.374    lnZ_ind     923259.28  w_ind 0.773
+  m3   not-converged                            re2 nan      lnZ_ind     914489.86  w_ind 0
+  base re2-too-large                            re2 0.383    lnZ_ind     919814.77
+
+Parameters per mode (median, 68% interval):
+  m2:
+    s      0.8461 +0.028/-0.03
+    q      0.0001937 +2.4e-05/-1.9e-05
+    alpha  -71.94 +0.22/-0.23
+    t_0    2460035.4896 +0.0001/-0.0001
+    u_0    0.002434 +2.3e-05/-3.1e-05
+    t_E    7.151 +0.037/-0.034
+    rho    0.001586 +0.00011/-0.00014
+  m1:
+    s      1.168 +0.037/-0.034
+    q      0.0001876 +2e-05/-1.8e-05
+    alpha  -71.87 +0.25/-0.22
+    t_0    2460035.4895 +0.0001/-0.0001
+    u_0    0.0025 +1.8e-05/-2e-05
+    t_E    7.146 +0.038/-0.038
+    rho    0.001615 +0.0001/-0.00012
+  m3:
+    s      1.694 +0.055/-0.075
+    q      0.0006215 +5.4e-05/-6.2e-05
+    alpha  55.93 +1.5/-1.3e+02
+    t_0    2460035.4878 +0.0005/-0.0004
+    u_0    0.002654 +0.00023/-0.00016
+    t_E    5.888 +0.17/-0.17
+    rho    0.001791 +0.00017/-0.00021
+  base:
+    t_0    2460035.4889 +0.0001/-0.0001
+    u_0    0.002578 +3.1e-05/-2.6e-05
+    t_E    6.828 +0.039/-0.042
+    rho    0.001318 +6.7e-05/-3.9e-05
+
+Reliability flags:
+  m2: bridge refused; drift: log s moved +0.207 (> one node, 0.070)
+  m1: bridge refused
+  m3: stuck 0.99 > 0.1; lp Rhat 4.56; bridge refused
+  base: bridge refused
+
+Duplicates (same basin; lnZ NOT added):
+  m0 == m2 (Mahalanobis 0.13)
+
+------------------------------------------------------------------------
+VALIDATION ONLY -- answer key, NOT used by the procedure
+------------------------------------------------------------------------
+  truth: s=1.1384 (mirror 1/s=0.8784) q=0.000172 log q=-3.763
+  m2: s=0.8461 (mirror side), dlog s=-0.016 vs mirror; dlog q=+0.051; weight 0
+  m1: s=1.1678 (truth side), dlog s=+0.011 vs truth; dlog q=+0.037; weight 0
+  m3: s=1.6939 (truth side), dlog s=+0.173 vs truth; dlog q=+0.557; weight 0

@@ -113,10 +113,12 @@ def one_run(name, burn_frac, max_draws):
     from exozippy.whitening import restore_whitening_for_trace
 
     d = B.run_dir("modes", name)
+    # The config is DC2018_069_<arch>.yaml: a stem with no dot.  The params
+    # file, the SED file and the run's restart file (.params.2.yaml) all
+    # carry one.
     cfg_path = next(
-        p for p in sorted(d.glob(B.NAME + "_*.yaml"))
-        if not p.name.endswith((".params.yaml", ".sed.yaml"))
-    )  # fmt: skip
+        p for p in sorted(d.glob(B.NAME + "_*.yaml")) if "." not in p.stem
+    )
     arch = cfg_path.stem.split("_", 2)[-1]
     cfg = yaml.safe_load(open(cfg_path))
     prefix = cfg["prefix"]

@@ -176,10 +176,67 @@ minimum in its own right. The next basin (s = 3.63, dchi2 992) falls
 outside the cut. Every config, including the 1L1S_fs baseline, carries
 one shared prior (sha256 e2ccca2a966572b0).
 
-**Stages 3-5: PENDING.** The array is Slurm job 54191630 (5 tasks: m0-m3
-and 1L1S_fs) and is queued on sapphire. The mode table, the weights and
-the comparison with truth will be added to `results/` when the runs
-finish.
+**Stage 3: the runs.** Slurm array 54191630, 64 cores each. Settings:
+n_temps auto (23 rungs for 2L1S, 22 for 1L1S_fs), tune 300, draws 3000.
+All five tasks finished well inside the 6.5 h maxtime.
+
+| run | wall | wrap-up verdict |
+|---|---|---|
+| m0 | 2.7 h | CONVERGENCE NOT REACHED: burn-in 75%, max Rhat 1.038, min ESS 1230 (both on `log_pi_rel`), 74 chains kept |
+| m1 | 2.7 h | the same: Rhat 1.040, ESS 1365 (`log_pi_rel`) |
+| m2 | 2.6 h | the same: Rhat 1.038, ESS 1270 (`log_pi_rel`) |
+| m3 | 3.0 h | **NOT EQUILIBRATED**: lp still trending, +191 nats between the last two quarters; stuck fraction 0.99; lp Rhat 4.56 |
+| 1L1S_fs | 0.7 h | CONVERGENCE NOT REACHED: Rhat 1.034, ESS 1426 (`log_pi_rel`) |
+
+The worst-mixed parameter in m0, m1, m2 and 1L1S_fs is the prior-dominated
+`log_pi_rel`. On the last 25% of draws their lp split-Rhat is 1.03-1.05,
+with no stuck chains. Every ladder logged "communication-limited" (the
+2 Lambda + 1 criterion asks for 26-37 rungs). Stage 4 therefore uses
+`--burn-frac 0.75`, the burn-in the wrap-up itself measured.
+
+**Stages 4-5: the blind report** (`results/DC2018_069_blind_report.txt`).
+lnZ is normalized. The bridge limit is re2 <= 0.25.
+
+| mode | seed (s, log q) | posterior s | q | bridge | re2 | lnZ (refused, indicative) | weight | flags |
+|---|---|---|---|---|---|---|---|---|
+| m1 | 1.175, -3.86 | 1.168 +0.037/-0.034 | 1.88e-4 | REFUSED (re2-too-large) | 0.374 | 923259.28 +/- 0.61 | none | bridge refused |
+| m0 | 0.851, -3.86 | 0.846 | 1.94e-4 | REFUSED (re2-too-large) | 0.631 | 923259.31 +/- 0.79 | none | duplicate of m2 (Mahalanobis 0.13) |
+| m2 | 0.525, -3.14 | 0.846 +0.028/-0.030 | 1.94e-4 | REFUSED (re2-too-large) | 0.369 | 923258.06 +/- 0.61 | none | drift: log s +0.207, now in m0's basin |
+| m3 | 1.905, -3.14 | 1.694 | 6.2e-4 | REFUSED (not-converged) | -- | 914489.86 | none | stuck 0.99, lp Rhat 4.56, not equilibrated |
+| 1L1S_fs | -- | -- | -- | REFUSED (re2-too-large) | 0.383 | 919814.77 +/- 0.62 | none | bridge refused |
+
+**No mode was accepted by the bridge, so this run produced no evidence
+weights.** All five refusals are the bridge's own. Four are re2 = 0.37-0.63
+against the 0.25 limit: the Gaussian proposal fits these 37-D raw
+posteriors poorly. The fifth is m3, which also did not converge as a
+sampling run. Everything below is computed from the REFUSED estimates and
+is labelled INDICATIVE in the report.
+
+- **2L1S over 1L1S_fs:** dlnZ ~ 3444 nats (indicative). An error on the
+  bridge cannot move a gap this size, and lnL_max agrees: 923408.9
+  against 919950.0, a difference of 3459. The companion is detected.
+- **Close vs wide:** the pair is a tie. m1 (wide) is at 923259.28 and the
+  m0/m2 basin (close) at 923259.31 for m0 and 923258.06 for m2. The two
+  runs of the close basin differ by 1.25 nats, about twice their quoted
+  errors, so the bridge's error bars are optimistic. The dedupe keeps the
+  lower-re2 run, m2, and that gives an indicative weight of 0.77 (wide)
+  against 0.23 (close). Had it kept m0, the split would be 0.49 / 0.51. At
+  the indicative level the data do not choose between the two topologies.
+- **m3** is ~8800 nats below and not equilibrated. Its basin
+  (s = 1.69, q = 6e-4) is excluded.
+
+**Validation only (answer key; not used above).** The truth is s = 1.138,
+log q = -3.763 (q = 1.72e-4), with mirror 1/s = 0.878.
+
+- m1 is on the truth side: s = 1.168, so dlog s = +0.011 and
+  dlog q = +0.037.
+- m2 (and its duplicate m0) is on the mirror side: s = 0.846, so
+  dlog s = -0.016 from the mirror and dlog q = +0.051.
+
+Both members of the degenerate pair were found, each close to its true
+value, and the blind procedure correctly declines to rank them. The only
+non-degenerate alternative (m3) is ruled out. The grid's best node was
+the mirror. Seeding both sides is what recovered the truth-side solution.
 
 ## Gaps found (for the blind-pipeline driver)
 
@@ -192,12 +249,25 @@ finish.
   and only over that run's own modes. A single-mode run therefore gets
   no lnZ, which is why stage 4 is a separate offline pass. The driver
   should own this pass.
-- On the earlier single 069 fit (24 temperatures, 8000 draws, hogg on),
-  the bridge refused both sub-modes that `identify_modes` found
-  (not-converged; re2 = 1.3). The Gaussian proposal fits this posterior
-  poorly. Refused estimates are kept only as `lnZ_indicative` and are
-  never used for a weight. Whether the Gaussian runs here pass is the
-  open question for stage 4.
+- **The bridge refuses every 069 run** (re2 0.37-0.63 against 0.25,
+  including the point-lens baseline), even with converged, single-mode
+  T=1 posteriors. The Gaussian proposal in raw space does not fit these
+  posteriors well enough. Without a better proposal (a warped or mixture
+  proposal), or nested sampling as the cross-check, the pipeline cannot
+  produce weights for this event class. This is the main blocker.
+- Two runs of the same basin (m0 and m2) gave bridge lnZ 1.25 nats apart,
+  about twice their quoted errors. The quoted lnZ errors are too small.
+- Keeping the lower-re2 duplicate is a rule that can move a weight from
+  0.5 to 0.77 when the two estimates disagree. Averaging the duplicates
+  (not summing them) may be the better rule.
+- A seed can drift into another mode's basin (m2 -> m0), so the dedupe has
+  to run on the posteriors, not on the seeds. It does.
+- The wrap-up reports "CONVERGENCE NOT REACHED" on `log_pi_rel`, a
+  prior-dominated latent. The flags in this pipeline use lp instead.
+- 04_evidence.py first selected the run's restart file
+  (`*.params.2.yaml`) as its config, because the run writes that file
+  into the same directory. Fixed here: the config is the yaml whose stem
+  has no dot.
 - `dc18_highmag_grid2.py` (the script that made the shipped grid) reads
   the answer key in order to print a truth comparison. The search itself
   is blind, but the driver should use the package path that

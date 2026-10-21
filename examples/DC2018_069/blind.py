@@ -306,6 +306,17 @@ def same_basin(fa, fb, n_sigma=DEDUPE_SIGMA):
     return fa["u0_sign"] == fb["u0_sign"] and mahalanobis(fa, fb) < n_sigma
 
 
+def bridge_re2(r):
+    """The re2 to rank a run by.  An accepted run's own; for a refused run,
+    the worst finite re2 of its sub-mode bridges (a refused bridge still
+    measured how badly its proposal fit), else inf (did not converge)."""
+    re2 = r.get("re2", float("inf"))
+    if np.isfinite(re2):
+        return float(re2)
+    vals = [m["re2"] for m in r.get("submodes", []) if np.isfinite(m["re2"])]
+    return float(max(vals)) if vals else float("inf")
+
+
 def dedupe(runs, n_sigma=DEDUPE_SIGMA):
     """Collapse runs that converged to the same basin.
 
@@ -316,7 +327,7 @@ def dedupe(runs, n_sigma=DEDUPE_SIGMA):
     """
 
     def key(r):
-        re2 = r.get("re2", float("inf"))
+        re2 = bridge_re2(r)
         return (not np.isfinite(re2), re2 if np.isfinite(re2) else 0.0)
 
     kept, dupes = [], []
@@ -388,7 +399,17 @@ def build_report(runs, baseline=None, event=EVENT):
             row["weight_all"] = float(wa[k])
             row["weight_all_err"] = float(dwa[k])
         row["flags"] = reliability_flags(r)
+        row["bridge_re2"] = bridge_re2(r)
+        row["bridge_states"] = [m["state"] for m in r.get("submodes", [])]
         modes.append(row)
+    # When NO bridge was accepted there are no weights.  The refused
+    # estimates still say something, so they get their own softmax --
+    # labelled INDICATIVE everywhere, never merged into the weights above.
+    ind = [r.get("lnZ_indicative", float("nan")) for r in kept]
+    iw, _ = softmax(ind, [0.0] * len(ind))
+    for row, w in zip(modes, iw):
+        row["weight_2L1S_indicative"] = float(w)
+    n_ok = sum(1 for r in kept if np.isfinite(r["lnZ"]))
     out = {
         "event": int(event),
         "name": "DC2018_%03d" % event,
@@ -396,6 +417,12 @@ def build_report(runs, baseline=None, event=EVENT):
         "dedupe -> normalized per-mode lnZ (bridge) -> softmax",
         "dedupe_rule": "same sign(u_0) and Mahalanobis(log s, log q, alpha)"
         " < %.1f; keep lower re2" % DEDUPE_SIGMA,
+        "weights_status": (
+            "%d of %d modes accepted by the bridge" % (n_ok, len(kept))
+            if n_ok
+            else "NO mode accepted by the bridge: there are no evidence "
+            "weights; weight_2L1S_indicative is from the REFUSED estimates"
+        ),
         "modes": modes,
         "duplicates": [
             {
@@ -418,6 +445,10 @@ def build_report(runs, baseline=None, event=EVENT):
             default=float("nan"),
         )
         b["dlnZ_best_2L1S_minus_baseline"] = float(best - baseline["lnZ"])
+        bi = max((v for v in ind if np.isfinite(v)), default=float("nan"))
+        b["dlnZ_best_2L1S_minus_baseline_indicative"] = float(
+            bi - baseline.get("lnZ_indicative", float("nan"))
+        )
         out["baseline"] = b
     return out
 
@@ -474,10 +505,7 @@ def report_text(rep, truth=None):
         )
         ind = r.get("lnZ_indicative", float("nan"))
         if not np.isfinite(r["lnZ"]) and np.isfinite(ind):
-            L.append(
-                "     bridge refused; its unaccepted estimate was %.2f "
-                "(NOT used for any weight)" % ind
-            )
+            L.append("     bridge refused (estimate below, NOT a weight)")
     b = rep.get("baseline")
     if b:
         L.append(
@@ -493,8 +521,38 @@ def report_text(rep, truth=None):
             )
         )
         L.append(
-            "  best 2L1S minus %s: dlnZ = %.1f"
-            % (ARCH_BASELINE, b["dlnZ_best_2L1S_minus_baseline"])
+            "  best 2L1S minus %s: dlnZ = %.1f (accepted); %.1f "
+            "(INDICATIVE, refused estimates)"
+            % (
+                ARCH_BASELINE,
+                b["dlnZ_best_2L1S_minus_baseline"],
+                b.get("dlnZ_best_2L1S_minus_baseline_indicative", np.nan),
+            )
+        )
+    L.append("")
+    L.append("Weights: " + rep.get("weights_status", ""))
+    L.append("Bridge per mode (re2 limit 0.25), and the INDICATIVE")
+    L.append("softmax of the refused estimates (never a weight):")
+    for r in rep["modes"]:
+        L.append(
+            "  %-4s %-40s re2 %-8s lnZ_ind %13.2f  w_ind %.3g"
+            % (
+                r["mode"],
+                ",".join(r.get("bridge_states", [])),
+                _fmt(r.get("bridge_re2"), 3),
+                r.get("lnZ_indicative", np.nan),
+                r.get("weight_2L1S_indicative", np.nan),
+            )
+        )
+    if b:
+        L.append(
+            "  %-4s %-40s re2 %-8s lnZ_ind %13.2f"
+            % (
+                "base",
+                ",".join(m["state"] for m in b.get("submodes", [])),
+                _fmt(bridge_re2(b), 3),
+                b.get("lnZ_indicative", np.nan),
+            )
         )
     L.append("")
     L.append("Parameters per mode (median, 68% interval):")
