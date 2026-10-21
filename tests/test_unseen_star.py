@@ -181,6 +181,69 @@ def test_a_params_prior_frees_a_pinned_parameter(monkeypatch, tmp_path):
     system, _ = _build(config, user_params)
     assert _sampled(system, "av", 0)
     assert not _sampled(system, "teffsed", 0)
+    # The named knob is a parameter of the fit again (a row); the unnamed
+    # one is not (inactive, not merely pinned).
+    assert _active(system, "av", 0)
+    assert not _active(system, "teffsed", 0)
+
+
+def _active(system, param, idx):
+    return getattr(system.star, param).element_is_active(idx)
+
+
+def test_rows_derived_from_bookkeeping_pins_are_not_reported(
+    monkeypatch, tmp_path
+):
+    """
+    Given the default fixture -- the Lens unseen, Mann reading its radius
+      and feh, nothing reading its teff, its av/teffsed/radiussed pinned at
+      bookkeeping values --
+    When the system is built,
+    Then those three knobs are INACTIVE on the Lens (not merely pinned:
+      a pin is still a table row), and so is everything derived from a
+      bookkeeping value -- loggsed/luminositysed/fbolsed from the knobs,
+      luminosity and fbol from the inactive teff -- while logg and density,
+      whose radius Mann reads, stay active; and on the Source every one of
+      them is active.  This is Component._inherit_inactivity: before it, a
+      0.11 Msun lens reported logg 3.48 and one solar luminosity from the
+      radius = 1 solRad, Teff = 5778 K pins (examples/KMT-2021-BLG-1122L).
+    """
+    # ARRANGE
+    monkeypatch.chdir(EXAMPLE_DIR)
+    config, user_params = _inputs(tmp_path)
+
+    # ACT
+    system, _ = _build(config, user_params)
+
+    # ASSERT -- the Lens (element 0)
+    for p in SED_SIDE:
+        assert not _active(system, p, 0), f"Lens {p} should be inactive"
+    for p in ("loggsed", "luminositysed", "fbolsed"):
+        assert not _active(system, p, 0), (
+            f"Lens {p} derives from a bookkeeping pin and must not be a row"
+        )
+    assert not _active(system, "teff", 0)
+    for p in ("luminosity", "fbol"):
+        assert not _active(system, p, 0), f"Lens {p} derives from its teff"
+    for p in ("radius", "logg", "density", "mass", "distance"):
+        assert _active(system, p, 0), f"Lens {p} is read (Mann) or sampled"
+    # the inactive derived elements are still BUILT: consumers read them
+    assert getattr(system.star, "luminosity").element_is_derived(0)
+    # ...and the Source (element 1) reports all of them
+    for p in (
+        SED_SIDE
+        + STRUCTURE
+        + (
+            "logg",
+            "density",
+            "luminosity",
+            "fbol",
+            "loggsed",
+            "luminositysed",
+            "fbolsed",
+        )
+    ):
+        assert _active(system, p, 1), f"Source {p} should be active"
 
 
 def test_an_unstated_zeropoint_leaves_the_source_unseen_too(
