@@ -315,3 +315,31 @@ def test_arch_specific_priors(built):
     for arch in ("2L1S", "1L2S"):
         assert np.allclose(np.asarray(built[arch].source.rho.upper), 1.0)
     assert np.allclose(np.asarray(built["1L1S_fs"].source.rho.upper), 10.0)
+
+
+def test_n_temps_accepts_auto(gen, tmp_path):
+    """
+    Given `--n-temps auto` (the sampler's own ladder sizing),
+    When the generator writes a 2L1S config,
+    Then the config says `n_temps: auto` -- passed through as the string,
+    not guessed -- while an integer stays an integer and junk is refused.
+    """
+    root = tmp_path / "data"
+    _write_event(root)
+    out = tmp_path / "arch"
+    rc = gen.main(
+        [
+            "--event", str(EVENT), "--arch", "2L1S", "--out", str(out),
+            "--data-dir", str(root), "--cores", "1", "--n-temps", "auto",
+        ]
+    )  # fmt: skip
+    assert rc == 0
+    with io.open(out / ("DC2018_%03d_2L1S.yaml" % EVENT)) as fh:
+        assert yaml.safe_load(fh)["sampler"]["n_temps"] == "auto"
+    assert gen.n_temps_arg("24") == 24
+    assert gen.n_temps_arg("AUTO") == "auto"
+    import argparse
+
+    for bad in ("0", "four"):
+        with pytest.raises(argparse.ArgumentTypeError):
+            gen.n_temps_arg(bad)

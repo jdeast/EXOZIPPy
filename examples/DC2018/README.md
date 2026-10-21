@@ -99,7 +99,7 @@ roadmap item after static 2L1S works.
 ## Architecture configs for evidence comparison (`dc18_arch_config.py`)
 
     python dc18_arch_config.py --event 194 --arch all --out sweep_arch/194 \
-        [--seed seed.yaml] [--n-temps 4 --tune 300 --draws 8000] \
+        [--seed seed.yaml] [--n-temps 4|auto --tune 300 --draws 8000] \
         [--maxtime 72000] [--hogg] [--data-dir DIR]
     python dc18_arch_config.py --check sweep_arch/194/*_{1L1S,1L1S_fs,1L2S,2L1S}.yaml
 
