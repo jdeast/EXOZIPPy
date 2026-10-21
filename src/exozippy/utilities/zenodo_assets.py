@@ -81,6 +81,12 @@ class ZenodoRecord:
     creators: tuple[str, ...]
     files: Mapping[str, ZenodoFile]
     citation_key: str | None
+    # {filename: md5s of that file in EARLIER published versions}.  An owner
+    # that finds a file on disk matching one of these has a checkout that
+    # predates the pin, not a local edit: it re-fetches the pinned version
+    # (bc_tables._check_present) instead of raising "regenerated locally".
+    # Filled when a record is re-versioned; empty for a first version.
+    superseded: Mapping[str, tuple[str, ...]] = MappingProxyType({})
 
     @property
     def doi(self) -> str:
@@ -154,7 +160,7 @@ RECORDS: Mapping[str, ZenodoRecord] = MappingProxyType(
         # models/NextGen/bc_tables.py (fetched per facility on first use,
         # via components/sed/bc_grid.py).
         "nextgen_bc_tables": ZenodoRecord(
-            record_id=23074951,
+            record_id=23522276,
             concept_record_id=23074950,
             title="Bolometric Correction Grids for EXOZIPPy",
             creators=("Eastman, Jason", "Sandhaus, Phoebe"),
@@ -162,61 +168,87 @@ RECORDS: Mapping[str, ZenodoRecord] = MappingProxyType(
             files=_pins(
                 {
                     "2MASS.bc.parquet": (
-                        4253006,
-                        "41ff8f2f6e9a1b88f3f085f128dfcc2a",
+                        4566065,
+                        "df84dc4426a1b29e7eceebb55d798c08",
                     ),
                     "Euclid.bc.parquet": (
-                        4252914,
-                        "44925baf29ad0d1d4d3cedd4d45abc07",
+                        4565957,
+                        "cc8ab258863d077a7b9aec4b57fbf927",
                     ),
                     "GAIA.bc.parquet": (
-                        8464605,
-                        "073dcf7acbd6195478954cc13a9fd742",
+                        8975523,
+                        "0c9654322c0d31ea8fa79a8dee7a3093",
                     ),
                     "GALEX.bc.parquet": (
-                        2849599,
-                        "e5f774a917144a0c942ea65e2a613b11",
+                        3096721,
+                        "d2e5d6ff3d9684d5a9bcf95ff3e56221",
                     ),
                     "Gemini.bc.parquet": (
-                        2849819,
-                        "73e689d4edafe76052f29f16e5ee9d52",
+                        3096953,
+                        "efae58a2bd2ec304f096279749bdec37",
                     ),
                     "Generic.bc.parquet": (
-                        25307518,
-                        "4e067a46d646edd2991141f5a3cdd728",
+                        26609685,
+                        "a652a7f764e5e59666cdc04fc8cfe866",
                     ),
                     "Keck.bc.parquet": (
-                        7060295,
-                        "7b0be59aef0304dcc68b03a7831b7b85",
+                        7505242,
+                        "73ac7988b7b485955190ce43f62151af",
                     ),
                     "Kepler.bc.parquet": (
-                        1445932,
-                        "9b21575a77dd737b6f0fa4d43c00b52d",
+                        1627111,
+                        "6e506f9f70df6480522cc84842a55773",
+                    ),
+                    "MANIFEST.txt": (
+                        820,
+                        "17928a49ba335de1754341dae2ab9b74",
                     ),
                     "PAN-STARRS.bc.parquet": (
-                        5656266,
-                        "8f5d5a4c24ad21a93028b52e4414e1ab",
+                        6035220,
+                        "99051cdc9a0aedbdcdfb73ed97026916",
                     ),
                     "Roman.bc.parquet": (
-                        11270909,
-                        "5e431ef09b0a65a4471f6598f7f7cdae",
+                        11913657,
+                        "e573360c53ad4d8bfd2df39973e208df",
                     ),
                     "SLOAN.bc.parquet": (
-                        7059882,
-                        "95c997b768f763faf51ed41305ff2dcb",
+                        7504799,
+                        "de6cccbd1aa0d3369d917c1169e6212d",
                     ),
                     "TESS.bc.parquet": (
-                        1445767,
-                        "af9cabbe4018da49e57ccf88c48072ca",
+                        1626938,
+                        "a5d1b015f0defe7fd36162cd23834c71",
                     ),
                     "TYCHO.bc.parquet": (
-                        8464106,
-                        "6cbe366d4c185da85d9ab399d609b517",
+                        8974993,
+                        "5fe4ed31af26dc765d84d5dfef8ed4cd",
                     ),
                     "WISE.bc.parquet": (
-                        5656474,
-                        "7738d148d3dd9e0a37c84720d3737614",
+                        6035458,
+                        "8d48b1c02b733f10c0e77d49f246372e",
                     ),
+                }
+            ),
+            superseded=MappingProxyType(
+                {
+                    "2MASS.bc.parquet": ("41ff8f2f6e9a1b88f3f085f128dfcc2a",),
+                    "Euclid.bc.parquet": ("44925baf29ad0d1d4d3cedd4d45abc07",),
+                    "GAIA.bc.parquet": ("073dcf7acbd6195478954cc13a9fd742",),
+                    "GALEX.bc.parquet": ("e5f774a917144a0c942ea65e2a613b11",),
+                    "Gemini.bc.parquet": ("73e689d4edafe76052f29f16e5ee9d52",),
+                    "Generic.bc.parquet": (
+                        "4e067a46d646edd2991141f5a3cdd728",
+                    ),
+                    "Keck.bc.parquet": ("7b0be59aef0304dcc68b03a7831b7b85",),
+                    "Kepler.bc.parquet": ("9b21575a77dd737b6f0fa4d43c00b52d",),
+                    "PAN-STARRS.bc.parquet": (
+                        "8f5d5a4c24ad21a93028b52e4414e1ab",
+                    ),
+                    "Roman.bc.parquet": ("5e431ef09b0a65a4471f6598f7f7cdae",),
+                    "SLOAN.bc.parquet": ("95c997b768f763faf51ed41305ff2dcb",),
+                    "TESS.bc.parquet": ("af9cabbe4018da49e57ccf88c48072ca",),
+                    "TYCHO.bc.parquet": ("6cbe366d4c185da85d9ab399d609b517",),
+                    "WISE.bc.parquet": ("7738d148d3dd9e0a37c84720d3737614",),
                 }
             ),
         ),

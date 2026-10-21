@@ -18,13 +18,20 @@ These tables are built from the full-resolution BT-NextGen (AGSS2009) spectra[^1
 
 ## 0. Get the raw spectra
 
-Download the BT-NextGen (AGSS2009) spectra from SVO[^1] as ASCII (`.BT-NextGen.7.dat.txt`, ~13 MB each). The default location is set in `nextgen_spectra.py`:
+`fetch_raw_spectra.py` downloads the BT-NextGen (AGSS2009) spectra from SVO[^1] as the ASCII files the pipeline reads (`.BT-NextGen.7.dat.txt`, ~12.5 MB each): it reads SVO's SSAP index of the model (cached as `svo_index.votable.xml` beside the spectra), maps every (teff, logg, feh) node of the grid onto a file id -- trying the alphas in `ALPHA_GRID_PTS` order, exactly as `find_spectrum_file` reads them back -- and skips what is already on disk. The index is also the pipeline's AUTHORITY on which nodes exist (see Padding below).
+
+```bash
+python -m exozippy.models.NextGen.fetch_raw_spectra --logg 5.5   # one plane
+python -m exozippy.models.NextGen.fetch_raw_spectra              # the grid
+```
+
+The default location is set in `nextgen_spectra.py`:
 
 ```
 SPECTRA_RAW_PATH_DEFAULT = Path("/Volumes/Data/Spectra/BT-NextGen_AGSS2009/")
 ```
 
-Only the rectangular grid in `NextGen.grid.yaml` is needed (60 Teff x 11 log g x 11 [Fe/H] = 7260 spectra). Where a node has no $[\alpha/\text{Fe}]=0$ spectrum, the next alpha in `ALPHA_GRID_PTS = [0, 0.2, -0.2, 0.4, 0.6]` is used and recorded in the `alpha` column.
+Only the rectangular grid in `NextGen.grid.yaml` is needed (60 Teff x 12 log g x 11 [Fe/H] = 7920 nodes, of which the logg 5.5 plane above 5000 K -- 385 nodes -- has no spectrum and is padded, see 1b). Where a node has no $[\alpha/\text{Fe}]=0$ spectrum, the next alpha in `ALPHA_GRID_PTS = [0, 0.2, -0.2, 0.4, 0.6]` is used and recorded in the `alpha` column.
 
 ## 1. Resample the raw spectra (`generate_NextGen_BC_Tables.py`, step 1)
 
@@ -37,6 +44,10 @@ SPECTRA_PROCESSED_PATH_DEFAULT = Path("/Volumes/Data/Spectra/BT-NextGen_AGSS2009
 
 > [!WARNING]
 > Reading the raw ASCII spectra is the slow part (~1 s each, so ~2 hours single-process; `n_workers` in `process_raw_spectra_for_feh` parallelizes it). Each processed file is ~0.7 GB (~8 GB total). Step 1 is incremental (`process_missing_spectra`): for each [Fe/H] it reads only the `teff`/`logg` columns of the existing parquet and resamples only the (teff, log g) nodes it does not hold yet, so adding Teff, log g or [Fe/H] values to `NextGen.grid.yaml` costs only the new spectra. Extending A_V needs no new spectra, so step 1 is then a no-op.
+
+## 1b. Padding: the grid nodes no spectrum exists for (`pad_missing_nodes`)
+
+BT-NextGen's raw grid is ragged: the logg 5.5 plane exists only to 5000 K and the 6.0 plane to 4000 K. The loader (`bc_grid.complete_axes`) reads only the largest COMPLETE box of a table, so a half plane would be trimmed away -- or cost the hot end of the Teff axis -- and the ceiling would stay at logg 5.0, where an M dwarf below ~0.2 Msun sits above it (logg 5.16 at 0.11 Msun) and the grid barrier pushes its mass. So after step 1 and BEFORE step 2, `pad_missing_nodes` copies, for every grid node SVO lists no spectrum for (`unavailable_grid_nodes`, from the index -- never from the local raw directory, which is empty on most machines), the BC rows of the nearest lower-gravity plane that has one, at every Av and for every filter column, and records each padded node in the table's `meta["padding"]` (`alpha` is copied with the row: it is the provenance of the spectrum actually used). No star lives at logg 5.5 and 6000 K; the padded cells exist to keep the box rectangular and are never interpolated near a real star. Step 2 then plans nothing for those nodes. `process_missing_spectra(skip_unavailable=True)` is step 1's half of the same rule: it leaves the unavailable nodes out instead of raising. The 2026-10-20 extension to logg 5.5 (`scripts/build_nextgen_logg55.job`) padded 385 nodes per facility (35 Teff values from 5100 to 10000 K x 11 [Fe/H]).
 
 ## 2. Compute the BC tables (`generate_NextGen_BC_Tables.py`, step 2)
 

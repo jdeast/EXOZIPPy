@@ -203,5 +203,5 @@ def test_the_inventory_lists_what_no_data_reads(tmp_path):
         "star.teffsed": (1,),
     }
     lo, hi = system.star.loggsed.lower, system.star.loggsed.upper
-    assert (float(lo[0]), float(hi[0])) == (0.0, 5.0)
+    assert (float(lo[0]), float(hi[0])) == (0.0, 5.5)
     assert (float(lo[1]), float(hi[1])) == (float("-inf"), float("inf"))

@@ -202,6 +202,40 @@ def test_a_locally_changed_table_raises_and_is_not_overwritten(
     assert calls == []
 
 
+def test_a_superseded_published_version_is_fetched_over(
+    fake_manifest, monkeypatch
+):
+    """
+    Given a table on disk that is byte-identical to a PREVIOUS published
+      version of itself (a checkout that fetched the record before the pin
+      moved to a new version),
+    When a fit asks for it,
+    Then it is recognized from the registry's superseded md5s, fetched over
+      -- not refused as a local edit -- and the pinned bytes are what is
+      read afterwards; a local edit that matches no version still raises.
+    """
+    calls = []
+    monkeypatch.setattr(zenodo, "_urlretrieve", _serving(calls))
+    fake_manifest.mkdir(parents=True)
+    local = fake_manifest / _NAME
+    previous = _PAYLOAD.replace(b"bytes", b"BYTES")  # the old version
+    local.write_bytes(previous)
+    monkeypatch.setattr(
+        bc_tables, "_SUPERSEDED", {_NAME: {hashlib.md5(previous).hexdigest()}}
+    )
+
+    paths = bc_tables.ensure_tables([_NAME])
+
+    assert paths == [local]
+    assert local.read_bytes() == _PAYLOAD
+    assert len(calls) == 1
+    # and a file matching NO version is still a local edit
+    local.write_bytes(_PAYLOAD.replace(b"bytes", b"other"))
+    monkeypatch.setattr(bc_tables, "_verified", set())
+    with pytest.raises(RuntimeError, match="not the published"):
+        bc_tables.ensure_tables([_NAME])
+
+
 def test_a_cached_table_is_linked_without_a_download(
     fake_manifest, monkeypatch, tmp_path
 ):

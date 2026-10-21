@@ -82,9 +82,20 @@ BC_TABLE_DIR = current_dir / "BCs"
 _RECORD = zenodo_assets.record("nextgen_bc_tables")
 ZENODO_RECORD = _RECORD.record_id
 ZENODO_CONCEPT_RECORD = _RECORD.concept_record_id
+# Only the tables: the record also carries the publish script's
+# MANIFEST.txt, which no reader opens (the Claret record's rule).
 _BC_TABLE_FILES = {
     name: {"size": pin.size, "md5": pin.md5}
     for name, pin in _RECORD.files.items()
+    if name.endswith(".bc.parquet")
+}
+# md5s of each table in EARLIER published versions (zenodo_assets
+# ZenodoRecord.superseded): a checkout that fetched the previous version
+# holds one of these, and gets the pinned version fetched over it.
+_SUPERSEDED = {
+    name: set(md5s)
+    for name, md5s in _RECORD.superseded.items()
+    if name in _BC_TABLE_FILES
 }
 
 FETCH_COMMAND = "exozippy-fetch-bc-tables"
@@ -134,14 +145,27 @@ def _how_to_prefetch() -> str:
     )
 
 
-def _check_present(path: Path, name: str) -> None:
-    """Raise unless the table at `path` is byte-identical to the pin."""
+def _check_present(path: Path, name: str) -> bool:
+    """True when the table at `path` is byte-identical to the pin; False
+    when it is a PREVIOUS published version of it (the caller re-fetches
+    over it); raises on anything else -- a local edit is never overwritten.
+    """
     meta = _BC_TABLE_FILES[name]
     st = path.stat()
     key = (str(path), st.st_size, st.st_mtime_ns, st.st_ino)
     if key in _verified:
-        return
-    if st.st_size != meta["size"] or _md5(path) != meta["md5"]:
+        return True
+    md5 = None
+    if st.st_size != meta["size"] or (md5 := _md5(path)) != meta["md5"]:
+        if (md5 or _md5(path)) in _SUPERSEDED.get(name, ()):
+            logger.info(
+                "%s is a previous published version of %s; fetching the "
+                "pinned one (record %s) over it.",
+                path,
+                name,
+                record_url(),
+            )
+            return False
         raise RuntimeError(
             f"{path} is not the published {name} (pinned size "
             f"{meta['size']}, md5 {meta['md5']}; record {record_url()}). "
@@ -157,6 +181,7 @@ def _check_present(path: Path, name: str) -> None:
             f"given and never fetched into)."
         )
     _verified.add(key)
+    return True
 
 
 def ensure_tables(
@@ -198,8 +223,12 @@ def ensure_tables(
     for name in names:
         path = dest_dir / name
         if path.is_file():
-            if not allow_local_changes:
-                _check_present(path, name)
+            if not allow_local_changes and not _check_present(path, name):
+                # A superseded version: a hard link into the machine cache
+                # (the old md5's entry), so unlinking here leaves the cache
+                # alone and the fetch below links or downloads the new one.
+                path.unlink()
+                missing.append(name)
         else:
             missing.append(name)
 

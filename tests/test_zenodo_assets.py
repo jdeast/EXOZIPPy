@@ -51,31 +51,9 @@ _OLD_LITERALS = {
             ),
         },
     ),
-    "nextgen_bc_tables": (
-        23074951,
-        {
-            "2MASS.bc.parquet": (4253006, "41ff8f2f6e9a1b88f3f085f128dfcc2a"),
-            "Euclid.bc.parquet": (4252914, "44925baf29ad0d1d4d3cedd4d45abc07"),
-            "GAIA.bc.parquet": (8464605, "073dcf7acbd6195478954cc13a9fd742"),
-            "GALEX.bc.parquet": (2849599, "e5f774a917144a0c942ea65e2a613b11"),
-            "Gemini.bc.parquet": (2849819, "73e689d4edafe76052f29f16e5ee9d52"),
-            "Generic.bc.parquet": (
-                25307518,
-                "4e067a46d646edd2991141f5a3cdd728",
-            ),
-            "Keck.bc.parquet": (7060295, "7b0be59aef0304dcc68b03a7831b7b85"),
-            "Kepler.bc.parquet": (1445932, "9b21575a77dd737b6f0fa4d43c00b52d"),
-            "PAN-STARRS.bc.parquet": (
-                5656266,
-                "8f5d5a4c24ad21a93028b52e4414e1ab",
-            ),
-            "Roman.bc.parquet": (11270909, "5e431ef09b0a65a4471f6598f7f7cdae"),
-            "SLOAN.bc.parquet": (7059882, "95c997b768f763faf51ed41305ff2dcb"),
-            "TESS.bc.parquet": (1445767, "af9cabbe4018da49e57ccf88c48072ca"),
-            "TYCHO.bc.parquet": (8464106, "6cbe366d4c185da85d9ab399d609b517"),
-            "WISE.bc.parquet": (5656474, "7738d148d3dd9e0a37c84720d3737614"),
-        },
-    ),
+    # nextgen_bc_tables was re-versioned on 2026-10-20 (logg 5.5 plane,
+    # record 23522276), so its migrated literals no longer describe it;
+    # the live-record test covers it like every other record.
 }
 
 
@@ -113,13 +91,21 @@ def test_the_consumers_read_their_pins_from_the_registry():
     bc = zenodo_assets.record("nextgen_bc_tables")
     assert bc_tables.ZENODO_RECORD == bc.record_id
     assert bc_tables.ZENODO_CONCEPT_RECORD == bc.concept_record_id
+    # The record also carries the publish script's MANIFEST.txt, which the
+    # owner lists among no table and never fetches (the Claret record's rule).
     assert {
         name: (meta["size"], meta["md5"])
         for name, meta in bc_tables._BC_TABLE_FILES.items()
-    } == {name: (p.size, p.md5) for name, p in bc.files.items()}
-    assert bc_tables._assets(bc_tables.published_tables()) == (
-        zenodo_assets.assets("nextgen_bc_tables")
-    )
+    } == {
+        name: (p.size, p.md5)
+        for name, p in bc.files.items()
+        if name.endswith(".bc.parquet")
+    }
+    assert bc_tables._assets(bc_tables.published_tables()) == {
+        name: asset
+        for name, asset in zenodo_assets.assets("nextgen_bc_tables").items()
+        if name.endswith(".bc.parquet")
+    }
 
 
 def test_the_registry_is_internally_consistent():

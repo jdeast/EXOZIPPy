@@ -381,7 +381,7 @@ def test_prior_contribution_is_declared_and_reported(hat3_star_only):
         assert "NextGen" in rendered
         assert "bound" in rendered
         assert "Uniform" not in rendered and "U(" not in rendered
-        assert "[0, 5]" in rendered.replace("$", "")
+        assert "[0, 5.5]" in rendered.replace("$", "")
     assert cell == ""
     assert len(notes) == 1
     # A barrier is not a normalized density over the interval, and the note
@@ -424,13 +424,15 @@ def test_off_grid_start_warns_and_names_the_star(tmp_path, caplog):
 
     A warning and not a raise: the interpolator extrapolates rather than
     failing there, so such fits have been running, and the barrier pulls
-    the chain back by itself.  examples/gj1214 is the shipped case (its
-    M dwarf starts at loggsed = 5.02).
+    the chain back by itself.  examples/gj1214 was the shipped case (its
+    M dwarf starts at loggsed = 5.02, off the grid until the 5.5 plane).
     """
-    # ARRANGE -- 0.178 solMass, 0.215 solRad is GJ 1214: logg ~ 5.03
+    # ARRANGE -- 0.08 solMass at 0.07 solRad: logg ~ 5.65, above the grid's
+    # 5.5 ceiling (GJ 1214's 5.03 was off the grid until 2026-10-20, when
+    # the logg 5.5 plane was added, padded above 5000 K)
     sed, _ = _minimal_sed(tmp_path)
     loggsed = _loggsed_parameter()
-    system = _fake_system(loggsed, np.log10(0.178), 0.215, star_names=("A",))
+    system = _fake_system(loggsed, np.log10(0.08), 0.07, star_names=("A",))
 
     # ACT
     with caplog.at_level(logging.WARNING):
@@ -441,7 +443,7 @@ def test_off_grid_start_warns_and_names_the_star(tmp_path, caplog):
     hits = [m for m in messages if "loggsed" in m and "OUTSIDE" in m]
     assert len(hits) == 1, messages
     assert "star 'A'" in hits[0]
-    assert "5.0" in hits[0]
+    assert "5.5" in hits[0]
     assert "bound_scale" in hits[0]
 
 
@@ -487,7 +489,7 @@ def test_softening_the_barrier_does_not_silence_the_warning(tmp_path, caplog):
     # ARRANGE
     sed, _ = _minimal_sed(tmp_path)
     loggsed = _loggsed_parameter(bound_scale=25.0)
-    system = _fake_system(loggsed, np.log10(0.178), 0.215)
+    system = _fake_system(loggsed, np.log10(0.08), 0.07)  # logg ~ 5.65
 
     # ACT
     with caplog.at_level(logging.WARNING):
