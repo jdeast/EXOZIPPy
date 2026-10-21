@@ -240,8 +240,14 @@ Each solution file carries:
   - `rho` and `piEN`/`piEE`;
   - `F0_S/F0_B`, `F1_S/F1_B` and `F2_S/F2_B`, with F0 = F146, F1 = F087
     and F2 = F213.
-- `parameter_uncertainties`: `[lower, upper]` 68% offsets.
-- `higher_order_effects`: `finite-source` and `parallax`. Every RMDC26
+- `parameter_uncertainties`: ONE number per parameter, max(minus, plus),
+  the larger 68% half-width. The package's validator rejects an
+  asymmetric `[lower, upper]` pair with lower > upper, which a skewed
+  posterior gives about half the time. The exact interval is tabulated in
+  the notes.
+- `higher_order_effects`: `finite-source` and `parallax`. `t_ref` is
+  written both as the solution field and inside `parameters`, where the
+  validator looks for it. Every RMDC26
   model is physical (masses, distances, proper motions), so `pi_E` and
   `rho` are always derived. When parallax is included, `t_ref` is the
   fit's `t0_par`.
@@ -295,7 +301,58 @@ microlens-submit has no inline notes field; notes live in the file that
 - **No zero-LD PSPL fit exists for the 2L1S events.** Their probabilities
   are therefore conditional on 1S2L. A PSPL arm per anomaly candidate
   would make the architecture comparison real.
+- **Asymmetric errors.** We use symmetric max-half-widths because of the
+  validator's lower <= upper check (see above). If the organizers read
+  `[lower, upper]` as offsets, the check is a validator bug worth
+  reporting; the asymmetric values are in every solution's notes.
 - **Team name, tier and hardware info** in `submission.json` are blank.
+
+## Results on the 76 events finished by 2026-10-21
+
+The outputs are under `/n/holylabs/jjohnson_lab/Lab/rmdc26_report/`:
+`report/campaign_summary.{txt,csv}`, `report/<NNN>_report.txt` and
+`submission/`. The run covered 74 events with solutions, 128 solutions in
+all. 022 and 187 were skipped as stale; 015 was processed on its
+finished re-fit.
+
+- **lp check: all 74 fits PASS** (max abs(dlp) <= 3.3e-7 nat), on master.
+- **1S1L fits: all 39 bridges accepted** (re2 small, errors 0.1-0.5 nat).
+- **1S2L fits: 70 of 83 mode bridges refused.** The counts are 46
+  re2-too-large, 18 not-converged and 6 unsupported-proposal-mass. Only 9
+  of 35 binary events have an accepted mode: 006, 015, 027, 036, 043,
+  052, 053, 103 and 114. The other 26 binary events are INDICATIVE. The
+  cause is the posteriors, not the bridge size: most binary runs are NOT
+  EQUILIBRATED and lp Rhat > 1.1. Many modes are one or two chains
+  parked in a seed's basin ("mode held by only N chain(s)"), and their
+  draws are not a Gaussian-coverable population.
+- **No event has both architectures**, so every probability is
+  conditional on the one architecture fitted. Each 1S1L event is
+  P(1S1L) = 1, and each binary event is P(1S2L) = 1 split over its modes.
+- **1S1L UNRELIABLE (ANOMALY at the event):** 042, 063, 079, 081, 127,
+  131, 160 and 166. These are single lenses whose outlier mixture absorbs
+  points at the event, which makes them candidates for a missed companion.
+- **err_scale out of range:** 016 (F213 ~14 in the top mode), 163 (F087
+  2.8, F213 0.62), 173 (F213 8.1, F087 1.67) and 177 (F213 0.077).
+- **POSSIBLE_UNLISTED_MODE:** 173 (`source.t_0_raw`, 25.3% rejected) and
+  176 (`lens.log_s_raw` + `planet.log_q_raw`, 15.4%).
+- **Runtime of stage 1 on 32 test-partition cores:** median 53 s per PSPL
+  fit (max 63 s), and median 373 s per binary fit. The cost grows with the
+  mode count: 163, with 4 modes on 49k epochs, took 5746 s, and 016, with
+  8 modes, about as long. Stage 2 takes seconds.
+
+## Validation against the package
+
+`microlens_submit` 0.17.9 (the wheel, unpacked, not installed; pydantic
+is absent from the conda env) was used to check the 2026-10-21
+submission of 76 events and 128 solutions. Its pure validators
+(`check_solution_completeness`, `validate_parameter_uncertainties`,
+`validate_solution_consistency`) were loaded straight from
+`validate_parameters.py`, and the Solution field names and the
+`higher_order_effects` vocabulary were checked against
+`models/solution.py`. Every event's active probabilities sum to 1. What
+remains are the package's advisory "uncertainty very large/small"
+warnings: for example, t0 is known to better than 0.1% of a BJD, and piE
+and rho are often prior-dominated.
 
 ## Files
 

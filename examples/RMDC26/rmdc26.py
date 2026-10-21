@@ -618,8 +618,15 @@ def submit_parameters(sol):
     """(parameters, parameter_uncertainties) in the challenge's names.
 
     ``sol["summary"]`` holds (median, minus, plus) per OUR name in user
-    units, alpha already in radians.  Uncertainties are [lower, upper]
-    68% offsets, the asymmetric form microlens-submit accepts.
+    units, alpha already in radians.
+
+    Each uncertainty is ONE number, max(minus, plus): the larger 68%
+    half-width.  microlens-submit 0.17.9 documents an asymmetric
+    ``[lower, upper]`` form, but its validator rejects any pair with
+    lower > upper (``validate_parameter_uncertainties``), which a skewed
+    posterior produces about half the time.  The conservative symmetric
+    value passes everywhere, and the exact asymmetric interval is in the
+    solution's notes (``notes_markdown``).
     """
     names = {"t0": "t_0", "u0": "u_0", "tE": "t_E", "rho": "rho",
              "piEN": "pi_E_N", "piEE": "pi_E_E"}  # fmt: skip
@@ -632,14 +639,14 @@ def submit_parameters(sol):
             continue
         med, lo, hi = summ[ours]
         par[out] = float(med)
-        unc[out] = [float(lo), float(hi)]
+        unc[out] = float(max(lo, hi))
     for band, k in sorted(BAND_INDEX.items(), key=lambda kv: kv[1]):
         for kind, ours in (("S", "f_source"), ("B", "f_blend")):
             key = "%s_%s" % (ours, band)
             if key in summ:
                 med, lo, hi = summ[key]
                 par["F%d_%s" % (k, kind)] = float(med)
-                unc["F%d_%s" % (k, kind)] = [float(lo), float(hi)]
+                unc["F%d_%s" % (k, kind)] = float(max(lo, hi))
     return par, unc
 
 
@@ -662,6 +669,10 @@ def solution_json(sol, notes_path):
         key=int,
     )
     eff = higher_order_effects(sol)
+    if "parallax" in eff:
+        # Also inside `parameters`: the validator looks for the parallax
+        # effect's optional `t_ref` there, and counts it as metadata.
+        par["t_ref"] = float(sol["t0_par"])
     out = {
         "solution_id": sol["solution_id"],
         "model_type": sol["arch"],
@@ -702,6 +713,18 @@ def notes_markdown(sol, event):
     L.append(
         "Warnings: "
         + ("; ".join(sol["warnings"]) if sol["warnings"] else "none")
+    )
+    L.append("")
+    L.append("## Parameters (posterior median, 68% interval)")
+    L.append("")
+    L.append("| parameter | median | minus | plus |")
+    L.append("|---|---|---|---|")
+    for k, v in sorted(sol.get("summary", {}).items()):
+        L.append("| %s | %.10g | %.4g | %.4g |" % (k, v[0], v[1], v[2]))
+    L.append("")
+    L.append(
+        "parameter_uncertainties in the solution file are max(minus, plus); "
+        "the table above is the exact interval."
     )
     L.append("")
     L.append("## Evidence")

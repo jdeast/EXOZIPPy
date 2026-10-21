@@ -274,13 +274,17 @@ def test_solution_json_fields_and_units(R):
     p = j["parameters"]
     for k in ("t0", "u0", "tE", "s", "q", "alpha", "rho", "piEN", "piEE"):
         assert k in p and k in j["parameter_uncertainties"]
+        assert j["parameter_uncertainties"][k] > 0
     assert p["alpha"] == pytest.approx(5.9)
     assert 0.0 <= p["alpha"] < 2 * math.pi
     assert p["F0_S"] == pytest.approx(1e-8)
     assert p["F1_S"] == pytest.approx(3e-9)
     assert p["F2_B"] == pytest.approx(2e-8 / 3)
     assert {f"F{i}_{k}" for i in range(3) for k in "SB"} <= set(p)
-    assert j["parameter_uncertainties"]["t0"] == [0.001, 0.002]
+    # one number, the larger half-width: the validator rejects [lo, hi]
+    # with lo > hi, which a skewed posterior produces half the time
+    assert j["parameter_uncertainties"]["t0"] == 0.002
+    assert p["t_ref"] == j["t_ref"]
     assert j["limb_darkening_coeffs"] == {"u_0": 0.0, "u_1": 0.0, "u_2": 0.0}
     assert j["is_active"] is True and j["relative_probability"] == 0.75
     assert isinstance(j["n_data_points"], int)
@@ -301,7 +305,7 @@ def test_no_parallax_means_no_t_ref(R):
     del s["summary"]["pi_E_N"], s["summary"]["pi_E_E"]
     j = R.solution_json(s, "n.md")
     assert "parallax" not in j["higher_order_effects"]
-    assert j["t_ref"] is None
+    assert j["t_ref"] is None and "t_ref" not in j["parameters"]
 
 
 def test_event_json_and_notes(R):
@@ -314,6 +318,7 @@ def test_event_json_and_notes(R):
     assert "**UNRELIABLE:**" in txt and "err_scale F213" in txt
     assert R.CONVENTIONS in txt
     assert "RADIANS" in txt and "1S2L: 1" in txt
+    assert "| t_0 | 2462793.51 | 0.001 | 0.002 |" in txt
 
 
 def test_wrapup_banners_are_parsed(R):
