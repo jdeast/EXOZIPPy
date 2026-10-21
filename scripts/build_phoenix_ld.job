@@ -1,0 +1,26 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 32
+#$ -q mThC.q
+#$ -cwd
+#$ -j y
+#$ -N phoenixld
+#$ -o scripts/build_phoenix_ld.$JOB_ID.log
+#
+# Build the PHOENIX limb-darkening tables (models/PHOENIX/
+# generate_PHOENIX_LD_Tables.py): streams ~7000 specific-intensity FITS
+# (16 MB each) from the Goettingen archive's gwdg mirror into $TMPDIR,
+# one node per worker, and writes the per-facility tables and the
+# band-intensity intermediate into the package tree (git-ignored).
+# Resumable: a rerun computes only the nodes the tables lack.
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+cd $HOME/python/EXOZIPPy
+echo "commit $(git rev-parse --short HEAD) on $(git branch --show-current)   $(date)   slots $NSLOTS   tmp ${TMPDIR:-/tmp}"
+python -u -m exozippy.models.PHOENIX.generate_PHOENIX_LD_Tables --workers $NSLOTS --work-dir ${TMPDIR:-/tmp}
+echo "exit $?   $(date)"
