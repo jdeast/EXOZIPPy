@@ -29,7 +29,18 @@ NODES = [
 ]
 
 
-def main():
+def main(argv=None):
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument(
+        "--model-root",
+        default=None,
+        help="model root holding models/PHOENIX/LDs (default: the package)",
+    )
+    args = parser.parse_args(argv)
+    if args.model_root:
+        ldgrid.DEFAULT_TABLE_ROOT = args.model_root
     print(
         f"{'band':14s} {'node':22s} {'PHOENIX u1,u2':>18s} {'Claret a,b':>18s} {'d(u1+u2)':>9s} {'PHX u':>7s} {'Clr u':>7s}"
     )
