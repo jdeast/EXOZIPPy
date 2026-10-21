@@ -3,8 +3,100 @@
  "name": "DC2018_069",
  "procedure": "blind: grid -> modes -> one PTDE run per mode -> dedupe -> normalized per-mode lnZ (bridge) -> softmax",
  "dedupe_rule": "same sign(u_0) and Mahalanobis(log s, log q, alpha) < 3.0; keep lower re2",
- "weights_status": "NO mode accepted by the bridge: there are no evidence weights; weight_2L1S_indicative is from the REFUSED estimates",
+ "weights_status": "2 of 3 modes accepted by the bridge",
  "modes": [
+  {
+   "mode": "m1",
+   "arch": "2L1S",
+   "config": "/n/holylabs/jjohnson_lab/Lab/dc069_runs/modes/m1/DC2018_069_2L1S.yaml",
+   "n_chain": 74,
+   "n_draw_used": 750,
+   "burn_frac": 0.75,
+   "draws_requested": 3000,
+   "hit_maxtime": false,
+   "n_temps": "auto",
+   "log_norm": -164.8528839409393,
+   "lnZ": 923259.0948875989,
+   "lnZ_err": 0.19293996051846662,
+   "re2": 0.03722582836486746,
+   "bridge_status": "ok",
+   "lnZ_indicative": 923259.0948875989,
+   "submodes": [
+    {
+     "mode": 0,
+     "lnZ": 923259.0948875989,
+     "lnZ_err": 0.19293996051846662,
+     "re2": 0.03722582836486746,
+     "refused": false,
+     "reason": "",
+     "state": "ok",
+     "n_post": 18500,
+     "weight_occupancy": 1.0
+    }
+   ],
+   "lp_max": 923372.0856660885,
+   "lp_rhat": 1.0445523116545572,
+   "stuck_frac": 0.0,
+   "lnL_max": 923408.9187715978,
+   "summary": {
+    "s": [
+     1.16780490720996,
+     1.1340582790207192,
+     1.2049583173307792
+    ],
+    "q": [
+     0.00018759944966251305,
+     0.00016933912629110123,
+     0.00020770415415875864
+    ],
+    "alpha": [
+     -71.86809581179803,
+     -72.0886257748037,
+     -71.62182828025298
+    ],
+    "t_0": [
+     2460035.4894956904,
+     2460035.4894032907,
+     2460035.4895760636
+    ],
+    "u_0": [
+     0.002499607543579386,
+     0.0024798280877742314,
+     0.002518011497728398
+    ],
+    "t_E": [
+     7.145545705574555,
+     7.107948440215826,
+     7.183631764908948
+    ],
+    "rho": [
+     0.0016149430793057824,
+     0.0014996691232544213,
+     0.0017151783185048361
+    ]
+   },
+   "origin": "minimum 1",
+   "seed": {
+    "log_s": 0.06999999999999995,
+    "log_q": -3.857142857142857,
+    "alpha": 288.673510832431,
+    "u_0": 0.0024005001063273908,
+    "t_0": 2460035.4893721724,
+    "dchi2": 17.575117937929463
+   },
+   "drift": "",
+   "flags": [],
+   "evidence_wall_s": 220.4192135334015,
+   "weight_2L1S": 0.7748941997848587,
+   "weight_2L1S_err": 0.05000228342161033,
+   "weight_all": 0.7748941997848587,
+   "weight_all_err": 0.05000228342161033,
+   "bridge_re2": 0.03722582836486746,
+   "bridge_states": [
+    "ok"
+   ],
+   "weight_2L1S_indicative": 0.7748941997848587
+  },
   {
    "mode": "m2",
    "arch": "2L1S",
@@ -16,21 +108,21 @@
    "hit_maxtime": false,
    "n_temps": "auto",
    "log_norm": -165.03226444390754,
-   "lnZ": NaN,
-   "lnZ_err": Infinity,
-   "re2": Infinity,
-   "bridge_status": "refused",
-   "lnZ_indicative": 923258.0580240419,
+   "lnZ": 923257.8587316101,
+   "lnZ_err": 0.2120040624570113,
+   "re2": 0.04494572249827636,
+   "bridge_status": "ok",
+   "lnZ_indicative": 923257.8587316101,
    "submodes": [
     {
      "mode": 0,
-     "lnZ": 923258.0580240419,
-     "lnZ_err": 0.6071520849794037,
-     "re2": 0.36863365429483697,
-     "refused": true,
-     "reason": "relative-MSE diagnostic re2=0.369 exceeds 0.25 (proposal poorly supports the target -- likely a bound pileup); lnZ error bar ~0.61 nat",
-     "state": "re2-too-large",
-     "n_post": 3996,
+     "lnZ": 923257.8587316101,
+     "lnZ_err": 0.2120040624570113,
+     "re2": 0.04494572249827636,
+     "refused": false,
+     "reason": "",
+     "state": "ok",
+     "n_post": 18500,
      "weight_occupancy": 1.0
     }
    ],
@@ -86,113 +178,18 @@
    },
    "drift": "log s moved +0.207 (> one node, 0.070)",
    "flags": [
-    "bridge refused",
     "drift: log s moved +0.207 (> one node, 0.070)"
    ],
-   "evidence_wall_s": 64.95092582702637,
-   "weight_2L1S": 0.0,
-   "weight_2L1S_err": 0.0,
-   "weight_all": 0.0,
-   "weight_all_err": 0.0,
-   "bridge_re2": 0.36863365429483697,
+   "evidence_wall_s": 221.04124212265015,
+   "weight_2L1S": 0.22510580021514115,
+   "weight_2L1S_err": 0.05000228342161033,
+   "weight_all": 0.22510580021514115,
+   "weight_all_err": 0.05000228342161033,
+   "bridge_re2": 0.04494572249827636,
    "bridge_states": [
-    "re2-too-large"
+    "ok"
    ],
-   "weight_2L1S_indicative": 0.22682353141512435
-  },
-  {
-   "mode": "m1",
-   "arch": "2L1S",
-   "config": "/n/holylabs/jjohnson_lab/Lab/dc069_runs/modes/m1/DC2018_069_2L1S.yaml",
-   "n_chain": 74,
-   "n_draw_used": 750,
-   "burn_frac": 0.75,
-   "draws_requested": 3000,
-   "hit_maxtime": false,
-   "n_temps": "auto",
-   "log_norm": -164.8528839409393,
-   "lnZ": NaN,
-   "lnZ_err": Infinity,
-   "re2": Infinity,
-   "bridge_status": "refused",
-   "lnZ_indicative": 923259.2843590345,
-   "submodes": [
-    {
-     "mode": 0,
-     "lnZ": 923259.2843590345,
-     "lnZ_err": 0.6119561546018367,
-     "re2": 0.374490335155067,
-     "refused": true,
-     "reason": "relative-MSE diagnostic re2=0.374 exceeds 0.25 (proposal poorly supports the target -- likely a bound pileup); lnZ error bar ~0.61 nat",
-     "state": "re2-too-large",
-     "n_post": 3996,
-     "weight_occupancy": 1.0
-    }
-   ],
-   "lp_max": 923372.0856660885,
-   "lp_rhat": 1.0445523116545572,
-   "stuck_frac": 0.0,
-   "lnL_max": 923408.9187715978,
-   "summary": {
-    "s": [
-     1.16780490720996,
-     1.1340582790207192,
-     1.2049583173307792
-    ],
-    "q": [
-     0.00018759944966251305,
-     0.00016933912629110123,
-     0.00020770415415875864
-    ],
-    "alpha": [
-     -71.86809581179803,
-     -72.0886257748037,
-     -71.62182828025298
-    ],
-    "t_0": [
-     2460035.4894956904,
-     2460035.4894032907,
-     2460035.4895760636
-    ],
-    "u_0": [
-     0.002499607543579386,
-     0.0024798280877742314,
-     0.002518011497728398
-    ],
-    "t_E": [
-     7.145545705574555,
-     7.107948440215826,
-     7.183631764908948
-    ],
-    "rho": [
-     0.0016149430793057824,
-     0.0014996691232544213,
-     0.0017151783185048361
-    ]
-   },
-   "origin": "minimum 1",
-   "seed": {
-    "log_s": 0.06999999999999995,
-    "log_q": -3.857142857142857,
-    "alpha": 288.673510832431,
-    "u_0": 0.0024005001063273908,
-    "t_0": 2460035.4893721724,
-    "dchi2": 17.575117937929463
-   },
-   "drift": "",
-   "flags": [
-    "bridge refused"
-   ],
-   "evidence_wall_s": 63.950427532196045,
-   "weight_2L1S": 0.0,
-   "weight_2L1S_err": 0.0,
-   "weight_all": 0.0,
-   "weight_all_err": 0.0,
-   "bridge_re2": 0.374490335155067,
-   "bridge_states": [
-    "re2-too-large"
-   ],
-   "weight_2L1S_indicative": 0.7731764685848758
+   "weight_2L1S_indicative": 0.22510580021514115
   },
   {
    "mode": "m3",
@@ -209,17 +206,17 @@
    "lnZ_err": Infinity,
    "re2": Infinity,
    "bridge_status": "refused",
-   "lnZ_indicative": 914489.8626284586,
+   "lnZ_indicative": 916759.3023381617,
    "submodes": [
     {
      "mode": 0,
-     "lnZ": 914489.8626284586,
+     "lnZ": 916759.3023381617,
      "lnZ_err": Infinity,
      "re2": Infinity,
      "refused": true,
      "reason": "bridge iteration did not converge",
      "state": "not-converged",
-     "n_post": 3996,
+     "n_post": 18500,
      "weight_occupancy": 1.0
     }
    ],
@@ -279,7 +276,7 @@
     "lp Rhat 4.56",
     "bridge refused"
    ],
-   "evidence_wall_s": 61.690425395965576,
+   "evidence_wall_s": 227.83909249305725,
    "weight_2L1S": 0.0,
    "weight_2L1S_err": 0.0,
    "weight_all": 0.0,
@@ -296,8 +293,8 @@
    "mode": "m0",
    "duplicate_of": "m2",
    "mahalanobis": 0.13143165835099344,
-   "lnZ": NaN,
-   "re2": Infinity
+   "lnZ": 923260.0295564065,
+   "re2": 0.04583762938899027
   }
  ],
  "baseline": {
@@ -311,21 +308,21 @@
   "hit_maxtime": false,
   "n_temps": "auto",
   "log_norm": -146.97907118821396,
-  "lnZ": NaN,
-  "lnZ_err": Infinity,
-  "re2": Infinity,
-  "bridge_status": "refused",
-  "lnZ_indicative": 919814.7683741265,
+  "lnZ": 919814.9696604485,
+  "lnZ_err": 0.2272802105826654,
+  "re2": 0.05165629412250073,
+  "bridge_status": "ok",
+  "lnZ_indicative": 919814.9696604485,
   "submodes": [
    {
     "mode": 0,
-    "lnZ": 919814.7683741265,
-    "lnZ_err": 0.6189103545307059,
-    "re2": 0.383050026945324,
-    "refused": true,
-    "reason": "relative-MSE diagnostic re2=0.383 exceeds 0.25 (proposal poorly supports the target -- likely a bound pileup); lnZ error bar ~0.62 nat",
-    "state": "re2-too-large",
-    "n_post": 3828,
+    "lnZ": 919814.9696604485,
+    "lnZ_err": 0.2272802105826654,
+    "re2": 0.05165629412250073,
+    "refused": false,
+    "reason": "",
+    "state": "ok",
+    "n_post": 16500,
     "weight_occupancy": 1.0
    }
   ],
@@ -357,14 +354,12 @@
   },
   "origin": "architecture baseline (no companion)",
   "drift": "",
-  "flags": [
-   "bridge refused"
-  ],
-  "evidence_wall_s": 49.19816994667053,
+  "flags": [],
+  "evidence_wall_s": 52.18413734436035,
   "weight_all": 0.0,
   "weight_all_err": 0.0,
-  "dlnZ_best_2L1S_minus_baseline": NaN,
-  "dlnZ_best_2L1S_minus_baseline_indicative": 3444.515984907979
+  "dlnZ_best_2L1S_minus_baseline": 3444.125227150391,
+  "dlnZ_best_2L1S_minus_baseline_indicative": 3444.125227150391
  },
  "validation_only_truth": {
   "s": 1.13843,

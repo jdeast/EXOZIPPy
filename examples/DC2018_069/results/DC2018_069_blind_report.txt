@@ -5,32 +5,22 @@ dedupe: same sign(u_0) and Mahalanobis(log s, log q, alpha) < 3.0; keep lower re
 lnZ is the NORMALIZED log evidence (System.evidence_log_norm added to the bridge lnZ), so it compares across runs and architectures.
 
 mode origin                           lnZ     err    w(2L1S)     w(all)      lnL_max
-m2   minimum 2                        nan     inf          0          0    923408.15
-     bridge refused (estimate below, NOT a weight)
-m1   minimum 1                        nan     inf          0          0    923408.92
-     bridge refused (estimate below, NOT a weight)
+m1   minimum 1                  923259.09    0.19     0.7749     0.7749    923408.92
+m2   minimum 2                  923257.86    0.21     0.2251     0.2251    923408.15
 m3   mirror of minimum 2              nan     inf          0          0    922765.20
      bridge refused (estimate below, NOT a weight)
-base 1L1S_fs (no companion)           nan     inf          -          0    919949.97
-  best 2L1S minus 1L1S_fs: dlnZ = nan (accepted); 3444.5 (INDICATIVE, refused estimates)
+base 1L1S_fs (no companion)     919814.97    0.23          -          0    919949.97
+  best 2L1S minus 1L1S_fs: dlnZ = 3444.1 (accepted); 3444.1 (INDICATIVE, refused estimates)
 
-Weights: NO mode accepted by the bridge: there are no evidence weights; weight_2L1S_indicative is from the REFUSED estimates
-Bridge per mode (re2 limit 0.25), and the INDICATIVE
-softmax of the refused estimates (never a weight):
-  m2   re2-too-large                            re2 0.369    lnZ_ind     923258.06  w_ind 0.227
-  m1   re2-too-large                            re2 0.374    lnZ_ind     923259.28  w_ind 0.773
-  m3   not-converged                            re2 nan      lnZ_ind     914489.86  w_ind 0
-  base re2-too-large                            re2 0.383    lnZ_ind     919814.77
+Weights: 2 of 3 modes accepted by the bridge
+Bridge per mode (re2 limit 0.25).  w_ind is an INDICATIVE
+softmax over EVERY finite estimate, refused ones included:
+  m1   ok                                       re2 0.0372   lnZ_ind     923259.09  w_ind 0.775
+  m2   ok                                       re2 0.0449   lnZ_ind     923257.86  w_ind 0.225
+  m3   not-converged                            re2 nan      lnZ_ind     916759.30  w_ind 0
+  base ok                                       re2 0.0517   lnZ_ind     919814.97
 
 Parameters per mode (median, 68% interval):
-  m2:
-    s      0.8461 +0.028/-0.03
-    q      0.0001937 +2.4e-05/-1.9e-05
-    alpha  -71.94 +0.22/-0.23
-    t_0    2460035.4896 +0.0001/-0.0001
-    u_0    0.002434 +2.3e-05/-3.1e-05
-    t_E    7.151 +0.037/-0.034
-    rho    0.001586 +0.00011/-0.00014
   m1:
     s      1.168 +0.037/-0.034
     q      0.0001876 +2e-05/-1.8e-05
@@ -39,6 +29,14 @@ Parameters per mode (median, 68% interval):
     u_0    0.0025 +1.8e-05/-2e-05
     t_E    7.146 +0.038/-0.038
     rho    0.001615 +0.0001/-0.00012
+  m2:
+    s      0.8461 +0.028/-0.03
+    q      0.0001937 +2.4e-05/-1.9e-05
+    alpha  -71.94 +0.22/-0.23
+    t_0    2460035.4896 +0.0001/-0.0001
+    u_0    0.002434 +2.3e-05/-3.1e-05
+    t_E    7.151 +0.037/-0.034
+    rho    0.001586 +0.00011/-0.00014
   m3:
     s      1.694 +0.055/-0.075
     q      0.0006215 +5.4e-05/-6.2e-05
@@ -54,10 +52,10 @@ Parameters per mode (median, 68% interval):
     rho    0.001318 +6.7e-05/-3.9e-05
 
 Reliability flags:
-  m2: bridge refused; drift: log s moved +0.207 (> one node, 0.070)
-  m1: bridge refused
+  m1: none
+  m2: drift: log s moved +0.207 (> one node, 0.070)
   m3: stuck 0.99 > 0.1; lp Rhat 4.56; bridge refused
-  base: bridge refused
+  base: none
 
 Duplicates (same basin; lnZ NOT added):
   m0 == m2 (Mahalanobis 0.13)
@@ -66,6 +64,6 @@ Duplicates (same basin; lnZ NOT added):
 VALIDATION ONLY -- answer key, NOT used by the procedure
 ------------------------------------------------------------------------
   truth: s=1.1384 (mirror 1/s=0.8784) q=0.000172 log q=-3.763
-  m2: s=0.8461 (mirror side), dlog s=-0.016 vs mirror; dlog q=+0.051; weight 0
-  m1: s=1.1678 (truth side), dlog s=+0.011 vs truth; dlog q=+0.037; weight 0
+  m1: s=1.1678 (truth side), dlog s=+0.011 vs truth; dlog q=+0.037; weight 0.775
+  m2: s=0.8461 (mirror side), dlog s=-0.016 vs mirror; dlog q=+0.051; weight 0.225
   m3: s=1.6939 (truth side), dlog s=+0.173 vs truth; dlog q=+0.557; weight 0

@@ -531,8 +531,8 @@ def report_text(rep, truth=None):
         )
     L.append("")
     L.append("Weights: " + rep.get("weights_status", ""))
-    L.append("Bridge per mode (re2 limit 0.25), and the INDICATIVE")
-    L.append("softmax of the refused estimates (never a weight):")
+    L.append("Bridge per mode (re2 limit 0.25).  w_ind is an INDICATIVE")
+    L.append("softmax over EVERY finite estimate, refused ones included:")
     for r in rep["modes"]:
         L.append(
             "  %-4s %-40s re2 %-8s lnZ_ind %13.2f  w_ind %.3g"

@@ -195,35 +195,67 @@ with no stuck chains. Every ladder logged "communication-limited" (the
 `--burn-frac 0.75`, the burn-in the wrap-up itself measured.
 
 **Stages 4-5: the blind report** (`results/DC2018_069_blind_report.txt`).
-lnZ is normalized. The bridge limit is re2 <= 0.25.
+lnZ is normalized. The bridge uses 20000 posterior and 20000 proposal
+draws (`04_evidence.py --max-draws`, default 20000; the reason is below).
+The bridge limit is re2 <= 0.25.
 
-| mode | seed (s, log q) | posterior s | q | bridge | re2 | lnZ (refused, indicative) | weight | flags |
+| mode | seed (s, log q) | posterior s | q | bridge | re2 | lnZ | weight (2L1S) | flags |
 |---|---|---|---|---|---|---|---|---|
-| m1 | 1.175, -3.86 | 1.168 +0.037/-0.034 | 1.88e-4 | REFUSED (re2-too-large) | 0.374 | 923259.28 +/- 0.61 | none | bridge refused |
-| m0 | 0.851, -3.86 | 0.846 | 1.94e-4 | REFUSED (re2-too-large) | 0.631 | 923259.31 +/- 0.79 | none | duplicate of m2 (Mahalanobis 0.13) |
-| m2 | 0.525, -3.14 | 0.846 +0.028/-0.030 | 1.94e-4 | REFUSED (re2-too-large) | 0.369 | 923258.06 +/- 0.61 | none | drift: log s +0.207, now in m0's basin |
-| m3 | 1.905, -3.14 | 1.694 | 6.2e-4 | REFUSED (not-converged) | -- | 914489.86 | none | stuck 0.99, lp Rhat 4.56, not equilibrated |
-| 1L1S_fs | -- | -- | -- | REFUSED (re2-too-large) | 0.383 | 919814.77 +/- 0.62 | none | bridge refused |
+| m1 | 1.175, -3.86 | 1.168 +0.037/-0.034 | 1.88e-4 | ok | 0.037 | 923259.09 +/- 0.19 | 0.775 | none |
+| m2 | 0.525, -3.14 | 0.846 +0.028/-0.030 | 1.94e-4 | ok | 0.045 | 923257.86 +/- 0.21 | 0.225 | drift: log s +0.207, into m0's basin |
+| m0 | 0.851, -3.86 | 0.846 | 1.94e-4 | ok | 0.046 | 923260.03 +/- 0.21 | -- | duplicate of m2 (Mahalanobis 0.13): lnZ not added |
+| m3 | 1.905, -3.14 | 1.694 | 6.2e-4 | REFUSED (not-converged) | -- | -- | 0 | stuck 0.99, lp Rhat 4.56, not equilibrated |
+| 1L1S_fs | -- | -- | -- | ok | 0.052 | 919814.97 +/- 0.23 | 0 (all architectures) | none |
 
-**No mode was accepted by the bridge, so this run produced no evidence
-weights.** All five refusals are the bridge's own. Four are re2 = 0.37-0.63
-against the 0.25 limit: the Gaussian proposal fits these 37-D raw
-posteriors poorly. The fifth is m3, which also did not converge as a
-sampling run. Everything below is computed from the REFUSED estimates and
-is labelled INDICATIVE in the report.
+- **2L1S over 1L1S_fs: dlnZ = 3444.1 nats.** The companion is detected
+  decisively. lnL_max agrees: 923408.9 against 919950.0.
+- **Close vs wide: NOT decided, even though both bridges were accepted.**
+  The 0.775 / 0.225 split depends on which duplicate the dedupe keeps. m0
+  and m2 are two runs of the same close basin, and their lnZ differ by
+  2.2 nats against errors of 0.2. With m0 kept instead, the split would
+  be 0.28 wide / 0.72 close. "Why two runs of one basin disagree", below,
+  shows that this is posterior coverage, not normalization. Until the
+  latent block converges, the ranking of the pair is not trustworthy.
+- **m3** did not converge and is excluded. Its refused estimate sits ~6500 nats below m1.
 
-- **2L1S over 1L1S_fs:** dlnZ ~ 3444 nats (indicative). An error on the
-  bridge cannot move a gap this size, and lnL_max agrees: 923408.9
-  against 919950.0, a difference of 3459. The companion is detected.
-- **Close vs wide:** the pair is a tie. m1 (wide) is at 923259.28 and the
-  m0/m2 basin (close) at 923259.31 for m0 and 923258.06 for m2. The two
-  runs of the close basin differ by 1.25 nats, about twice their quoted
-  errors, so the bridge's error bars are optimistic. The dedupe keeps the
-  lower-re2 run, m2, and that gives an indicative weight of 0.77 (wide)
-  against 0.23 (close). Had it kept m0, the split would be 0.49 / 0.51. At
-  the indicative level the data do not choose between the two topologies.
-- **m3** is ~8800 nats below and not equilibrated. Its basin
-  (s = 1.69, q = 6e-4) is excluded.
+**Why the bridge refused at 4000 draws.** At 4000 draws, every run was
+refused (re2 0.37-0.63). The diagnosis (scratch scripts under
+`$DC069_RUNS/tools/`):
+
+- re2 is dominated by the PROPOSAL-side term, which falls as 1/N
+  (relative variance 200-750 per draw). The posterior-side term is only
+  0.013-0.03 (IACT tau ~2-3), so longer chains would not help.
+- `estimate_mode_evidences` caps the proposal count at
+  `max_posterior_draws`.
+- At N = 4000 the re2 estimate is itself heavy-tailed: the same
+  configuration gave 0.12 in one realization and 0.37 in another.
+- At 20000, re2 is 0.03-0.05 on every converged run. This costs ~40k
+  logp evaluations per mode (~5 min on 16 cores).
+- Student-t and Warp-III proposals agree with the Gaussian to 0.3 nats
+  and do no better at this N. The Laplace approximation is +10-13 nats
+  off and unusable.
+- The worst raw marginals are `neighbor_flux` (skew -3, excess
+  kurtosis +17, piled at its bound) and the source star's teff/feh/av.
+
+**Why two runs of one basin disagree (m0 vs m2, 2.2 nats).**
+
+- **Not the soft barriers.** Each run measures its own barrier steepness,
+  and those scales differ up to 10x between runs. But the barrier
+  potentials touch almost no posterior mass (mean -3e-4 nats), and
+  putting m0's barrier scales into m2's model moves lnZ by 0.0000.
+- **Not the normalization.** I mapped 3000 of m2's draws through physical
+  space into m0's raw coordinates. The normalized densities agree at
+  every point (D = 0.0000 +/- 0.0012) while the whitening Jacobians
+  differ by 1.58 nats, so `evidence_log_norm` makes the density exactly
+  whitening-invariant.
+- **The posterior samples differ.** s, q and alpha are identical (sd of
+  log s 0.0153 vs 0.0147), but the prior-dominated source-star block is
+  not. Source teff is 3481 +/- 390 in m0 and 3101 +/- 286 in m2 (0.8
+  sigma); feh, av and the luminosity differ by 0.4-0.6 sigma. The bridge
+  fits its proposal to the draws it is given, so a run that covered the
+  latent block differently reports a different lnZ. The wrap-up's own
+  verdict agrees: "CONVERGENCE NOT REACHED", with Rhat 1.04 on
+  `log_pi_rel`.
 
 **Validation only (answer key; not used above).** The truth is s = 1.138,
 log q = -3.763 (q = 1.72e-4), with mirror 1/s = 0.878.
@@ -234,7 +266,9 @@ log q = -3.763 (q = 1.72e-4), with mirror 1/s = 0.878.
   dlog s = -0.016 from the mirror and dlog q = +0.051.
 
 Both members of the degenerate pair were found, each close to its true
-value, and the blind procedure correctly declines to rank them. The only
+value. The accepted weights put 0.775 on the truth side, but as shown
+above that split is not robust; the honest verdict is that the procedure
+does not rank the pair. The only
 non-degenerate alternative (m3) is ruled out. The grid's best node was
 the mirror. Seeding both sides is what recovered the truth-side solution.
 
@@ -249,17 +283,23 @@ the mirror. Seeding both sides is what recovered the truth-side solution.
   and only over that run's own modes. A single-mode run therefore gets
   no lnZ, which is why stage 4 is a separate offline pass. The driver
   should own this pass.
-- **The bridge refuses every 069 run** (re2 0.37-0.63 against 0.25,
-  including the point-lens baseline), even with converged, single-mode
-  T=1 posteriors. The Gaussian proposal in raw space does not fit these
-  posteriors well enough. Without a better proposal (a warped or mixture
-  proposal), or nested sampling as the cross-check, the pipeline cannot
-  produce weights for this event class. This is the main blocker.
-- Two runs of the same basin (m0 and m2) gave bridge lnZ 1.25 nats apart,
-  about twice their quoted errors. The quoted lnZ errors are too small.
-- Keeping the lower-re2 duplicate is a rule that can move a weight from
-  0.5 to 0.77 when the two estimates disagree. Averaging the duplicates
-  (not summing them) may be the better rule.
+- **The bridge's default draw count is too small.**
+  `estimate_mode_evidences` caps the proposal draws at
+  `max_posterior_draws` = 4000, which refused every 069 run. 20000
+  passes. `04_evidence.py` now defaults to 20000. The library default, or
+  a separate `n_proposal` that is not capped by the posterior count,
+  should follow.
+- **Run-to-run lnZ scatter, from the latent block.** Two runs of one
+  basin differ by 2.2 nats against bridge errors of 0.2. The bridge error
+  describes one run's draws, not the run-to-run sampling of the
+  prior-dominated stellar block. Either more runs per basin with the
+  scatter quoted as the error, or longer or better-mixed runs in that
+  block, is needed before close vs wide can be ranked.
+- **Dedupe rule.** Keeping the lower-re2 duplicate hides that scatter.
+  The driver should report every duplicate's lnZ and take their spread as
+  a systematic. Pooling the duplicates' draws for one bridge is also an
+  option, because the normalization is whitening-invariant (verified
+  above).
 - A seed can drift into another mode's basin (m2 -> m0), so the dedupe has
   to run on the posteriors, not on the seeds. It does.
 - The wrap-up reports "CONVERGENCE NOT REACHED" on `log_pi_rel`, a
