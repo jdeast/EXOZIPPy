@@ -23,8 +23,14 @@ models/PHOENIX/
 ```
 
 The tables and the intensities are NOT tracked (git-ignored, like the BC
-tables); the tables are to be published on Zenodo and fetched on first
-use. Their format is the BC tables' (`bc_grid.write_bc_table`; columns
+tables). The tables are published on Zenodo (record `phoenix_ld_tables`
+in `utilities/zenodo_assets.py`, DOI 10.5281/zenodo.23522329, cite as
+`Eastman:2026ld`) and fetched on first use by `ld_tables.py`, per
+facility and law, through `components/band/ldgrid.py`; the record's flat
+file names `{FACILITY}.{law}.ld.parquet` land as `LDs/{law}/{FACILITY}.ld.parquet`.
+`exozippy-fetch-ld-tables` pre-fetches the whole set for offline use. The
+band intensities (2.7 GB) are not published; they live on the machine that
+generated them. Their format is the BC tables' (`bc_grid.write_bc_table`; columns
 `teff logg feh alpha Av Rv` plus the coefficient columns; `alpha` is 0;
 `df.attrs["meta"]` holds the method, the intensities' provenance, and
 `padding`, the list of interior holes filled), so the incremental merge,

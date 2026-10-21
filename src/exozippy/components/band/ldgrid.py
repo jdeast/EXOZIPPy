@@ -70,6 +70,23 @@ def _root(model_root) -> Path:
     )
 
 
+def _ensure_published(facility: str, law: str, model_root) -> None:
+    """Fetch one published table into the package tree on first use.
+
+    Only for the DEFAULT root: an explicit ``model_root`` (or a test's
+    patched DEFAULT_TABLE_ROOT) is the caller's own tree, used as given and
+    never fetched into -- the BC grid's rule (bc_grid.ensure_bc_tables).
+    A table the record does not publish is left to the "not present"
+    answer in ld_table_lookup.
+    """
+    if model_root is not None or DEFAULT_TABLE_ROOT:
+        return
+    from exozippy.models.PHOENIX import ld_tables
+
+    if ld_tables.is_published(facility, law):
+        ld_tables.ensure_tables([ld_tables.record_name(facility, law)])
+
+
 @dataclass(frozen=True)
 class LDTable:
     """One band's coefficients on a complete regular (teff, logg, feh, av)
@@ -143,13 +160,14 @@ def ld_table_lookup(
     if resolved is None:
         return None, problem
     svo, mist, fac = resolved
+    _ensure_published(fac, law, model_root)
     path = ld_table_path(_root(model_root), law, fac)
     if not path.is_file():
         return None, (
             f"the PHOENIX {law} limb-darkening table for facility {fac} "
-            f"({path.name}) is not present; generate it with "
-            f"models/PHOENIX/generate_PHOENIX_LD_Tables.py or fetch the "
-            f"published set"
+            f"({path.name}) is not present and not published (record "
+            f"phoenix_ld_tables); generate it with "
+            f"models/PHOENIX/generate_PHOENIX_LD_Tables.py"
         )
     wanted = [coefficient_column(mist, law, c) for c in COEFFICIENTS[law]]
     have = set(bc_table_filter_columns(path))

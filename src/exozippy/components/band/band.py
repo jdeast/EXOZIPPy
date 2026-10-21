@@ -1258,7 +1258,7 @@ class Band(Component):
                 rf"The limb-darkening coefficients in the {names} "
                 rf"band{'s' if len(phoenix) > 1 else ''} were each given a "
                 rf"Gaussian prior {width} on their offset from tables we "
-                rf"computed from the PHOENIX-ACES specific intensities of "
+                rf"computed \\citep{{Eastman:2026ld}} from the PHOENIX-ACES specific intensities of "
                 rf"\citet{{Husser:2013}}: each band-integrated profile "
                 rf"$I(\mu)$, formed through the same filter profiles, "
                 rf"detector weighting and extinction law as the bolometric "

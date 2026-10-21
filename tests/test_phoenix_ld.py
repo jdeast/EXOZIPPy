@@ -420,3 +420,91 @@ def test_an_unknown_ld_source_raises(tmp_path):
     bad = {**_TESS_PHOENIX, "ld_source": "atlas9"}
     with pytest.raises(ValueError, match="unknown ld_source"):
         _prepared(tmp_path, bad)
+
+
+# --------------------------------------------------------------------------
+# 4. The fetch owner (models/PHOENIX/ld_tables.py): the record's flat names
+#    land in the per-law tree, and a local edit is never overwritten.
+# --------------------------------------------------------------------------
+
+_PAYLOAD = b"not really a parquet file, but bytes with a pinned md5\n" * 5
+_RECORD_NAME = "Fake.quadratic.ld.parquet"
+
+
+def _owner(monkeypatch, tmp_path):
+    import hashlib
+
+    from exozippy.models.PHOENIX import ld_tables
+    from exozippy.utilities import zenodo
+
+    files = {
+        _RECORD_NAME: {
+            "size": len(_PAYLOAD),
+            "md5": hashlib.md5(_PAYLOAD).hexdigest(),
+        }
+    }
+    monkeypatch.setattr(ld_tables, "_TABLE_FILES", files)
+    monkeypatch.setattr(ld_tables, "_SUPERSEDED", {})
+    monkeypatch.setattr(ld_tables, "ZENODO_RECORD", 123)
+    monkeypatch.setattr(ld_tables, "MODEL_ROOT", tmp_path / "models")
+    monkeypatch.setattr(ld_tables, "_verified", set())
+    monkeypatch.setattr(zenodo.time, "sleep", lambda *a: None)
+    calls = []
+
+    def serve(url, dest):
+        calls.append(url)
+        dest.write_bytes(_PAYLOAD)
+
+    monkeypatch.setattr(zenodo, "_urlretrieve", serve)
+    return ld_tables, calls
+
+
+def test_the_owner_fetches_a_flat_record_name_into_the_per_law_tree(
+    monkeypatch, tmp_path
+):
+    """
+    Given a pinned record file Fake.quadratic.ld.parquet and an empty tree,
+    When the owner ensures it,
+    Then it is downloaded once and lands at LDs/quadratic/Fake.ld.parquet,
+      a second call downloads nothing, and the loader's lookup resolves the
+      facility/law pair through the same names.
+    """
+    ld_tables, calls = _owner(monkeypatch, tmp_path)
+
+    paths = ld_tables.ensure_tables([_RECORD_NAME])
+
+    assert paths == [
+        tmp_path
+        / "models"
+        / "PHOENIX"
+        / "LDs"
+        / "quadratic"
+        / "Fake.ld.parquet"
+    ]
+    assert paths[0].read_bytes() == _PAYLOAD
+    assert len(calls) == 1
+    assert ld_tables.ensure_tables([_RECORD_NAME]) == paths
+    assert len(calls) == 1
+    assert ld_tables.is_published("Fake", "quadratic")
+    assert not ld_tables.is_published("Fake", "linear")
+    assert ld_tables.record_name("Fake", "quadratic") == _RECORD_NAME
+
+
+def test_the_owner_never_overwrites_a_local_edit(monkeypatch, tmp_path):
+    """
+    Given a table on disk that matches no published version,
+    When the owner ensures it,
+    Then it raises naming the file and leaves it untouched; a name the
+      record does not publish is a KeyError naming it.
+    """
+    ld_tables, calls = _owner(monkeypatch, tmp_path)
+    path = ld_tables.table_path(_RECORD_NAME)
+    path.parent.mkdir(parents=True)
+    edited = _PAYLOAD.replace(b"bytes", b"BYTES")
+    path.write_bytes(edited)
+
+    with pytest.raises(RuntimeError, match="not the published"):
+        ld_tables.ensure_tables([_RECORD_NAME])
+    assert path.read_bytes() == edited and calls == []
+    with pytest.raises(KeyError, match="not published"):
+        ld_tables.ensure_tables(["Nope.linear.ld.parquet"])

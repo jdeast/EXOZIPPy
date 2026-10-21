@@ -481,6 +481,133 @@ RECORDS: Mapping[str, ZenodoRecord] = MappingProxyType(
                 }
             ),
         ),
+        # The limb-darkening tables EXOZIPPy generates from the PHOENIX-ACES
+        # specific intensities (models/PHOENIX/generate_PHOENIX_LD_Tables.py),
+        # one file per facility and law, flattened as {FACILITY}.{law}.ld.parquet.
+        # Consumer: models/PHOENIX/ld_tables.py (fetched per facility on first
+        # use, via components/band/ldgrid.py).
+        "phoenix_ld_tables": ZenodoRecord(
+            record_id=23522329,
+            concept_record_id=23522328,
+            title=(
+                "Limb-Darkening Coefficient Grids for EXOZIPPy from PHOENIX "
+                "specific intensities"
+            ),
+            creators=("Eastman, Jason", "Sandhaus, Phoebe"),
+            citation_key="Eastman:2026ld",
+            files=_pins(
+                {
+                    "2MASS.linear.ld.parquet": (
+                        4379980,
+                        "21f4e2538bf4bbce2928aec56e917741",
+                    ),
+                    "2MASS.quadratic.ld.parquet": (
+                        8588726,
+                        "296aa5cb0d281444eb28275048abfb89",
+                    ),
+                    "Euclid.linear.ld.parquet": (
+                        4379856,
+                        "5fb73f507c65bd971bd0c2dc67079150",
+                    ),
+                    "Euclid.quadratic.ld.parquet": (
+                        8588489,
+                        "7ff5482bd898193d6a176a5e082efc84",
+                    ),
+                    "GAIA.linear.ld.parquet": (
+                        8588853,
+                        "deca6a3b4053d7ccfd37fe1973a285de",
+                    ),
+                    "GAIA.quadratic.ld.parquet": (
+                        17007304,
+                        "713c3ebed2d42b20657b8c3f77f6359a",
+                    ),
+                    "GALEX.linear.ld.parquet": (
+                        2977439,
+                        "71831d82908afb447ba4e33a3e3bbf24",
+                    ),
+                    "GALEX.quadratic.ld.parquet": (
+                        5783416,
+                        "3965b4110a68026dac0cfab7859df74f",
+                    ),
+                    "Gemini.linear.ld.parquet": (
+                        2977659,
+                        "0f66ea266b3ca2765c7fe87d807a25e1",
+                    ),
+                    "Gemini.quadratic.ld.parquet": (
+                        5783855,
+                        "9e99d2f2a0f9c2c84ec2b5a22e4e6519",
+                    ),
+                    "Generic.linear.ld.parquet": (
+                        24018332,
+                        "7a55091e866c777bfd97e79ab2231495",
+                    ),
+                    "Generic.quadratic.ld.parquet": (
+                        47869168,
+                        "189d6572238d56da02fa9488b39ceecc",
+                    ),
+                    "Keck.linear.ld.parquet": (
+                        7185462,
+                        "2dfc6816257fcd08a26d4a70e47341a0",
+                    ),
+                    "Keck.quadratic.ld.parquet": (
+                        14200232,
+                        "68c814123f9dac4daab53e594c233454",
+                    ),
+                    "Kepler.linear.ld.parquet": (
+                        1574677,
+                        "1e796c4856682617f4b573ad967c6b6f",
+                    ),
+                    "Kepler.quadratic.ld.parquet": (
+                        2977736,
+                        "397160f55c09ed885f68a08c8fe6f7bc",
+                    ),
+                    "MANIFEST.txt": (
+                        1752,
+                        "e6ea1b84b2bffc130a221ce5f5828ffe",
+                    ),
+                    "PAN-STARRS.linear.ld.parquet": (
+                        5782300,
+                        "483b69c42f674b3f32e7ad527aa0fb8f",
+                    ),
+                    "PAN-STARRS.quadratic.ld.parquet": (
+                        11393637,
+                        "269333e4d72efec6163d66bc95dd23ad",
+                    ),
+                    "Roman.linear.ld.parquet": (
+                        11393383,
+                        "fcec5bb65614f95349c6e0518df062aa",
+                    ),
+                    "Roman.quadratic.ld.parquet": (
+                        22616905,
+                        "4d85c928a14197b2975f05018f241244",
+                    ),
+                    "SLOAN.linear.ld.parquet": (
+                        7185032,
+                        "7106885ec766b6f9b157fe337e5e6f56",
+                    ),
+                    "SLOAN.quadratic.ld.parquet": (
+                        14199381,
+                        "cee9b7a234d1326f98965cab6700c94f",
+                    ),
+                    "TESS.linear.ld.parquet": (
+                        1574509,
+                        "28adb44377b3591c36138f024ab84bfe",
+                    ),
+                    "TESS.quadratic.ld.parquet": (
+                        2977405,
+                        "7788e5f2e2902fbac2745eeb25aa3f4d",
+                    ),
+                    "TYCHO.linear.ld.parquet": (
+                        8588367,
+                        "d345f87bee6732f903d3cd79c7192512",
+                    ),
+                    "TYCHO.quadratic.ld.parquet": (
+                        17006318,
+                        "be724e28358cc2fe78b26035391677bd",
+                    ),
+                }
+            ),
+        ),
     }
 )
 
@@ -497,6 +624,7 @@ OWNERS: Mapping[str, str] = MappingProxyType(
         "nextgen_bc_tables": "exozippy.models.NextGen.bc_tables",
         "mist_eep_grids": "exozippy.models.MIST.eep_grid",
         "claret_ld_tables": "exozippy.models.Claret.claret_tables",
+        "phoenix_ld_tables": "exozippy.models.PHOENIX.ld_tables",
     }
 )
 
