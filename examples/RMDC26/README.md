@@ -164,18 +164,35 @@ each is pinned by `tests/test_rmdc26_report.py`.
 **UNRELIABLE** means "do not trust this lnZ or probability". It is set
 when any of these holds:
 
+- the event is in `FORCED_UNRELIABLE` (016, 163, 173, set by the campaign
+  agent 2026-10-21). 173 also flags VARIABILITY + FORGIVEN + AT_CAP in all
+  three bands, and a third of its chains sit in a worse t_0 mode;
 - the lp was not reproduced;
-- the bridge was refused;
-- the run was NOT EQUILIBRATED, according to the wrap-up log or to
-  master's check on the trimmed lp;
+- the bridge was refused, so there is no accepted lnZ;
 - any err_scale lies outside [0.8, 1.25]. The noise model, not the lens
   model, is then carrying the fit. The known cases are 016 F213 21.0,
   173 F213 8.1 and 163 F087 3.2;
-- there is an ANOMALY outlier flag: the mixture is absorbing points AT the
-  event, which means this model is missing a signal;
-- the event is in `FORCED_UNRELIABLE` (016, 163, 173, set by the campaign
-  agent 2026-10-21). 173 also flags VARIABILITY + FORGIVEN + AT_CAP in all
-  three bands, and a third of its chains sit in a worse t_0 mode.
+- a **1S1L** solution has an ANOMALY outlier flag: the mixture is
+  absorbing points AT the event, so the single lens is missing a signal
+  and its lnZ is subsidized.
+
+**Warnings** cover:
+
+- NOT EQUILIBRATED, from the wrap-up log or from master's check on the
+  trimmed lp. It is listed first, because it makes Rhat and ESS
+  meaningless.
+- Unconverged: Rhat/ESS against the config's own thresholds.
+- A mode held by fewer than 3 chains.
+- Stuck chains: more than 10% of chains with a second-half mean lp more
+  than 20 nats below the best chain, as in `diag30.py`.
+- lp Rhat > 1.1.
+- POSSIBLE_UNLISTED_MODE, or else more than 5% invalid draws.
+- Bridge re2 > 0.1.
+- ANOMALY on a 1S2L solution. On 2026-10-21 it fired on most binary
+  modes, so on its own it does not condemn one.
+- The VARIABILITY and FORGIVEN outlier kinds.
+- AT_CAP, with that band's out_scale Rhat beside it.
+- An out_scale Rhat > 1.1.
 
 **POSSIBLE_UNLISTED_MODE (<param>)** is its own warning, meaning the mode
 list may be incomplete. It fires when more than 5% of the draws are raw-z

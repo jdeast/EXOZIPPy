@@ -146,27 +146,27 @@ def test_err_scale_edges_are_inside(R):
     assert bad == []
 
 
-def test_lp_not_reproduced_refused_and_trending_are_unreliable(R):
-    bad, _ = R.reliability_flags(
+def test_lp_not_reproduced_and_refused_are_unreliable_trending_warns(R):
+    bad, warn = R.reliability_flags(
         _sol(lpcheck={"dlp_max_abs": 0.5}, bridge_refused=True,
              bridge_state="re2-too-large", equilibrated=False)
     )  # fmt: skip
-    assert len(bad) == 3
+    assert len(bad) == 2
     assert any("lp NOT reproduced" in b for b in bad)
     assert any("re2-too-large" in b for b in bad)
-    assert any("NOT EQUILIBRATED" in b for b in bad)
+    assert warn[0] == "NOT EQUILIBRATED (lp trending)"
 
 
 def test_outlier_kinds_split_between_unreliable_and_warning(R):
-    """ANOMALY (the mixture absorbing points AT the event) is UNRELIABLE;
-    VARIABILITY/FORGIVEN are warnings; AT_CAP carries the band's out_scale
-    Rhat beside it."""
+    """ANOMALY (the mixture absorbing points AT the event) is UNRELIABLE for
+    a single lens and a warning for a binary; VARIABILITY/FORGIVEN are
+    warnings; AT_CAP carries the band's out_scale Rhat beside it."""
     kinds = {
         "Roman_F146": ["ANOMALY", "FORGIVEN"],
         "Roman_F213": ["AT_CAP", "VARIABILITY"],
     }
     bad, warn = R.reliability_flags(
-        _sol(outlier_kinds=kinds, out_scale_rhat={"F213": 1.70})
+        _sol(outlier_kinds=kinds, out_scale_rhat={"F213": 1.70}, arch="1S1L")
     )
     assert bad == ["ANOMALY outliers in Roman_F146"]
     assert "FORGIVEN in Roman_F146" in warn
@@ -174,6 +174,8 @@ def test_outlier_kinds_split_between_unreliable_and_warning(R):
     assert "AT_CAP in Roman_F213 (out_scale Rhat 1.7)" in warn
     # the high out_scale Rhat is reported once, next to AT_CAP
     assert sum("1.7" in w for w in warn) == 1
+    bad2, warn2 = R.reliability_flags(_sol(outlier_kinds=kinds, arch="1S2L"))
+    assert bad2 == [] and "ANOMALY outliers in Roman_F146" in warn2
 
 
 def test_sampler_health_warnings(R):
@@ -359,7 +361,9 @@ def test_a_rejection_concentrated_in_t0_is_a_possible_unlisted_mode(R):
              invalid_frac=0.28)
     )  # fmt: skip
     assert bad == []
-    assert any(w.startswith("POSSIBLE_UNLISTED_MODE (source.t_0_raw)") for w in warn)
+    assert any(
+        w.startswith("POSSIBLE_UNLISTED_MODE (source.t_0_raw)") for w in warn
+    )
     # it replaces, not duplicates, the generic invalid-fraction warning
     assert not any(w.startswith("invalid draws") for w in warn)
 
@@ -374,7 +378,11 @@ def test_a_small_or_diffuse_or_noise_rejection_is_not(R):
     spread over three parameters, nor one in a NOISE parameter."""
     one = [{"source.t_0_raw"}]
     assert R.unlisted_mode_params(_beyond(one * 3), _DIMS, 100) == []
-    diffuse = [{"source.t_0_raw"}, {"source.u_0_raw"}, {"star.pm_ra_raw[0]"}] * 4
+    diffuse = [
+        {"source.t_0_raw"},
+        {"source.u_0_raw"},
+        {"star.pm_ra_raw[0]"},
+    ] * 4
     assert R.unlisted_mode_params(_beyond(diffuse), _DIMS, 100) == []
     noise = [{"mulensinstrument.err_scale_raw[2]"}] * 20
     assert R.unlisted_mode_params(_beyond(noise), _DIMS, 100) == []
@@ -383,9 +391,13 @@ def test_a_small_or_diffuse_or_noise_rejection_is_not(R):
 
 
 def test_two_geometric_parameters_can_carry_it(R):
-    rows = [{"source.t_0_raw"}] * 6 + [{"source.t_0_raw", "source.u_0_raw"}] * 4
+    rows = [{"source.t_0_raw"}] * 6 + [
+        {"source.t_0_raw", "source.u_0_raw"}
+    ] * 4
     got = R.unlisted_mode_params(_beyond(rows), _DIMS, 100)
-    assert got == ["source.t_0_raw", "source.u_0_raw"] or got == ["source.t_0_raw"]
+    assert got == ["source.t_0_raw", "source.u_0_raw"] or got == [
+        "source.t_0_raw"
+    ]
     # 6/10 covered by t_0 alone (< 0.8), so the pair is needed
     assert got == ["source.t_0_raw", "source.u_0_raw"]
 

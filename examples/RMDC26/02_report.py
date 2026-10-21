@@ -56,7 +56,7 @@ def build_event(ev, recs):
     sols, skipped, errors = [], [], []
     for r in recs:
         if "error" in r:
-            errors.append("%s: %s" % (r["fit"], r["error"]))
+            errors.append("%s: ERROR %s" % (r["fit"], r["error"][:200]))
             continue
         if "skipped" in r:
             skipped.append(

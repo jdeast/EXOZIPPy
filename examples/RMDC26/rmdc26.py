@@ -200,7 +200,10 @@ def staleness_from_mtimes(trace, config, params, whitening):
         return "no trace"
     for name, t in (("config", config), ("params file", params)):
         if t is not None and t > trace:
-            why.append("%s is newer than the trace (regenerated after this fit)" % name)
+            why.append(
+                "%s is newer than the trace (regenerated after this fit)"
+                % name
+            )
     if whitening is None:
         why.append("no whitening file")
     elif whitening > trace + 60:
@@ -476,7 +479,9 @@ def unlisted_mode_params(beyond, dim_names, n_total,
     if B.shape[0] / n_total <= frac_min:
         return []
     params = sorted({base_param(d) for d in dim_names})
-    col = {p: np.array([base_param(d) == p for d in dim_names]) for p in params}
+    col = {
+        p: np.array([base_param(d) == p for d in dim_names]) for p in params
+    }
     counts = {p: int(B[:, col[p]].any(axis=1).sum()) for p in params}
     cands = [p for p in sorted(params, key=lambda p: -counts[p])
              if p in geometric and counts[p] > 0][: max(4, max_params)]  # fmt: skip
@@ -509,15 +514,21 @@ def reliability_flags(sol):
     """(unreliable, warnings): two lists of str for one solution record.
 
     UNRELIABLE -- its lnZ, and so its probability, should not be trusted:
-      the report's tree did not reproduce the sampler's lp; the bridge was
-      refused; the lp was still trending (NOT EQUILIBRATED); an err_scale
-      outside ERR_SCALE_RANGE (the noise model is fitting the data, e.g.
-      016 F213 21.0, 173 F213 8.1, 163 F087 3.2); or an ANOMALY outlier flag
-      (the mixture absorbs points AT the event, the signature of a signal
-      this model is missing).
-    WARNING -- worth reading before relying on it: unconverged (Rhat/ESS
-      thresholds), stuck chains, lp Rhat, invalid-draw fraction, re2 or a
-      partial bridge, the other outlier kinds, out_scale Rhat.
+      the event is in FORCED_UNRELIABLE; the report's tree did not
+      reproduce the sampler's lp; the bridge was refused (there is no
+      accepted lnZ); an err_scale outside ERR_SCALE_RANGE (the noise model
+      is fitting the data, e.g. 016 F213 21.0, 173 F213 8.1, 163 F087 3.2);
+      or, for a 1S1L solution, an ANOMALY outlier flag (the mixture absorbs
+      points AT the event: the single lens is missing a signal and its
+      lnZ is subsidized).
+    WARNING -- worth reading before relying on it: NOT EQUILIBRATED (lp
+      still trending; first, because it undercuts Rhat/ESS), unconverged,
+      a mode held by < MIN_MODE_CHAINS chains, stuck chains, lp Rhat,
+      POSSIBLE_UNLISTED_MODE or the invalid-draw fraction, re2, ANOMALY on
+      a 1S2L solution (the binary leaves residual structure at the event;
+      on 2026-10-21 it fired on most 1S2L modes, so it does not condemn
+      one), VARIABILITY / FORGIVEN / AT_CAP with the out_scale Rhat, and
+      out_scale Rhat on its own.
     """
     bad, warn = [], []
     forced = FORCED_UNRELIABLE.get(sol.get("event"))
@@ -532,8 +543,6 @@ def reliability_flags(sol):
     st = sol.get("bridge_state", "ok")
     if sol.get("bridge_refused"):
         bad.append("bridge refused (%s)" % st)
-    if sol.get("equilibrated") is False:
-        bad.append("NOT EQUILIBRATED (lp trending)")
     lo, hi = ERR_SCALE_RANGE
     for band, v in sorted((sol.get("err_scale") or {}).items()):
         if np.isfinite(v) and not lo <= v <= hi:
@@ -543,7 +552,11 @@ def reliability_flags(sol):
     kinds = sol.get("outlier_kinds") or {}
     for f, ks in sorted(kinds.items()):
         if "ANOMALY" in ks:
-            bad.append("ANOMALY outliers in %s" % f)
+            (bad if sol.get("arch") == ARCH_PSPL else warn).append(
+                "ANOMALY outliers in %s" % f
+            )
+    if sol.get("equilibrated") is False:
+        warn.insert(0, "NOT EQUILIBRATED (lp trending)")
     if sol.get("converged") is False:
         warn.append(
             "unconverged (max Rhat %.3g on %s, min ESS %.0f)"

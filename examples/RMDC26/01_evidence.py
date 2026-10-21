@@ -178,7 +178,9 @@ def rawz_info(post, rep):
         counts[p] = counts.get(p, 0)
     for p in counts:
         cols = np.array([R.base_param(d) == p for d in names])
-        counts[p] = int(beyond[:, cols].any(axis=1).sum()) if len(beyond) else 0
+        counts[p] = (
+            int(beyond[:, cols].any(axis=1).sum()) if len(beyond) else 0
+        )
     n_total = X.shape[0]
     return {
         "rawz_frac": float(len(beyond) / max(n_total, 1)),

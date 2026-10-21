@@ -295,6 +295,10 @@ def test_every_example_directory_has_a_config():
         # directory, against challenge data that is not in the repo (see
         # examples/DC2018_069/README.md).
         "DC2018_069",
+        # The RMDC26 evidence report and microlens-submit writer: scripts
+        # only.  The configs and traces they read live in the campaign
+        # directory outside the repo (see examples/RMDC26/README.md).
+        "RMDC26",
         # Inject-and-recover validation harness (7.13.1): a driver script
         # plus job files and result rows; configs are generated in tmp
         # workdirs per realization, never committed.
