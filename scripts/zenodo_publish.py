@@ -866,8 +866,14 @@ def render_record(
     creators: tuple[str, ...],
     citation_key: str | None,
     files: dict[str, dict],
+    superseded: dict[str, tuple[str, ...]] | None = None,
 ) -> str:
     """One RECORDS entry in zenodo_assets.py's ZenodoRecord shape.
+
+    ``superseded`` is {filename: md5s of EARLIER published versions}
+    (ZenodoRecord.superseded); rendered after ``files`` when non-empty, so
+    an owner can tell a checkout holding the previous version from a local
+    edit and re-fetch it.
 
     Laid out as ruff format (line-length 79) writes it, so rewriting an
     entry from its own values reproduces the file byte for byte --
@@ -906,6 +912,23 @@ def render_record(
         out.append(f"{i3}),")
     out.append(f"{i2}}}")
     out.append(f"{i1}),")
+    if superseded:
+        out.append(f"{i1}superseded=MappingProxyType(")
+        out.append(f"{i2}{{")
+        for name, md5s in sorted(superseded.items()):
+            md5s = tuple(md5s)
+            inner = ", ".join(_q(m) for m in md5s) + (
+                "," if len(md5s) == 1 else ""
+            )
+            line = f"{i3}{_q(name)}: ({inner}),"
+            if len(line) <= _LINE:
+                out.append(line)
+            else:
+                out.append(f"{i3}{_q(name)}: (")
+                out += [f"{i4}{_q(m)}," for m in md5s]
+                out.append(f"{i3}),")
+        out.append(f"{i2}}}")
+        out.append(f"{i1}),")
     out.append(f"{_ENTRY_INDENT}),")
     return "\n".join(out) + "\n"
 
@@ -995,6 +1018,19 @@ def pin_entry(pub: dict, registry, name: str | None) -> tuple[str, str]:
             f"is not in the registry yet; pass --name KEY for its new entry."
         )
     citation_key = registry.RECORDS[key].citation_key if match else None
+    # A re-versioned record: carry the entry's superseded md5s and add the
+    # previous version's md5 of every file the new version changed, so an
+    # owner recognizes a checkout holding the old file and re-fetches it.
+    superseded: dict[str, tuple[str, ...]] = {}
+    if match:
+        old = registry.RECORDS[key]
+        superseded = {n: tuple(m) for n, m in old.superseded.items()}
+        for n, f in old.files.items():
+            new_md5 = pub["files"].get(n, {}).get("md5")
+            if new_md5 is not None and new_md5 != f.md5:
+                have = superseded.get(n, ())
+                if f.md5 not in have:
+                    superseded[n] = (f.md5,) + tuple(have)
     entry = render_record(
         key,
         pub["record_id"],
@@ -1003,6 +1039,7 @@ def pin_entry(pub: dict, registry, name: str | None) -> tuple[str, str]:
         pub["creators"],
         citation_key,
         pub["files"],
+        superseded,
     )
     return key, entry
 

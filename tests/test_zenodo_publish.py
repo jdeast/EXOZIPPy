@@ -826,6 +826,7 @@ def test_render_round_trips_the_shipped_registry():
             r.creators,
             r.citation_key,
             {n: {"size": f.size, "md5": f.md5} for n, f in r.files.items()},
+            {n: tuple(m) for n, m in r.superseded.items()},
         )
         start, end = zp._entry_span(text, key)
         assert text[start:end] == entry, key
