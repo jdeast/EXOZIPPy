@@ -401,15 +401,58 @@ def test_ob161003_collapse_reconciles_against_the_presplit_recording():
     replay tests all the same.
     """
     # ARRANGE -- the pre-split recording (labels translated, values
-    # untouched) and the post-split model at its exact start.
+    # untouched) and the post-split model at its exact start, built with
+    # the EARTH PLACED AS THE RECORDING PLACED IT.  Review 1.10.13 moved
+    # the observer to the instant it received each epoch's light (BJD_TDB
+    # minus the Roemer delay; conventions.md C4) and the frame velocity to
+    # a 0.05 d step (C5).  Both move the data term at a matched
+    # trajectory, legitimately, by ~1e-5 relative -- which is exactly the
+    # motion this test's sharp edge exists to catch as a wiring bug.  So
+    # the split is reconciled against the recording with the recording's
+    # own Earth (the two 1.10.13 changes switched off for the build), and
+    # the 1.10.13 motion is measured separately below.  Switching the
+    # physics off for a comparison is the same move as the analytic
+    # err_scale and u1 reconciliations further down: the recording's
+    # values stay untouched, and every later change is accounted for.
+    import exozippy.components.mulensing.mulensevent as mulensevent_mod
+    import exozippy.ephemeris as ephemeris_mod
+
     presplit = load(os.path.join(FIXTURES, "presplit", "ob161003.json"))
     fixture = load_fixture("ob161003")
-    system, model = build(fixture, extra_params=_OB161003_PRESPLIT_PM)
-
-    # ACT -- decompose at this model's own solved start (which the seeds
-    # above pin to the recording's start).
-    parts, _, reconciles, _ = decompose(system, model)
+    with (
+        unittest.mock.patch.object(
+            ephemeris_mod,
+            "reception_instant",
+            lambda bjd_tdb, ra, dec, **kw: np.atleast_1d(
+                np.asarray(bjd_tdb, dtype=float)
+            ),
+        ),
+        unittest.mock.patch.object(
+            mulensevent_mod, "FRAME_VELOCITY_STEP_DAYS", 0.5
+        ),
+    ):
+        system, model = build(fixture, extra_params=_OB161003_PRESPLIT_PM)
+        # ACT -- decompose at this model's own solved start (which the
+        # seeds above pin to the recording's start).
+        parts, _, reconciles, _ = decompose(system, model)
     assert reconciles, "the instrument stopped reconciling; fix it first"
+
+    # The 1.10.13 motion itself, with the Earth placed as the code now
+    # places it: a bounded, directional shift of the data term at the same
+    # start, well inside 1e-4 relative, and nothing like the 1e-9 edge
+    # held below.  Pins that the switch above is what separates the two
+    # builds, so a future change cannot hide behind it.
+    system_now, model_now = build(fixture, extra_params=_OB161003_PRESPLIT_PM)
+    parts_now, _, reconciles_now, _ = decompose(system_now, model_now)
+    assert reconciles_now
+    data_shift = (
+        parts_now["RV:mulensinstrument.model"]
+        - parts["RV:mulensinstrument.model"]
+    ) / abs(parts["RV:mulensinstrument.model"])
+    assert 1e-9 < abs(data_shift) < 1e-4, (
+        f"1.10.13's Earth placement moved the data term by {data_shift:.3e} "
+        f"relative; expected a small, nonzero shift"
+    )
     moved, appeared, vanished = compare(
         presplit["terms"], parts, rtol=COLLAPSE_RTOL
     )

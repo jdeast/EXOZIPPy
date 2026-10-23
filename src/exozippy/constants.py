@@ -15,6 +15,9 @@ RSUN_TO_AU = (1.0 * u.R_sun).to(u.au).value
 C_LIGHT_RSUN_PER_DAY = const.c.to(u.R_sun / u.day).value
 KEPLER_CONST = (G / (4.0 * np.pi**2)) ** (1.0 / 3.0)
 C_MPS = const.c.to(u.m / u.s).value
+# AU/day, for the Roemer delay between an observer's barycentric position and
+# the solar-system barycenter (ephemeris.observer_position_at_reception).
+C_AU_PER_DAY = const.c.to(u.au / u.day).value
 SOLRAD_PER_DAY_TO_MPS = (1.0 * u.R_sun / u.day).to(u.m / u.s).value
 LOGG_CONST = np.log10(const.GM_sun.cgs.value / const.R_sun.cgs.value**2)  # cgs
 LUM_CONST = 1.0 / (

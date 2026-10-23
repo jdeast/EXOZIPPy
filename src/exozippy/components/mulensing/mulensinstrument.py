@@ -13,7 +13,7 @@ from scipy.optimize import nnls
 from exozippy.compat import patch_mulensmodel_method_order
 from exozippy.components.instrument import Instrument
 from exozippy.config import PRECEDENCE_DERIVED_DATA, user_entry
-from exozippy.ephemeris import get_observer_position
+from exozippy.ephemeris import observer_position_at_reception
 from exozippy.outputs.prose import get_collector
 from exozippy.skyframe import observer_sky_offset
 
@@ -488,6 +488,9 @@ class MulensInstrument(Instrument):
         # t_0/u_0/t_E is already informed.  Re-anchored below once t0_par
         # is final, before the bootstrap's own probe.
         self._event = system.mulensevent
+        # The frame's Earth is placed at the instant it received each
+        # epoch's light, which needs the line of sight (review 1.10.13).
+        self._event.set_line_of_sight(ra_rad, dec_rad)
         _, self._earth_pos_ref, self._earth_vel_ref = (
             self._event.geocentric_frame()
         )
@@ -614,6 +617,7 @@ class MulensInstrument(Instrument):
         # _earth_vel_ref off this instrument for the mu_helio -> mu_geo
         # conversion.
         self._event = system.mulensevent
+        self._event.set_line_of_sight(ra_rad, dec_rad)
         _, self._earth_pos_ref, self._earth_vel_ref = (
             self._event.geocentric_frame()
         )
@@ -1719,11 +1723,28 @@ class MulensInstrument(Instrument):
 
     def get_observer_position(self, time, observer_location="earth"):
         """
-        High-precision observer position dispatcher.
-        Delegates to the shared exozippy.ephemeris module (major bodies,
-        topocentric ground sites, and spacecraft ephemeris files).
+        Observer position at the instant it received the light tagged
+        ``time`` (BJD_TDB, the data's time system).
+
+        Delegates to ``exozippy.ephemeris.observer_position_at_reception``
+        (major bodies, topocentric ground sites, and spacecraft ephemeris
+        files), which solves for the geocentric reception instant, BJD_TDB
+        minus the Roemer delay toward the source, before looking the
+        position up (review 1.10.13).  The line of sight is the source's,
+        stashed by ``load_data`` -- the same (ra, dec) the Skowron
+        deviations and the mu_helio -> mu_geo conversion project with.
         """
-        return get_observer_position(time, observer_location=observer_location)
+        radec = getattr(self, "_source_radec_rad", None)
+        if radec is None:
+            raise RuntimeError(
+                f"[{self.prefix}] get_observer_position needs the source's "
+                f"line of sight (_source_radec_rad), which load_data sets; "
+                f"it was called before stage 1."
+            )
+        ra_rad, dec_rad = radec
+        return observer_position_at_reception(
+            time, ra_rad, dec_rad, observer_location=observer_location
+        )
 
     def register_parameters(self, system):
         """Stage 3: Declare the manifest with bootstrapped fluxes."""
