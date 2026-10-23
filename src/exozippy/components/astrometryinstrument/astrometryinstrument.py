@@ -136,7 +136,7 @@ from exozippy.components.parameterization import (
     pin_unselected,
 )
 from exozippy.constants import DAYS_PER_YEAR
-from exozippy.ephemeris import get_observer_position
+from exozippy.ephemeris import observer_position_at_reception
 from exozippy.outputs.texutils import latex_escape
 from exozippy.skyframe import parallax_factors
 
@@ -553,8 +553,11 @@ class AstrometryInstrument(Instrument):
 
             # Parallax factors (needed for gaia/abs only)
             if mode in ("gaia", "abs"):
-                xyz = get_observer_position(
-                    t, observer_location=self.observers[i]
+                # At the instant the observer RECEIVED each epoch's light
+                # (the tag minus the Roemer delay toward the target), not
+                # at the BJD_TDB tag itself (review 1.10.13).
+                xyz = observer_position_at_reception(
+                    t, ra_ref, dec_ref, observer_location=self.observers[i]
                 )
                 # Apparent displacement of the source = parallax * (P_E, P_N)
                 d["P_E"], d["P_N"] = parallax_factors(xyz, ra_ref, dec_ref)
@@ -1212,8 +1215,11 @@ class AstrometryInstrument(Instrument):
         both from the same ephemeris call, for a plot grid or the data
         times alike."""
         d = self.datasets[i]
-        xyz = get_observer_position(
-            np.asarray(t, dtype=float), observer_location=self.observers[i]
+        xyz = observer_position_at_reception(
+            np.asarray(t, dtype=float),
+            d["ra_ref"],
+            d["dec_ref"],
+            observer_location=self.observers[i],
         )
         P_E, P_N = parallax_factors(xyz, d["ra_ref"], d["dec_ref"])
         dev = system.mulensevent.skowron_deviations(t, xyz)
@@ -1947,8 +1953,11 @@ class AstrometryInstrument(Instrument):
         # ---------------- left: full path over the data span ----------------
         t_dense = np.linspace(t.min(), t.max(), 4000)
         # parallax factors on the dense grid (numpy, same observer)
-        xyz = get_observer_position(
-            t_dense, observer_location=self.observers[i]
+        xyz = observer_position_at_reception(
+            t_dense,
+            d["ra_ref"],
+            d["dec_ref"],
+            observer_location=self.observers[i],
         )
         P_E, P_N = parallax_factors(xyz, d["ra_ref"], d["dec_ref"])
         d_dense = dict(d, P_E=P_E, P_N=P_N)

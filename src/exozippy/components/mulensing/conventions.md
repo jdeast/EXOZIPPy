@@ -132,6 +132,29 @@ The hand-off was removed 2026-10-01; the peak finder reads the CONVERTED times, 
 went with it. `examples/DC2018/convert_mmexofast_json.py` keeps the refusal for the JSONs
 it converts.)
 
+A BJD_TDB tag is the light's arrival time at the solar-system barycenter. The lens-source
+motion is uniform in that clock, so the trajectory term `(t - t_0)/t_E` takes the tag as
+is. The OBSERVER, however, received that light earlier, at its own coordinate time
+`jd = bjd - (r_obs . n_hat)/c` (the Roemer delay, up to 8.3 min; `n_hat` toward the source),
+and that is the instant its position enters the parallax terms. Every observer-position
+lookup therefore goes through `ephemeris.observer_position_at_reception`, which solves that
+fixed point with the observer's OWN position (a spacecraft's from its ephemeris file) and
+only then calls `get_observer_position`, whose argument is the coordinate time. Placing the
+Earth at the tag itself puts it 1e-4 AU too far along its orbit: 1e-4 of the parallax
+signal, 2e-5 `theta_E` on a `pi_E = 0.2` event (review 1.10.13). The two time arguments are
+what VBMicrolensing's `ComputeParallax` keeps apart for its HJD input (`t_in_HJD`), and
+what BAGLE 1.0.5 does not (it places the Earth at its geocentric tag and leaves the
+trajectory on it, the opposite face, 1.4e-4 `theta_E` on the same event). Spacecraft `.eph`
+files tabulate the coordinate time of the state (Horizons' `datetime_jd`), i.e. the
+observer's `JD_TDB`, not a BJD.
+
+- Pinned by: `tests/test_ephemeris_reception_instant.py` -- the reception instant against
+  astropy's own barycentric light-travel time, and the delay itself against the one
+  VBMicrolensing adds to its trajectory time when told its tags are JD (`t_in_HJD` off,
+  `pi_E = 0`), which matches astropy's heliocentric delay to 0.2 s and ours to the
+  Sun-barycenter difference. VBM's internal Earth VECTOR is not a usable reference at this
+  level: it differs from a geometric heliocentric Earth by a fixed ~8e-5 AU map of its own.
+
 ### C5 -- the geocentric frame, anchored at `t0_par`
 
 Parameters live in the Skowron+2011 geocentric inertial frame: the frame moving with
@@ -145,6 +168,16 @@ picks it in the order explicit `mulensevent: t0_par:` > user `source.0.t_0` init
 `pm_dec` are barycentric observables, so `physics.calc_mu_ra_rel_geo` /
 `calc_mu_dec_rel_geo` apply the Gould (2004) conversion
 `mu_geo = mu_helio - pi_rel * v_earth_perp(t0_par) / AU` before `t_E` and `pi_E` are formed.
+
+The frame's anchors are built by `MulensEvent.geocentric_frame`: the Earth's barycentric
+position at the instant it received the light tagged `t0_par` (C4), and its PHYSICAL
+velocity, `d(position)/d(coordinate time)`, by a central difference of +/-0.05 d about that
+instant (relative error `(omega h)^2/6 = 1.2e-7`). The step is a convention, not a
+numerical detail: the velocity cancels exactly in `u(t)` (the rectilinear term and the
+deviations use the same one), but it sets the reported `t_E` and the direction of `pi_E`,
+and a `(t_0, u_0)` quoted by another code is comparable only in a frame spanned by the same
+velocity -- a 0.5 d step (1.2e-5) was the last 7e-7 `theta_E` between EXOZIPPy and BAGLE
+on the Lu et al. 2026 Figure 12 event before it was matched.
 
 - Pinned by: `tests/test_mu_rel_geo.py::test_mu_geo_sign_matches_first_principles_trajectory`
   (the flipped sign changes `t_E` by tens of percent at `pi_rel ~ 0.35 mas`).

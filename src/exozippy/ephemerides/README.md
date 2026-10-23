@@ -1,3 +1,11 @@
+Time column: every file's first column is the TDB COORDINATE time at which the spacecraft
+occupies the tabulated position (Horizons' `datetime_jd`), i.e. the observer's own JD_TDB.
+It is NOT a BJD_TDB tag: the data's BJD_TDB tags are converted to the reception instant by
+`ephemeris.observer_position_at_reception` before the file is interpolated (the Roemer delay
+toward the target, up to 8.3 min, computed with the spacecraft's own position). Files written
+before 2026-10 carried the header "BJD_TDB" for this column; the numbers were always the
+coordinate time.
+
 This directory contains ephemeris files to compute the observer trajectory (microlensing parallax, astrometry parallax factors, etc.; see src/exozippy/ephemeris.py). New ephemerides can be generated in the appropriate format using the get_ephemeris tool in this directory. This is how the existing ones were generated:
 
 python get_ephemeris.py --id -79 --out "spitzer.eph" --start "2013-06-01" --stop "2018-12-31" --step="1d" 

@@ -135,7 +135,7 @@
   "POT:logit_uniform_prior.star.pm_ra": -4.1588830869266165,
   "POT:logit_uniform_prior.star.radius": -5.456071697295337,
   "POT:logit_uniform_prior.star.rv": -4.1588830833596715,
-  "POT:low_bound.lens.q": -1.5891243831692648e-265,
+  "POT:low_bound.lens.q": -3.016245514697053e-251,
   "POT:low_bound.lens.s": -9.85967654375977e-305,
   "POT:low_bound.mulensevent.mlens_total": -9.85967654375977e-305,
   "POT:low_bound.mulensevent.mu_dec_rel": -9.85967654375977e-305,
@@ -149,7 +149,7 @@
   "POT:low_bound.mulensevent.theta_E": -9.85967654375977e-305,
   "POT:low_bound.mulensinstrument.f_blend": -8.873708889383794e-304,
   "POT:low_bound.mulensinstrument.f_source": -6.238322633717684,
-  "POT:mulensevent.event_rate_prior": 3.973166042298518,
+  "POT:mulensevent.event_rate_prior": 3.9731680786080936,
   "POT:mulensevent.mu_rel_singularity": -9.85967654375977e-305,
   "POT:mulensevent.source_behind_lens": -9.85967654375977e-305,
   "POT:mulensevent.theta_E_singularity": -9.85967654375977e-305,
@@ -171,7 +171,7 @@
   "RV:band.u1_raw": -2.756815599614018,
   "RV:mulensinstrument.err_scale_raw": -8.270446798842054,
   "RV:mulensinstrument.log_f_total_raw": -8.270446798842054,
-  "RV:mulensinstrument.model": 33697.90905017518,
+  "RV:mulensinstrument.model": 33685.874023999786,
   "RV:mulensinstrument.q_source_raw": -8.270446798842054,
   "RV:orbit.cosi_raw": -0.9189385332046727,
   "RV:orbit.logP_raw": -0.9189385332046727,
@@ -192,5 +192,5 @@
   "RV:star.radius_raw": -0.9189385332046727,
   "RV:star.rv_raw": -2.756815599614018
  },
- "total_logp": 33540.194854807516
+ "total_logp": 33528.159830668505
 }

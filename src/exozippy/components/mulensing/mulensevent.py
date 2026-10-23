@@ -58,6 +58,15 @@ from .physics import (
 
 logger = logging.getLogger(__name__)
 
+# Central-difference step (days) for the Earth's velocity at t0_par, which
+# spans the Skowron frame (conventions.md C5).  A CONVENTION, not a numerical
+# detail: the velocity cancels exactly in u(t) but sets the reported t_E and
+# the direction of pi_E, so a (t_0, u_0) is comparable across codes only in
+# a frame built with the same step.  (omega h)^2/6 = 1.2e-7 relative here;
+# it was 0.5 d (1.2e-5) before review 1.10.13.  Module-level so a test can
+# reproduce the pre-1.10.13 frame.
+FRAME_VELOCITY_STEP_DAYS = 0.05
+
 # alpha is stored in radians (lens.alpha's internal_unit) and consumed in
 # degrees by both magnification backends.
 _RAD_TO_DEG = 180.0 / np.pi
@@ -140,6 +149,11 @@ class MulensEvent(Component):
         # it back into t0_par[0] -- a length-1 list precisely so that write
         # is visible to every later reader of the same object.
         self.t0_par = [self._resolve_t0_par(ev, config_manager)]
+        # The source's line of sight (ra, dec in radians), set by
+        # MulensInstrument.load_data before the geocentric frame is first
+        # anchored: the frame's Earth is placed at the instant it received
+        # the light tagged t0_par, which depends on the direction.
+        self._line_of_sight_rad = None
 
         # One magnification method per source; all sources start from the
         # event-level config value, and resolve_auto_vbbl refines each slot.
@@ -1146,6 +1160,20 @@ class MulensEvent(Component):
         (before its stage-1 probe of the event geometry) and again at stage
         3, which also covers a fit with no microlensing data (0, 0).
         """
+        if self._line_of_sight_rad is None:
+            # No microlensing data set it at stage 1 (an astrometry-only
+            # or data-free event): the frame is still well defined by the
+            # source star's own coordinates, so resolve them here rather
+            # than leave geocentric_frame to raise at stage 7.
+            source_ndx = int(self.source_bodies[0][1])
+            n_stars = system.star.n_elements
+            ra_deg = self.config_manager.resolve(
+                "star", "ra", shape=(n_stars,)
+            )["initval"][source_ndx]
+            dec_deg = self.config_manager.resolve(
+                "star", "dec", shape=(n_stars,)
+            )["initval"][source_ndx]
+            self.set_line_of_sight(np.radians(ra_deg), np.radians(dec_deg))
         vperp_e, vperp_n = self._earth_vperp_en(system)
         self.config_manager.add_constant(
             "mulensevent.0.earth_vperp_e", vperp_e
@@ -1722,6 +1750,13 @@ class MulensEvent(Component):
     # ------------------------------------------------------------------
     # The Skowron+2011 geocentric frame (conventions.md C5, C6)
     # ------------------------------------------------------------------
+    def set_line_of_sight(self, ra_rad, dec_rad):
+        """Record the source direction the geocentric frame is built for.
+        Called by ``MulensInstrument.load_data`` (both the provisional and
+        the final anchoring); a change of direction invalidates the cached
+        frame."""
+        self._line_of_sight_rad = (float(ra_rad), float(dec_rad))
+
     def geocentric_frame(self):
         """``(t0_par, earth_pos_ref, earth_vel_ref)`` -- the anchors of the
         geocentric inertial frame: Earth's barycentric position (AU) and
@@ -1734,29 +1769,48 @@ class MulensEvent(Component):
         against a stale value: ``MulensInstrument.load_data`` re-resolves
         ``t0_par`` at stage 1 (the peak finder's seeds arrive after this
         component's ``__init__`` snapshot) and writes it back into that
-        length-1 list precisely so later readers see the final value.  The
-        velocity is a central difference over +/-0.5 d, the recipe
-        ``MulensInstrument`` used before this moved here (bit-identical).
-        """
-        from exozippy.ephemeris import get_observer_position
+        length-1 list precisely so later readers see the final value.
 
+        ``t0_par`` is a BJD_TDB tag like every other epoch (C4), so the
+        Earth is placed where it was when it RECEIVED that light: at the
+        reception instant ``t0_par - Roemer`` toward the source
+        (``ephemeris.reception_instant``; review 1.10.13).  The velocity is
+        the physical one, d(position)/d(coordinate time), by a central
+        difference of +/-0.05 d about that instant ((omega h)^2/6 = 1.2e-7
+        relative; it was +/-0.5 d, 1.2e-5, before 1.10.13).  The velocity
+        cancels exactly in u(t) -- the rectilinear term and the deviations
+        use the same one -- but it sets the REPORTED t_E and the direction
+        of pi_E, and a (t_0, u_0) quoted by another code is only
+        comparable in a frame spanned by the same velocity (C5).
+        """
+        from exozippy.ephemeris import get_observer_position, reception_instant
+
+        if self._line_of_sight_rad is None:
+            raise RuntimeError(
+                f"[{self.prefix}] geocentric_frame needs the source's line "
+                f"of sight (set_line_of_sight), which MulensInstrument."
+                f"load_data provides at stage 1 and register_frame_constants "
+                f"at stage 3; it was called before either."
+            )
         t0 = float(self.t0_par[0])
+        ra, dec = self._line_of_sight_rad
         cache = getattr(self, "_geocentric_frame_cache", None)
-        if cache is not None and cache[0] == t0:
-            return cache
-        pos = get_observer_position(np.array([t0]), observer_location="earth")[
-            0
-        ]  # (3,) AU
-        _dt = 0.5  # days for finite-difference velocity
+        if cache is not None and cache[0] == (t0, ra, dec):
+            return cache[1]
+        jd0 = float(reception_instant(np.array([t0]), ra, dec)[0])
+        pos = get_observer_position(
+            np.array([jd0]), observer_location="earth"
+        )[0]  # (3,) AU
+        _dt = FRAME_VELOCITY_STEP_DAYS
         _ep = get_observer_position(
-            np.array([t0 + _dt]), observer_location="earth"
+            np.array([jd0 + _dt]), observer_location="earth"
         )[0]
         _em = get_observer_position(
-            np.array([t0 - _dt]), observer_location="earth"
+            np.array([jd0 - _dt]), observer_location="earth"
         )[0]
         vel = (_ep - _em) / (2.0 * _dt)  # AU/day
-        self._geocentric_frame_cache = (t0, pos, vel)
-        return self._geocentric_frame_cache
+        self._geocentric_frame_cache = ((t0, ra, dec), (t0, pos, vel))
+        return self._geocentric_frame_cache[1]
 
     def skowron_deviations(self, t, xyz_abs):
         """Absolute barycentric observer positions -> Skowron+2011 geocentric
