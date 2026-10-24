@@ -31,6 +31,7 @@ import argparse
 import contextlib
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -40,8 +41,12 @@ import numpy as np
 
 def config_path(fit_dir):
     """The fit's system config: RMDC26_<ev>.yaml (a stem with no dot; the
-    params file and the run's restart file carry one)."""
+    params file and the run's restart file carry one).  A path to a YAML
+    file is taken as the config itself (the SED-tied layout, where it is
+    run.yaml / run_long.yaml beside out/ and out_long/)."""
     d = Path(fit_dir)
+    if d.is_file():
+        return d
     cands = [p for p in sorted(d.glob("RMDC26_*.yaml")) if "." not in p.stem]
     if len(cands) != 1:
         raise SystemExit(f"{d}: expected one RMDC26_*.yaml, found {cands}")
@@ -49,7 +54,8 @@ def config_path(fit_dir):
 
 
 def stage(fit_dir, work_dir):
-    """Copy a fit's config + params into `work_dir` and link its trace and
+    """Copy a fit's config (`fit_dir` is its directory or the config file)
+    + params into `work_dir` and link its trace and
     whitening there, so nothing this process does can write into the
     campaign's directory (it is another agent's live run).  Returns the
     staged config path.  `prefix:` is pointed at `work_dir`; it is not part
@@ -64,7 +70,11 @@ def stage(fit_dir, work_dir):
     if not src_prefix.is_absolute():
         src_prefix = cfg.parent / src_prefix
     new_prefix = work / src_prefix.name
-    raw = cfg.read_text().replace(str(text["prefix"]), str(new_prefix))
+    raw, n = re.subn(
+        r"(?m)^prefix:.*$", "prefix: %s" % new_prefix, cfg.read_text()
+    )
+    if n != 1:
+        raise SystemExit(f"{cfg}: expected one top-level prefix: line")
     (work / cfg.name).write_text(raw)
     pf = text.get("parameter_file")
     if pf:
@@ -79,7 +89,8 @@ def stage(fit_dir, work_dir):
 
 
 def build(fit_dir, work_dir):
-    """(system, model, config, prefix) for a fit directory, staged into
+    """(system, model, config, prefix) for a fit directory (or config
+    file), staged into
     `work_dir`, with the whitening restored from the trace's own file."""
     from exozippy.system import System
     from exozippy.whitening import restore_whitening_for_trace
@@ -193,7 +204,8 @@ def main(argv=None):
     )
     a = ap.parse_args(argv)
     fit_dir = Path(a.fit_dir).resolve()
-    res = check(fit_dir, Path(a.work) / fit_dir.name, a.n, a.seed)
+    sub = fit_dir.name if fit_dir.is_dir() else fit_dir.stem
+    res = check(fit_dir, Path(a.work) / sub, a.n, a.seed)
     txt = json.dumps(res, indent=1)
     if a.out:
         with contextlib.suppress(FileExistsError):
