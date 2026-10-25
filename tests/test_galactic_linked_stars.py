@@ -93,6 +93,10 @@ class _Stars:
                     "hard": {2: _pm_link(1, name)}
                 }
 
+    def position_root(self, i):
+        # No derived lens positions here (Star.position_root).
+        return i
+
 
 class _Sys:
     def __init__(self, stars):

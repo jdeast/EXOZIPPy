@@ -39,7 +39,7 @@ from exozippy.corner_utils import (
 )
 from exozippy.outputs.prose import get_collector
 from exozippy.potentials import soft_lower_bound
-from exozippy.skyframe import observer_sky_offset, sky_basis
+from exozippy.skyframe import observer_sky_offset, parallax_factors, sky_basis
 
 from ..galacticmodel.physics import expected_proper_motion
 from .bodies import body_entries, resolve_orbit_ref, validate_event_config
@@ -51,6 +51,7 @@ from .physics import (
     THETA_E_LENSING_MIN,
     apply_u_0_floor,
     clip_q,
+    host_offset_from_com,
     lens_geometry_from_orbit,
     source_offset_from_orbit,
     xallarap_trajectory_shift,
@@ -100,7 +101,18 @@ class MulensEvent(Component):
 
     # Earth's velocity at t0_par, projected E/N -- constants injected in
     # add_parameter for the mu_rel helio -> geo conversion (Gould 2004).
-    context_dep_names = frozenset({"earth_vperp_e", "earth_vperp_n"})
+    # The lens_offset_e/n quartet (review 8.10.4) likewise: the astrometric
+    # reference epoch, t0_par, and the Earth's parallax factors at t0_par.
+    context_dep_names = frozenset(
+        {
+            "earth_vperp_e",
+            "earth_vperp_n",
+            "track_epoch",
+            "track_t0_par",
+            "track_earth_pe",
+            "track_earth_pn",
+        }
+    )
 
     def __init__(self, config, config_manager):
         # Refuse unknown/misplaced keys BEFORE anything reads the block: a
@@ -408,6 +420,124 @@ class MulensEvent(Component):
         """(comp_type, star_ndx) of the primary source body."""
         return self.source_bodies[0]
 
+    def lens_track_star(self, system):
+        """The primary lens STAR whose sky position is derived from the
+        source's (review 8.10.4), or None.
+
+        The light curve fixes the lens-minus-source separation at every
+        instant (C9), so a lens star's ``ra``/``dec`` at the astrometric
+        reference epoch are not free: they are the primary source's plus
+        ``mulensevent.lens_offset_e/n``.  The flip happens exactly where
+        that position is MEASURED -- the lens star is the target of a
+        gaia/abs astrometry dataset -- and nowhere else: a lens position
+        nothing reads is a pinned bookkeeping value, and deriving it would
+        only add a potential to every microlensing fit.
+
+        Stage-safe from stage 1 on: reads the raw astrometry config and
+        ``lens_bodies``/``source_bodies`` (``__init__``), never a stage-2
+        attribute, because AstrometryInstrument.load_data asks it too.
+        """
+        l_type, l_idx = self._primary_lens()
+        s_type, _ = self._primary_source()
+        if l_type != "star" or s_type != "star":
+            return None
+        astrom = getattr(system, "astrometryinstrument", None)
+        if astrom is None:
+            return None
+        for c in astrom.config:
+            mode = c.get("mode", "gaia")
+            if mode in ("gaia", "abs") and int(c.get("star_ndx", 0)) == int(
+                l_idx
+            ):
+                return int(l_idx)
+        return None
+
+    def _validate_lens_track(self, system):
+        """Refuse the configurations the derived lens position cannot
+        represent, and say what it approximates.  Called at stage 3 when
+        ``lens_track_star`` is not None."""
+        if self.xal_orbit_idx is not None:
+            raise NotImplementedError(
+                f"[{self.prefix}] the lens star carries absolute astrometry, "
+                f"so its position is derived from the source's and the "
+                f"event geometry (review 8.10.4) -- but this event has a "
+                f"source_orbit (xallarap), and the source's orbital offset "
+                f"at the reference epoch is not part of that derivation "
+                f"yet.  Drop the lens's astrometry or the source orbit."
+            )
+        if self.n_companions >= 2:
+            raise NotImplementedError(
+                f"[{self.prefix}] the lens star carries absolute astrometry, "
+                f"so its position is derived from the event geometry "
+                f"(review 8.10.4), which places the luminous primary relative "
+                f"to the lens center of mass for ONE companion only; this "
+                f"lens has {self.n_companions}."
+            )
+        if self.n_companions == 1 and self.lens_bodies[1][0] == "star":
+            logger.warning(
+                f"[{self.prefix}] the lens star's position is derived from "
+                f"the event geometry (review 8.10.4) and the lens companion "
+                f"is a STAR: the derivation places the primary at its offset "
+                f"from the center of mass at t0_par, while a luminous "
+                f"companion moves the light's photocenter and the binary "
+                f"orbit moves both over the years to the imaging epoch (up "
+                f"to s theta_E).  Treat the lens astrometry as approximate."
+            )
+
+    def check_lens_offset_supported(self, where):
+        """Gate for the resolved lens-minus-source astrometry ('lensrel'):
+        the luminous primary is placed relative to the lens center of mass
+        for at most one companion (``host_offset``)."""
+        if self.n_companions >= 2:
+            raise NotImplementedError(
+                f"[{where}] resolved lens-source astrometry places the "
+                f"luminous primary relative to the lens center of mass for "
+                f"ONE companion only; this lens has {self.n_companions}."
+            )
+        if self.n_companions == 1 and self.lens_bodies[1][0] == "star":
+            logger.warning(
+                f"[{where}] the lens companion is a STAR: the model places "
+                f"the primary at its offset from the center of mass at "
+                f"t0_par, while a luminous companion moves the light's "
+                f"photocenter and the binary orbit moves both over the years "
+                f"to the imaging epoch (up to s theta_E)."
+            )
+
+    def host_offset(self, system):
+        """The luminous primary's offset from the lens center of mass, on
+        C9's ``(tau_hat, beta_hat)`` axes in Einstein radii (C12/C15), from
+        the companion geometry at t0_par: ``(0, 0)`` for a single lens.
+        The tensor twin of the ``binary`` expression of
+        ``lens_offset_e/n``; both call ``physics.host_offset_from_com``."""
+        if self.n_companions == 0:
+            return 0.0, 0.0
+        if self.n_companions > 1:
+            raise NotImplementedError(
+                f"[{self.prefix}] host_offset supports one companion; this "
+                f"lens has {self.n_companions} (check_lens_offset_supported "
+                f"should have refused it)."
+            )
+        lens = system.lens
+        return host_offset_from_com(
+            lens.s.value[1], lens.alpha.value[1], lens.q.value[1]
+        )
+
+    def _lens_track_constants(self, system):
+        """The context constants of lens_offset_e/n: the astrometric
+        reference epoch, t0_par, and the Earth's parallax factors at
+        t0_par -- from the same frame anchor (``geocentric_frame``) the
+        light curve's deviations use, so the derived offset and the
+        trajectory share one frame by construction."""
+        _t0, earth_pos, _vel = self.geocentric_frame()
+        ra, dec = self._line_of_sight_rad
+        p_e, p_n = parallax_factors(np.asarray(earth_pos)[None, :], ra, dec)
+        return {
+            "track_epoch": float(system.astrometryinstrument.epoch),
+            "track_t0_par": float(self.t0_par[0]),
+            "track_earth_pe": float(p_e[0]),
+            "track_earth_pn": float(p_n[0]),
+        }
+
     def _mass_initval(self, comp_type, ndx):
         """Best-effort mass initval (solMass) for a body at stage 3, from
         user_params mass or logmass entries; None when neither is given."""
@@ -573,6 +703,13 @@ class MulensEvent(Component):
             setattr(
                 self, f"companion{j}_mass_map", np.array([c_ndx], dtype=int)
             )
+        # The derived lens position's deps (lens_offset_e/n): the primary
+        # source's element of the `source` component, and the first
+        # companion's element of the `lens` component (element 0 is the
+        # primary, masked inactive there).
+        self.primary_source_element_map = np.array([0], dtype=int)
+        if self.n_companions >= 1:
+            self.first_companion_map = np.array([1], dtype=int)
 
     def register_parameters(self, system):
         """Stage 3: Declare the event-level manifest and push hints."""
@@ -676,6 +813,14 @@ class MulensEvent(Component):
             "pi_E_N": {"expr_key": "default"},
             "pi_E_E": {"expr_key": "default"},
         }
+
+        # The lens star's position, derived from the source's where it is
+        # measured (review 8.10.4; Star flips the lens's ra/dec onto these).
+        if self.lens_track_star(system) is not None:
+            self._validate_lens_track(system)
+            key = "binary" if self.n_companions == 1 else "default"
+            self.manifest["lens_offset_e"] = {"expr_key": key}
+            self.manifest["lens_offset_n"] = {"expr_key": key}
 
         # The geocentric-frame caveat lives in ONE shared table note (the
         # note_marks dedup collapses identical texts to one letter).
@@ -1139,13 +1284,18 @@ class MulensEvent(Component):
 
     def add_parameter(self, model, param_name, system, context_nodes=None):
         """Inject the Earth-velocity context constants for the mu_rel_geo
-        chain (see context_dep_names); everything else is generic."""
+        chain and the frame constants of the derived lens offset (see
+        context_dep_names); everything else is generic."""
         if param_name in ("mu_ra_rel_geo", "mu_dec_rel_geo"):
             context_nodes = dict(context_nodes or {})
             if "earth_vperp_e" not in context_nodes:
                 vperp_e, vperp_n = self._earth_vperp_en(system)
                 context_nodes["earth_vperp_e"] = pt.as_tensor_variable(vperp_e)
                 context_nodes["earth_vperp_n"] = pt.as_tensor_variable(vperp_n)
+        if param_name in ("lens_offset_e", "lens_offset_n"):
+            context_nodes = dict(context_nodes or {})
+            for key, val in self._lens_track_constants(system).items():
+                context_nodes.setdefault(key, pt.as_tensor_variable(val))
         return super().add_parameter(model, param_name, system, context_nodes)
 
     def register_frame_constants(self, system):

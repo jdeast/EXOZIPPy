@@ -877,7 +877,7 @@ class GalacticModel(Component):
                     supersedes_bounds=True,
                 )
 
-    def _require_anchor_position(self, stars):
+    def _require_anchor_position(self, stars, anchor):
         """Refuse to build the prior on an anchor star nobody positioned.
 
         The whole prior -- density, d^2 volume, velocity frame, the three
@@ -910,12 +910,12 @@ class GalacticModel(Component):
         unset = []
         for name, param in (("ra", stars.ra), ("dec", stars.dec)):
             src = getattr(param, "element_initval_source", lambda i: None)(
-                self.anchor_idx
+                anchor
             )
             if src in ("user", "data", "solved"):
                 continue
             if np.isclose(
-                float(param.element_start(self.anchor_idx)),
+                float(param.element_start(anchor)),
                 placeholder[name],
                 rtol=0.0,
                 atol=1e-12,
@@ -924,22 +924,18 @@ class GalacticModel(Component):
         if not unset:
             return
         names = getattr(stars, "names", None)
-        label = (
-            names[self.anchor_idx]
-            if names and self.anchor_idx < len(names)
-            else str(self.anchor_idx)
-        )
+        label = names[anchor] if names and anchor < len(names) else str(anchor)
         missing = " and ".join(f"star.{label}.{n}" for n in unset)
         raise ValueError(
             f"[{self.prefix}] the galactic model's anchor star '{label}' "
-            f"(star index {self.anchor_idx}) has no sky position: {missing} "
+            f"(star index {anchor}) has no sky position: {missing} "
             f"still at the defaults.yaml value. The whole density and "
             f"kinematic prior is evaluated along this star's line of sight, "
             f"so set star.{label}.ra and star.{label}.dec in the params file "
             f"(or point 'anchor_idx' at a star that has them)."
         )
 
-    def _warn_if_anchor_coords_sampled(self, stars, ra_rad, dec_rad):
+    def _warn_if_anchor_coords_sampled(self, stars, ra_rad, dec_rad, anchor):
         """Warn once if the anchor star's ra/dec are SAMPLED, since the
         line-of-sight basis below is built from their start values and frozen.
 
@@ -959,13 +955,13 @@ class GalacticModel(Component):
         moving = [
             name
             for name, param in (("ra", stars.ra), ("dec", stars.dec))
-            if param.element_is_sampled(self.anchor_idx)
+            if param.element_is_sampled(anchor)
         ]
         if not moving:
             return
         logger.warning(
             f"[{self.prefix}] star.{'/'.join(moving)} of the anchor star "
-            f"{self.anchor_idx} is sampled, but the galactic model's line of "
+            f"{anchor} is sampled, but the galactic model's line of "
             f"sight is FROZEN at the start value (ra="
             f"{np.degrees(ra_rad):.6f} deg, dec={np.degrees(dec_rad):.6f} "
             f"deg) for the whole fit. This is safe -- 1 arcsec of coordinate "
@@ -988,10 +984,22 @@ class GalacticModel(Component):
         # error whenever n_blocks and n_stars disagreed and neither was 1.
         # Keeping the matrix 2-D (and the direction cosines scalar) lets it
         # broadcast over any number of stars by construction.
-        self._require_anchor_position(stars)
-        ra_rad = stars.ra.element_start(self.anchor_idx)
-        dec_rad = stars.dec.element_start(self.anchor_idx)
-        self._warn_if_anchor_coords_sampled(stars, ra_rad, dec_rad)
+        # A lens whose position is DERIVED from its source's (review 8.10.4)
+        # has no start of its own -- its resolved initval is a placeholder --
+        # so the sight line is read off the star it derives from, which it
+        # matches to the lens-source separation (mas; the freeze below is
+        # safe out to ~1 arcmin).
+        anchor = stars.position_root(self.anchor_idx)
+        if anchor != self.anchor_idx:
+            logger.info(
+                f"[{self.prefix}] anchor star {self.anchor_idx}'s position is "
+                f"derived from star {anchor}'s (the lens track); the line of "
+                f"sight is read from star {anchor}."
+            )
+        self._require_anchor_position(stars, anchor)
+        ra_rad = stars.ra.element_start(anchor)
+        dec_rad = stars.dec.element_start(anchor)
+        self._warn_if_anchor_coords_sampled(stars, ra_rad, dec_rad, anchor)
 
         # Shared with the start-value hints (physics.line_of_sight_basis):
         # the affine (pm_ra_cosdec, pm_dec, rv) -> galactocentric velocity map,

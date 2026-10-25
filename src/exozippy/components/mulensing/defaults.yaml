@@ -238,6 +238,63 @@ mulensevent:
       default:
         func_name: "calc_mu_rel_mag"
         deps: ["mu_ra_rel_geo", "mu_dec_rel_geo"]
+  # The barycentric LENS-minus-SOURCE offset at the astrometric reference
+  # epoch (review 8.10.4; mulensing.md "The lens's position is derived"),
+  # declared only when the lens star carries absolute astrometry, where it
+  # places the lens: star.<lens>.ra/dec = the source's + this offset.  The
+  # primary SOURCE's (t_0, u_0); `binary` adds the primary's offset from the
+  # lens center of mass (C12).  track_epoch / track_t0_par /
+  # track_earth_pe / track_earth_pn are context constants
+  # (MulensEvent.add_parameter).  No bounds on purpose: on a derived
+  # parameter they would become live potentials.
+  lens_offset_e:
+    unit: "mas"
+    internal_unit: "mas"
+    latex: "\\Delta\\alpha^*_{LS}"
+    description: "lens - source offset (East) at the astrometric epoch"
+    expressions:
+      default:
+        func_name: "calc_lens_offset_e"
+        deps: [ "source.t_0[primary_source_element_map]",
+                "source.u_0[primary_source_element_map]",
+                "t_E", "theta_E", "mu_ra_rel_geo", "mu_dec_rel_geo",
+                "mu_rel_geo_mag", "mu_ra_rel", "mu_dec_rel", "pi_rel",
+                "track_epoch", "track_t0_par", "track_earth_pe",
+                "track_earth_pn" ]
+      binary:
+        func_name: "calc_lens_offset_e_binary"
+        deps: [ "source.t_0[primary_source_element_map]",
+                "source.u_0[primary_source_element_map]",
+                "t_E", "theta_E", "mu_ra_rel_geo", "mu_dec_rel_geo",
+                "mu_rel_geo_mag", "mu_ra_rel", "mu_dec_rel", "pi_rel",
+                "track_epoch", "track_t0_par", "track_earth_pe",
+                "track_earth_pn", "lens.s[first_companion_map]",
+                "lens.alpha[first_companion_map]",
+                "lens.q[first_companion_map]" ]
+  lens_offset_n:
+    unit: "mas"
+    internal_unit: "mas"
+    latex: "\\Delta\\delta_{LS}"
+    description: "lens - source offset (North) at the astrometric epoch"
+    expressions:
+      default:
+        func_name: "calc_lens_offset_n"
+        deps: [ "source.t_0[primary_source_element_map]",
+                "source.u_0[primary_source_element_map]",
+                "t_E", "theta_E", "mu_ra_rel_geo", "mu_dec_rel_geo",
+                "mu_rel_geo_mag", "mu_ra_rel", "mu_dec_rel", "pi_rel",
+                "track_epoch", "track_t0_par", "track_earth_pe",
+                "track_earth_pn" ]
+      binary:
+        func_name: "calc_lens_offset_n_binary"
+        deps: [ "source.t_0[primary_source_element_map]",
+                "source.u_0[primary_source_element_map]",
+                "t_E", "theta_E", "mu_ra_rel_geo", "mu_dec_rel_geo",
+                "mu_rel_geo_mag", "mu_ra_rel", "mu_dec_rel", "pi_rel",
+                "track_epoch", "track_t0_par", "track_earth_pe",
+                "track_earth_pn", "lens.s[first_companion_map]",
+                "lens.alpha[first_companion_map]",
+                "lens.q[first_companion_map]" ]
   mlens_total:
     lower: 0.0
     upper: 500.0

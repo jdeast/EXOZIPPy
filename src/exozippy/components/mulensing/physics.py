@@ -787,3 +787,127 @@ def calc_s(log_s):
     # Projected binary separation from the sampled log10(s).  Sampling log_s
     # makes close/wide an exact reflection log_s -> -log_s (|J| = 1).
     return pt.power(10.0, log_s)
+
+
+# --- The lens's sky position, derived from the source's (review 8.10.4) ---
+#
+# The light curve fixes where the lens is relative to the source at every
+# instant: C9's lens-minus-source separation, seen from the geocenter at
+# t0_par (where the Skowron deviation is zero by construction), is
+# theta_E * [((t0_par - t_0)/t_E) tau_hat + u_0 beta_hat].  Seen from the
+# observer each star is displaced by its own parallax times the parallax
+# factor P (skyframe.md), so the BARYCENTRIC separation is that minus
+# pi_rel * P_earth(t0_par), and the barycentric separation moves with the
+# HELIOCENTRIC relative proper motion.  Hence, at the astrometric reference
+# epoch,
+#
+#   (lens - source)_bary(epoch) = theta_E dtheta_geo(t0_par)
+#                                 - pi_rel P_earth(t0_par)
+#                                 + mu_rel,helio (epoch - t0_par)
+#
+# which reproduces the light curve's own trajectory at EVERY epoch exactly
+# (the residual is (mu_geo - mu_helio + pi_rel v_perp)(t - t0_par), zero by
+# calc_mu_*_rel_geo), so a lens track built from it IS the trajectory the
+# light curve fits.  t_0/u_0/alpha refer to the lens CENTER OF MASS (C12);
+# the luminous primary sits at host_offset_from_com from it.
+
+
+def host_offset_from_com(s, alpha, q):
+    """The primary lens body's position relative to the lens center of
+    mass, ``(x, y)`` in Einstein radii on C9's ``(tau_hat, beta_hat)`` axes.
+
+    C15 puts companion ``j`` at ``s_j (cos alpha_j, -sin alpha_j)`` from the
+    primary, so the center of mass sits at ``q/(1+q)`` of that vector and
+    the primary at minus it.  One companion; ``(s, alpha, q)`` broadcast.
+    """
+    w = q / (1.0 + q)
+    return -w * s * pt.cos(alpha), w * s * pt.sin(alpha)
+
+
+def lens_offset_en(
+    t_0,
+    u_0,
+    t_E,
+    theta_E,
+    mu_ra_rel_geo,
+    mu_dec_rel_geo,
+    mu_rel_geo_mag,
+    mu_ra_rel,
+    mu_dec_rel,
+    pi_rel,
+    epoch,
+    t0_par,
+    earth_pe,
+    earth_pn,
+    host_x=0.0,
+    host_y=0.0,
+):
+    """``(dE, dN)`` in mas: the barycentric lens-minus-source offset at
+    ``epoch`` (see the block comment above).  ``earth_pe``/``earth_pn`` are
+    the Earth's parallax factors at ``t0_par`` (``skyframe.parallax_factors``
+    of its position at the reception instant, C4); ``host_x``/``host_y``
+    the primary's offset from the center of mass (``host_offset_from_com``)."""
+    tau_n = mu_dec_rel_geo / mu_rel_geo_mag
+    tau_e = mu_ra_rel_geo / mu_rel_geo_mag
+    # beta_hat = tau_hat rotated +90 deg North through East: (c, d) -> (-d, c)
+    beta_n, beta_e = -tau_e, tau_n
+    tau = (t0_par - t_0) / t_E + host_x
+    beta = u_0 + host_y
+    dt_yr = (epoch - t0_par) / DAYS_PER_YEAR
+    off_e = (
+        theta_E * (tau * tau_e + beta * beta_e)
+        - pi_rel * earth_pe
+        + mu_ra_rel * dt_yr
+    )
+    off_n = (
+        theta_E * (tau * tau_n + beta * beta_n)
+        - pi_rel * earth_pn
+        + mu_dec_rel * dt_yr
+    )
+    return off_e, off_n
+
+
+@register_physics
+def calc_lens_offset_e(
+    t_0, u_0, t_E, theta_E, mu_e_geo, mu_n_geo, mu_geo, mu_e, mu_n, pi_rel,
+    epoch, t0_par, earth_pe, earth_pn,
+):  # fmt: skip
+    return lens_offset_en(
+        t_0, u_0, t_E, theta_E, mu_e_geo, mu_n_geo, mu_geo, mu_e, mu_n,
+        pi_rel, epoch, t0_par, earth_pe, earth_pn,
+    )[0]  # fmt: skip
+
+
+@register_physics
+def calc_lens_offset_n(
+    t_0, u_0, t_E, theta_E, mu_e_geo, mu_n_geo, mu_geo, mu_e, mu_n, pi_rel,
+    epoch, t0_par, earth_pe, earth_pn,
+):  # fmt: skip
+    return lens_offset_en(
+        t_0, u_0, t_E, theta_E, mu_e_geo, mu_n_geo, mu_geo, mu_e, mu_n,
+        pi_rel, epoch, t0_par, earth_pe, earth_pn,
+    )[1]  # fmt: skip
+
+
+@register_physics
+def calc_lens_offset_e_binary(
+    t_0, u_0, t_E, theta_E, mu_e_geo, mu_n_geo, mu_geo, mu_e, mu_n, pi_rel,
+    epoch, t0_par, earth_pe, earth_pn, s, alpha, q,
+):  # fmt: skip
+    hx, hy = host_offset_from_com(s, alpha, q)
+    return lens_offset_en(
+        t_0, u_0, t_E, theta_E, mu_e_geo, mu_n_geo, mu_geo, mu_e, mu_n,
+        pi_rel, epoch, t0_par, earth_pe, earth_pn, hx, hy,
+    )[0]  # fmt: skip
+
+
+@register_physics
+def calc_lens_offset_n_binary(
+    t_0, u_0, t_E, theta_E, mu_e_geo, mu_n_geo, mu_geo, mu_e, mu_n, pi_rel,
+    epoch, t0_par, earth_pe, earth_pn, s, alpha, q,
+):  # fmt: skip
+    hx, hy = host_offset_from_com(s, alpha, q)
+    return lens_offset_en(
+        t_0, u_0, t_E, theta_E, mu_e_geo, mu_n_geo, mu_geo, mu_e, mu_n,
+        pi_rel, epoch, t0_par, earth_pe, earth_pn, hx, hy,
+    )[1]  # fmt: skip

@@ -31,6 +31,22 @@ Supports three data modes (set per instrument via 'mode' in the config):
          companion needs no SED; otherwise the photocenter is
          approximated by the barycenter with a warning).
 
+  lensrel : a RESOLVED microlensing lens relative to its source (review
+         8.10.4) -- the observable a resolved-pair fit to HST or Roman
+         imaging delivers, years after the event.
+         File columns: time[BJD_TDB]  dE[mas]  dN[mas]  err_E[mas]
+                       err_N[mas]  corr
+         (dE, dN) is the lens's position minus the source's in one image,
+         East (true arc) and North; corr is the correlation coefficient of
+         the two components' errors (|corr| < 1).  Being a DIFFERENCE in
+         one image it is immune to that image's frame registration, which
+         a pair of abs datasets is not.  Modeled as theta_E times the
+         light curve's own trajectory at the observer (C9; the primary
+         offset from the lens center of mass for a binary lens, C12),
+         minus the source's own centroid shift (C30) -- the source is
+         measured through its images, the lens is not lensed.  Requires a
+         mulensevent and its light curve; the primary source only.
+
 Per-instrument config keys:
   file              : data file (whitespace-separated, '#' comments)
   mode              : gaia | abs | rel   (default gaia)
@@ -143,7 +159,7 @@ from exozippy.skyframe import parallax_factors
 RAD2MAS = (1.0 * u.rad).to(u.mas).value  # 2.06264806e8
 RSUN_AU = (1.0 * u.solRad).to(u.AU).value  # 4.6505e-3
 
-VALID_MODES = ("gaia", "abs", "rel")
+VALID_MODES = ("gaia", "abs", "rel", "lensrel")
 
 
 def wrap_ra_diff(delta_rad):
@@ -312,11 +328,13 @@ class AstrometryInstrument(Instrument):
             {
                 "key": "mode",
                 "kind": "option",
-                "accepts": ["gaia", "abs", "rel"],
+                "accepts": ["gaia", "abs", "rel", "lensrel"],
                 "required": False,
                 "doc": (
-                    "Astrometry data mode: 'gaia'/'abs' absolute positions "
-                    "or 'rel' relative separations. Default 'gaia'."
+                    "Astrometry data mode: 'gaia'/'abs' absolute positions, "
+                    "'rel' relative separations of an orbit's companion, or "
+                    "'lensrel' the resolved microlensing lens minus its "
+                    "source (dE, dN, errors, correlation). Default 'gaia'."
                 ),
             },
             {
@@ -441,7 +459,8 @@ class AstrometryInstrument(Instrument):
                 note=(
                     "The roles depend on the file's mode -- gaia: time, w, "
                     "err, psi; abs: time, ra, dec, err_e, err_n; rel: time, "
-                    "sep, err_sep, pa, err_pa."
+                    "sep, err_sep, pa, err_pa; lensrel: time, de, dn, err_e, "
+                    "err_n, corr."
                 ),
             ),
             *cls._time_config_schema(),
@@ -467,11 +486,14 @@ class AstrometryInstrument(Instrument):
         ]
         ra_cfg = np.atleast_1d(ra_cfg)
         dec_cfg = np.atleast_1d(dec_cfg)
+        event = getattr(system, "mulensevent", None)
+        lens_track = None if event is None else event.lens_track_star(system)
 
         mode_roles = {
             "gaia": ("time", "w", "err", "psi"),
             "abs": ("time", "ra", "dec", "err_e", "err_n"),
             "rel": ("time", "sep", "err_sep", "pa", "err_pa"),
+            "lensrel": ("time", "de", "dn", "err_e", "err_n", "corr"),
         }
         # Roles a columns: spec may point at the SAME file column
         # (everything else collides -- Instrument._check_no_duplicate_columns).
@@ -493,8 +515,28 @@ class AstrometryInstrument(Instrument):
             t = df.iloc[:, 0].values.astype(float)
 
             star_ndx = int(self.config[i].get("star_ndx", 0))
-            ra_ref = float(ra_cfg[star_ndx]) * np.pi / 180.0  # rad
-            dec_ref = float(dec_cfg[star_ndx]) * np.pi / 180.0  # rad
+            # The tangent point of the (dE, dN) offsets.  A microlensing
+            # lens whose position is DERIVED from its source's (review
+            # 8.10.4) has no position entry of its own to read -- resolve()
+            # would hand back the defaults.yaml placeholder -- so its
+            # dataset is projected about the source, which it matches to
+            # the lens-source separation (mas; small-angle exact).
+            ref_ndx = star_ndx
+            if lens_track is not None and star_ndx == lens_track:
+                ref_ndx = int(system.mulensevent.source_bodies[0][1])
+            if mode == "lensrel":
+                # The trajectory is the PRIMARY SOURCE's line of sight, so
+                # the observer is placed toward it (C4); star_ndx plays no
+                # part in this mode.
+                if event is None:
+                    raise ValueError(
+                        f"[{self.prefix}.{self.names[i]}] mode 'lensrel' "
+                        f"measures a microlensing lens relative to its "
+                        f"source, but the system has no mulensevent: block."
+                    )
+                ref_ndx = int(event.source_bodies[0][1])
+            ra_ref = float(ra_cfg[ref_ndx]) * np.pi / 180.0  # rad
+            dec_ref = float(dec_cfg[ref_ndx]) * np.pi / 180.0  # rad
 
             d = {
                 "name": self.names[i],
@@ -527,6 +569,26 @@ class AstrometryInstrument(Instrument):
                 d["err_E"] = df.iloc[:, 3].values.astype(float)  # mas
                 d["err_N"] = df.iloc[:, 4].values.astype(float)  # mas
                 min_err = min(np.min(d["err_E"]), np.min(d["err_N"]))
+            elif mode == "lensrel":
+                d["dE_obs"] = df.iloc[:, 1].values.astype(float)  # mas
+                d["dN_obs"] = df.iloc[:, 2].values.astype(float)  # mas
+                d["err_E"] = df.iloc[:, 3].values.astype(float)  # mas
+                d["err_N"] = df.iloc[:, 4].values.astype(float)  # mas
+                d["corr"] = df.iloc[:, 5].values.astype(float)
+                if not np.all(np.abs(d["corr"]) < 1.0):
+                    raise ValueError(
+                        f"[{self.prefix}.{self.names[i]}] the corr column "
+                        f"must satisfy |corr| < 1 on every row (a correlation "
+                        f"coefficient); got {d['corr'].tolist()}."
+                    )
+                # The jitter is an isotropic variance added to the 2x2
+                # covariance, which stays positive definite for jitter >
+                # -lambda_min; the floor is _jitter_floor of the smallest
+                # eigenvalue's square root, i.e. -0.95 lambda_min.
+                a, b = d["err_E"] ** 2, d["err_N"] ** 2
+                c = d["corr"] * d["err_E"] * d["err_N"]
+                lam_min = 0.5 * (a + b) - np.sqrt(0.25 * (a - b) ** 2 + c**2)
+                min_err = float(np.sqrt(np.min(lam_min)))
             else:  # rel
                 factor = u.Unit(self.config[i].get("sep_unit", "mas")).to(
                     u.mas
@@ -551,8 +613,9 @@ class AstrometryInstrument(Instrument):
                     np.min(d["err_sep"]), np.min(d["err_pa"] * d["sep"])
                 )
 
-            # Parallax factors (needed for gaia/abs only)
-            if mode in ("gaia", "abs"):
+            # Parallax factors (needed for gaia/abs only; lensrel keeps the
+            # observer positions for the trajectory's Skowron deviations)
+            if mode in ("gaia", "abs", "lensrel"):
                 # At the instant the observer RECEIVED each epoch's light
                 # (the tag minus the Roemer delay toward the target), not
                 # at the BJD_TDB tag itself (review 1.10.13).
@@ -652,6 +715,8 @@ class AstrometryInstrument(Instrument):
         for i, mode in enumerate(self.modes):
             d = self.datasets[i]
             t = np.asarray(d["time"], dtype=float)
+            if mode == "lensrel":
+                continue  # measures no orbit (the lens-source trajectory)
             if mode == "rel":
                 targets = (
                     [] if self.rel_orbit[i] is None else [self.rel_orbit[i]]
@@ -838,6 +903,20 @@ class AstrometryInstrument(Instrument):
             if flag is not None and not flag:
                 continue
             where = f"{self.prefix}.{self.names[i]}"
+            if self.modes[i] == "lensrel":
+                # Always the lens-source trajectory (load_data refused a
+                # system without an event); the light curve supplies the
+                # limb darkening of the source's centroid shift and the
+                # geocentric frame anchor, as for a lensed abs dataset.
+                if flag is not None:
+                    logger.warning(
+                        f"[{where}] microlensing is a gaia/abs key; a "
+                        f"'lensrel' dataset is the lens-source trajectory "
+                        f"by definition and the key is ignored."
+                    )
+                event.check_lens_offset_supported(where)
+                self._lens_phot[i] = self._resolve_lens_photometry(system, i)
+                continue
             if self.modes[i] == "rel":
                 if explicit_on:
                     logger.warning(
@@ -1102,6 +1181,35 @@ class AstrometryInstrument(Instrument):
                 dN = dN + dN2[:, 0]
         return dE, dN
 
+    def _lensrel_model(self, system, i, t, dev):
+        """(dE, dN) in mas of a 'lensrel' dataset: the resolved lens minus
+        its source, as one image measures them.
+
+        The lens-minus-source separation is theta_E times C9's trajectory at
+        the observer (``dev``: its Skowron deviations, as for every other
+        consumer of the trajectory), with the luminous primary placed at its
+        offset from the lens center of mass (C12, ``MulensEvent.host_offset``).
+        The source is measured through its images, so its position carries
+        the centroid shift (C30) and the difference loses it; the lens's own
+        light is not lensed.  Neither is diluted by a blend: a resolved pair
+        fit separates the two stars, which is the point of the mode.  The
+        same trajectory, so the same t_E/pi_E/xallarap; years after the
+        event it is ``theta_E u`` with ``u >> 1``, i.e. mu_rel times the
+        elapsed time plus pi_rel times the parallax factor.
+        """
+        event = system.mulensevent
+        tau, beta = event.get_trajectory(t, dev, system, 0)
+        hx, hy = event.host_offset(system)
+        sep_n, sep_e = event._shift_to_sky(
+            tau + hx, beta + hy, event.theta_E.value[0]
+        )
+        mi = system.mulensinstrument
+        u1, u2, bandpass = mi._finite_source_limb_darkening(system)
+        _A, shift_n, shift_e = event.get_astrometric_terms(
+            t, dev, system, index=0, u1=u1, u2=u2, bandpass=bandpass
+        )
+        return sep_e - shift_e, sep_n - shift_n
+
     def _absolute_model(
         self, system, d, t, beta, P_E=None, P_N=None, dev=None
     ):
@@ -1290,6 +1398,33 @@ class AstrometryInstrument(Instrument):
                     observed=pm.Data(f"{self.prefix}.{name}_w", d["w"]),
                 )
 
+            elif mode == "lensrel":
+                dev = system.mulensevent.skowron_deviations(t, d["xyz"])
+                dE, dN = self._lensrel_model(system, i, t, dev)
+                # The bivariate normal with the per-epoch correlation, as
+                # the East marginal times the North conditional -- exact,
+                # and it keeps two observed nodes like abs mode.  The
+                # isotropic jitter adds to both variances, not to the
+                # covariance; its floor keeps the matrix positive definite.
+                err_E = pm.Data(f"{self.prefix}.{name}_errE", d["err_E"])
+                err_N = pm.Data(f"{self.prefix}.{name}_errN", d["err_N"])
+                c_EE = pt.sqr(err_E) + jv
+                c_NN = pt.sqr(err_N) + jv
+                c_EN = d["corr"] * err_E * err_N
+                obs_E = pm.Data(f"{self.prefix}.{name}_dE", d["dE_obs"])
+                pm.Normal(
+                    f"{self.prefix}.model_{name}_E",
+                    mu=dE,
+                    sigma=pt.sqrt(c_EE),
+                    observed=obs_E,
+                )
+                pm.Normal(
+                    f"{self.prefix}.model_{name}_N",
+                    mu=dN + c_EN / c_EE * (obs_E - dE),
+                    sigma=pt.sqrt(c_NN - pt.sqr(c_EN) / c_EE),
+                    observed=pm.Data(f"{self.prefix}.{name}_dN", d["dN_obs"]),
+                )
+
             elif mode == "abs":
                 sigma_E = pt.sqrt(
                     pt.sqr(pm.Data(f"{self.prefix}.{name}_errE", d["err_E"]))
@@ -1407,7 +1542,7 @@ class AstrometryInstrument(Instrument):
         self._compiled_photo = []
         self._photo_nodes = []
         for i in range(self.n_elements):
-            if self.modes[i] == "rel" or not has_orbit:
+            if self.modes[i] not in ("gaia", "abs") or not has_orbit:
                 self._compiled_photo.append(None)
                 self._photo_nodes.append(None)
                 continue
@@ -1466,6 +1601,26 @@ class AstrometryInstrument(Instrument):
                 pytensor.function(
                     inputs=[t_input, pe_input, pn_input, dev_input]
                     + param_symbols,
+                    outputs=[dE, dN],
+                    on_unused_input="ignore",
+                )
+            )
+
+        # The resolved lens minus its source per lensrel dataset, on a time
+        # grid with the grid's own Skowron deviations (the likelihood's
+        # _lensrel_model, run on other times).
+        self._compiled_lensrel = []
+        self._lensrel_nodes = []
+        for i in range(self.n_elements):
+            if self.modes[i] != "lensrel":
+                self._compiled_lensrel.append(None)
+                self._lensrel_nodes.append(None)
+                continue
+            dE, dN = self._lensrel_model(system, i, t_input, dev_input)
+            self._lensrel_nodes.append((dE, dN))
+            self._compiled_lensrel.append(
+                pytensor.function(
+                    inputs=[t_input, dev_input] + param_symbols,
                     outputs=[dE, dN],
                     on_unused_input="ignore",
                 )
@@ -1666,6 +1821,8 @@ class AstrometryInstrument(Instrument):
         rel_fns = getattr(self, "_compiled_rel", None)
         lensed_nodes = getattr(self, "_lensed_nodes", None)
         lensed_fns = getattr(self, "_compiled_lensed", None)
+        lensrel_nodes = getattr(self, "_lensrel_nodes", None)
+        lensrel_fns = getattr(self, "_compiled_lensrel", None)
 
         specs = []
         for i, d in enumerate(self.datasets):
@@ -1836,6 +1993,86 @@ class AstrometryInstrument(Instrument):
                     rf"{latex_escape(name)}, with proper motion and "
                     r"parallax subtracted from the measured positions so "
                     r"that what remains is the photocenter orbit (line). "
+                    r"East is to the LEFT and the axes are equal-scale."
+                )
+
+            elif mode == "lensrel":
+                traces.append(
+                    Trace(
+                        name="data",
+                        role="data",
+                        kind="scatter",
+                        x=d["dE_obs"],
+                        y=d["dN_obs"],
+                        xerr=d["err_E"],
+                        yerr=d["err_N"],
+                        style=self._data_trace_style(i),
+                    )
+                )
+                if (
+                    point is not None
+                    and lensrel_fns
+                    and lensrel_fns[i] is not None
+                ):
+                    # The separation's track from the event to the last
+                    # epoch, so the plot shows where the lens came from.
+                    vals = self._point_values(system, point)
+                    t0 = float(
+                        np.atleast_1d(
+                            self._point_value(point, system.source.t_0, 0)
+                        )[0]
+                    )
+                    t_pretty = np.linspace(
+                        min(t.min(), t0), max(t.max(), t0), 2000
+                    )
+                    xyz = observer_position_at_reception(
+                        t_pretty,
+                        d["ra_ref"],
+                        d["dec_ref"],
+                        observer_location=self.observers[i],
+                    )
+                    dev = system.mulensevent.skowron_deviations(t_pretty, xyz)
+                    dE_m, dN_m = lensrel_fns[i](
+                        t_pretty.astype(np.float64), dev, *vals
+                    )
+                    deps = self._node_pair_deps(
+                        lensrel_nodes[i] if lensrel_nodes else None, system
+                    )
+                    traces.append(
+                        Trace(
+                            name="model",
+                            role="model",
+                            kind="line",
+                            x=dE_m,
+                            y=dN_m,
+                            style={"legend": True, "lw": 1},
+                        )
+                    )
+                    traces.append(
+                        Trace(
+                            name="source",
+                            role="model",
+                            kind="scatter",
+                            x=np.array([0.0]),
+                            y=np.array([0.0]),
+                            style={
+                                "color": "k",
+                                "marker": "*",
+                                "legend": False,
+                            },
+                        )
+                    )
+                x_inverted = True  # East to the left
+                meta["aspect_equal"] = True
+                xlabel = r"$\Delta\alpha^*$ [mas]"
+                ylabel = r"$\Delta\delta$ [mas]"
+                title = f"Lens relative to source: {name} ({sysname})"
+                meta["caption"] = (
+                    r"Resolved lens-minus-source astrometry of "
+                    rf"{latex_escape(sysname)} from "
+                    rf"{latex_escape(name)} (points), with the modeled "
+                    r"lens-source trajectory from the event to the last "
+                    r"epoch (line); the source sits at the origin (star). "
                     r"East is to the LEFT and the axes are equal-scale."
                 )
 

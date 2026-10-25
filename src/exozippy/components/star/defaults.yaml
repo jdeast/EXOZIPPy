@@ -328,6 +328,17 @@ star:
     internal_unit: "rad"
     latex: "\\alpha_{ICRS}"
     description: "Right Ascension"
+    expressions:
+      # Selected per element by Star.register_parameters for a
+      # microlensing LENS star that carries absolute astrometry (review
+      # 8.10.4): its position at the astrometric reference epoch is the
+      # source's plus the offset the event geometry fixes
+      # (mulensevent.lens_offset_e/n; mulensing.md "The lens's position is
+      # derived").  Same-parameter element dep, as from_mulens_murel.
+      from_mulens_track:
+        func_name: "calc_ra_from_lens_offset"
+        deps: [ "star.ra[track_source_map]", "star.dec[track_source_map]",
+                "mulensevent.lens_offset_e[track_event_map]" ]
   dec:
     initval: 0.0
     init_scale: 20e-6
@@ -337,6 +348,12 @@ star:
     internal_unit: "rad"
     latex: "\\delta_{ICRS}"
     description: "Declination"
+    expressions:
+      # ra's from_mulens_track twin; see the note there.
+      from_mulens_track:
+        func_name: "calc_dec_from_lens_offset"
+        deps: [ "star.dec[track_source_map]",
+                "mulensevent.lens_offset_n[track_event_map]" ]
   rv:
     initval: 0.0
     init_scale: 100
