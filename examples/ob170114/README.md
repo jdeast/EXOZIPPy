@@ -32,7 +32,8 @@
 > The photometry here is the EWS quick-look file, not the re-calibrated
 > set the paper fit (see Data).
 
-The shipped worked example of a source on a keplerian `source_orbit:`
+The shipped worked example of a source on a keplerian orbit (the source
+entry's `orbit:`)
 (conventions.md **C25**; review 8.6.9): a planetary microlensing event
 whose light-curve asymmetry is modeled as the SOURCE orbiting a dark
 companion, entering the trajectory at exactly the slot the parallax
@@ -86,7 +87,7 @@ Two data caveats, both material:
     planet.0 = b       lens planet, q = 0.0219 (~11.5 M_J)
 
 Orbit `S` (`Source` + `SComp`) drives the source's barycentric sky track;
-the mulensevent block's `source_orbit: "S"` projects it onto the
+the source entry's `orbit: "S"` projects it onto the
 trajectory (C25).  Everything is coupled through the graph: `xi_a` is not
 a parameter but the derived `a_1/(D_S theta_E)`, so the same masses that
 set the orbit set the amplitude -- at the seeds, `xi_a` derives to 0.2004

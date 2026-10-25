@@ -865,6 +865,12 @@ def _symbolic_A():
     # ... and get_trajectory, the (tau, beta) builder get_magnification and
     # the astrometric centroid shift (C30) share since 2026-09.
     fake.get_trajectory = functools.partial(MulensEvent.get_trajectory, fake)
+    # ... which asks the SOURCE's own orbit for its xallarap shift: a static
+    # source here (review 8.6.9, per-source orbits).
+    fake.source_orbit_idx = [None]
+    fake._source_offset_series = functools.partial(
+        MulensEvent._source_offset_series, fake
+    )
     system = fake.system
     times = pt.dvector("times")
     obs = pt.dmatrix("obs")

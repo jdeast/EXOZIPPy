@@ -82,12 +82,11 @@ def _xal_system(tmp_path, finite_source=False, binary_lens=False):
         "mulensevent": [
             {
                 "finite_source": finite_source,
-                "source_orbit": "S",
                 "t0_par": _T0_PAR,
             }
         ],
         "lens": lens_bodies,
-        "source": [{"body": "star.Source"}],
+        "source": [{"body": "star.Source", "orbit": "S"}],
         "mulensinstrument": [{"name": "OGLE", "file": lc, "filter": "I"}],
     }
     params = {
@@ -199,7 +198,7 @@ def test_shift_is_the_anchored_projected_source_orbit(xal_system):
     times = np.linspace(_T0_PAR - 90.0, _T0_PAR + 90.0, 181)
 
     dtau_t, du_t = event._source_offset_series(times, system)
-    j = event.xal_orbit_idx
+    j = event.source_orbit_idx[0]
     nodes = [
         dtau_t,
         du_t,
@@ -336,19 +335,21 @@ def test_no_new_parameters_and_node_degeneracy(xal_system):
     assert "orbit.xbigomega_raw" in free_names
     assert bool(
         np.atleast_1d(system.orbit.node_degenerate)[
-            system.mulensevent.xal_orbit_idx
+            system.mulensevent.source_orbit_idx[0]
         ]
     ), "a xallarap-only orbit must keep the node fold"
 
 
 def test_config_validation():
-    """linear refused with the degeneracy explanation; missing/shared
-    orbit references refused.  Post-split these keys, and their
-    validation, live on the mulensevent block (design 1.4/1.5)."""
+    """linear refused with the degeneracy explanation; removed keys name
+    their replacement; shared lens/source orbits refused.  Each SOURCE
+    entry names its own orbit (review 8.6.9); MulensEvent validates."""
     from exozippy.components.mulensing.mulensevent import MulensEvent
     from exozippy.config import ConfigManager
 
-    def _cm(lens_entries, orbits=None):
+    src_on_s = [{"body": "star.Source", "orbit": "S"}]
+
+    def _cm(lens_entries, orbits=None, sources=None):
         cm = ConfigManager({})
         cm.system_config = {
             "star": [
@@ -358,7 +359,7 @@ def test_config_validation():
                 {"name": "L2"},
             ],
             "lens": lens_entries,
-            "source": [{"body": "star.Source"}],
+            "source": sources or [{"body": "star.Source"}],
         }
         if orbits:
             cm.system_config["orbit"] = orbits
@@ -375,13 +376,16 @@ def test_config_validation():
     ]
     # A linear source orbit is the degenerate drift C25 refuses.
     with pytest.raises(NotImplementedError, match="degenerate"):
-        MulensEvent([{"source_orbit": "S"}], _cm(single, orbits=linear_s))
+        MulensEvent([{}], _cm(single, orbits=linear_s, sources=src_on_s))
     # The removed key names its replacement.
     with pytest.raises(ValueError, match="source_orbit"):
         MulensEvent([{"source_orbital_motion": "keplerian"}], _cm(single))
+    # The event-level key is gone too: each source names its own orbit.
+    with pytest.raises(ValueError, match="SOURCE's entry"):
+        MulensEvent([{"source_orbit": "S"}], _cm(single))
     with pytest.raises(ValueError, match="SAME orbit"):
         MulensEvent(
-            [{"source_orbit": "S"}],
+            [{}],
             _cm(
                 [
                     {"body": "star.L1"},
@@ -394,6 +398,7 @@ def test_config_validation():
                         "companion": ["SComp"],
                     }
                 ],
+                sources=src_on_s,
             ),
         )
 

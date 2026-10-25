@@ -12,7 +12,7 @@ This component also owns everything event-scoped that is not a parameter:
 the magnification dispatcher (`get_magnification`/`get_magnification_op`,
 one call per source trajectory over the shared lens bodies), the event-level
 config keys (finite_source, t0_par, backend, mag_method, use_op, the fit*
-coordinate flags, peak_find, source_orbit), the event potentials
+coordinate flags, peak_find), the event potentials
 (event rate, singularity guards, source-behind-lens, the fitpirel
 Jacobian), the seeding hints, and the sampler-compatibility declaration.
 """
@@ -24,7 +24,7 @@ import pymc as pm
 import pytensor.tensor as pt
 
 from exozippy.components.component import Component
-from exozippy.components.orbit.bodies import orbit_types
+from exozippy.components.orbit.bodies import orbit_types, parse_orbit_bodies
 from exozippy.components.star.position import probe_star_radec
 from exozippy.config import (
     PRECEDENCE_DERIVED_DATA,
@@ -190,68 +190,112 @@ class MulensEvent(Component):
                 f"'mulensmodel', got '{self.backend}'."
             )
 
-        # Source orbital motion -- xallarap (C25): `source_orbit:` on this
-        # block names the orbit the luminous source moves on; the trajectory
-        # shift is applied by the magnification dispatcher below.  The
-        # orbit's `type:` is what says HOW it moves, so the separate
-        # `source_orbital_motion:` key that used to repeat it is gone.
-        # (A leftover `source_orbital_motion:` key is refused by the shared
-        # key check, bodies.REMOVED_KEYS, with the migration message.)
-        self.source_orbit_ref = [ev.get("source_orbit")]
-        self.xal_orbit_idx = None
-        som = None
-        if self.source_orbit_ref[0] is not None:
-            self.xal_orbit_idx = resolve_orbit_ref(
-                config_manager, self.source_orbit_ref[0], self.prefix
-            )
-            types = orbit_types(sys_cfg)
-            som = (
-                types[self.xal_orbit_idx]
-                if self.xal_orbit_idx < len(types)
-                else "keplerian"
-            )
-            if som != "keplerian":
+        # Source orbital motion -- xallarap (C25), PER SOURCE (review 8.6.9,
+        # the source twin of 8.6.33): each source entry's `orbit:` names the
+        # orbit it moves on, exactly as a lens companion's does; a source
+        # without one is static beside moving ones.  The orbit's `type:` says
+        # HOW it moves, and only keplerian is offered: a linear source drift
+        # is degenerate with (t_E, t_0, u_0, alpha) in the light curve alone
+        # (C25) -- physics, not plumbing.  A source sits ALONE on one side of
+        # its orbit; on the primary side its offset is the orbit's primary
+        # track, a1 = a m_companion / m_total, on the companion side the
+        # opposite track, a2 = -a m_primary / m_total (source_offset_from_
+        # orbit is linear in its amplitude).  Two sources on ONE orbit, one
+        # per side, are the linked binary source.  A source inside a group
+        # of bodies is a hierarchical system (8.6.33 phase 2) and raises.
+        self.source_orbit_idx = []  # per source slot: orbit index or None
+        self.source_orbit_side = []  # +1 primary side, -1 companion side
+        src_block = sys_cfg.get("source") or []
+        refs = [
+            e.get("orbit") if isinstance(e, dict) else None for e in src_block
+        ]
+        types = orbit_types(sys_cfg)
+        prim = comp = None
+        if any(r is not None for r in refs):
+            prim, comp = parse_orbit_bodies(sys_cfg.get("orbit"), sys_cfg)
+        for j, ref in enumerate(refs):
+            if ref is None:
+                self.source_orbit_idx.append(None)
+                self.source_orbit_side.append(None)
+                continue
+            o = resolve_orbit_ref(config_manager, ref, f"source.{j}")
+            t = types[o] if o < len(types) else "keplerian"
+            if t != "keplerian":
                 raise NotImplementedError(
-                    f"mulensevent.source_orbit names a type: {som} orbit.  "
-                    "Linear (or quadratic) xallarap is deliberately not "
-                    "offered: a low-order source drift is exactly "
-                    "degenerate with (t_E, t_0, u_0, alpha) in the light "
-                    "curve alone (conventions.md C25).  Use a keplerian "
-                    "source orbit, or wait for the per-star proper-motion "
-                    "predicate that would make a linear mode meaningful."
+                    f"source.{j}: orbit {ref!r} is type: {t}.  Linear (or "
+                    "quadratic) xallarap is deliberately not offered: a "
+                    "low-order source drift is exactly degenerate with "
+                    "(t_E, t_0, u_0, alpha) in the light curve alone "
+                    "(conventions.md C25).  Use a keplerian source orbit."
                 )
-            if self.n_sources > 1:
+            body = tuple(self.source_bodies[j])
+            p_grp = [tuple(b) for b in prim[o]]
+            c_grp = [tuple(b) for b in comp[o]]
+            if p_grp == [body]:
+                side = 1
+            elif c_grp == [body]:
+                side = -1
+            else:
                 raise NotImplementedError(
-                    "xallarap currently supports a single luminous source; "
-                    "the linked binary-source case (both sources on one "
-                    "orbit, opposite offsets scaled by the mass ratio) is "
-                    "the next step of review 8.6.9."
+                    f"source.{j}: orbit {ref!r} has primary group {p_grp} "
+                    f"and companion group {c_grp}; a source must be ALONE "
+                    f"on one side of its orbit (a source inside a group of "
+                    f"bodies is a hierarchical system, review 8.6.33 phase "
+                    f"2)."
                 )
-            # The lens binary and the source binary are different systems,
-            # so a lens companion's `orbit:` and this block's
-            # `source_orbit:` must not name the same orbit.  Resolved from
-            # the raw lens block: component construction order is the
-            # user's config key order, so the Lens instance may not exist
-            # yet.
+            self.source_orbit_idx.append(o)
+            self.source_orbit_side.append(side)
+
+        by_orbit = {}
+        for j, o in enumerate(self.source_orbit_idx):
+            if o is not None:
+                by_orbit.setdefault(o, []).append(j)
+        for o, js in by_orbit.items():
+            if len(js) == 2 and (
+                self.source_orbit_side[js[0]] == self.source_orbit_side[js[1]]
+            ):
+                raise ValueError(
+                    f"[{self.prefix}] sources {js} name the same orbit from "
+                    f"the same side."
+                )
+            # The other side of a source's orbit may be a dark body or the
+            # OTHER source of a binary -- but then that source must name
+            # this orbit too, or it would be modeled static while the orbit
+            # says it moves.
+            for j in js:
+                other = comp[o] if self.source_orbit_side[j] == 1 else prim[o]
+                for k, sb in enumerate(self.source_bodies):
+                    if [tuple(sb)] == [
+                        tuple(b) for b in other
+                    ] and k not in js:
+                        raise ValueError(
+                            f"[{self.prefix}] source.{j}'s orbit "
+                            f"{refs[j]!r} has source.{k} on its other side, "
+                            f"but source.{k} does not name that orbit: put "
+                            f"'orbit: {refs[j]}' on source.{k} too (a "
+                            f"binary source moves both sources)."
+                        )
+        self.xal_orbit_idxs = sorted(by_orbit)
+
+        # The lens binary and a source binary are different systems, so a
+        # lens companion's `orbit:` and a source's must not name the same
+        # orbit.  Resolved from the raw lens block: component construction
+        # order is the user's config key order, so the Lens instance may not
+        # exist yet.
+        if self.xal_orbit_idxs:
             lens_refs = {
                 resolve_orbit_ref(config_manager, e["orbit"], f"lens.{i}")
                 for i, e in enumerate(sys_cfg.get("lens") or [])
                 if isinstance(e, dict) and e.get("orbit") is not None
             }
-            if self.xal_orbit_idx in lens_refs:
+            shared = lens_refs & set(self.xal_orbit_idxs)
+            if shared:
                 raise ValueError(
-                    f"[{self.prefix}] the lens companion's (`orbit:`) and "
-                    f"the event's (`source_orbit:`) references name the "
-                    "SAME orbit; the lens binary and the source binary are "
-                    "different systems."
+                    f"[{self.prefix}] a lens companion's and a source's "
+                    f"`orbit:` name the SAME orbit {sorted(shared)}; the "
+                    "lens binary and the source binary are different "
+                    "systems."
                 )
-        # Compat view: "keplerian" when the source moves, else None.
-        self.source_orbital_motion = [som]
-        # The orbits the source moves on, as a list (Orbit reads lens and
-        # xallarap orbit references through one list-valued attribute).
-        self.xal_orbit_idxs = (
-            [] if self.xal_orbit_idx is None else [self.xal_orbit_idx]
-        )
 
     def _resolve_t0_par(self, event_config, config_manager):
         """t0_par from the mulensevent block, the source.0.t_0 seed, or the
@@ -384,25 +428,6 @@ class MulensEvent(Component):
                 ),
             },
             {
-                "key": "source_orbit",
-                "kind": "option",
-                "accepts": None,
-                "required": False,
-                "doc": (
-                    "Source orbital motion -- xallarap (conventions.md "
-                    "C25; review 8.6.9): the orbit instance (name or index) "
-                    "of the luminous source about its (dark or faint) "
-                    "companion.  Its barycentric sky offset enters the "
-                    "trajectory at exactly the parallax slot, anchored at "
-                    "t0_par, with NO new sampled parameters.  The orbit "
-                    "must be type: keplerian -- a linear source drift is "
-                    "exactly degenerate with (t_E, t_0, u_0, alpha) in the "
-                    "light curve alone.  Must differ from the lens "
-                    "companion's 'orbit:' (the lens binary).  Single "
-                    "luminous source for now."
-                ),
-            },
-            {
                 "key": "use_op",
                 "kind": "option",
                 "accepts": [True, False],
@@ -462,12 +487,12 @@ class MulensEvent(Component):
         """Refuse the configurations the derived lens position cannot
         represent, and say what it approximates.  Called at stage 3 when
         ``lens_track_star`` is not None."""
-        if self.xal_orbit_idx is not None:
+        if self.xal_orbit_idxs:
             raise NotImplementedError(
                 f"[{self.prefix}] the lens star carries absolute astrometry, "
                 f"so its position is derived from the source's and the "
                 f"event geometry (review 8.10.4) -- but this event has a "
-                f"source_orbit (xallarap), and the source's orbital offset "
+                f"source on an orbit (xallarap), and the source's orbital offset "
                 f"at the reference epoch is not part of that derivation "
                 f"yet.  Drop the lens's astrometry or the source orbit."
             )
@@ -1323,7 +1348,7 @@ class MulensEvent(Component):
             pt.sum(soft_lower_bound(theta_E, 1e-6, scale=1e-5)),
         )
 
-        if self.xal_orbit_idx is not None:
+        if self.xal_orbit_idxs:
             get_collector(system).add(
                 r"We modeled the orbital motion of the source (the "
                 r"xallarap effect; \citealt{Griest:1992}) by projecting "
@@ -1436,13 +1461,16 @@ class MulensEvent(Component):
                 alpha_rows.append(self._alpha_deg(system, j) + zero)
         return pt.stack(s_rows), pt.stack(alpha_rows)
 
-    def _source_offset_series(self, times, system):
-        """Per-epoch xallarap trajectory shift ``(dtau_t, du_t)``, or None
-        for a static source (conventions.md C25; review 8.6.9).
+    def _source_offset_series(self, times, system, index=0):
+        """Per-epoch xallarap trajectory shift ``(dtau_t, du_t)`` of SOURCE
+        slot ``index``, or None for a static source (conventions.md C25;
+        review 8.6.9).
 
-        The luminous source's own barycentric sky offset -- its orbit's
-        primary track, a1 = a * m_companion / m_total, in Einstein units
-        a1/(D_S theta_E) -- anchored at t0_par (the shift VANISHES there,
+        That source's own barycentric sky offset -- on the primary side of
+        its orbit the primary track, a1 = a * m_companion / m_total, on the
+        companion side the opposite track, a2 = -a * m_primary / m_total
+        (a linked binary source puts one source on each side), in Einstein
+        units a/(D_S theta_E) -- anchored at t0_par (the shift VANISHES there,
         5d: same anchor as the parallax, so t_0/u_0 keep their meaning),
         and projected on C9's (tau_hat, beta_hat) exactly where the
         parallax terms enter: parallax is the OBSERVER's offset, xallarap
@@ -1451,16 +1479,23 @@ class MulensEvent(Component):
         Built from the TIMES ARGUMENT, so the plotters' model grids carry
         the same moving source the likelihood fits.
         """
-        if self.xal_orbit_idx is None:
+        j = self.source_orbit_idx[index]
+        if j is None:
             return None
-        j = self.xal_orbit_idx
         orbit = system.orbit
-        a1 = (
-            orbit.a.value[j]
-            * orbit.m_companion.value[j]
-            / orbit.m_total.value[j]
-        )
-        d_s = system.star.distance.value[int(self.source_bodies[0][1])]
+        if self.source_orbit_side[index] == 1:
+            a1 = (
+                orbit.a.value[j]
+                * orbit.m_companion.value[j]
+                / orbit.m_total.value[j]
+            )
+        else:
+            a1 = -(
+                orbit.a.value[j]
+                * (orbit.m_total.value[j] - orbit.m_companion.value[j])
+                / orbit.m_total.value[j]
+            )
+        d_s = system.star.distance.value[int(self.source_bodies[index][1])]
         args = (
             orbit.tp_target.value[j],
             orbit.n.value[j],
@@ -1593,7 +1628,7 @@ class MulensEvent(Component):
             return f"a {n_lenses}-body lens (MulensModel carries at most 2)"
         if n_lenses == 2 and system.lens.companion_motion[0] == "keplerian":
             return "a lens companion on a keplerian orbit"
-        if self.xal_orbit_idx is not None:
+        if self.xal_orbit_idxs:
             return "xallarap (a source orbit)"
         return None
 
@@ -1702,11 +1737,9 @@ class MulensEvent(Component):
         u_p = p["u_0"] + delta_n * p["pi_E_E"] - delta_e * p["pi_E_N"]
 
         # Xallarap enters at EXACTLY this slot: parallax is the OBSERVER's
-        # offset, this is the SOURCE's own (C25).  getattr, not a bare
-        # attribute: test harnesses borrow this method onto minimal fakes
-        # (tests/test_trajectory_sanitization.py).
-        if getattr(self, "xal_orbit_idx", None) is not None:
-            xal = self._source_offset_series(times, system)
+        # offset, this is the SOURCE's own (C25) -- this source's.
+        xal = self._source_offset_series(times, system, index)
+        if xal is not None:
             tau_p = tau_p + xal[0]
             u_p = u_p + xal[1]
         return tau_p, u_p
@@ -2135,10 +2168,10 @@ class MulensEvent(Component):
 
         # Per-epoch xallarap trajectory shift (source orbital motion, C25)
         # -- None for a static source.
-        source_series = self._source_offset_series(times, system)
+        source_series = self._source_offset_series(times, system, index)
         if source_series is not None and self.backend == "mulensmodel":
             raise NotImplementedError(
-                "xallarap (source_orbit) requires backend: vbm_direct (the "
+                "xallarap (a source on an orbit) requires backend: vbm_direct (the "
                 "point-source single-lens case takes the symbolic path "
                 "and needs neither).  MulensModel's native xi_* xallarap "
                 "is not wired as a backend -- unnecessary: C25's machinery "
@@ -2226,7 +2259,7 @@ class MulensEvent(Component):
         else:
             if source_series is not None:
                 raise NotImplementedError(
-                    "xallarap (source_orbit) with a FORCED MulensModel "
+                    "xallarap (a source on an orbit) with a FORCED MulensModel "
                     "single-lens Op (use_op: true) is not wired; drop "
                     "use_op (the symbolic path carries xallarap) or use "
                     "finite_source with backend: vbm_direct."
@@ -2373,7 +2406,7 @@ class MulensEvent(Component):
         use_rho = self.finite_source
         effective_bandpass = bandpass if (use_rho and u1 is not None) else None
         use_u2 = self._resolve_quadratic_ld(u2, effective_bandpass)
-        source_series = self._source_offset_series(times, system)
+        source_series = self._source_offset_series(times, system, index)
         geometry_series = (
             self._companion_geometry_series(times, system)
             if n_lenses >= 2

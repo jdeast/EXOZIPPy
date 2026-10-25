@@ -1791,7 +1791,7 @@ class Orbit(Component):
         # node is fixed, and the axis's position angle is the node -- it is
         # the ONLY effect here that measures them for a lens binary
         # (review 8.6.8 5e).
-        # A xallarap orbit (a lens block's `source_orbit:`, C25) is
+        # A xallarap orbit (a source entry's `orbit:`, C25) is
         # astrometry-like too: the source's sky track enters the
         # trajectory, so bigomega is measurable -- but unlike the
         # lens-geometry case it stays node-DEGENERATE (the track, like all
@@ -1949,7 +1949,7 @@ class Orbit(Component):
         for o in self._lens_xallarap_orbits(system):
             if o in consumers:
                 raise NotImplementedError(
-                    f"[{self.prefix}.{name(o)}] the event's source_orbit is "
+                    f"[{self.prefix}.{name(o)}] a source's orbit is "
                     f"a type: {self.types[o]} orbit; linear xallarap is "
                     f"deliberately not supported (conventions.md C25, "
                     f"review 8.6.9) -- a linear source drift is absorbed by "
@@ -2162,13 +2162,18 @@ class Orbit(Component):
             v = v + 0.5 * self.gammaddot.value[o] * dt**2
         return v
 
-    def _lens_orbit_refs(self, system, comp_name, idx_attr, ref_key):
+    def _lens_orbit_refs(
+        self, system, comp_name, idx_attr, ref_key, raw_comp_name=None
+    ):
         """Orbit indices the ``comp_name`` microlensing component references
         through ``ref_key`` -- of ANY orbit type; the callers filter by
         `self.types`.  A BUILT component's ``idx_attr`` is the LIST of
         resolved orbit indices (empty when it references none); before
         construction (a partial harness), ``in_topology`` hands back the
-        raw config block(s), which are read directly.
+        raw config block(s), which are read directly -- from
+        ``raw_comp_name``'s blocks when the references live on a different
+        component than the one that resolves them (each SOURCE entry names
+        its orbit; MulensEvent resolves them).
         """
         comp = in_topology(system, comp_name)
         if comp is None:
@@ -2176,6 +2181,10 @@ class Orbit(Component):
         if not isinstance(comp, (dict, list)):
             # The built component: its resolved list, never a guess.
             return {int(o) for o in getattr(comp, idx_attr)}
+        if raw_comp_name is not None:
+            comp = in_topology(system, raw_comp_name)
+            if comp is None:
+                return set()
         blocks = comp if isinstance(comp, list) else [comp]
         out = set()
         for b in blocks:
@@ -2212,10 +2221,14 @@ class Orbit(Component):
         }
 
     def _lens_xallarap_orbits(self, system):
-        """Orbits the event's SOURCE moves on (``source_orbit:`` on the
-        mulensevent block, C25)."""
+        """Orbits the event's SOURCES move on (each source entry's
+        ``orbit:``, C25)."""
         return self._lens_orbit_refs(
-            system, "mulensevent", "xal_orbit_idxs", "source_orbit"
+            system,
+            "mulensevent",
+            "xal_orbit_idxs",
+            "orbit",
+            raw_comp_name="source",
         )
 
     def _node_degenerate_orbits(self, system):
