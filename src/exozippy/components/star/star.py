@@ -105,6 +105,9 @@ class Star(Component):
     def __init__(self, config, config_manager):
         super().__init__(config, config_manager)
         self.label = "Stellar Parameters"
+        # Lens stars whose position derives from their source's (review
+        # 8.10.4); filled at stage 3 by _radec_manifest_entry.
+        self.position_roots = {}
         self.mist = [c.get("mist", True) for c in self.config]
         self.parsec = [c.get("parsec", False) for c in self.config]
 
@@ -1161,8 +1164,7 @@ class Star(Component):
 
     def register_parameters(self, system):
         """Stage 3: Declare the manifest and push to ConfigManager."""
-        # Lens stars whose position derives from their source's; filled by
-        # _radec_manifest_entry when the topology declares ra/dec at all.
+        # Reset per build (System may prepare more than once).
         self.position_roots = {}
 
         # 1. Get the stellar parameters we always want.  logmass may carry a
