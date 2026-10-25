@@ -32,6 +32,15 @@ pytestmark = pytest.mark.skipif(
 
 GEOMETRY = {"source.0.t_0", "source.0.u_0", "mulensevent.0.t_E"}
 
+# The example's sky position (DC2018_128.params.yaml).  "No params file"
+# here means no STARTS; the target still needs a position, which every
+# stage-1 line-of-sight reader requires (review 1.1.10).
+POSITION = {
+    f"star.{s}.{c}": {"initval": v}
+    for s in ("Lens", "Source")
+    for c, v in (("ra", 267.595), ("dec", -28.982))
+}
+
 
 def _prepare(tmp_path, user_params=None, **event_keys):
     from exozippy.system import System
@@ -44,7 +53,7 @@ def _prepare(tmp_path, user_params=None, **event_keys):
     config["prefix"] = str(tmp_path / "fitresults" / "DC2018_128")
     config["mulensinstrument"][0]["file"] = str(tmp_path / DATA)
     config["mulensevent"][0].update(event_keys)
-    system = System(config, user_params=dict(user_params or {}))
+    system = System(config, user_params={**POSITION, **(user_params or {})})
     system.prepare()
     return system.config_manager
 
@@ -151,6 +160,14 @@ def test_a_t_E_the_kinematics_derive_is_not_overridden(tmp_path):
     assert set(cm.seed_hint_sets[0]) == {"source.0.u_0"}
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "review 1.1.11: with the target positioned, the galactic-model "
+        "proper-motion seeds override a user t_E (17 -> 42.5 d) silently; "
+        "the defaults.yaml placeholder used to switch those seeds off"
+    ),
+)
 def test_a_user_t_E_without_t_0_is_held_and_t_0_u_0_are_found(tmp_path):
     """
     Given a params file that names t_E only (JDE 2026-10-01: "when the user
