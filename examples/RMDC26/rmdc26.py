@@ -811,6 +811,11 @@ TIER_FULL_FILE = CAMPAIGN / "sed" / "tier_full.txt"
 TIER_SCORED_FILE = CAMPAIGN / "sed" / "tier_scored.txt"
 VERDICT_FILE = CAMPAIGN / "sed" / "verdict.out"
 GRID_DCHI2_FILE = CAMPAIGN / "grid" / "dchi2_noplanet.json"
+#: Direct single-lens-vs-binary comparisons the campaign ran where the grid
+#: was not decisive (arch105/arch_direct.json: both arms at their own MAP,
+#: chi2 on the data file's errors).  A direct comparison SUPERSEDES the
+#: grid: it is the test the grid only approximates.
+DIRECT_ARCH_GLOB = "arch*/arch_direct.json"
 #: sed/make_notes.py's generated per-event notes.  Each event's notes_path
 #: file is that note VERBATIM plus one appended section of ours
 #: (event_notes_markdown); their file is never patched.
@@ -1089,9 +1094,24 @@ def tier_reason(tier, verdict):
     )
 
 
+def load_direct_arch(campaign=None):
+    """{'105': {dchi2, n, k_extra, ...}} merged from every DIRECT_ARCH_GLOB
+    file under the campaign directory ({} when there are none)."""
+    out = {}
+    for f in sorted(Path(campaign or CAMPAIGN).glob(DIRECT_ARCH_GLOB)):
+        out.update(json.loads(f.read_text()))
+    return out
+
+
 def architecture_verdict(arch, dchi2_np=None, q=None, anomaly_files=(),
-                         threshold=ARCH_DCHI2_MIN, q_pinned=Q_PINNED_REL):  # fmt: skip
+                         threshold=ARCH_DCHI2_MIN, q_pinned=Q_PINNED_REL,
+                         direct=None):  # fmt: skip
     """The event's architecture statement (PI-approved rule).
+
+    ``direct`` (a load_direct_arch record: dchi2 = chi2(1L1S) - chi2(2L1S)
+    at each arm's MAP, n epochs, k_extra parameters) supersedes the grid for
+    a 1S2L event: the same threshold applies to it, and the grid value is
+    quoted only for the record.
 
     1S2L: from the blind (s, q) grid's dchi2_np = chi2(no-planet row) -
       chi2(best node).  dchi2_np > threshold: "binary lens favoured", P(1S1L)
@@ -1104,6 +1124,34 @@ def architecture_verdict(arch, dchi2_np=None, q=None, anomaly_files=(),
 
     Returns {flag (str|None), statement, dchi2_np, rule}.
     """
+    if (
+        arch == ARCH_BINARY
+        and direct
+        and np.isfinite(float(direct.get("dchi2", np.nan)))
+    ):
+        dd = float(direct["dchi2"])
+        grid = (
+            "" if dchi2_np is None
+            else " (the blind grid gave dchi2_np = %.1f; the direct fit "
+            "supersedes it)" % float(dchi2_np)
+        )  # fmt: skip
+        how = (
+            "a direct single-lens fit to the same %s epochs, each arm at its "
+            "own MAP with chi2 on the data file's errors, is worse than the "
+            "binary by dchi2 = %.1f for %s extra parameters%s"
+            % (direct.get("n", "?"), dd, direct.get("k_extra", "?"), grid)
+        )
+        if dd > threshold:
+            return {"flag": None, "dchi2_np": dchi2_np, "rule": "direct",
+                    "dchi2_direct": dd,
+                    "statement": "binary lens favoured: %s (> %g), so "
+                    "P(1S1L) ~ 0; relative_probability is normalized over "
+                    "this event's 1S2L solutions." % (how, threshold)}  # fmt: skip
+        return {"flag": ARCH_UNCERTAIN, "dchi2_np": dchi2_np,
+                "rule": "direct", "dchi2_direct": dd,
+                "statement": "ARCHITECTURE_UNCERTAIN: %s (<= %g), so a "
+                "single lens is not excluded; relative_probability is "
+                "conditional on 1S2L." % (how, threshold)}  # fmt: skip
     if arch == ARCH_BINARY:
         d = None if dchi2_np is None else float(dchi2_np)
         if d is None or not np.isfinite(d):
@@ -1260,14 +1308,10 @@ def submit_physical(summary):
     return par, unc
 
 
-#: Event-specific findings appended to the architecture statement, with
-#: their source (campaign agent, 2026-10-24).  105 awaits a direct PSPL arm
-#: (job 55068758).
-ARCH_EVENT_NOTES = {
-    105: "The grid used only 16367 of 49096 epochs, and its log_q profile "
-    "has no power at q ~ 2.6e-5. A direct PSPL arm (job 55068758) will "
-    "settle it.",
-}
+#: Event-specific findings appended to the architecture statement.  (105's
+#: grid caveat was retired 2026-10-24: its direct PSPL arm, job 55068758,
+#: settles it through DIRECT_ARCH_GLOB.)
+ARCH_EVENT_NOTES = {}
 
 #: The heading of the one section this tool appends to the campaign's note.
 NOTES_SECTION = "## Evidence, flags and conventions (exozippy report stage)"

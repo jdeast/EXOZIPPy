@@ -99,7 +99,7 @@ def model_type_check(sols, arch):
     return out
 
 
-def build_submitted_event(row, rec, dchi2_table, campaign_note):
+def build_submitted_event(row, rec, dchi2_table, campaign_note, direct=None):
     """One submitted event: 02_report's probabilities + tier, architecture,
     physical parameters, flags and the notes text."""
     ev = int(row["event"])
@@ -120,6 +120,7 @@ def build_submitted_event(row, rec, dchi2_table, campaign_note):
     av = R.architecture_verdict(
         arch, d, q=(top["summary"].get("q") if top else None),
         anomaly_files=anomaly,
+        direct=(direct or {}).get(R.ev3(ev)),
     )  # fmt: skip
     extra = R.ARCH_EVENT_NOTES.get(ev)
     if extra:
@@ -335,6 +336,7 @@ def main(argv=None):
                          .read_text())  # fmt: skip
     problems = list(listing["problems"])
     dchi2 = json.loads(Path(R.GRID_DCHI2_FILE).read_text())
+    direct = R.load_direct_arch()
     sub = R.OUT / "submission"
     rep = R.OUT / "report"
     rep.mkdir(parents=True, exist_ok=True)
@@ -370,7 +372,7 @@ def main(argv=None):
             problems.append("%s: no campaign note %s (our section only)"
                             % (R.ev3(ev), note_p))  # fmt: skip
         recs[ev] = rec
-        e = build_submitted_event(row, rec, dchi2, note)
+        e = build_submitted_event(row, rec, dchi2, note, direct)
         e["fit_paths"] = {"trace": rec["trace"], "config": rec.get("config")}
         problems.extend("%s: %s" % (R.ev3(ev), x) for x in e["problems"])
         write_event(e, sub)

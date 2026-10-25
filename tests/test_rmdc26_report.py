@@ -591,6 +591,35 @@ def test_the_architecture_rule(R):
     )
 
 
+def test_a_direct_comparison_supersedes_the_grid(R, tmp_path):
+    """105: the grid gave dchi2_np = 8 but a direct 1L1S arm is worse by 513
+    -> no flag, rule 'direct', the grid quoted for the record.  A direct
+    dchi2 under the threshold still flags; 1S1L ignores it; the loader
+    merges every arch*/arch_direct.json."""
+    rec = {"dchi2": 513.0, "n": 49096, "k_extra": 14}
+    v = R.architecture_verdict("1S2L", 8.0, q=(2.57e-5, 2.6e-6, 2.5e-6),
+                               direct=rec)  # fmt: skip
+    assert v["flag"] is None and v["rule"] == "direct"
+    assert v["dchi2_direct"] == 513.0
+    assert (
+        "worse than the binary by dchi2 = 513.0 for 14 extra"
+        in (v["statement"])
+    )
+    assert "the blind grid gave dchi2_np = 8.0" in v["statement"]
+    assert "pins q" not in v["statement"]
+    v = R.architecture_verdict("1S2L", 3000.0, direct=dict(rec, dchi2=20.0))
+    assert v["flag"] == "ARCHITECTURE_UNCERTAIN" and v["rule"] == "direct"
+    v = R.architecture_verdict("1S1L", direct=rec)
+    assert v["rule"] == "audit"
+    for sub, ev in (("arch105", "105"), ("arch200", "200")):
+        (tmp_path / sub).mkdir()
+        (tmp_path / sub / "arch_direct.json").write_text(
+            '{"%s": {"dchi2": 99.0}}' % ev
+        )
+    assert set(R.load_direct_arch(tmp_path)) == {"105", "200"}
+    assert R.load_direct_arch(tmp_path / "none") == {}
+
+
 def test_physical_parameters_are_formed_per_draw(R):
     """Given anti-correlated draws, each physical parameter is the median of
     the per-draw quantity, not a product of medians; M2 = Mtot - M1 per
