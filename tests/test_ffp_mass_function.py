@@ -69,6 +69,10 @@ class _MockStar:
             self.ffp_mask = np.asarray(ffp_mask, dtype=bool)
             self.ffp_alpha = np.full(n, alpha, dtype=float)
 
+    def position_root(self, i):
+        # No derived lens positions here (Star.position_root).
+        return i
+
 
 class _MockSystem:
     def __init__(self, star):

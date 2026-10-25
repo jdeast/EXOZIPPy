@@ -43,6 +43,10 @@ class _MockStar:
         self.pm_dec = _MockParam(0.0)  # mas/yr
         self.rv = _MockParam(0.0)  # m/s
 
+    def position_root(self, i):
+        # No derived lens positions here (Star.position_root).
+        return i
+
 
 class _MockSystem:
     def __init__(self):

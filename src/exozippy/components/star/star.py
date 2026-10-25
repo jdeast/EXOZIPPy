@@ -958,6 +958,43 @@ class Star(Component):
         self.murel_traj_map = np.zeros(n, dtype=int)
         return {"expr_key": {"from_mulens_murel": [int(l_idx)]}}
 
+    def _radec_manifest_entry(self, system):
+        """ra/dec manifest entry: sampled (or pinned) everywhere, except that
+        a microlensing LENS star that carries absolute astrometry flips its
+        element to derived -- its position at the astrometric reference
+        epoch is the primary source's plus the offset the event geometry
+        fixes, ``mulensevent.lens_offset_e/n`` (review 8.10.4).  The light
+        curve already says where the lens is relative to the source at
+        every instant, so a free lens position would be a second, competing
+        statement of the same thing (and a hard link between the two was
+        wrong anyway: they differ by theta_E u_0 at t_0).  Builds the two
+        maps the expression's deps name: track_source_map (per star
+        element, the primary source star) and track_event_map.  Also
+        records ``position_roots`` (see ``position_root``).
+        """
+        event = getattr(system, "mulensevent", None)
+        if event is None:
+            return None
+        l_idx = event.lens_track_star(system)
+        if l_idx is None:
+            return None
+        _, s_idx = event.source_bodies[0]
+        n = self.n_elements
+        self.track_source_map = np.full(n, int(s_idx), dtype=int)
+        self.track_event_map = np.zeros(n, dtype=int)
+        self.position_roots = {int(l_idx): int(s_idx)}
+        return {"expr_key": {"from_mulens_track": [int(l_idx)]}}
+
+    def position_root(self, i):
+        """The star whose own ra/dec define star ``i``'s line of sight: ``i``
+        itself, or -- for a lens whose position is derived from its source
+        (``_radec_manifest_entry``) -- that source.  The two agree to the
+        lens-source separation (mas), so any consumer that freezes a line of
+        sight at a START value (the galactic model's basis) reads the root,
+        whose start is a real one; a derived element's resolved initval is
+        a bookkeeping placeholder, not a position."""
+        return self.position_roots.get(int(i), int(i))
+
     def _seed_pm_from_sgra_prior(self):
         """Start the ABSOLUTE pm where the user stated it relative to Sgr A*.
 
@@ -1124,6 +1161,9 @@ class Star(Component):
 
     def register_parameters(self, system):
         """Stage 3: Declare the manifest and push to ConfigManager."""
+        # Lens stars whose position derives from their source's; filled by
+        # _radec_manifest_entry when the topology declares ra/dec at all.
+        self.position_roots = {}
 
         # 1. Get the stellar parameters we always want.  logmass may carry a
         # power-law-IMF floor (None otherwise, i.e. a plain free parameter).
@@ -1362,8 +1402,8 @@ class Star(Component):
         ):
             self.manifest.update(
                 {
-                    "ra": None,
-                    "dec": None,
+                    "ra": self._radec_manifest_entry(system),
+                    "dec": self._radec_manifest_entry(system),
                     "pm_ra": self._pm_manifest_entry(system),
                     "pm_dec": self._pm_manifest_entry(system),
                     "distance": self._distance_manifest_entry(system),
@@ -1428,6 +1468,11 @@ class Star(Component):
                         for i, m in enumerate(modes)
                         if m in ("gaia", "abs")
                     }
+            # A lens whose position is derived from its source's (review
+            # 8.10.4) makes the SOURCE's ra/dec measured too: pinning them at
+            # a catalog value would pin the lens track to it, at a precision
+            # (~0.1 arcsec) far below the astrometry's.
+            abs_astrom_idx |= set(self.position_roots.values())
 
             def _pin_sigma(param_name, skip_idx):
                 idx_list = sorted(ml_source_idx - skip_idx)
