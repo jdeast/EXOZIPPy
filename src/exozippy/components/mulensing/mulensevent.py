@@ -539,40 +539,6 @@ class MulensEvent(Component):
             "track_earth_pn": float(p_n[0]),
         }
 
-    def _mass_initval(self, comp_type, ndx):
-        """Best-effort mass initval (solMass) for a body at stage 3, from
-        user_params mass or logmass entries; None when neither is given."""
-        up = self.config_manager.user_params
-        entry = user_entry(up, f"{comp_type}.{ndx}.mass")
-        val = None if entry is None else entry.get("initval")
-        if val is not None:
-            # A user_params `mass` is in that BODY's own user unit, and this
-            # function's contract is solMass.  `star.mass` is solMass so the
-            # two coincide, but `planet.mass` is jupiterMass
-            # (planet/defaults.yaml), so returning it raw seeded
-            # mulensevent.mlens_total -- and through it theta_E, t_E and
-            # every per-element q -- too large by 1047 on any lens with 2+
-            # companions one of which is a planet.  Measured: a two-planet
-            # lens seeded q = 1.995e-3 where the built graph computes
-            # 1.9047e-6.  Single-companion lenses never reached here, which
-            # is why it survived.
-            #
-            # config_manager's factor is the USER -> INTERNAL one; it is the
-            # RECIPROCAL of Parameter's (CLAUDE.md), so it multiplies here.
-            # Reaching for it in a component is the existing idiom
-            # (orbit.py:750) -- what is forbidden is hand-writing the number.
-            factor = self.config_manager.get_conversion_factor(
-                comp_type, "mass", full_path=f"{comp_type}.{ndx}.mass"
-            )
-            return float(val) * float(factor if factor else 1.0)
-        entry = user_entry(up, f"{comp_type}.{ndx}.logmass")
-        val = None if entry is None else entry.get("initval")
-        # Only `star` declares logmass, in dex(solMass), so 10** already
-        # lands in the internal unit.  A component that ever declares a
-        # logmass in another dex base needs the same factor treatment as
-        # `mass` above.
-        return float(10.0 ** float(val)) if val is not None else None
-
     def _validate_bodies(self, system):
         """Fail at registration time if a body reference points to a
         component or instance that does not exist, if the PRIMARY lens body
@@ -855,89 +821,6 @@ class MulensEvent(Component):
                     **self.manifest["theta_E"],
                     "deps": ["mlens_total", "pi_rel"],
                 }
-
-        if self.n_companions >= 2:
-            # The symbolic relaxation engine only knows the binary mass-sum
-            # and q relations (see symbolic_physics.get_symbol_map), so for
-            # 3+ lens bodies the mlens_total and per-element q initvals are
-            # seeded from the per-body mass initvals instead.  The q and
-            # log_s hints target LENS ELEMENTS: companion slot j is lens
-            # element j+1 (the off-by-one this refactor is named for).
-            body_masses = [
-                self._mass_initval(c_type, c_ndx)
-                for c_type, c_ndx in self.lens_bodies
-            ]
-            # Seeded at PRECEDENCE_DERIVED_MIXED: overrides defaults, yields
-            # to explicit user values.  Loud, once, at config time, because
-            # the alternative -- a start that quietly comes from nowhere --
-            # is what review 1.6.5 traced (and what 2.6.6 asks be said out
-            # loud until the relations are generalized).  A WARNING and not
-            # an INFO: for a 2-body lens the engine derives all of this from
-            # ANY of the masses, q or the trajectory, so a user who has
-            # never had to supply body masses gets no other signal that a
-            # third body changes the rules.
-            user_q = [
-                f"lens.{j + 1}.q"
-                for j in range(1, self.n_companions)
-                if self.config_manager.user_params.get(f"lens.{j + 1}.q")
-                is not None
-            ]
-            if user_q:
-                logger.warning(
-                    f"{self.prefix}: {', '.join(user_q)} sets the START of "
-                    "a derived mass ratio but CANNOT set the companion "
-                    "mass it is computed from -- the relaxation engine's q "
-                    "relation covers the first companion (lens element 1) "
-                    "only (see mulensing/symbolic_physics.py).  The fit "
-                    "will run at the masses, not at the q you typed.  "
-                    "Supply <component>.<body>.mass (or logmass) for every "
-                    "lens body instead."
-                )
-            if any(m is None for m in body_masses):
-                missing = [
-                    f"{ct}.{cn}"
-                    for (ct, cn), m in zip(self.lens_bodies, body_masses)
-                    if m is None
-                ]
-                logger.warning(
-                    f"{self.prefix}: no mass initval for lens body/bodies "
-                    f"{missing}, so mulensevent.mlens_total and the "
-                    "per-companion q starts fall back to defaults.  A lens "
-                    "with 3+ bodies REQUIRES explicit body masses: the "
-                    "engine's mass-sum and q relations are binary-only, so "
-                    "nothing else can supply them (review 2.6.6).  Add "
-                    f"mass (or logmass) initvals for {missing} to the "
-                    "params file."
-                )
-            else:
-                self.config_manager.add_hint(
-                    "mulensevent.0.mlens_total",
-                    float(sum(body_masses)),
-                    rank=PRECEDENCE_DERIVED_MIXED,
-                )
-                for j, m_c in enumerate(body_masses[1:]):
-                    q_j = m_c / body_masses[0]
-                    self.config_manager.add_hint(
-                        f"lens.{j + 1}.q", q_j, rank=PRECEDENCE_DERIVED_MIXED
-                    )
-                    self.config_manager.add_scale_hint(
-                        f"lens.{j + 1}.q", 0.1 * q_j
-                    )
-
-            # The s <-> log_s relation is mapped only for the first
-            # companion (lens element 1), so for 3+ body lenses seed the
-            # remaining companions' log_s from any user s initval.
-            up = self.config_manager.user_params
-            for j in range(1, self.n_companions):
-                entry = user_entry(up, f"lens.{j + 1}.s")
-                s_val = None if entry is None else entry.get("initval")
-                if s_val is None or float(s_val) <= 0.0:
-                    continue
-                self.config_manager.add_hint(
-                    f"lens.{j + 1}.log_s",
-                    float(np.log10(float(s_val))),
-                    rank=PRECEDENCE_DERIVED_MIXED,
-                )
 
         # Expected proper motions from the galactic model, for the seeds
         # below.  None when the line of sight is not known yet, in which

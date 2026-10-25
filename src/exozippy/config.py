@@ -1391,6 +1391,30 @@ class ConfigManager:
                             if rel_inst not in self.all_relations:
                                 self.all_relations.append(rel_inst)
 
+                    # Relations whose SHAPE depends on the config (a sum over
+                    # however many bodies a lens has, review 8.6.13) cannot
+                    # live in the fixed RELATIONS list, so a module may also
+                    # define get_extra_relations(entry_cfg, system_config):
+                    # equations already written in FULL-PATH symbols, no
+                    # renaming.  A bare (pathless) symbol there is a bug in
+                    # that module, not a spelling, so it raises.
+                    extra = getattr(module, "get_extra_relations", None)
+                    if extra is not None:
+                        for rel in extra(entry_cfg, self.system_config):
+                            for sym in sorted(rel.free_symbols, key=str):
+                                if "." not in sym.name:
+                                    raise ValueError(
+                                        f"{yaml_key} get_extra_relations: "
+                                        f"symbol '{sym.name}' in {rel} is not "
+                                        f"a full parameter path."
+                                    )
+                                self.master_symbol_map[sym.name] = sp.Symbol(
+                                    sym.name
+                                )
+                                self.relation_symbol_paths.add(sym.name)
+                            if rel not in self.all_relations:
+                                self.all_relations.append(rel)
+
         # Sorted for the same reason as the symbolic_physics walk above.  No
         # root-level key is currently defined by two components (a test pins
         # that), so today this is future-proofing rather than a live fix --

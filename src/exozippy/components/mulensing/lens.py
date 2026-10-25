@@ -50,10 +50,9 @@ class Lens(Component):
 
     Any number of lens bodies: the default ``backend: vbm_direct`` is
     N-body (VBMicrolensing MultiMag2); only ``backend: mulensmodel`` caps
-    the lens at a binary (MulensEvent.get_magnification_op raises), and the
-    relaxation engine's companion relations are binary-only, so a 3+ body
-    lens needs explicit body masses (mulensing.md, "Three or more lens
-    bodies").
+    the lens at a binary (MulensEvent.get_magnification_op raises).  The
+    relaxation engine has one relation set per companion (mulensing.md,
+    "Three or more lens bodies").
 
     In the params file, address a companion's geometry by the body's
     instance name (``lens.b.log_s``) or by element index (``lens.1.log_s``
@@ -173,9 +172,10 @@ class Lens(Component):
         if om is not None:
             if len(om_set) > 1 or self.n_companions > 1:
                 raise NotImplementedError(
-                    "lens orbital motion currently supports exactly one "
-                    "companion (the engine's companion relations are "
-                    "binary-only; mulensing.md '3+ lens bodies')."
+                    "lens orbital motion currently supports a lens with "
+                    "exactly one companion (Lens and VBMDirectMagOp carry "
+                    "a single s(t)/alpha(t) series; mulensing.md, 'Three "
+                    "or more lens bodies')."
                 )
             if om == "keplerian" and n_sources > 1:
                 raise NotImplementedError(
@@ -559,30 +559,20 @@ class Lens(Component):
         number I typed is not the number being fitted" that goes unnoticed
         for months.
 
-        **NaN is fatal only where it MEANS something**, which is the FIRST
-        COMPANION -- lens element 1 post-split -- (review 1.6.5).  The
-        split is not about q being derived -- it always is -- but about
-        which elements the relaxation engine can actually solve:
-        ``symbolic_physics.get_symbol_map`` maps a SINGLE companion, so for
-        element 1 a NaN really does say the solve failed, i.e. one of the
-        lens body masses is already non-finite, and the advice below is the
-        right advice.  Elements 2 and up are never solved by the engine at
-        all: `register_parameters` seeds them from USER body-mass entries
-        only, skips the hint when there are none (see 2.6.6), and
-        `resolve()` then leaves them NaN because q has no defaults.yaml
-        initval.  That NaN is bookkeeping, not a start -- the graph
-        recomputes q from the mass nodes, which carry finite defaults --
-        and raising on it killed a 3+ body fit that would have run
-        perfectly well.  Exactly the false-positive class
-        :meth:`Source._validate_pspl_start`'s docstring warns about for the
-        derived t_E/theta_E/pi_E (the ob161003 theta_E lesson).  The
-        inactive element 0 (pinned at 1.0) is excluded from every scan.
+        **NaN is fatal on every active element.**  Every companion's q is
+        solved by the relaxation engine from the body masses
+        (symbolic_physics.get_symbol_map maps one companion each, review
+        8.6.13), so a NaN start says the solve failed -- one of the lens
+        body masses is already non-finite -- and the advice below is the
+        right advice.  Until 2026-10 only lens element 1 was solved, and
+        elements 2 and up carried a NaN BOOKKEEPING initval for a derived
+        parameter, so they were exempt (review 1.6.5); that exemption went
+        with the per-companion relations.  The inactive element 0 (pinned at
+        1.0) is excluded from every scan.
 
         A q that genuinely reaches the magnification backend as NaN is
         still caught at runtime by ``clip_q_value``, which names the
-        parameter.  The derived-ness test is kept for the skipped elements
-        so that a future parameterization which SAMPLES one of them gets
-        the raise back: for a sampled element the initval IS the start.
+        parameter.
         """
         if self.n_companions < 1 or self.q.initval is None:
             return
@@ -591,12 +581,7 @@ class Lens(Component):
             [self.q.element_is_active(i) for i in range(q0.size)]
         )
         nan = np.isnan(q0) & active
-        fatal = [
-            i
-            for i in np.flatnonzero(nan)
-            if i == 1 or not self.q.element_is_derived(int(i))
-        ]
-        if fatal:
+        if np.any(nan):
             raise ValueError(
                 f"{self.prefix}.q starts at {q0.tolist()}, which is not a "
                 f"number.  {_Q_NAN_ADVICE}"

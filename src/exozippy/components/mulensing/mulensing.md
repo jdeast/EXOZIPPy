@@ -173,15 +173,15 @@ The point-source assumption is not safe on a resolved source. Averaging the exac
 
 With the lens inside the source disk (`u_0 = 0.1`, `rho = 0.1`) the shift nearly VANISHES (99.6% cancellation: elements on opposite sides of the lens are deflected in opposite directions), and at `rho = 0.5` it REVERSES SIGN. So the closed form on a resolved source can get the DIRECTION wrong, which is why finite-source events dispatch to VBM's disk-integrated centroid. The two theta_E routes complement each other: finite-source events already have theta_E from `rho`, and the astrometric route earns its keep on the events that do not, which are exactly those where the point-source formula is valid.
 
-## Three or more lens bodies: the engine's relations are binary-only
+## Three or more lens bodies: one relation set per companion
 
-`symbolic_physics.get_symbol_map` registers `companion_mass`/`q_lens`/`s`/`log_s` for **companion slot 0 only** -- the sympy symbols are module-level objects and `RELATIONS` is a fixed list, so there is no per-companion instance to bind a third body to. Consequences, all real and all now said out loud at config time (review 2.6.6, `MulensEvent.register_parameters`):
+**Every companion has its own relations, and the total lens mass is a sum over every body** (review 8.6.13). `symbolic_physics.get_symbol_map` returns one symbol map per source (the event chain) and then ONE MAP PER COMPANION: companion `j` (lens element `j`; element 0 is the masked primary) maps `q_lens`, `companion_mass`, `primary_lens_mass` and -- unless it moves on a keplerian orbit -- its geometry (`alpha`'s pair, `s <-> log_s`). So `q_j * M_primary = M_j` and the geometry relations instantiate once per companion, for any number of lens bodies. The total mass `mulensevent.0.mlens_total = sum of every lens body's mass` has a config-dependent number of terms, so it cannot sit in the fixed `RELATIONS` list; it comes from `get_extra_relations`, the engine's hook for relations written directly in full-path symbols (`components/components.md`).
 
-- `mulensevent.mlens_total` and the per-slot `q` starts can only come from `Lens`'s own hint, which sums **user-supplied body masses**. With defaults there is nothing to sum, so it warns naming the bodies: a 3+ body lens REQUIRES explicit `mass:` (or `logmass:`) initvals for every lens body.
-- A user `lens.<j>.q` for `j >= 1` sets that element's start but **cannot back-propagate to the companion mass**, and `q` is derived from the masses at runtime -- so the fit runs at the masses, not at the q that was typed. That also warns.
-- The same NaN start is NOT fatal: see `_validate_q_start`, which raises only for slot 0 (review 1.6.5).
+Why it matters, measured on examples/KMT-2021-BLG-1122L with t_E seeded at 30 d, the companions' `q` at 0.3 and 0.05, and no body-mass entries. Before, only lens element 1 was mapped and the mass sum existed for exactly two bodies, so `mlens_total` had no relation to the body masses: the engine satisfied the seeded t_E by moving `mlens_total` -- a derived parameter whose start never reaches the model -- and the model started at t_E = 124.7 d with both companions at the default 1 Msun (q = 3.16). That is review 1.1.12's "silently not delivered" seeds and review 2.6.34's "t_E not derivable at stage 1". After, all three starts are delivered and the body masses follow from them (`check_user_starts`: 0 misses). The 3+ body hint block in `MulensEvent.register_parameters` -- which seeded `mlens_total` and the extra companions' `q`/`log_s` from user body masses, and warned that a 3+ body lens REQUIRED explicit masses -- is gone with it, and so is its stage-3 mass read, which raised on per-seed (list) mass initvals.
 
-Generalizing the relations per companion is the real fix and is still open; until then the requirement is documented rather than silently assumed.
+`Lens._validate_q_start` now treats a NaN q start as fatal on every active element: every companion is solved, so a NaN means a failed solve, not the bookkeeping initval of an unsolved element (the review 1.6.5 exemption it replaces).
+
+Lens ORBITAL MOTION is still one companion only (review 8.6.33): `Lens.__init__` and `VBMDirectMagOp` carry a single `(s_t, alpha_t)` series.
 
 ## The binary mode finder: topology is found BEFORE the fit (`components/mulensing/gridsearch.py`)
 
