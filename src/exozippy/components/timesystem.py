@@ -51,6 +51,8 @@ import logging
 
 import numpy as np
 
+from exozippy.components.star.position import require_star_radec
+
 logger = logging.getLogger(__name__)
 
 # Time-system vocabulary for the per-file time_scale/time_frame keys.
@@ -277,32 +279,28 @@ class TimeSystem:
         Reuses the star component's ra/dec exactly as astrometry and mulens
         do (``star_ndx`` on the file's config entry picks the star, default
         0; every star in one system is the same direction at the accuracy
-        that matters here).  Requiring ``user_modified`` is deliberate: the
-        defaults.yaml ra/dec are placeholders, and a conversion run against
-        them would corrupt every BJD by up to +/-8 minutes with no error.
+        that matters here).  Read with ``require_star_radec`` (components/star/position.py),
+        never ``resolve()``: a position given as a
+        LINK reads as the defaults.yaml placeholder (180, 0) under
+        ``resolve()`` with ``user_modified`` True, and the conversion ran
+        against it (+4.2 s on every KMT time; review 1.1.10).  Requiring an
+        INFORMED start is deliberate: a conversion run against the
+        placeholder would corrupt every BJD by up to +/-8 minutes with no
+        error.
         """
         star_ndx = self.resolve_star_ndx(
             self.config[i].get("star_ndx"),
             f"[{self.prefix}] {self.names[i]} star_ndx",
         )
-        ra = self.config_manager.resolve("star", "ra", element=star_ndx)
-        dec = self.config_manager.resolve("star", "dec", element=star_ndx)
-        if not (ra["user_modified"] and dec["user_modified"]):
-            raise ValueError(
-                f"[{label}] time_scale/time_frame conversion needs the "
-                f"target's coordinates: set star.{star_ndx}.ra and "
-                f"star.{star_ndx}.dec (deg) in the params file."
-            )
+        ra, dec = require_star_radec(
+            self.config_manager,
+            star_ndx,
+            f"[{label}] time_scale/time_frame conversion",
+        )
         import astropy.units as u
         from astropy.coordinates import SkyCoord
 
-        # resolve() returns per-element arrays even for shape=(); take the
-        # single element rather than float()-ing an ndarray (NumPy 2 error).
-        return SkyCoord(
-            ra=float(np.ravel(ra["initval"])[0]) * u.Unit(ra["unit"] or "deg"),
-            dec=float(np.ravel(dec["initval"])[0])
-            * u.Unit(dec["unit"] or "deg"),
-        )
+        return SkyCoord(ra=ra * u.rad, dec=dec * u.rad)
 
     def _time_location(self, i):
         """File ``i``'s observer EarthLocation (geocenter when unset)."""

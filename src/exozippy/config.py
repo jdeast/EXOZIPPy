@@ -4021,6 +4021,18 @@ class ConfigManager:
         )
         return float(value) / factor
 
+    def to_internal(self, path, value):
+        """Convert a USER-unit value of `path` to its INTERNAL unit.
+
+        The inverse of ``from_internal``: ``get_conversion_factor`` is the
+        user -> internal multiplier, so this multiplies by it.
+        """
+        parts = path.split(".")
+        factor = self.get_conversion_factor(
+            parts[0], parts[-1], full_path=path
+        )
+        return float(value) * factor
+
     def _probe_solve(self, paths, seed_hints=None):
         """Run the engine on a snapshot and roll every mutation back.
 

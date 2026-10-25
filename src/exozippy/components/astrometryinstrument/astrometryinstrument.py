@@ -151,6 +151,7 @@ from exozippy.components.parameterization import (
     merge_overrides,
     pin_unselected,
 )
+from exozippy.components.star.position import require_star_radec
 from exozippy.constants import DAYS_PER_YEAR
 from exozippy.ephemeris import observer_position_at_reception
 from exozippy.outputs.texutils import latex_escape
@@ -477,15 +478,6 @@ class AstrometryInstrument(Instrument):
         self.jittervar_lower = [0.0] * self.n_elements
         self.n_total_obs = 0
 
-        n_stars = system.star.n_elements if hasattr(system, "star") else 1
-        ra_cfg = self.config_manager.resolve("star", "ra", shape=(n_stars,))[
-            "initval"
-        ]
-        dec_cfg = self.config_manager.resolve("star", "dec", shape=(n_stars,))[
-            "initval"
-        ]
-        ra_cfg = np.atleast_1d(ra_cfg)
-        dec_cfg = np.atleast_1d(dec_cfg)
         event = getattr(system, "mulensevent", None)
         lens_track = None if event is None else event.lens_track_star(system)
 
@@ -535,18 +527,31 @@ class AstrometryInstrument(Instrument):
                         f"source, but the system has no mulensevent: block."
                     )
                 ref_ndx = int(event.source_bodies[0][1])
-            ra_ref = float(ra_cfg[ref_ndx]) * np.pi / 180.0  # rad
-            dec_ref = float(dec_cfg[ref_ndx]) * np.pi / 180.0  # rad
-
             d = {
                 "name": self.names[i],
                 "index": i,
                 "mode": mode,
                 "time": t,
                 "star_ndx": star_ndx,
-                "ra_ref": ra_ref,
-                "dec_ref": dec_ref,
             }
+            if mode != "rel":
+                # The tangent point, which also aims the observer and the
+                # parallax factors.  rel (separation/PA between two orbit
+                # bodies) uses neither, so it needs no sky position at all
+                # (examples/kelt4 gives none) and carries no ra_ref key.
+                # require_star_radec, not resolve(): a position given as a LINK read as
+                # the defaults.yaml placeholder (180, 0) under resolve(),
+                # which put an abs dataset ~3e8 mas from its tangent point
+                # (review 1.1.10).  An unset position raises rather than
+                # projecting about the placeholder.
+                ra_ref, dec_ref = require_star_radec(  # rad
+                    self.config_manager,
+                    ref_ndx,
+                    f"[{self.prefix}.{self.names[i]}] the astrometry "
+                    f"tangent point",
+                )
+                d["ra_ref"] = ra_ref
+                d["dec_ref"] = dec_ref
 
             if mode == "gaia":
                 d["w"] = df.iloc[:, 1].values.astype(float)  # mas
