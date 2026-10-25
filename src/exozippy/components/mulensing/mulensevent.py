@@ -247,6 +247,11 @@ class MulensEvent(Component):
                 )
         # Compat view: "keplerian" when the source moves, else None.
         self.source_orbital_motion = [som]
+        # The orbits the source moves on, as a list (Orbit reads lens and
+        # xallarap orbit references through one list-valued attribute).
+        self.xal_orbit_idxs = (
+            [] if self.xal_orbit_idx is None else [self.xal_orbit_idx]
+        )
 
     def _resolve_t0_par(self, event_config, config_manager):
         """t0_par from the mulensevent block, the source.0.t_0 seed, or the
@@ -1349,24 +1354,30 @@ class MulensEvent(Component):
         return system.lens.alpha.value[j + 1] * _RAD_TO_DEG
 
     def _companion_geometry_series(self, times, system):
-        """Per-epoch companion geometry ``(s_t, alpha_t_deg)`` for companion
-        0 (VECTOR ELEMENT 1 of the lens component; element 0 is the masked
-        primary), or ``None`` when the lens geometry is static.
+        """Per-epoch geometry of EVERY companion, ``(S, ALPHA_DEG)``, each
+        of shape ``(n_companions, n_epochs)`` -- row j is companion slot j
+        (lens VECTOR ELEMENT j + 1; element 0 is the masked primary) -- or
+        ``None`` when no companion moves (review 8.6.33: any number of
+        companions may move, each on its own orbit, beside static ones).
 
-        The linear mode is DEFINITIONAL in these coordinates (C24):
+        Each row follows its own companion's mode.  The linear mode is
+        DEFINITIONAL in these coordinates (C24):
 
-            s(t)     = s_0     + ds_dt     * (t - t0_par)/DAYS_PER_YEAR
-            alpha(t) = alpha_0 + dalpha_dt * (t - t0_par)/DAYS_PER_YEAR
+            s_j(t)     = s_j0     + ds_dt[o_j]     * (t - t0_par)/DAYS_PER_YEAR
+            alpha_j(t) = alpha_j0 + dalpha_dt[o_j] * (t - t0_par)/DAYS_PER_YEAR
 
-        anchored at t0_par -- the same fiducial epoch the parallax uses
-        (5d: one anchor is what makes the two effects composable; Skowron
-        Eq. A17).  ``alpha_t`` is returned in DEGREES, the unit both
-        magnification backends take; ``dalpha_dt``'s internal unit is
-        rad/yr, so the rate converts here alongside alpha itself
+        with o_j companion j's own linear orbit, anchored at t0_par -- the
+        same fiducial epoch the parallax uses (5d: one anchor is what makes
+        the two effects composable; Skowron Eq. A17).  A keplerian row comes
+        from companion j's own orbit through ``lens_geometry_from_orbit``,
+        the same physics function the reported s/alpha use; a static row is
+        its constant (s_j, alpha_j).  ``alpha`` is returned in DEGREES, the
+        unit both magnification backends take; ``dalpha_dt``'s internal
+        unit is rad/yr, so the rate converts here alongside alpha itself
         (_alpha_deg).  Skowron's gamma vocabulary maps as
         gamma_par = ds_dt/s_0 and gamma_perp = -dalpha_dt -- the minus is
-        C24's rule, and the light curve built from these definitions is
-        pinned against MulensModel's linear branch (the reference
+        C24's rule, and the binary light curve built from these definitions
+        is pinned against MulensModel's linear branch (the reference
         implementation) in tests/test_lens_orbital_motion.py.
 
         ``times`` may be a tensor or a numpy array (the likelihood's
@@ -1375,43 +1386,55 @@ class MulensEvent(Component):
         curve is the curve the likelihood fits.
         """
         lens = system.lens
-        om = lens.orbital_motion[0]
-        if om is None:
+        if not lens.any_motion:
             return None
-        dt_yr = (times - self.t0_par[0]) / DAYS_PER_YEAR
-        if om == "linear":
-            # The rates are the companion's type: linear ORBIT's (anchored
-            # at t0_par, which is that orbit's epoch -- Orbit._taylor_epochs).
-            o = lens.motion_orbit_idx
-            s_t = lens.s.value[1] + system.orbit.ds_dt.value[o] * dt_yr
-            alpha_t_deg = (
-                self._alpha_deg(system, 0)
-                + system.orbit.dalpha_dt.value[o] * _RAD_TO_DEG * dt_yr
-            )
-            return s_t, alpha_t_deg
-        # keplerian: the same physics function the reported s/alpha use
-        # (evaluated there at t0_par), here over the epoch vector.  No
-        # anchor enters -- alpha(t) = phi_pi - PA_axis(t) is absolute
-        # (C15/C20/C24), and s(t) is the projected separation in Einstein
-        # units.  Adds NO free parameters (8.6.8 5b).
-        j = lens.kep_orbit_idx
+        dt_yr = (pt.as_tensor_variable(times) - self.t0_par[0]) / DAYS_PER_YEAR
         orbit = system.orbit
-        s_t, alpha_t_rad = lens_geometry_from_orbit(
-            pt.as_tensor_variable(times),
-            orbit.tp_target.value[j],
-            orbit.n.value[j],
-            orbit.ecc.value[j],
-            orbit.sinw.value[j],
-            orbit.cosw.value[j],
-            orbit.cosi.value[j],
-            orbit.bigomega.value[j],
-            orbit.a.value[j],
-            self.theta_E.value[0],
-            system.star.distance.value[int(self.lens_bodies[0][1])],
-            self.pi_E_N.value[0],
-            self.pi_E_E.value[0],
-        )
-        return s_t, alpha_t_rad * _RAD_TO_DEG
+        s_rows, alpha_rows = [], []
+        for j, (mode, o) in enumerate(
+            zip(lens.companion_motion, lens.companion_orbit_idx)
+        ):
+            elem = j + 1
+            if mode == "linear":
+                # The rates are the companion's own type: linear ORBIT's
+                # (anchored at t0_par, that orbit's epoch --
+                # Orbit._taylor_epochs).
+                s_rows.append(
+                    lens.s.value[elem] + orbit.ds_dt.value[o] * dt_yr
+                )
+                alpha_rows.append(
+                    self._alpha_deg(system, j)
+                    + orbit.dalpha_dt.value[o] * _RAD_TO_DEG * dt_yr
+                )
+            elif mode == "keplerian":
+                # No anchor enters -- alpha(t) = phi_pi - PA_axis(t) is
+                # absolute (C15/C20/C24), and s(t) is the projected
+                # separation in Einstein units.  Adds NO free parameters
+                # (8.6.8 5b).
+                s_t, alpha_t_rad = lens_geometry_from_orbit(
+                    pt.as_tensor_variable(times),
+                    orbit.tp_target.value[o],
+                    orbit.n.value[o],
+                    orbit.ecc.value[o],
+                    orbit.sinw.value[o],
+                    orbit.cosw.value[o],
+                    orbit.cosi.value[o],
+                    orbit.bigomega.value[o],
+                    orbit.a.value[o],
+                    self.theta_E.value[0],
+                    system.star.distance.value[int(self.lens_bodies[0][1])],
+                    self.pi_E_N.value[0],
+                    self.pi_E_E.value[0],
+                )
+                s_rows.append(s_t)
+                alpha_rows.append(alpha_t_rad * _RAD_TO_DEG)
+            else:
+                # Static beside a moving companion: its constant geometry,
+                # broadcast over the epochs.
+                zero = pt.zeros_like(dt_yr)
+                s_rows.append(lens.s.value[elem] + zero)
+                alpha_rows.append(self._alpha_deg(system, j) + zero)
+        return pt.stack(s_rows), pt.stack(alpha_rows)
 
     def _source_offset_series(self, times, system):
         """Per-epoch xallarap trajectory shift ``(dtau_t, du_t)``, or None
@@ -1568,7 +1591,7 @@ class MulensEvent(Component):
         n_lenses = len(self.lens_bodies)
         if n_lenses > 2:
             return f"a {n_lenses}-body lens (MulensModel carries at most 2)"
-        if n_lenses == 2 and system.lens.orbital_motion[0] == "keplerian":
+        if n_lenses == 2 and system.lens.companion_motion[0] == "keplerian":
             return "a lens companion on a keplerian orbit"
         if self.xal_orbit_idx is not None:
             return "xallarap (a source orbit)"
@@ -1611,11 +1634,11 @@ class MulensEvent(Component):
                     self._alpha_deg(system, 0),
                 ]
             )
-            if lens.orbital_motion[0] == "linear":
+            if lens.companion_motion[0] == "linear":
                 # MulensModel's LINEAR branch is definitional in the same
                 # (ds_dt, dalpha_dt) and takes deg/yr; the rates are the
                 # companion's type: linear orbit's.
-                o = lens.motion_orbit_idx
+                o = lens.companion_orbit_idx[0]
                 params.extend(
                     [
                         system.orbit.ds_dt.value[o],
@@ -2181,7 +2204,7 @@ class MulensEvent(Component):
                 n_companions=self.n_companions,
             )
         elif n_lenses == 2:
-            if lens.orbital_motion[0] == "keplerian":
+            if lens.companion_motion[0] == "keplerian":
                 raise NotImplementedError(
                     "a lens companion on a keplerian orbit requires backend: "
                     "vbm_direct."

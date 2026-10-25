@@ -2165,16 +2165,17 @@ class Orbit(Component):
     def _lens_orbit_refs(self, system, comp_name, idx_attr, ref_key):
         """Orbit indices the ``comp_name`` microlensing component references
         through ``ref_key`` -- of ANY orbit type; the callers filter by
-        `self.types`.  Reads the built component's resolved ``idx_attr``
-        when there is one, else the raw config blocks (the components may
-        not be constructed yet in a partial harness).
+        `self.types`.  A BUILT component's ``idx_attr`` is the LIST of
+        resolved orbit indices (empty when it references none); before
+        construction (a partial harness), ``in_topology`` hands back the
+        raw config block(s), which are read directly.
         """
         comp = in_topology(system, comp_name)
         if comp is None:
             return set()
-        idx = getattr(comp, idx_attr, None)
-        if idx is not None:
-            return {int(idx)}
+        if not isinstance(comp, (dict, list)):
+            # The built component: its resolved list, never a guess.
+            return {int(o) for o in getattr(comp, idx_attr)}
         blocks = comp if isinstance(comp, list) else [comp]
         out = set()
         for b in blocks:
@@ -2189,7 +2190,7 @@ class Orbit(Component):
     def _lens_companion_orbits(self, system):
         """Orbits a lens COMPANION entry moves on (its ``orbit:`` key)."""
         return self._lens_orbit_refs(
-            system, "lens", "motion_orbit_idx", "orbit"
+            system, "lens", "motion_orbit_idxs", "orbit"
         )
 
     def _lens_keplerian_orbits(self, system):
@@ -2214,7 +2215,7 @@ class Orbit(Component):
         """Orbits the event's SOURCE moves on (``source_orbit:`` on the
         mulensevent block, C25)."""
         return self._lens_orbit_refs(
-            system, "mulensevent", "xal_orbit_idx", "source_orbit"
+            system, "mulensevent", "xal_orbit_idxs", "source_orbit"
         )
 
     def _node_degenerate_orbits(self, system):

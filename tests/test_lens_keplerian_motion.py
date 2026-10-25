@@ -127,10 +127,12 @@ def _eval_at_start(system, model, nodes):
 def _series_and_pa(system, model, times):
     import pytensor.tensor as pt
 
-    s_t, alpha_t_deg = system.mulensevent._companion_geometry_series(
+    # One row per companion (review 8.6.33); this lens has one.
+    s_all, alpha_all = system.mulensevent._companion_geometry_series(
         times, system
     )
-    omap = np.array([system.lens.kep_orbit_idx])
+    s_t, alpha_t_deg = s_all[0], alpha_all[0]
+    omap = np.array([system.lens.companion_orbit_idx[0]])
     dE, dN = system.orbit.get_sky_position(
         pt.as_tensor_variable(times),
         pt.ones(1),
