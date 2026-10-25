@@ -132,11 +132,12 @@ lens.LensC.xalpha:
 lens.LensC.yalpha:
     initval: 0.508440       # sin(149.44 deg)
 
-# ---- explicit body masses (REQUIRED for 3+ lens bodies) -------------------
-# q_j = M_j / M_1 is DERIVED from the masses at runtime (the engine's
-# q <-> companion-mass relation exists for companion slot 0 only, and a
-# user lens.<j>.q for j >= 1 cannot back-propagate, mulensing.md).  The
-# masses are set so the derived q's reproduce Table 2 exactly:
+# ---- body masses ------------------------------------------------------------
+# q_j = M_j / M_1 is DERIVED from the masses at runtime.  The engine relates
+# every companion's q to its mass (mulensing.md, "Three or more lens
+# bodies"), so lens.<j>.q initvals would also work; the masses are seeded
+# because they are what the Bayesian analysis gives.  They are set so the
+# derived q's reproduce Table 2 exactly:
 #   M_1 = 0.47 (Bayesian median, Eq. 10), M_2 = 0.526 M_1, M_3 = 0.241 M_1.
 star.Lens.mass:
     initval: 0.47

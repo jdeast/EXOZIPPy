@@ -6,10 +6,9 @@ prefix: "fitresults/KMT-2021-BLG-1122L"
 # KMT-2021-BLG-1122L: the first microlensing TRIPLE STELLAR system
 # (Han et al. 2023, A&A 672, A8; arXiv:2302.05613).  3L1S: a 0.47 Msun
 # primary with two M-dwarf companions near its Einstein ring, finite
-# source.  This is the triple-lens validation vehicle (review 7.6.4): the
-# engine's companion relations are binary-only (mulensing.md, "Three or
-# more lens bodies"), so a 3-body lens REQUIRES explicit per-body masses
-# in the params file, and q is DERIVED from them at runtime.
+# source.  This is the triple-lens validation vehicle (review 7.6.4).  q is
+# DERIVED from the per-body masses at runtime; the engine has one relation
+# set per companion (mulensing.md, "Three or more lens bodies").
 #
 # system architecture:
 #   star.Lens    = M1, the primary lens         (lens body 0)

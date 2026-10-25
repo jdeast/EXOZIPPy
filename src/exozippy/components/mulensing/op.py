@@ -533,7 +533,7 @@ class VBMDirectMagOp(Op):
             raise ValueError(
                 "VBMDirectMagOp(orbital_motion=True) supports exactly "
                 "one companion (Lens raises earlier; mulensing.md "
-                "'3+ lens bodies')."
+                "'Three or more lens bodies')."
             )
         if self.orbital_motion or self.source_motion:
             self.itypes = [pt.dvector, pt.dvector, pt.dmatrix]
