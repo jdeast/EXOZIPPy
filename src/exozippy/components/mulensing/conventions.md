@@ -638,10 +638,17 @@ peaked at A = 8.58 where MulensModel at the published values gives 4.22, and aga
 real OGLE photometry the wrong sign cost chi2 = 781,739 on 351 points where the corrected
 chain gives 2,062 (MulensModel itself: 2,063).
 
-The offset itself is the orbit component's primary-body track in Einstein units:
-`dsigma(t) = [r_1(t) - r_1(t0_par)]`, `r_1` from `a_1 = a * m_companion / m_total`
-projected through the SAME kernel and Thiele-Innes owner as everything else, scaled by
-`a_1 / (D_S * theta_E)`.  NO new sampled parameters: the orbit's period, eccentricity,
+**Each source `j` moves on its own orbit, or not at all, alone on one side of it**
+(review 8.6.9).  Its offset is its own barycentric track in Einstein units:
+`dsigma_j(t) = [r_j(t) - r_j(t0_par)]`, projected through the SAME kernel and
+Thiele-Innes owner as everything else and scaled by `a_j / (D_S * theta_E)`, with
+
+    a_j = +a * m_companion / m_total     (source on the orbit's PRIMARY side)
+    a_j = -a * m_primary   / m_total     (source on the COMPANION side: the opposite track)
+
+Two sources on one orbit, one per side, are the LINKED BINARY SOURCE: their offsets are
+exactly opposite and in the mass ratio.  (Paper III carries the same form, paper commit
+6a3e048.)  NO new sampled parameters: the orbit's period, eccentricity,
 orientation and the companion mass (through the barycentric scale) are the physical
 coordinates, which is Mroz et al. (2026)'s "ET" philosophy expressed through the component
 graph rather than bolted on.  A LINEAR source drift is deliberately not offered: it is
