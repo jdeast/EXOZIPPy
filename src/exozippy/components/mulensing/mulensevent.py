@@ -25,6 +25,10 @@ import pytensor.tensor as pt
 
 from exozippy.components.component import Component
 from exozippy.components.orbit.bodies import orbit_types
+from exozippy.components.star.position import (
+    probe_star_radec,
+    require_star_radec,
+)
 from exozippy.config import (
     PRECEDENCE_DERIVED_DATA,
     PRECEDENCE_DERIVED_MIXED,
@@ -1133,40 +1137,20 @@ class MulensEvent(Component):
                 f"its direction."
             )
             return None
-        try:
-            n_stars = system.star.n_elements
-            source_ndx = int(self.source_map[0])
-            ra_all = self.config_manager.resolve(
-                "star", "ra", shape=(n_stars,)
-            )["initval"]
-            dec_all = self.config_manager.resolve(
-                "star", "dec", shape=(n_stars,)
-            )["initval"]
-        except Exception as exc:  # pragma: no cover - seeds are optional
-            logger.debug(
-                f"[{self.prefix}] could not resolve the line of sight for "
-                f"the galactic-model proper-motion seeds: {exc!r}"
-            )
-            return None
-
-        keys = [f"star.{source_ndx}.ra", "star.ra"]
-        names = getattr(system.star, "names", None)
-        if names:
-            keys.append(f"star.{names[source_ndx]}.ra")
-        if not any(k in self.config_manager.user_params for k in keys):
+        # probe_star_radec, not resolve(): a source position LINKED to the
+        # lens's read as the defaults.yaml placeholder under resolve(), and
+        # an `in user_params` test cannot tell a link from a number (review
+        # 1.1.10).  An uninformed position means no line of sight, so no
+        # seed -- these seeds are optional.
+        source_ndx = int(self.source_map[0])
+        pos = probe_star_radec(self.config_manager, [source_ndx])[source_ndx]
+        if pos is None:
             logger.debug(
                 f"[{self.prefix}] no user-set RA/Dec; skipping the "
                 f"galactic-model proper-motion seeds."
             )
             return None
-
-        # resolve() hands back the value in the parameter's USER unit,
-        # which for ra/dec is degrees; the galactic-model helpers take
-        # radians.
-        return (
-            float(np.radians(np.atleast_1d(ra_all)[source_ndx])),
-            float(np.radians(np.atleast_1d(dec_all)[source_ndx])),
-        )
+        return pos
 
     def _user_pm_keys(self, system, star_idx):
         """The params-file keys that set star ``star_idx``'s proper motion.
@@ -1315,15 +1299,16 @@ class MulensEvent(Component):
             # or data-free event): the frame is still well defined by the
             # source star's own coordinates, so resolve them here rather
             # than leave geocentric_frame to raise at stage 7.
+            # require_star_radec, not resolve(): a linked position read
+            # as the placeholder (review 1.1.10).
             source_ndx = int(self.source_bodies[0][1])
-            n_stars = system.star.n_elements
-            ra_deg = self.config_manager.resolve(
-                "star", "ra", shape=(n_stars,)
-            )["initval"][source_ndx]
-            dec_deg = self.config_manager.resolve(
-                "star", "dec", shape=(n_stars,)
-            )["initval"][source_ndx]
-            self.set_line_of_sight(np.radians(ra_deg), np.radians(dec_deg))
+            self.set_line_of_sight(
+                *require_star_radec(
+                    self.config_manager,
+                    source_ndx,
+                    f"[{self.prefix}] the microlensing frame",
+                )
+            )
         vperp_e, vperp_n = self._earth_vperp_en(system)
         self.config_manager.add_constant(
             "mulensevent.0.earth_vperp_e", vperp_e

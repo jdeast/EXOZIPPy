@@ -12,6 +12,7 @@ from scipy.optimize import nnls
 
 from exozippy.compat import patch_mulensmodel_method_order
 from exozippy.components.instrument import Instrument
+from exozippy.components.star.position import probe_star_radec
 from exozippy.config import PRECEDENCE_DERIVED_DATA, user_entry
 from exozippy.ephemeris import observer_position_at_reception
 from exozippy.outputs.prose import get_collector
@@ -472,14 +473,11 @@ class MulensInstrument(Instrument):
         # stage is the user's config key order, so they may not exist yet).
         self._n_sources = int(system.source.n_elements)
 
-        # Source RA/Dec (degrees from resolve → radians for projection math).
-        # Stashed for MulensEvent._earth_vperp_en: the mu_helio -> mu_geo
-        # conversion must project Earth's velocity with the same (ra, dec)
-        # the Skowron deltas are projected with.
-        ra_deg, dec_deg = self._resolve_source_radec_deg(system)
-        ra_rad = ra_deg * np.pi / 180.0
-        dec_rad = dec_deg * np.pi / 180.0
-        self._source_radec_rad = (ra_rad, dec_rad)
+        # Source RA/Dec (radians), stashed for MulensEvent._earth_vperp_en:
+        # the mu_helio -> mu_geo conversion must project Earth's velocity
+        # with the same (ra, dec) the Skowron deltas are projected with.
+        self._source_radec_rad = self._resolve_source_radec_rad(system)
+        ra_rad, dec_rad = self._source_radec_rad
 
         # A PROVISIONAL geocentric frame, at MulensEvent's preliminary
         # t0_par, so the relaxation engine's geocentric t_E / pi_E relations
@@ -863,50 +861,55 @@ class MulensInstrument(Instrument):
             rank=30,
         )
 
-    def _resolve_source_radec_deg(self, system):
-        """Source star's sky position in degrees.
+    def _resolve_source_radec_rad(self, system):
+        """Source star's sky position in radians.
 
-        Falls back to the (primary) lens star's ra/dec when the user never
-        explicitly set the source's own -- source and lens are angularly
-        coincident by construction, so params.yaml only needs to state the
-        target coordinates once, on the lens.
+        Falls back to the (primary) lens star's ra/dec when the source's own
+        are not set -- source and lens are angularly coincident by
+        construction, so params.yaml only needs to state the target
+        coordinates once, on the lens.
+
+        Read with ``probe_star_radec`` (components/star/position.py), never
+        ``resolve()``: a source position LINKED to the lens's
+        (``star.Source.ra: {initval: star.Lens.ra}``) read as the
+        defaults.yaml placeholder (180, 0) under ``resolve()``, and the
+        line of sight, the geocentric frame and the Earth-velocity
+        conversion all followed it (KMT-2023-BLG-1454: t_E 6.394 for
+        6.438, light-curve logp +79.6 at identical parameters; review
+        1.1.10).  A STATED position (a number, or a link to numbers)
+        replaces the old ``in user_params`` test, so a link counts as set
+        and an unset position raises instead of reaching the placeholder.
         """
         # bodies, not star_map: called from load_data (stage 1), before the
         # source component's build_maps has necessarily run.
         source_ndx = int(system.source.bodies[0][1])
-        n_stars = system.star.n_elements
-        ra_all = self.config_manager.resolve("star", "ra", shape=(n_stars,))[
-            "initval"
-        ]
-        dec_all = self.config_manager.resolve("star", "dec", shape=(n_stars,))[
-            "initval"
-        ]
-
-        star_names = getattr(system.star, "names", None)
-        keys = [f"star.{source_ndx}.ra", "star.ra"]
-        if star_names:
-            keys.append(f"star.{star_names[source_ndx]}.ra")
-        user_set_source = any(
-            k in self.config_manager.user_params for k in keys
-        )
-
-        ndx = source_ndx
-        if not user_set_source:
-            # The PRIMARY lens body (entry 0), never "the first star among
-            # the lens bodies": MulensEvent._validate_bodies (stage 3)
-            # refuses a non-star primary, but this runs in stage 1, so the
-            # same rule is enforced here rather than silently borrowing a
-            # star COMPANION's coordinates.
-            p_type, p_ndx = system.lens.bodies[0]
-            if p_type != "star":
-                raise ValueError(
-                    f"[{self.prefix}] the primary lens body (lens entry 0) "
-                    f"is '{p_type}.{p_ndx}', but it must be a star "
-                    f"(see MulensEvent._validate_bodies)."
-                )
-            ndx = int(p_ndx)
-
-        return float(ra_all[ndx]), float(dec_all[ndx])
+        # The PRIMARY lens body (entry 0), never "the first star among the
+        # lens bodies": MulensEvent._validate_bodies (stage 3) refuses a
+        # non-star primary, but this runs in stage 1, so the same rule is
+        # enforced here rather than silently borrowing a star COMPANION's
+        # coordinates.
+        p_type, p_ndx = system.lens.bodies[0]
+        wanted = [source_ndx] + ([int(p_ndx)] if p_type == "star" else [])
+        pos = probe_star_radec(self.config_manager, wanted)
+        if pos[source_ndx] is not None:
+            return pos[source_ndx]
+        if p_type != "star":
+            raise ValueError(
+                f"[{self.prefix}] the source star has no ra/dec, and the "
+                f"primary lens body (lens entry 0) is '{p_type}.{p_ndx}', "
+                f"which must be a star to lend its coordinates (see "
+                f"MulensEvent._validate_bodies)."
+            )
+        if pos[int(p_ndx)] is None:
+            raise ValueError(
+                f"[{self.prefix}] the microlensing line of sight needs the "
+                f"target's sky position, but neither the source "
+                f"(star.{source_ndx}) nor the primary lens "
+                f"(star.{int(p_ndx)}) has ra/dec set (only the "
+                f"defaults.yaml placeholder exists).  Give star.<i>.ra and "
+                f"star.<i>.dec (deg) for one of them in the params file."
+            )
+        return pos[int(p_ndx)]
 
     def _probe_bootstrap_geometry(self, system):
         """The flux bootstrap's event geometry, read with ``probe_start``.
