@@ -116,7 +116,12 @@ def _compile_om(op):
     o = pt.dmatrix("o")
     s_t = pt.dvector("s_t")
     a_t = pt.dvector("a_t")
-    return pytensor.function([p, t, o, s_t, a_t], op(p, t, o, s_t, a_t))
+    # The Op takes (n_companions, n_epochs) matrices (review 8.6.33); one
+    # companion is one row.
+    return pytensor.function(
+        [p, t, o, s_t, a_t],
+        op(p, t, o, s_t.dimshuffle("x", 0), a_t.dimshuffle("x", 0)),
+    )
 
 
 def _compile(op):

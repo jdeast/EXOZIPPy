@@ -519,6 +519,10 @@ backends take degrees, which is what `Lens._alpha_deg` converts to.
 
 ### C24 -- lens orbital motion: `ds_dt`, `dalpha_dt`, and the gamma identities
 
+**Every companion moves on its own orbit, or not at all** (review 8.6.33): companion `j`'s
+`orbit:` names an orbit whose `type:` sets its mode, any number of companions may move, and
+a companion without one is static (zero rates) beside moving ones.
+
 **The linear mode is definitional.** Per companion `j`, with `t0_par` the same anchor the
 parallax uses (C5; Skowron Eq. A17 recommends `t_0,kep = t_0,par`, which is what makes the
 orbital and parallax terms composable):
@@ -533,9 +537,11 @@ the sign vocabulary below.
 
 **Skowron's gamma vocabulary maps onto these with ONE minus sign, and it is not optional:**
 
-    gamma_par     = ds_dt / s_0
-    gamma_perp    = -dalpha_dt        [rad/yr]
-    d(PA_axis)/dt = +gamma_perp = -dalpha_dt
+    gamma_par_j     = ds_dt_j / s_j0
+    gamma_perp_j    = -dalpha_dt_j      [rad/yr]
+    d(PA_axis_j)/dt = +gamma_perp_j = -dalpha_dt_j
+
+with `PA_axis_j` the position angle of the primary -> companion `j` axis.
 
 The identity `gamma_perp = -dalpha/dt` is Skowron+2011 Appendix A.4 verbatim, and their
 Section 3.3.1 writes the linear expansion as `alpha(t) = alpha_0 - gamma_perp (t - t0_par)`.
@@ -558,8 +564,10 @@ mirror seed must flip all four or it is a different (and usually terrible) model
 degenerate partner.
 
 **The keplerian mode projects an orbit through the same definitions**: with
-`delta_j(t) = (dE, dN)` the companion's offset from the primary in Einstein radii
-(`Orbit.state_vectors` scaled by `a / (D_L * theta_E)`),
+`delta_j(t) = (dE, dN)` companion `j`'s offset from the primary in Einstein radii
+(`Orbit.state_vectors` of companion `j`'s own orbit, scaled by `a / (D_L * theta_E)`) --
+which is why that orbit must pair exactly the lens primary with companion `j` (`Lens`
+raises otherwise; a hierarchical orbit is 8.6.33 phase 2),
 
     s_j(t)      = |delta_j(t)|
     PA_axis(t)  = atan2(dE, dN)
@@ -595,9 +603,12 @@ improvement.
 - Implemented in: `Lens` (config key `orbit:` on the companion's entry; the referenced
   orbit's `type: linear|keplerian` selects the mode, and a linear orbit owns the rates as
   `orbit.<name>.ds_dt` / `orbit.<name>.dalpha_dt`),
-  `mulensing/physics.py`, `op.VBMDirectMagOp` (per-epoch `s_t`/`alpha_t` inputs).
+  `mulensing/physics.py`, `MulensEvent._companion_geometry_series` (one row per
+  companion), `op.VBMDirectMagOp` (per-epoch `(n_companions, n_epochs)` geometry inputs).
 - Pinned by: `tests/test_lens_orbital_motion.py` -- the known-inclination sign test, the
-  MulensModel linear-motion parity test, and the A16 mirror test.
+  MulensModel linear-motion parity test, and the A16 mirror test; and
+  `tests/test_nbody_lens_motion.py` for several moving companions.
+- Paper III carries the per-companion form (paper commit 99133d7).
 
 ### C25 -- source orbital motion (xallarap): the SOURCE's offset at the parallax slot
 

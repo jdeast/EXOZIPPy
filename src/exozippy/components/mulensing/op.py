@@ -510,12 +510,14 @@ class VBMDirectMagOp(Op):
         self.bandpass = (
             bandpass  # None = no LD; str = u1 (then u2) at the param tail
         )
-        # Lens orbital motion (C24, review 8.6.8 5c): two extra dvector
-        # inputs carry the PER-EPOCH companion geometry -- s_t [r_E] and
-        # alpha_t [DEG] -- built in the graph by
-        # MulensEvent._companion_geometry_series.  The param vector keeps its
-        # static s_0/alpha_0 entries (the t0_par values; the series must
-        # equal them there), so the layout and _param_labels are unchanged.
+        # Lens orbital motion (C24, review 8.6.8 5c): two extra dmatrix
+        # inputs carry the PER-EPOCH geometry of EVERY companion -- S [r_E]
+        # and ALPHA [DEG], shape (n_companions, n_epochs), row j companion j
+        # (review 8.6.33) -- built in the graph by
+        # MulensEvent._companion_geometry_series; a static companion's row
+        # is its constant.  The param vector keeps its static s_0/alpha_0
+        # entries (the t0_par values), so the layout and _param_labels are
+        # unchanged.
         self.orbital_motion = bool(orbital_motion)
         # Source orbital motion -- xallarap (C25, review 8.6.9): two more
         # dvector inputs carry the PER-EPOCH trajectory shift (dtau_t,
@@ -529,16 +531,15 @@ class VBMDirectMagOp(Op):
         self.astrometry = bool(astrometry)
         if self.astrometry:
             self.otypes = [pt.dvector, pt.dvector, pt.dvector]
-        if self.orbital_motion and self.n_companions != 1:
+        if self.orbital_motion and self.n_companions < 1:
             raise ValueError(
-                "VBMDirectMagOp(orbital_motion=True) supports exactly "
-                "one companion (Lens raises earlier; mulensing.md "
-                "'Three or more lens bodies')."
+                "VBMDirectMagOp(orbital_motion=True) needs at least one "
+                "companion: a single lens has no geometry to move."
             )
         if self.orbital_motion or self.source_motion:
             self.itypes = [pt.dvector, pt.dvector, pt.dmatrix]
             if self.orbital_motion:
-                self.itypes = self.itypes + [pt.dvector, pt.dvector]
+                self.itypes = self.itypes + [pt.dmatrix, pt.dmatrix]
             if self.source_motion:
                 self.itypes = self.itypes + [pt.dvector, pt.dvector]
         # u2 only means anything alongside a u1, so a quadratic law without a
@@ -768,8 +769,10 @@ class VBMDirectMagOp(Op):
         # our total-mass Einstein radius.
         q_tot = sum(q for (_, q, _) in companions)
         m = np.empty(self.n_companions + 1)
-        pos = np.zeros((self.n_companions + 1, 2))
         m[0] = 1.0 / (1.0 + q_tot)
+        if any(np.ndim(s) or np.ndim(a) for (s, _, a) in companions):
+            return self._magnify_moving(companions, m, x, y, rho)
+        pos = np.zeros((self.n_companions + 1, 2))
         for j, (s, q, alpha_rad) in enumerate(companions):
             m[j + 1] = q * m[0]
             pos[j + 1] = (s * np.cos(alpha_rad), -s * np.sin(alpha_rad))
@@ -801,6 +804,66 @@ class VBMDirectMagOp(Op):
                 for xi, yi, isfar in zip(x.tolist(), y.tolist(), far.tolist())
             ]
         )
+
+    def _magnify_moving(self, companions, m, x, y, rho):
+        """N-lens magnification with PER-EPOCH geometry (review 8.6.33).
+
+        The lens layout of the static N-lens path (C15: companion j at
+        s_j (cos alpha_j, -sin alpha_j) from the primary, shifted to the
+        center of mass with the static mass fractions ``m``), rebuilt and
+        handed to SetLensGeometry at every epoch, because any companion's
+        (s, alpha) may change between epochs.  The far-field guard is the
+        static path's, per epoch.  Returns what ``_magnify`` returns: A, or
+        ``(A, cx, cy)`` with astrometry -- the centroid read right after
+        each call, before the next geometry overwrites VBM's state.
+        """
+        vbm = self._vbm
+        shape = np.shape(x)
+        S = [
+            np.broadcast_to(np.asarray(s, dtype=float), shape)
+            for s, _, _ in companions
+        ]
+        AL = [
+            np.broadcast_to(np.asarray(a, dtype=float), shape)
+            for _, _, a in companions
+        ]
+        for j, (_, q, _) in enumerate(companions):
+            m[j + 1] = q * m[0]
+        n = int(np.size(x))
+        A = np.empty(n)
+        cx = np.empty(n) if self.astrometry else None
+        cy = np.empty(n) if self.astrometry else None
+        xs, ys = np.ravel(x).tolist(), np.ravel(y).tolist()
+        pos = np.zeros((self.n_companions + 1, 2))
+        for i in range(n):
+            pos[0] = 0.0
+            for j in range(self.n_companions):
+                s_ij = float(S[j][i])
+                a_ij = float(AL[j][i])
+                pos[j + 1] = (s_ij * np.cos(a_ij), -s_ij * np.sin(a_ij))
+            p_com = pos - m @ pos
+            vbm.SetLensGeometry(np.column_stack([p_com, m]).ravel().tolist())
+            xi, yi = xs[i], ys[i]
+            if not self.use_rho:
+                A[i] = vbm.MultiMag0(xi, yi)
+            else:
+                r_inf = (
+                    max(
+                        float(S[j][i]) + 1.0 / float(S[j][i])
+                        for j in range(self.n_companions)
+                    )
+                    + 2.0
+                )
+                if xi * xi + yi * yi > (r_inf + 2.0 * rho) ** 2:
+                    A[i] = vbm.MultiMag0(xi, yi)
+                else:
+                    A[i] = vbm.MultiMag2(xi, yi, rho)
+            if self.astrometry:
+                cx[i] = vbm.astrox1
+                cy[i] = vbm.astrox2
+        if not self.astrometry:
+            return A
+        return A, cx, cy
 
     def _collect(self, calls):
         """Run one VBM call per epoch and read the astrox pair after EACH
@@ -992,11 +1055,13 @@ class VBMDirectMagOp(Op):
 
         if series is not None:
             # Per-epoch geometry supersedes the scalar s_0/alpha_0 entries
-            # (which remain the t0_par anchors).  Same S_FLOOR as the scalar
-            # path; alpha arrives in degrees, like every alpha here.
+            # (which remain the t0_par anchors), row j for companion j.
+            # Same S_FLOOR as the scalar path; alpha arrives in degrees,
+            # like every alpha here.
             s_t = np.maximum(np.asarray(series[0], dtype=float), S_FLOOR)
             alpha_t = np.radians(np.asarray(series[1], dtype=float))
-            companions[0] = (s_t, companions[0][1], alpha_t)
+            for j in range(self.n_companions):
+                companions[j] = (s_t[j], companions[j][1], alpha_t[j])
 
         dN, dE = self._deltas(obs_pos_np)
         tau = (

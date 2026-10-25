@@ -21,7 +21,7 @@ import pymc as pm
 import pytensor.tensor as pt
 
 from exozippy.components.component import Component
-from exozippy.components.orbit.bodies import orbit_types
+from exozippy.components.orbit.bodies import orbit_types, parse_orbit_bodies
 from exozippy.components.parameterization import mode_manifest
 from exozippy.config import PRECEDENCE_DEFAULT, user_entry
 from exozippy.outputs.prose import get_collector
@@ -160,40 +160,63 @@ class Lens(Component):
                     f"(the magnification backends take first derivatives "
                     f"only, conventions.md C24)."
                 )
+            if t == "keplerian":
+                # A keplerian orbit gives its COMPANION GROUP's position
+                # relative to its PRIMARY GROUP, which is companion j's
+                # (s_j, alpha_j) -- defined relative to the lens primary
+                # (C15) -- only when the groups are exactly [primary] and
+                # [companion j].  Anything else is a hierarchical system
+                # (8.6.33 phase 2) and would silently give the wrong
+                # geometry.  A linear orbit only holds rates of (s_j,
+                # alpha_j) themselves, so its groups do not enter.
+                prim, comp = parse_orbit_bodies(sys_cfg.get("orbit"), sys_cfg)
+                want = ([tuple(self.bodies[0])], [tuple(self.bodies[j + 1])])
+                got = (
+                    [tuple(b) for b in prim[o]],
+                    [tuple(b) for b in comp[o]],
+                )
+                if got != want:
+                    raise NotImplementedError(
+                        f"lens.{j + 1}: keplerian orbit {ref!r} has primary "
+                        f"group {got[0]} and companion group {got[1]}; a "
+                        f"lens companion's keplerian orbit must pair exactly "
+                        f"the lens primary {want[0]} with that companion "
+                        f"{want[1]} (hierarchical orbits are review 8.6.33 "
+                        f"phase 2)."
+                    )
             self._companion_om.append(t)
             self._companion_orbit_idx.append(o)
-        om_set = [(j, om) for j, om in enumerate(self._companion_om) if om]
-        om = om_set[0][1] if om_set else None
-        # Event-level compat view (the dispatcher and orbit.py read these).
-        self.orbital_motion = [om]
-        self.orbit_ref = [
-            self._companion_orbit_ref[om_set[0][0]] if om_set else None
-        ]
-        if om is not None:
-            if len(om_set) > 1 or self.n_companions > 1:
-                raise NotImplementedError(
-                    "lens orbital motion currently supports a lens with "
-                    "exactly one companion (Lens and VBMDirectMagOp carry "
-                    "a single s(t)/alpha(t) series; mulensing.md, 'Three "
-                    "or more lens bodies')."
-                )
-            if om == "keplerian" and n_sources > 1:
-                raise NotImplementedError(
-                    "lens orbital motion on a keplerian orbit currently "
-                    "supports a single source (theta_E's per-source "
-                    "normalization would give each source its own "
-                    "Einstein-unit s(t))."
-                )
-
-        # The orbit the moving companion is on, of either type (Orbit reads
-        # this to decide what the orbit owes the lens), and -- kept apart --
-        # the keplerian one whose elements derive s/alpha.
-        self.motion_orbit_idx = (
-            self._companion_orbit_idx[om_set[0][0]] if om_set else None
-        )
-        self.kep_orbit_idx = (
-            self.motion_orbit_idx if om == "keplerian" else None
-        )
+        # PER COMPANION (review 8.6.33): any number of companions may move,
+        # each on its own orbit, linear or keplerian, and a static
+        # companion stays static beside a moving one.  `companion_motion[j]`
+        # and `companion_orbit_idx[j]` are companion slot j's (lens element
+        # j + 1); `motion_orbit_idxs` is every orbit a companion moves on
+        # (what Orbit owes the lens); `any_motion` says whether the
+        # magnification backends need per-epoch geometry at all.
+        self.companion_motion = list(self._companion_om)
+        self.companion_orbit_idx = list(self._companion_orbit_idx)
+        moving = [o for o in self.companion_orbit_idx if o is not None]
+        if len(set(moving)) != len(moving):
+            # Phase 1 of the design: each moving companion's orbit is
+            # primary <-> that companion.  Two companions on ONE orbit would
+            # be a companion GROUP, whose members' positions need the
+            # hierarchical composition through the body groups (8.6.33
+            # phase 2), not the same s(t)/alpha(t) twice.
+            raise NotImplementedError(
+                f"lens: companions {self._companion_orbit_ref} share an "
+                f"orbit; each moving companion needs its own orbit "
+                f"(hierarchical companion groups are not implemented yet, "
+                f"review 8.6.33 phase 2)."
+            )
+        self.motion_orbit_idxs = sorted(moving)
+        self.any_motion = bool(moving)
+        if "keplerian" in self.companion_motion and n_sources > 1:
+            raise NotImplementedError(
+                "lens orbital motion on a keplerian orbit currently "
+                "supports a single source (theta_E's per-source "
+                "normalization would give each source its own "
+                "Einstein-unit s(t))."
+            )
 
     # ------------------------------------------------------------------
     # Helpers
@@ -210,6 +233,8 @@ class Lens(Component):
         """
         up = self.config_manager.user_params
         for j in range(self.n_companions):
+            if self.companion_motion[j] == "keplerian":
+                continue  # no log_s: s is derived from the orbit (C24)
             elem = j + 1
             entry = user_entry(up, f"lens.{elem}.s")
             if entry is None:
@@ -343,55 +368,70 @@ class Lens(Component):
             # Element 0 is the masked primary; its code is a filler for the
             # same reason as the maps above.
             self.companion_type_code = type_code
-        if self.kep_orbit_idx is not None:
-            self.lens_kep_orbit_map = np.full(n, self.kep_orbit_idx, dtype=int)
-        if self.motion_orbit_idx is not None:
-            self.lens_motion_orbit_map = np.full(
-                n, self.motion_orbit_idx, dtype=int
-            )
+        # Per-element orbit maps (review 8.6.33): element j + 1 holds
+        # companion j's own orbit.  An element whose companion is not in
+        # that mode holds the mode's first orbit as a FILLER that keeps the
+        # index legal; its per-element expression is a different mode's, so
+        # no filler is ever read (the same rule as companion_body_map).
+        for mode, attr in (
+            ("keplerian", "lens_kep_orbit_map"),
+            ("linear", "lens_motion_orbit_map"),
+        ):
+            own = [
+                (j + 1, o)
+                for j, (m, o) in enumerate(
+                    zip(self.companion_motion, self.companion_orbit_idx)
+                )
+                if m == mode
+            ]
+            if own:
+                orbit_map = np.full(n, own[0][1], dtype=int)
+                for elem, o in own:
+                    orbit_map[elem] = o
+                setattr(self, attr, orbit_map)
 
     def register_parameters(self, system):
         """Stage 3: the per-body manifest (masked primary)."""
         # s is derived from the sampled log_s; move any user s bounds onto
-        # log_s before the manifest/relaxation engine run.  In keplerian
-        # orbital-motion mode there IS no log_s.
-        if self.orbital_motion[0] != "keplerian":
-            self._translate_s_bounds_to_log_s()
+        # log_s before the manifest/relaxation engine run.  A companion in
+        # keplerian orbital-motion mode has no log_s (skipped inside).
+        self._translate_s_bounds_to_log_s()
 
         if self.n_companions >= 1:
             # Seed alpha hints (degrees, user unit) from user xalpha/yalpha
             # entries so inspect_start can display alpha before the
             # expression graph is built.  Companion slot j is ELEMENT j+1.
-            if self.orbital_motion[0] != "keplerian":
-                up = self.config_manager.user_params
-                for j in range(self.n_companions):
-                    elem = j + 1
-                    ca_entry = user_entry(up, f"lens.{elem}.xalpha") or {}
-                    sa_entry = user_entry(up, f"lens.{elem}.yalpha") or {}
-                    ca = ca_entry.get("initval")
-                    sa = sa_entry.get("initval")
-                    # List-valued initval (P4 multi-seed): use seed 0.
-                    if isinstance(ca, (list, tuple)):
-                        ca = ca[0] if ca else None
-                    if isinstance(sa, (list, tuple)):
-                        sa = sa[0] if sa else None
-                    if ca is not None and sa is not None:
-                        alpha_deg = float(
-                            np.arctan2(float(sa), float(ca)) * _RAD_TO_DEG
-                        )
-                        # rank=PRECEDENCE_DEFAULT (20), NOT the add_hint
-                        # default of PRECEDENCE_DERIVED_DATA (60): this
-                        # value is arithmetic on the USER's own
-                        # xalpha/yalpha entries, purely for display, and
-                        # must neither be reported as data-derived
-                        # provenance (the startup table's source column,
-                        # export_solution, the GUI) nor outrank an
-                        # engine-solved alpha at rank 40.
-                        self.config_manager.add_hint(
-                            f"lens.{elem}.alpha",
-                            alpha_deg,
-                            rank=PRECEDENCE_DEFAULT,
-                        )
+            up = self.config_manager.user_params
+            for j in range(self.n_companions):
+                if self.companion_motion[j] == "keplerian":
+                    continue  # alpha is derived from the orbit (C24)
+                elem = j + 1
+                ca_entry = user_entry(up, f"lens.{elem}.xalpha") or {}
+                sa_entry = user_entry(up, f"lens.{elem}.yalpha") or {}
+                ca = ca_entry.get("initval")
+                sa = sa_entry.get("initval")
+                # List-valued initval (P4 multi-seed): use seed 0.
+                if isinstance(ca, (list, tuple)):
+                    ca = ca[0] if ca else None
+                if isinstance(sa, (list, tuple)):
+                    sa = sa[0] if sa else None
+                if ca is not None and sa is not None:
+                    alpha_deg = float(
+                        np.arctan2(float(sa), float(ca)) * _RAD_TO_DEG
+                    )
+                    # rank=PRECEDENCE_DEFAULT (20), NOT the add_hint
+                    # default of PRECEDENCE_DERIVED_DATA (60): this
+                    # value is arithmetic on the USER's own
+                    # xalpha/yalpha entries, purely for display, and
+                    # must neither be reported as data-derived
+                    # provenance (the startup table's source column,
+                    # export_solution, the GUI) nor outrank an
+                    # engine-solved alpha at rank 40.
+                    self.config_manager.add_hint(
+                        f"lens.{elem}.alpha",
+                        alpha_deg,
+                        rank=PRECEDENCE_DEFAULT,
+                    )
 
             # q's mass dependencies are typed by the companion components.
             # All companions of ONE type share a single full-length body
@@ -518,7 +558,7 @@ class Lens(Component):
         slicing skips it (a scalar applies to every element)."""
         if (
             param_name in ("s", "alpha")
-            and self.orbital_motion[0] == "keplerian"
+            and "keplerian" in self.companion_motion
         ):
             context_nodes = dict(context_nodes or {})
             context_nodes.setdefault(
@@ -607,18 +647,27 @@ class Lens(Component):
         """
         self._validate_q_start()
 
-        if self.orbital_motion[0] == "linear":
+        linear = [
+            j + 1 for j, m in enumerate(self.companion_motion) if m == "linear"
+        ]
+        if linear:
             # The bound-orbit rope for the linear rates (C24; Skowron A19):
-            # ONE LENS ORBIT, ONE BOUND (review 8.6.18).  beta is a
-            # per-companion vector with a masked primary now, so the bound
-            # reads THE COMPANION'S element -- element 1, never element 0,
-            # whose pinned bookkeeping value would otherwise contribute a
-            # constant logp offset (the design's one whole-vector-reduction
-            # hazard, section 2.3).
-            pm.Potential(
-                f"{self.prefix}.bound_orbit",
-                soft_upper_bound(self.beta.value[1], 1.0, scale=0.1),
-            )
+            # ONE LENS ORBIT, ONE BOUND (review 8.6.18) -- so one bound per
+            # linearly moving companion, each on its own element (review
+            # 8.6.33), never on element 0, whose pinned bookkeeping value
+            # would otherwise contribute a constant logp offset (the
+            # design's one whole-vector-reduction hazard, section 2.3).
+            # One companion keeps the historical node name.
+            for elem in linear:
+                name = (
+                    f"{self.prefix}.bound_orbit"
+                    if len(linear) == 1
+                    else f"{self.prefix}.bound_orbit_{elem}"
+                )
+                pm.Potential(
+                    name,
+                    soft_upper_bound(self.beta.value[elem], 1.0, scale=0.1),
+                )
             get_collector(system).add(
                 r"We modeled the orbital motion of the lens binary to "
                 r"first order, $s(t) = s_0 + \dot{s}\,(t - t_{0,\rm par})$ "
