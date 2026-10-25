@@ -1961,16 +1961,26 @@ class Orbit(Component):
         ).get("planet") or []
         if not isinstance(planet_cfgs, list):
             planet_cfgs = [planet_cfgs]
-        for j, pc in enumerate(planet_cfgs):
-            o = int((pc or {}).get("orbit_ndx", 0))
-            if o in consumers:
-                raise ValueError(
-                    f"[{self.prefix}.{name(o)}] planet "
-                    f"{(pc or {}).get('name', j)!r} has orbit_ndx {o}, a "
-                    f"type: {self.types[o]} orbit.  A planet's transit and "
-                    f"derived geometry need a Keplerian orbit; point its "
-                    f"orbit_ndx at one."
-                )
+        # A planet on a Taylor orbit has no Keplerian geometry, and Planet
+        # then declares none (Planet.keplerian_geometry) -- legal when
+        # nothing needs it, e.g. a lens planet whose only reader is the
+        # lens's linear orbital motion (review 8.8.20).  What needs it is a
+        # TRANSIT: every transit file models every planet (p, b, a/R*, the
+        # durations), so a transit block with a planet on a Taylor orbit
+        # cannot be built.  (RM/DT and astrometry on a Taylor orbit are
+        # refused by their own checks above and below.)
+        if in_topology(system, "transit") is not None:
+            for j, pc in enumerate(planet_cfgs):
+                o = int((pc or {}).get("orbit_ndx", 0))
+                if o in consumers:
+                    raise ValueError(
+                        f"[{self.prefix}.{name(o)}] planet "
+                        f"{(pc or {}).get('name', j)!r} has orbit_ndx {o}, a "
+                        f"type: {self.types[o]} orbit, and this system has a "
+                        f"transit block, which models every planet's "
+                        f"Keplerian transit geometry; point the planet's "
+                        f"orbit_ndx at a Keplerian orbit."
+                    )
 
         ast = components.get("astrometryinstrument")
         if ast is not None:

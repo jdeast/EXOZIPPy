@@ -373,10 +373,13 @@ def test_the_rv_star_on_the_companion_side_is_refused(tmp_path):
         _system(cfg, {"star.B.mass": {"initval": 0.5}}, build=False)
 
 
-def test_a_planet_on_a_taylor_orbit_is_refused(tmp_path):
+def test_a_planet_on_a_taylor_orbit_has_no_keplerian_geometry(tmp_path):
     """
-    Given a planet whose orbit_ndx points at a Taylor orbit,
-    Then stage 3 raises: its transit and derived geometry need a Keplerian.
+    Given a planet whose orbit_ndx points at a Taylor orbit and NO transit,
+    Then it builds without Keplerian geometry (review 8.8.20): nothing reads
+      the planet's p, a, K, ..., so none is declared.  (With a transit block
+      the same planet is refused: tests below and
+      tests/test_planet_taylor_orbit.py.)
     """
     rv = _write_rv(tmp_path / "t.rv")
     cfg = _config(
@@ -391,8 +394,10 @@ def test_a_planet_on_a_taylor_orbit_is_refused(tmp_path):
         ],
         planets=[{"name": "b", "orbit_ndx": 0}],
     )
-    with pytest.raises(ValueError, match="Keplerian orbit"):
-        _system(cfg, build=False)
+    system, _ = _system(cfg, build=False)
+    assert not system.planet.keplerian_geometry(system)
+    for name in ("p", "a", "K"):
+        assert name not in system.planet.manifest
 
 
 # ---------------------------------------------------------------------------
