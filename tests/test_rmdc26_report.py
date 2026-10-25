@@ -731,13 +731,35 @@ def test_physical_parameters_only_when_the_caller_sets_them(R):
 
 def test_the_verdict_row_is_parsed(R):
     v = R.parse_verdict_line(
-        "138   OK                                 MIST wall,M-R locus,theta* off   1.451    1.02     8.73   0.120"
+        "138   OK                                 MIST wall,M-R locus,theta* off   1.451    1.02     8.73   0.120",
+        header=R.VERDICT_HEADER_LEGACY,
     )
     assert v["lc"] == "OK" and v["phy"] == "MIST wall,M-R locus,theta* off"
     assert v["rhat"] == pytest.approx(1.451) and v["outfrac"] == pytest.approx(
         0.12
     )
     assert R.parse_verdict_line(None) == {}
+    # 2026-10-24 format: modes/stuck appended, an LC verdict with spaces and
+    # a PHY verdict overflowing its column (the rows that broke tok[-4:])
+    hdr = (
+        "ev    LC verdict                               PHY verdict          "
+        "           Rhat    chi2    ratio  outfrc  modes  stuck"
+    )
+    v = R.parse_verdict_line(
+        "094   OK                                       MIST wall,M-R locus,"
+        "theta* off (0.037)   1.255     nan     0.04   0.054      1   1.00",
+        header=hdr,
+    )
+    assert v["phy"] == "MIST wall,M-R locus,theta* off (0.037)"
+    assert v["rhat"] == pytest.approx(1.255) and np.isnan(v["chi2"])
+    assert v["ratio"] == pytest.approx(0.04) and v["stuck"] == 1.0
+    v = R.parse_verdict_line(
+        "006   modes stuck 2/98%                        theta* off (13)      "
+        "          1.230    1.08    13.42   0.150      2   0.98",
+        header=hdr,
+    )
+    assert v["lc"] == "modes stuck 2/98%" and v["phy"] == "theta* off (13)"
+    assert v["rhat"] == pytest.approx(1.23) and v["modes"] == 2.0
     assert "FULL" in R.tier_reason("FULL", v) and "withheld" in R.tier_reason(
         "SCORED", v
     )

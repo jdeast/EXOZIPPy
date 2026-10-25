@@ -1055,15 +1055,46 @@ def pick_config(cands, run_dir, ev, trace_mtime, manifest_config=None):
     return max(ok, key=lambda c: c[2])[0] if ok else None
 
 
-def parse_verdict_line(line):
-    """{lc, phy, rhat, chi2, ratio, outfrac} from one sed/verdict.out row.
+#: verdict.out's header before the campaign added the modes/stuck columns
+#: (2026-10-24); used when the live file cannot be read.
+VERDICT_HEADER_LEGACY = (
+    "ev    LC verdict                         PHY verdict                    "
+    "  Rhat    chi2    ratio  outfrc"
+)
+#: verdict.out column name -> parse_verdict_line key.
+VERDICT_NUM_KEYS = {"Rhat": "rhat", "chi2": "chi2", "ratio": "ratio",
+                    "outfrc": "outfrac", "modes": "modes", "stuck": "stuck"}  # fmt: skip
 
-    The LC verdict is one comma-joined token; the PHY verdict is free text
-    ("A_V vs stated"); the last four columns are numbers."""
+
+def verdict_header(path=None):
+    """verdict.out's header line (the manifest copies rows without it)."""
+    try:
+        with open(path or VERDICT_FILE) as f:
+            return f.readline().rstrip("\n")
+    except OSError:
+        return VERDICT_HEADER_LEGACY
+
+
+def parse_verdict_line(line, header=None):
+    """{lc, phy, rhat, chi2, ratio, outfrac, ...} from one sed/verdict.out
+    row, by the HEADER's columns (``header`` defaults to the live file's).
+
+    The campaign adds columns (modes, stuck on 2026-10-24), and the LC
+    verdict can contain spaces ("modes stuck 2/98%"), so neither "the last
+    four tokens" nor "token 1" is safe: the LC verdict is the row's text
+    under the header's LC..PHY span, the numbers are the last N tokens for
+    the N header names after "PHY verdict", and the PHY verdict is what is
+    left between (free text, it may overflow its column)."""
     if not line:
         return {}
+    header = header if header is not None else verdict_header()
     tok = line.split()
-    if len(tok) < 6 or not tok[0].isdigit():
+    if not tok or not tok[0].isdigit():
+        return {}
+    i_lc, i_phy = header.find("LC"), header.find("PHY")
+    names = header[i_phy:].split()[2:] if i_phy >= 0 else []
+    n = len(names)
+    if i_lc < 0 or i_phy < 0 or n == 0 or len(tok) < 2 + n:
         return {}
 
     def num(x):
@@ -1072,9 +1103,13 @@ def parse_verdict_line(line):
         except ValueError:
             return float("nan")
 
-    rhat, chi2, ratio, outf = (num(x) for x in tok[-4:])
-    return {"lc": tok[1], "phy": " ".join(tok[2:-4]), "rhat": rhat,
-            "chi2": chi2, "ratio": ratio, "outfrac": outf}  # fmt: skip
+    if line[i_phy - 1 : i_phy] not in (" ", ""):
+        return {}  # the LC verdict overflowed its column: refuse to guess
+    rest = line[i_phy:].split()
+    out = {"lc": line[i_lc:i_phy].strip(), "phy": " ".join(rest[:-n])}
+    for name, x in zip(names, rest[-n:]):
+        out[VERDICT_NUM_KEYS.get(name, name)] = num(x)
+    return out
 
 
 def tier_reason(tier, verdict):
