@@ -103,6 +103,27 @@ class Source(Component):
                 ),
             },
             {
+                "key": "orbit",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Source orbital motion -- xallarap (conventions.md "
+                    "C25; review 8.6.9): the orbit instance (name or index) "
+                    "THIS source moves on; absent = a static source.  The "
+                    "source must be alone on one side of that orbit; its "
+                    "barycentric sky offset (the primary or the companion "
+                    "track) enters its trajectory at exactly the parallax "
+                    "slot, anchored at t0_par, with NO new sampled "
+                    "parameters.  Two sources on one orbit, one per side, "
+                    "are a linked binary source.  The orbit must be type: "
+                    "keplerian -- a linear source drift is exactly "
+                    "degenerate with (t_E, t_0, u_0, alpha) in the light "
+                    "curve alone -- and must differ from any lens "
+                    "companion's 'orbit:' (the lens binary)."
+                ),
+            },
+            {
                 "key": "star_constrains_rho",
                 "kind": "option",
                 "accepts": None,

@@ -672,8 +672,8 @@ direction is `tau_hat`; operationally:
 A published `xi_*` solution therefore drops into an EXOZIPPy config through these six
 lines; `examples/ob170114` is the shipped worked case (Mroz et al. 2026 Table B.1).
 
-- Implemented in: `Lens._source_offset_series` (config key `source_orbit:`, naming a
-  `type: keplerian` orbit),
+- Implemented in: `MulensEvent._source_offset_series` (config key `orbit:` on each
+  source entry, naming a `type: keplerian` orbit),
   `mulensing/physics.source_offset_from_orbit` / `xallarap_trajectory_shift`,
   `Lens.get_magnification` (symbolic) and `op.VBMDirectMagOp(source_motion=True)`.
 - Pinned by: `tests/test_xallarap.py` -- the C9 reconstruction with a displaced

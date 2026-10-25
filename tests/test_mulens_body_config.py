@@ -93,20 +93,17 @@ def test_per_source_flags_on_the_mulensevent_block_are_refused():
     assert "'source:' entry" in msg
 
 
-def test_companion_keys_on_a_source_entry_are_refused():
+def test_orbit_on_a_source_entry_is_accepted():
     """
     Given `orbit:` on a source entry,
     When the source block is parsed,
-    Then the refusal points at the lens companion entry (the per-companion
-      home) -- xallarap spells it source_orbit on mulensevent.
+    Then it is accepted: each source names the orbit it moves on (xallarap,
+      review 8.6.9), exactly as a lens companion does.  It used to be refused
+      as a lens-companion key, when xallarap was one event-level
+      `source_orbit:`.
     """
     cfg = _system_config(source=[{"body": "star.Source", "orbit": "S"}])
-    with pytest.raises(ValueError) as exc:
-        Source(cfg["source"], _DummyConfigManager(cfg))
-    msg = str(exc.value)
-    assert "source.0" in msg
-    assert "orbit" in msg
-    assert "'lens:' entry" in msg
+    Source(cfg["source"], _DummyConfigManager(cfg))
 
 
 @pytest.mark.parametrize(
