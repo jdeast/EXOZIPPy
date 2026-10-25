@@ -81,6 +81,9 @@ class _FakeConfigManager:
 
     def __init__(self, user_params=None):
         self.user_params = user_params if user_params is not None else {}
+        # No orbit block: every orbit type is the keplerian default
+        # (Planet.keplerian_geometry reads the raw config's orbit types).
+        self.system_config = {}
 
 
 _ONE_PLANET_ORBIT = _FakeOrbit(

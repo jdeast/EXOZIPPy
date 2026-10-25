@@ -16,6 +16,7 @@ from exozippy.outputs.prose import get_collector, join_names
 from exozippy.outputs.texutils import latex_escape
 from exozippy.potentials import soft_lower_bound
 
+from ..orbit.bodies import TAYLOR_TYPES, orbit_types
 from ..orbit.orbit import (
     amplitude_constrained_orbits,
     inclination_constrained_orbits,
@@ -369,9 +370,56 @@ class Planet(Component):
                 lines.append(prefix + "   |   ".join(parts))
         return lines
 
+    def keplerian_geometry(self, system):
+        """Do this system's planets have Keplerian orbital GEOMETRY?
+
+        Everything Planet derives from an orbit -- p, a, a/R*, b, K, msini,
+        teq, the transit durations, the radius prior and the msini/crossing
+        potentials -- is Keplerian.  A planet whose orbit is a Taylor orbit
+        (`type: linear|quadratic`: a lens companion's linear orbital motion,
+        or an unresolved trend) has none of it, and reading the Taylor
+        orbit's inactive Keplerian bookkeeping as an orbit would be a
+        silently wrong number.  So the question is per planet, not "is
+        there an orbit component" (review 8.8.20; the old test switched all
+        of it on for a lens planet on a linear lens orbit, which is why such
+        a planet was refused outright).
+
+        True when every planet's orbit is Keplerian, False when there is no
+        orbit or every planet's orbit is a Taylor orbit.  A MIX raises: the
+        manifest entries are whole-component, so one planet's geometry
+        cannot be declared while another's is absent (yet).
+        """
+        if "orbit" not in system.active_components:
+            return False
+        # From the raw config (orbit_types), as Lens and the symbolic maps
+        # read orbit types: it is what the user wrote, available at any
+        # stage, and an index past the declared types is keplerian (the
+        # orbit `type:` default).
+        types = orbit_types(self.config_manager.system_config)
+        taylor = [
+            (types[int(o)] if int(o) < len(types) else "keplerian")
+            in TAYLOR_TYPES
+            for o in self.orbit_map
+        ]
+        if not any(taylor):
+            return True
+        if all(taylor):
+            return False
+        raise NotImplementedError(
+            f"[{self.prefix}] planets {[n for n, t in zip(self.names, taylor) if t]} "
+            f"are on Taylor orbits and "
+            f"{[n for n, t in zip(self.names, taylor) if not t]} on Keplerian "
+            f"ones; a mix is not supported yet (the planet's orbit-derived "
+            f"parameters are declared for every planet or none; review "
+            f"8.8.20)."
+        )
+
     def register_parameters(self, system):
         """Stage 3: Auto-estimates and Manifest declaration."""
-        has_orbit = "orbit" in system.active_components
+        # Keplerian GEOMETRY, not merely "an orbit component exists": a lens
+        # planet on a linear lens orbit has no Keplerian elements to derive
+        # p, a, K, ... from (keplerian_geometry).
+        has_orbit = self.keplerian_geometry(system)
 
         self._resolve_mass_parameterization(system)
 
@@ -655,7 +703,12 @@ class Planet(Component):
         planet override it: true selects that coordinate, false rules it out.
         """
         mass_sides = self._mass_constrained(system)
-        orbit = system.active_components.get("orbit")
+        # Only a Keplerian orbit carries an inclination (keplerian_geometry).
+        orbit = (
+            system.active_components.get("orbit")
+            if self.keplerian_geometry(system)
+            else None
+        )
         if orbit is not None:
             inc_constrained = inclination_constrained_orbits(system, orbit)
             inc_modes = orbit.inclination_modes(system)
@@ -1006,7 +1059,7 @@ class Planet(Component):
                 key=f"{self.prefix}.chen",
             )
 
-        if "orbit" not in system.active_components:
+        if not self.keplerian_geometry(system):
             return
 
         orbits = system.orbit

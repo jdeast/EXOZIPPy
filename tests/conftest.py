@@ -69,6 +69,9 @@ class _DummyConfigManager:
     """Minimal ConfigManager stub for tests that only need a no-op hint interface."""
 
     user_params = {}
+    # No raw config: no orbit types are declared, so every orbit is the
+    # keplerian default (Planet.keplerian_geometry reads them from here).
+    system_config = {}
 
     def add_hint(self, *args, **kwargs):
         pass
