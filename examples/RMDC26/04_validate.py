@@ -52,17 +52,29 @@ def is_advisory(msg):
 
 
 def results_rows(path):
-    """{parname: [(mode, value, up, low)]} from a fit's results.csv."""
+    """{parname: [(mode, value, up, low)]} from a fit's results.csv.
+
+    Two schemas exist: multi-mode "parname, mode, weight, weight_err,
+    value, up_err, low_err" and single-mode "parname, value, up_err,
+    low_err" (a fit that settles into one mode).  Each row is read by its
+    length; a single-mode row's mode is "all".  Reading only the 7-column
+    form dropped every single-mode fit (029, 040 on 2026-10-25), and its
+    round trip then passed with nothing compared."""
     out = collections.defaultdict(list)
     with open(path, encoding="utf-8") as fh:
         for row in csv.reader(fh):
-            if not row or row[0].startswith("#") or len(row) < 7:
+            if not row or row[0].startswith("#"):
                 continue
-            if row[1].startswith("rejected"):
+            if len(row) >= 7:
+                mode, vals = row[1], row[4:7]
+            elif len(row) == 4:
+                mode, vals = "all", row[1:4]
+            else:
+                continue
+            if mode.startswith("rejected"):
                 continue
             try:
-                out[row[0]].append((row[1], float(row[4]), float(row[5]),
-                                    float(row[6])))  # fmt: skip
+                out[row[0]].append((mode,) + tuple(float(x) for x in vals))
             except ValueError:
                 continue
     return out
@@ -202,6 +214,10 @@ def main(argv=None):
             if os.path.exists(res):
                 da, dt = roundtrip(j, results_rows(res))
                 n_rt += 1
+                if dt is None or (da is None and "alpha" in p):
+                    errors.append("%s: round trip compared nothing: %s has "
+                                  "no %s row" % (sid, res, "source.t_0"
+                                  if dt is None else "lens.*.alpha"))  # fmt: skip
                 if da is not None and da > 10.0:
                     errors.append("%s: alpha %.3f deg back from radians is "
                                   "%.1f deg from every results.csv alpha"

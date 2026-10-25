@@ -797,3 +797,36 @@ def test_the_event_note_is_the_campaign_note_verbatim_plus_one_section(R):
     )
     assert "theta*" not in tail  # never re-described here
     assert "lp Rhat 1.2" in tail
+
+
+def test_results_csv_is_read_in_both_schemas(tmp_path):
+    """A fit that settles into one mode writes the 4-column schema; the
+    7-column-only reader dropped it (029, 040), and the alpha/t0 round trip
+    then compared nothing.  Both schemas must give the same rows."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "rmdc26_validate", EX / "04_validate.py"
+    )
+    V = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(V)
+    multi = tmp_path / "m.csv"
+    multi.write_text(
+        "# parname, mode, weight, weight_err, value, up_err, low_err\n"
+        "lens.Companion.alpha,all,1.0,,118.853,0.098,0.1\n"
+        "source.t_0,all,1.0,,2461821.8299,0.0022,0.0021\n"
+        "source.t_0,rejected-seed1,0.0,,2461800.0,1.0,1.0\n"
+    )
+    single = tmp_path / "s.csv"
+    single.write_text(
+        "# parname, value, up_err, low_err\n"
+        "lens.Companion.alpha,118.853,0.098,0.1\n"
+        "source.t_0,2461821.8299,0.0022,0.0021\n"
+    )
+    rm, rs = V.results_rows(multi), V.results_rows(single)
+    assert rm == rs
+    assert rs["source.t_0"] == [("all", 2461821.8299, 0.0022, 0.0021)]
+    sol = {"parameters": {"alpha": math.radians(118.853), "t0": 2461821.83}}
+    da, dt = V.roundtrip(sol, rs)
+    assert da == pytest.approx(0.0, abs=1e-9) and dt < 1e-3
+    assert V.roundtrip(sol, {}) == (None, None)
