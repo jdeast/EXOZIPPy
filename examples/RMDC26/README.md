@@ -354,12 +354,203 @@ remains are the package's advisory "uncertainty very large/small"
 warnings: for example, t0 is known to better than 0.1% of a BJD, and piE
 and rho are often prior-dominated.
 
+## The 2026-10 submission: the campaign MANIFEST (SED-tied fits)
+
+The submitted fits are now the campaign's SED-tied runs under
+`RMDC26_run/sed/<arm>/<NNN>/` (`out/` or `out_long/`, configs `run.yaml`,
+`run_long.yaml`, `run_long2.yaml`), sampled on `wt/master1021` (b1b41d8e).
+What is submitted, and in which tier, is decided by the campaign agent.
+This tool reads those decisions and never hardcodes an event list.
+
+### Regenerate (one command)
+
+The campaign side runs first, in this order:
+
+    python RMDC26_run/sed/verdict.py          # verdict.out, tier_full.txt, tier_scored.txt
+    python RMDC26_run/sed/make_manifest.py    # SUBMISSION_MANIFEST.txt
+    python RMDC26_run/sed/make_notes.py       # sed/notes/<NNN>.md
+
+Then, from the root of this worktree:
+
+    sbatch examples/RMDC26/run_submission.sbatch
+
+It runs on the test partition as ONE job with internal parallelism
+(96 cores; `WORKERS` fits at a time on disjoint core slices, default 6).
+Everything goes under `$RMDC26_REPORT`, which defaults to
+`/n/holylabs/jjohnson_lab/Lab/rmdc26_report/submission_v2`. The job:
+
+1. `01_evidence.py --manifest`: the stage-1 record of every SUBMITTED
+   fit. A record is reused only while its trace's (mtime, size) and the
+   evaluating tree's commit are unchanged, so a rerun recomputes only the
+   events whose trace changed. The resolved list goes to
+   `evidence/manifest_resolved.json`.
+2. `lpcheck.py` with THIS tree (master) on every submitted fit, into
+   `lpcheck_master/`.
+3. `03_submission.py`: rebuilds `submission/` from scratch, so an event
+   that leaves the tier lists also leaves the submission. Then it runs
+   `04_validate.py` and writes `report/submission_summary.{txt,csv,json}`
+   and `report/validation.json`.
+
+`--only 13,68` restricts stage 1 to some events, for a trial.
+
+### What is submitted (`rmdc26.select_submitted`, `prefer_out_long`)
+
+- **Tier filter.** `tier_full.txt` and `tier_scored.txt` are read on
+  every run and are authoritative. FULL submits the required fields plus
+  `physical_parameters`. SCORED submits the required fields only. Every
+  other event is "not ok" and is not submitted. An event in the manifest
+  but in neither list, an event in both lists, an event listed but missing
+  from the manifest, and a NO RESULTS block are all reported as problems
+  in the summary.
+- **out_long/ is always preferred** when it holds a finished run (trace
+  and results.csv) that is not stale, whatever the manifest names. A long
+  rerun still in flight is not usable, and out/ is used with a note. That
+  covers a whitening newer than the trace, or no trace yet.
+- **The config is the one that wrote the trace** (`pick_config`): the
+  newest `run*.yaml` whose `prefix:` is that run directory and that
+  predates the trace. `make_manifest.py` always names `run_long.yaml` for
+  out_long/, but the 70-event `long2` rerun writes out_long/ from
+  `run_long2.yaml`.
+
+### Which tree evaluates logp
+
+The bridge integrates whatever logp the reporting tree compiles. Master
+differs from the sampling tree by exactly one model change: #478, which
+places the observer at the instant it received the light. That moves lp
+by ~0.01-0.02 nat, against a 0.01 nat tolerance. Stage 1 therefore runs on
+the SAMPLING tree (`EVIDENCE_TREE`, default `wt/master1021`), where the
+50-draw lp check reproduces the sampler. Step 2 is the separate check of
+master against every stored lp, as before. Its numbers are in the summary.
+
+### Evidence and probabilities
+
+These are unchanged from stage 2 above (`02_report.build_event`):
+
+- valid draws only and 20000 proposal draws;
+- the +/-2 nat floor;
+- equal shares inside indistinguishable groups;
+- refused bridges reported as INDICATIVE only.
+
+`relative_probability` is normalized over the event's own submitted
+solutions, which all share one architecture.
+
+### Architecture (PI-approved; decided by Cannon Dev as owner)
+
+Each event is fitted with one architecture, chosen by triage. The model
+type comes from the fit itself (a `planet:` block, and s and q in the
+posterior; cross-checked), never from the tier.
+
+- **1S2L:** the rule uses the campaign's blind (s, q) grid,
+  `dchi2_np = chi2(no-planet row) - chi2(best node)`. It is read from
+  `grid/dchi2_noplanet.json`, which uses the same definition as
+  `grid/gridcheck26.py`, with the no-planet row at log_q = -5.5.
+  - If `dchi2_np > 50`, the note reads "binary lens favoured by
+    dchi2_np = X on the blind grid" and P(1S1L) ~ 0.
+  - Otherwise, or when there is no grid, the event is
+    ARCHITECTURE_UNCERTAIN. When the posterior nevertheless pins q (68%
+    half-width < 25% of the median), the tension is spelled out. 105 is
+    the case: dchi2 = 8, with q pinned to 10%.
+  - Event-specific findings are in `rmdc26.ARCH_EVENT_NOTES`.
+  - The campaign's dchi2 is bimodal, with nothing between 10 and 100, so
+    the exact cut moves nothing.
+- **1S1L:** single lenses were not gridded. The outlier audit gives the
+  verdict: an ANOMALY flag means a possible missed companion. A FULL
+  single lens's status rests on t_E, rho and Rhat only.
+
+### physical_parameters (FULL only; `rmdc26.physical_draws`)
+
+The values are computed PER DRAW within each mode, then summarized as the
+median and max(minus, plus). The keys are restricted to
+`validate_parameters.PHYSICAL_PARAMETERS`:
+
+| key | definition |
+|---|---|
+| `thetaE` | `mulensevent.theta_E` (mas) |
+| `M1` | `star.mass[lens]` (Msun) |
+| `Mtot` | `mulensevent.mlens_total` (1S2L), or M1 (1S1L) |
+| `M2` | Mtot - M1, per draw (1S2L only; no planet-mass unit involved) |
+| `D_L`, `D_S` | `star.distance` / 1000 (kpc) |
+| `piE` | hypot(pi_E_N, pi_E_E), per draw |
+| `mu_rel` | `mulensevent.mu_rel_mag` (heliocentric, mas/yr) |
+
+### Notes (`notes_path`)
+
+Each event has one notes file, `events/<id>/notes.md`, and all of the
+event's solutions point to it. It is the campaign's generated note
+(`sed/notes/<NNN>.md`) copied VERBATIM, followed by ONE appended,
+machine-generated section, "## Evidence, flags and conventions (exozippy
+report stage)". That section holds:
+
+- the per-mode lnZ, bridge error and total error with the floor;
+- the bridge status (a refused bridge is "indicative only");
+- relative_probability;
+- the reliability flags;
+- the architecture statement;
+- the conventions.
+
+The alpha sentence is the ruled one (`rmdc26.ALPHA_SENTENCE`): degrees to
+radians, no other transformation, wrapped to [0, 2 pi) and never negated.
+`alpha_submit` does this, and `01_evidence.mode_summary` asserts that the
+tree's `to_internal` agrees with it. Every written t0 must be a full BJD
+(> 2.4e6); `check_submitted_values` raises otherwise. The extinction-law
+caveat is added only when max Rhat > 1.3, read from the verdict row.
+Converged tied fits recover the stated extinction (29/29).
+
+### submission.json and validation
+
+`team_name` is the placeholder `TEAM_NAME_TBD`, for the PI to replace.
+`tier` is `beginner`. `hardware_info` names the cluster.
+
+`04_validate.py` loads the tree with microlens-submit 0.17.9's OWN
+`load()` and models, from the unpacked wheel. pydantic and psutil are
+installed into `$RMDC26_REPORT/deps` by the sbatch. It then runs:
+
+- `Submission.run_validation()`;
+- `Solution.run_validation()` on every inactive solution as well;
+- any warning the models raise at construction, which it counts as an
+  ERROR;
+- the physical-parameter key and consistency checks;
+- the t0/alpha guards;
+- an alpha and t0 ROUND TRIP against each fit's results.csv: radians
+  back to degrees, with no offset.
+
+### Results, 2026-10-24 (manifest of 25 FULL + 7 SCORED)
+
+The outputs are under `/n/holylabs/jjohnson_lab/Lab/rmdc26_report/submission_v2/`.
+The run took 48 min on 96 test-partition cores: stage 1 45 min, 5-10 min
+per fit with 16 cores each, and the master lp check 3 min.
+
+- **Submitted:** 32 events and 38 solutions (32 active). FULL is 25
+  events with 28 solutions; SCORED is 7 events with 10 solutions. 29
+  events are 1S2L and 3 are 1S1L (068, 083, 182). The manifest raised no
+  problems.
+- **lp reproduction:** the sampling tree reproduces every fit to
+  <= 4.7e-10 nat. Master fails 15 of 32 fits at the 0.01 nat tolerance
+  (median 0.009, max 0.18 nat on 162). Master's only model change since
+  b1b41d8e is #478.
+- **Bridges:** 30 of 38 mode bridges are refused, 19 for re2-too-large
+  and 11 for not-converged. That makes 24 events INDICATIVE. With 40-odd
+  dimensions, the SED-tied posteriors are poorly covered by the Gaussian
+  proposal at 20000 draws. Single-mode events report
+  relative_probability 1 regardless.
+- **Architecture:** 28 of 29 binaries have dchi2_np > 50. They range from
+  179 (110) to 1.0e6 (096). 105 is ARCHITECTURE_UNCERTAIN (dchi2_np =
+  8.0, q pinned to 10%). None of the three single lenses has an ANOMALY.
+- **Extinction caveat (max Rhat > 1.3):** 008, 030, 051, 053, 106, 138
+  and 182.
+- **Validation:** 0 errors. The 19 warnings are the package's advisory
+  "uncertainty very small/large" warnings and the TEAM_NAME_TBD
+  placeholder.
+
 ## Files
 
 | file | what |
 |---|---|
 | `rmdc26.py` | paths, thresholds and every decision (pure functions) |
 | `lpcheck.py`, `lpcheck.sbatch` | the lp-reproduction check |
-| `01_evidence.py`, `run_evidence.sbatch` | stage 1 |
-| `02_report.py` | stage 2 |
+| `01_evidence.py`, `run_evidence.sbatch` | stage 1 (`--manifest` for the SED-tied submission) |
+| `02_report.py` | stage 2 (legacy events/ layout) |
+| `03_submission.py` | the manifest submission tree and its summary |
+| `04_validate.py` | microlens-submit's own validation of a tree |
+| `run_submission.sbatch` | the one regenerate command |
 | `tests/test_rmdc26_report.py` | the stage 2 rules and the writer, without a sampler |

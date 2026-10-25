@@ -116,9 +116,15 @@ def mode_summary(system, post, mask, arch, inst_bands):
             raise ValueError(f"lens.alpha internal unit {par.internal_unit}")
         n_el = post["lens.alpha"].shape[-1]
         a = _el(post, "lens.alpha", -1, mask)
-        s["alpha_rad"] = R.circ_percentiles(
-            np.asarray(par.to_internal(a, index=n_el - 1), dtype=float)
-        )
+        rad = np.asarray(par.to_internal(a, index=n_el - 1), dtype=float)
+        # The conversion must be deg -> rad and nothing else (JDE: the VBM
+        # convention as fitted; no +180, no sign flip).
+        if (
+            np.max(np.abs(R.wrap_pi(rad - R.alpha_submit(a))), initial=0)
+            > 1e-9
+        ):
+            raise ValueError("lens.alpha to_internal is not a pure deg->rad")
+        s["alpha_rad"] = R.circ_percentiles(rad)
         s["alpha_deg_user"] = R.percentiles(a)
     for i, (_name, band) in enumerate(inst_bands):
         for var in ("f_source", "f_blend", "err_scale", "out_frac"):
@@ -198,13 +204,59 @@ def audit(system, point, label):
     return rows
 
 
-def fit_wall_hours(fit_dir):
+def fit_spec(fit_dir=None, config=None, name=None):
+    """What one_fit needs to find a fit's files: {name, fit_dir, config,
+    prefix (absolute, no suffix)}.  Either a legacy events/<NNN>/ directory
+    (config RMDC26_<NNN>.yaml, outputs in fitresults/) or an explicit config
+    file (the SED-tied layout: run.yaml / run_long.yaml, outputs under the
+    config's own `prefix:`, e.g. out_long/009)."""
+    import yaml
+
+    cfg = Path(config) if config else R.config_path(fit_dir)
+    d = cfg.parent
+    c = yaml.safe_load(cfg.read_text()) or {}
+    pre = Path(c["prefix"])
+    if not pre.is_absolute():
+        pre = d / pre
+    pf = c.get("parameter_file")
+    return {
+        "name": name or Path(fit_dir or d).name,
+        "fit_dir": d,
+        "config": cfg,
+        "params": (d / pf) if pf else None,
+        "prefix": pre,
+    }
+
+
+def _f(spec, suffix):
+    return Path(str(spec["prefix"]) + suffix)
+
+
+def spec_staleness(spec):
+    """rmdc26.staleness_from_mtimes on the spec's own files."""
+
+    def mt(p):
+        return p.stat().st_mtime if p is not None and p.exists() else None
+
+    return R.staleness_from_mtimes(
+        mt(_f(spec, "_trace.nc")), mt(spec["config"]), mt(spec["params"]),
+        mt(_f(spec, "_whitening.json")),
+    )  # fmt: skip
+
+
+def trace_identity(spec):
+    """(mtime, size) of the trace: a record is reused only while they hold."""
+    st = _f(spec, "_trace.nc").stat()
+    return [float(st.st_mtime), int(st.st_size)]
+
+
+def fit_wall_hours(spec):
     """Sampling wall time of the fit, from the first timestamp of its log to
     the trace's mtime (both read-only; nan when either is missing)."""
     import datetime as dt
 
-    logs = sorted((Path(fit_dir) / "fitresults").glob("RMDC26_*[0-9].log"))
-    traces = sorted((Path(fit_dir) / "fitresults").glob("*_trace.nc"))
+    logs = [p for p in [_f(spec, ".log")] if p.exists()]
+    traces = [p for p in [_f(spec, "_trace.nc")] if p.exists()]
     if not logs or not traces:
         return float("nan")
     with open(logs[0], encoding="utf-8", errors="replace") as fh:
@@ -217,7 +269,22 @@ def fit_wall_hours(fit_dir):
     return (end - start).total_seconds() / 3600.0
 
 
-def one_fit(fit_dir, max_draws, allow_free_ld, lp_n=50, rawz_only=False):
+def mode_physical(post, mask, arch, idx):
+    """Per-draw physical parameters of one mode (rmdc26.physical_draws),
+    summarized; {} when the trace lacks what they need."""
+    d = {}
+    for v in R.PHYSICAL_VARS:
+        if v in post.data_vars:
+            d[v] = np.asarray(post[v].values, dtype=float)[mask]
+    need = {"mulensevent.theta_E", "star.mass", "star.distance"}
+    if arch == R.ARCH_BINARY:
+        need.add("mulensevent.mlens_total")
+    if not need <= set(d):
+        return {}
+    return R.physical_summary(R.physical_draws(d, arch, *idx))
+
+
+def one_fit(spec, max_draws, allow_free_ld, lp_n=50, rawz_only=False):
     import arviz as az
     import yaml
 
@@ -227,31 +294,35 @@ def one_fit(fit_dir, max_draws, allow_free_ld, lp_n=50, rawz_only=False):
     from exozippy.run import fold_degeneracies
     from exozippy.samplers import convergence
 
-    fit_dir = Path(fit_dir)
-    cfg_src = R.config_path(fit_dir)
-    config0 = yaml.safe_load(cfg_src.read_text())
-    params0 = yaml.safe_load((fit_dir / config0["parameter_file"]).read_text())
+    if not isinstance(spec, dict):
+        spec = fit_spec(spec)
+    fit_dir = Path(spec["fit_dir"])
+    config0 = yaml.safe_load(Path(spec["config"]).read_text())
+    params0 = yaml.safe_load(Path(spec["params"]).read_text())
     arch = R.architecture(config0)
     ld0 = R.ld_pinned_zero(params0)
     rec = {
-        "fit": fit_dir.name,
+        "fit": spec["name"],
         "fit_dir": str(fit_dir),
+        "config": str(spec["config"]),
+        "trace": str(_f(spec, "_trace.nc")),
         "arch": arch,
         "ld_pinned_zero": ld0,
         "config_sampler": config0.get("sampler", {}),
-        "fit_wall_h": fit_wall_hours(fit_dir),
+        "fit_wall_h": fit_wall_hours(spec),
     }
     if not ld0 and not allow_free_ld:
         rec["skipped"] = "limb darkening not pinned at u1 = 0"
         return rec
-    stale = R.trace_staleness(fit_dir)
+    stale = spec_staleness(spec)
     if stale:
         rec["skipped"] = "STALE trace: " + stale
         return rec
+    rec["trace_identity"] = trace_identity(spec)
 
     t0 = time.time()
-    work = R.OUT / "work" / "evidence" / fit_dir.name
-    system, model, config, prefix = lpcheck.build(fit_dir, work)
+    work = R.OUT / "work" / "evidence" / spec["name"]
+    system, model, config, prefix = lpcheck.build(spec["config"], work)
     rec["build_s"] = time.time() - t0
     log_norm = float(system.evidence_log_norm())
     rec["log_norm"] = log_norm
@@ -262,6 +333,7 @@ def one_fit(fit_dir, max_draws, allow_free_ld, lp_n=50, rawz_only=False):
         (config.get("mulensevent") or [{}])[0].get("finite_source", False)
     )
 
+    rec["report_tree"], rec["report_tree_commit"] = report_tree()
     idata = az.from_netcdf(prefix + "_trace.nc")
     attrs = dict(idata.attrs)
     rec["trace_git_commit"] = attrs.get("exozippy_git_commit")
@@ -290,7 +362,7 @@ def one_fit(fit_dir, max_draws, allow_free_ld, lp_n=50, rawz_only=False):
     # never less than master's: the fits are multi-seed and the early draws
     # carry the seeds' transient, which master's max-ESS rule can keep (094:
     # wrap-up 75%, master 0%).  Chains: master's stuck-chain mask.
-    wu = R.parse_wrapup(fit_dir)
+    wu = R.parse_wrapup(fit_dir, prefix=spec["prefix"])
     rec["wrapup"] = wu
     burnin = max(int(diag["burnin"]), int(wu.get("burnin") or 0))
     good_idx = np.nonzero(diag["good_mask"])[0]
@@ -350,6 +422,10 @@ def one_fit(fit_dir, max_draws, allow_free_ld, lp_n=50, rawz_only=False):
     rec["bridge_s"] = time.time() - t1
 
     labels = np.asarray(post["mode"].values, dtype=int)
+    try:
+        idx = R.body_indices(config0)
+    except ValueError:
+        idx = None
     modes = []
     for e in ev:
         k = int(e.mode)
@@ -370,6 +446,7 @@ def one_fit(fit_dir, max_draws, allow_free_ld, lp_n=50, rawz_only=False):
             "lp_max": float(np.max(np.where(mask, lp, -np.inf))),
         }
         m["summary"] = mode_summary(system, post, mask, arch, inst_bands)
+        m["physical"] = mode_physical(post, mask, arch, idx) if idx else {}
         m["err_scale"] = {
             b: m["summary"]["err_scale_" + b][0]
             for b in rec["bands"]
@@ -390,13 +467,174 @@ def one_fit(fit_dir, max_draws, allow_free_ld, lp_n=50, rawz_only=False):
     return rec
 
 
+def _probe(arm_dir, ev, cands, manifest_config):
+    """rmdc26.prefer_out_long's view of <arm>/<ev>/<name>/, plus the
+    config that wrote it."""
+
+    def probe(name):
+        tr = arm_dir / name / ("%s_trace.nc" % R.ev3(ev))
+        res = arm_dir / name / ("%s_results.csv" % R.ev3(ev))
+        out = {"trace": tr.exists(), "results": res.exists(), "stale": "",
+               "config": None}  # fmt: skip
+        if not out["trace"]:
+            return out
+        cfg = R.pick_config(cands, name, ev, tr.stat().st_mtime,
+                            manifest_config)  # fmt: skip
+        if cfg is None:
+            out["stale"] = (
+                "no run*.yaml with prefix %s/%s that predates "
+                "the trace" % (name, R.ev3(ev))
+            )
+            return out
+        out["config"] = cfg
+        out["stale"] = spec_staleness(fit_spec(config=cfg))
+        return out
+
+    return probe
+
+
+def resolve_manifest_fit(entry):
+    """(spec or None, notes) for one submitted manifest entry: out_long/
+    preferred, the config that actually wrote the trace (run_long2.yaml is
+    found even where the manifest names run_long.yaml)."""
+    import yaml
+
+    ev = entry["event"]
+    tr = entry["paths"].get("trace")
+    arm_dir = (Path(tr).parent.parent if tr else
+               R.CAMPAIGN / "sed" / str(entry["arm"]) / R.ev3(ev))  # fmt: skip
+    cands = []
+    for c in sorted(arm_dir.glob("run*.yaml")):
+        if ".params" in c.name:
+            continue
+        try:
+            pre = (yaml.safe_load(c.read_text()) or {}).get("prefix")
+        except Exception:  # an unreadable candidate is not a candidate
+            continue
+        if pre:
+            cands.append((c, str(pre), c.stat().st_mtime))
+    probe = _probe(arm_dir, ev, cands, entry["paths"].get("config"))
+    seen = {}
+
+    def cached(name):
+        if name not in seen:
+            seen[name] = probe(name)
+        return seen[name]
+
+    run_dir, note = R.prefer_out_long(entry["dir"], cached)
+    notes = [note] if note else []
+    if run_dir is None:
+        return None, notes
+    cfg = cached(run_dir)["config"]
+    if entry["paths"].get("config") and str(cfg) != entry["paths"]["config"]:
+        notes.append("config %s used (the manifest named %s)"
+                     % (cfg, entry["paths"]["config"]))  # fmt: skip
+    name = "%s_%s_%s" % (R.ev3(ev), arm_dir.parent.name, run_dir)
+    return fit_spec(config=cfg, name=name), notes
+
+
+def manifest_jobs(manifest):
+    """[(ev, spec, entry, notes)] for every SUBMITTED event, and a resolved
+    listing (also problems) that stage 2 reads.  The tier lists are read
+    now, every time (they change)."""
+    entries = R.parse_manifest(Path(manifest).read_text())
+    full = R.read_event_list(R.TIER_FULL_FILE.read_text())
+    scored = R.read_event_list(R.TIER_SCORED_FILE.read_text())
+    sub, problems = R.select_submitted(entries, full, scored)
+    jobs, resolved = [], []
+    for e in sub:
+        spec, notes = resolve_manifest_fit(e)
+        row = {"event": e["event"], "tier": e["tier"], "arm": e["arm"],
+               "manifest_dir": e["dir"], "verdict": e["verdict"],
+               "notes": notes}  # fmt: skip
+        if spec is None:
+            problems.append("%03d (%s): no usable fit: %s"
+                            % (e["event"], e["tier"], "; ".join(notes)))  # fmt: skip
+            row["unusable"] = True
+        else:
+            row.update(fit=spec["name"], config=str(spec["config"]),
+                       trace=str(_f(spec, "_trace.nc")),
+                       run_dir=Path(str(spec["prefix"])).parent.name)  # fmt: skip
+            jobs.append((e["event"], spec))
+        resolved.append(row)
+    listing = {"manifest": str(manifest), "tier_full": sorted(full),
+               "tier_scored": sorted(scored), "problems": problems,
+               "submitted": resolved}  # fmt: skip
+    return jobs, listing
+
+
+def report_tree():
+    """(path, git HEAD) of the exozippy tree this process imports."""
+    import subprocess
+
+    import exozippy
+
+    tree = os.path.dirname(os.path.dirname(os.path.dirname(exozippy.__file__)))
+    head = subprocess.run(["git", "-C", tree, "rev-parse", "HEAD"],
+                          capture_output=True, text=True).stdout.strip()  # fmt: skip
+    return tree, head or None
+
+
+def record_is_current(out, spec):
+    """An existing record is reused only for the SAME trace (mtime, size),
+    evaluated by the SAME exozippy commit, and only if it did not error."""
+    if not out.exists():
+        return False
+    try:
+        old = json.loads(out.read_text())
+    except ValueError:
+        return False
+    if "error" in old:
+        return False
+    if "modes" in old and old.get("report_tree_commit") != report_tree()[1]:
+        return False
+    if "trace_identity" not in old:
+        return "skipped" in old and spec_staleness(spec) != ""
+    return old["trace_identity"] == trace_identity(spec)
+
+
+def run_workers(argv, n, jobs):
+    """Run this script as `n` shard processes on disjoint core sets (the
+    bridge pool sizes itself from the affinity mask), heaviest traces
+    first, round-robin."""
+    import subprocess
+
+    cores = sorted(os.sched_getaffinity(0))
+    per = max(1, len(cores) // n)
+    procs = []
+    for i in range(n):
+        mine = (
+            cores[i * per : (i + 1) * per] if i < n - 1 else cores[i * per :]
+        )
+        cmd = (
+            [sys.executable, str(Path(__file__).resolve())]
+            + argv
+            + ["--shard", "%d/%d" % (i, n), "--cpus", ",".join(map(str, mine))]
+        )
+        procs.append(subprocess.Popen(cmd))
+    return max(p.wait() for p in procs)
+
+
 def main(argv=None):
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("events", nargs="*", type=int)
     ap.add_argument("--events-file", default=None,
                     help="one event number per line (# comments)")  # fmt: skip
     ap.add_argument("--fit-dir", action="append", default=[],
                     help="an explicit fit directory (repeatable)")  # fmt: skip
+    ap.add_argument(
+        "--manifest", nargs="?", const=str(R.MANIFEST), default=None,
+        help="process every SUBMITTED event of the campaign's "
+        "SUBMISSION_MANIFEST.txt (tier lists read at run time; out_long/ "
+        "preferred); default path %s" % R.MANIFEST,
+    )  # fmt: skip
+    ap.add_argument("--only", default=None,
+                    help="with --manifest: only these events (e.g. 13,68)")  # fmt: skip
+    ap.add_argument("--workers", type=int, default=1,
+                    help="fits in parallel, each on its own core slice")  # fmt: skip
+    ap.add_argument("--shard", default=None, help=argparse.SUPPRESS)
+    ap.add_argument("--cpus", default=None, help=argparse.SUPPRESS)
     ap.add_argument("--allow-free-ld", action="store_true")
     ap.add_argument("--max-draws", type=int, default=R.MAX_POSTERIOR_DRAWS)
     ap.add_argument(
@@ -407,42 +645,58 @@ def main(argv=None):
     )
     ap.add_argument("--force", action="store_true",
                     help="recompute even when the record exists")  # fmt: skip
-    a = ap.parse_args(argv)
+    a = ap.parse_args(raw_argv)
+    if a.cpus:
+        os.sched_setaffinity(0, {int(c) for c in a.cpus.split(",")})
     evs = list(a.events)
     if a.events_file:
-        for line in Path(a.events_file).read_text().splitlines():
-            tok = line.split("#")[0].split()
-            if tok:
-                evs.append(int(tok[0]))
-    jobs = [(int(Path(d).name.split("_")[0]), Path(d)) for d in a.fit_dir]
+        evs += R.read_event_list(Path(a.events_file).read_text())
+    jobs = [(int(Path(d).name.split("_")[0]), fit_spec(d)) for d in a.fit_dir]
     for ev in evs:
-        jobs += [(ev, d) for d in R.candidate_fit_dirs(ev)]
+        jobs += [(ev, fit_spec(d)) for d in R.candidate_fit_dirs(ev)]
+    if a.manifest:
+        mj, listing = manifest_jobs(a.manifest)
+        if a.only:
+            keep = set(R.read_event_list(a.only.replace(",", "\n")))
+            mj = [j for j in mj if j[0] in keep]
+        jobs += mj
+        if a.shard is None:
+            R.dump_json(listing, R.OUT / "evidence" / "manifest_resolved.json")
+            for p in listing["problems"]:
+                print("MANIFEST: " + p, flush=True)
+    if a.workers > 1 and a.shard is None:
+        return run_workers(raw_argv, a.workers, jobs)
+    if a.shard is not None:
+        i, n = map(int, a.shard.split("/"))
+        jobs.sort(key=lambda j: -_f(j[1], "_trace.nc").stat().st_size)
+        jobs = jobs[i::n]
     rc = 0
-    for ev, d in jobs:
-        out = R.OUT / "evidence" / R.ev3(ev) / (d.name + ".json")
+    for ev, spec in jobs:
+        out = R.OUT / "evidence" / R.ev3(ev) / (spec["name"] + ".json")
         if a.update_rawz:
             if not out.exists():
                 continue
             old = json.loads(out.read_text())
             if "modes" not in old or "unlisted_mode_params" in old:
                 continue
-            new = one_fit(d, a.max_draws, a.allow_free_ld, rawz_only=True)
+            new = one_fit(spec, a.max_draws, a.allow_free_ld, rawz_only=True)
             for k in ("rawz_frac", "rawz_param_counts",
                       "unlisted_mode_params"):  # fmt: skip
                 old[k] = new[k]
             R.dump_json(old, out)
             print("%s %s: raw-z %.1f%%, unlisted %s"
-                  % (R.ev3(ev), d.name, 100 * new["rawz_frac"],
+                  % (R.ev3(ev), spec["name"], 100 * new["rawz_frac"],
                      new["unlisted_mode_params"]), flush=True)  # fmt: skip
             continue
-        if out.exists() and not a.force:
-            print("%s: exists, skipping (--force to redo)" % out, flush=True)
+        if not a.force and record_is_current(out, spec):
+            print("%s: current, skipping (--force to redo)" % out, flush=True)
             continue
         try:
-            rec = one_fit(d, a.max_draws, a.allow_free_ld)
+            rec = one_fit(spec, a.max_draws, a.allow_free_ld)
         except Exception as exc:  # recorded, never silently dropped
             rc = 1
-            rec = {"fit": d.name, "fit_dir": str(d), "error": repr(exc),
+            rec = {"fit": spec["name"], "fit_dir": str(spec["fit_dir"]),
+                   "error": repr(exc),
                    "traceback": traceback.format_exc()}  # fmt: skip
         rec["event"] = ev
         R.dump_json(rec, out)
@@ -450,15 +704,16 @@ def main(argv=None):
             print(
                 "%s %s (%s): lp check %s (max |dlp| %.2g); %d modes; %s; "
                 "wall %.0f s (bridge %.0f s)"
-                % (R.ev3(ev), d.name, rec["arch"], rec["lpcheck"]["verdict"],
-                   rec["lpcheck"]["dlp_max_abs"], rec["n_modes"],
+                % (R.ev3(ev), spec["name"], rec["arch"],
+                   rec["lpcheck"]["verdict"], rec["lpcheck"]["dlp_max_abs"],
+                   rec["n_modes"],
                    ", ".join("lnZ %.2f+/-%.2f %s" % (m["lnZ"], m["lnZ_err"],
                              m["bridge_state"]) for m in rec["modes"]),
                    rec["wall_s"], rec["bridge_s"]),
                 flush=True,
             )  # fmt: skip
         else:
-            print("%s %s: %s" % (R.ev3(ev), d.name,
+            print("%s %s: %s" % (R.ev3(ev), spec["name"],
                   rec.get("skipped") or rec.get("error")), flush=True)  # fmt: skip
     return rc
 
