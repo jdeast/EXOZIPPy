@@ -19,7 +19,7 @@ from exozippy.system import System
 
 _CONFIG = {
     "star": [{"name": "A", "mist": False}],
-    "planet": [{"name": "b", "orbit_ndx": 0}, {"name": "c", "orbit_ndx": 1}],
+    "planet": [{"name": "b"}, {"name": "c"}],
     "orbit": [
         {"name": "b", "primary": ["A"], "companion": ["b"]},
         {"name": "c", "primary": ["A"], "companion": ["c"]},

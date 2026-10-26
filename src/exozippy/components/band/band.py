@@ -556,7 +556,12 @@ class Band(Component):
 
         # Transit: the occultation model cannot be computed without limb
         # darkening, so any transit referencing a band reads it.
-        hosts = {int(pcfg.get("star_ndx", 0) or 0) for pcfg in _cfg("planet")}
+        # The planets' hosts: Planet's star_map, derived at stage 2 from the
+        # orbit blocks' groups (a planet carries no host key of its own).
+        planet = getattr(system, "planet", None)
+        hosts = (
+            {int(h) for h in planet.star_map} if planet is not None else set()
+        )
         transit_host = hosts.pop() if len(hosts) == 1 else None
         for i, c in enumerate(_cfg("transit")):
             name = c.get("name", i)

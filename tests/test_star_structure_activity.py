@@ -333,7 +333,7 @@ def test_planet_reads_its_host_radius_even_for_a_single_planet():
     # Arrange
     config = {
         "star": [{"name": "A"}],
-        "planet": [{"name": "b", "star_ndx": 0, "orbit_ndx": 0}],
+        "planet": [{"name": "b"}],
         "orbit": [{"name": "b"}],
     }
 

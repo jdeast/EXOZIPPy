@@ -375,7 +375,7 @@ def test_the_rv_star_on_the_companion_side_is_refused(tmp_path):
 
 def test_a_planet_on_a_taylor_orbit_has_no_keplerian_geometry(tmp_path):
     """
-    Given a planet whose orbit_ndx points at a Taylor orbit and NO transit,
+    Given a planet in a Taylor orbit's companion group and NO transit,
     Then it builds without Keplerian geometry (review 8.8.20): nothing reads
       the planet's p, a, K, ..., so none is declared.  (With a transit block
       the same planet is refused: tests below and
@@ -392,7 +392,7 @@ def test_a_planet_on_a_taylor_orbit_has_no_keplerian_geometry(tmp_path):
                 "companion": ["b"],
             }
         ],
-        planets=[{"name": "b", "orbit_ndx": 0}],
+        planets=[{"name": "b"}],
     )
     system, _ = _system(cfg, build=False)
     assert not system.planet.keplerian_geometry(system)

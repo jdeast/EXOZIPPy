@@ -77,13 +77,26 @@ class _FakeSystem:
 
 
 class _FakeConfigManager:
-    """Just enough for _reconcile_mass_user_params."""
+    """Just enough for _reconcile_mass_user_params and Planet.build_maps."""
 
-    def __init__(self, user_params=None):
+    def __init__(self, user_params=None, system_config=None):
         self.user_params = user_params if user_params is not None else {}
-        # No orbit block: every orbit type is the keplerian default
-        # (Planet.keplerian_geometry reads the raw config's orbit types).
-        self.system_config = {}
+        # Planet membership and the orbit types are read off the raw
+        # system config (orbit.bodies.planet_membership).
+        self.system_config = system_config or {}
+
+
+def _system_config(planet_cfg):
+    """One host star and one orbit per planet, membership by the orbit
+    groups -- the one spelling (a planet carries no orbit or host key)."""
+    return {
+        "star": [{"name": "A"}],
+        "planet": planet_cfg,
+        "orbit": [
+            {"name": p["name"], "primary": ["A"], "companion": [p["name"]]}
+            for p in planet_cfg
+        ],
+    }
 
 
 _ONE_PLANET_ORBIT = _FakeOrbit(
@@ -94,7 +107,12 @@ _ONE_PLANET_ORBIT = _FakeOrbit(
 
 def _modes(planet_cfg, user_params=None, **comps):
     """The PER-PLANET coordinates."""
-    comp = Planet(planet_cfg, config_manager=_FakeConfigManager(user_params))
+    comp = Planet(
+        planet_cfg,
+        config_manager=_FakeConfigManager(
+            user_params, _system_config(planet_cfg)
+        ),
+    )
     comp.build_maps()
     comp._resolve_mass_parameterization(_FakeSystem(**comps))
     return comp.mass_parameterizations
@@ -199,7 +217,7 @@ def test_a_mixed_topology_gives_each_planet_its_own_coordinate(caplog):
     """
     with caplog.at_level(logging.INFO):
         modes = _modes(
-            [{"name": "b"}, {"name": "c", "orbit_ndx": 1}],
+            [{"name": "b"}, {"name": "c"}],
             rvinstrument=_FakeRV([0]),
             transit=object(),
             orbit=_TWO_PLANET_ORBITS,
@@ -225,7 +243,6 @@ def test_an_explicit_per_planet_mix_is_honored():
             {"name": "b", "fitlogq": False, "fitmsini": False},
             {
                 "name": "c",
-                "orbit_ndx": 1,
                 "fitlogq": True,
             },
         ],
@@ -356,6 +373,12 @@ def test_two_planets_may_use_different_mass_coordinates():
         {"name": "b"},
         {"name": "c", "fitlogq": False, "fitmsini": False},
     ]
+    # Two planets, so neither host is left implicit: static pairings (no
+    # dynamics) with the lens star.
+    config["orbit"] = [
+        {"name": nm, "type": "static", "primary": ["Lens"], "companion": [nm]}
+        for nm in ("b", "c")
+    ]
     system = System(config, user_params=_binary_params())
     system.prepare()
     model = system.build_model()
@@ -421,6 +444,12 @@ def test_a_mass_seed_reaches_whichever_coordinate_each_planet_samples():
         "planet": [
             {"name": "b", "fitlogq": True},
             {"name": "c", "fitlogq": False, "fitmsini": False},
+        ],
+        # Two planets, so neither host is left implicit: static pairings
+        # (no dynamics) with the one star.
+        "orbit": [
+            {"name": nm, "type": "static", "primary": ["A"], "companion": [nm]}
+            for nm in ("b", "c")
         ],
     }
     system = System(

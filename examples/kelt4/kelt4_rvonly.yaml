@@ -16,8 +16,8 @@ planet:
 
 orbit:
   - name: "b"
-    primary: ["A"]    # optional here: omitting both keys pairs the orbit
-    companion: ["b"]  # with the planet whose orbit_ndx points at it
+    primary: ["A"]    # optional here: with one star, one planet and one
+    companion: ["b"]  # orbit, omitting both keys pairs them
 
 #transit:
 #  - name: "TESS S48"

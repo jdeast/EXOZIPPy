@@ -21,7 +21,11 @@ import pymc as pm
 import pytensor.tensor as pt
 
 from exozippy.components.component import Component
-from exozippy.components.orbit.bodies import orbit_types, parse_orbit_bodies
+from exozippy.components.orbit.bodies import (
+    STATIC_TYPE,
+    orbit_types,
+    parse_orbit_bodies,
+)
 from exozippy.components.parameterization import mode_manifest
 from exozippy.config import PRECEDENCE_DEFAULT, user_entry
 from exozippy.outputs.prose import get_collector
@@ -153,6 +157,13 @@ class Lens(Component):
                 continue
             o = resolve_orbit_ref(config_manager, ref, f"lens.{j + 1}")
             t = types[o] if o < len(types) else "keplerian"
+            if t == STATIC_TYPE:
+                raise ValueError(
+                    f"lens.{j + 1}: orbit {ref!r} is type: static, a pairing "
+                    f"with no dynamics, so it cannot move this companion.  A "
+                    f"static companion carries no 'orbit:' key (the static "
+                    f"orbit block may still pair it with its host)."
+                )
             if t not in ("keplerian", "linear"):
                 raise NotImplementedError(
                     f"lens.{j + 1}: orbit {ref!r} is type: {t}; a lens "

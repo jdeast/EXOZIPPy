@@ -1243,8 +1243,17 @@ def test_build_maps_does_not_build_a_dead_planet_map(tmp_path):
                 "star_ndx": 0,
             }
         ],
-        ConfigManager({}),
+        # planet_ndx resolves to the orbit holding that planet.
+        ConfigManager(
+            {},
+            system_config={
+                "star": [{"name": "A"}],
+                "planet": [{"name": "b"}],
+                "orbit": [{"name": "b"}],
+            },
+        ),
     )
+    assert comp.rel_orbit == [0]
 
     # Act
     comp.build_maps()

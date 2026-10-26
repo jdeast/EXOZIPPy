@@ -232,14 +232,12 @@ def test_mask_is_per_orbit_a_planetless_orbit_is_not_retarded(tmp_path):
 
 
 def test_an_orbit_without_masses_still_reports_both_frames_as_one():
-    """Geometry-only orbit (its implicit planet does not exist, so no
-    a/m_*): the twins take the `no_bodies` identity expression rather than
+    """Geometry-only orbit (a bare harness that declares no bodies, so the
+    placeholder pairing's bodies do not exist and there is no a/m_*): the
+    twins take the `no_bodies` identity expression rather than
     disappearing, and no LTT deps are demanded of a component that cannot
     supply them."""
-    system = System(
-        {"star": [{"name": "A", "mist": False}], "orbit": [{"name": "b"}]},
-        user_params={},
-    )
+    system = System({"orbit": [{"name": "b"}]}, user_params={})
     system.prepare()
     o = system.orbit
     assert "a" not in o.manifest

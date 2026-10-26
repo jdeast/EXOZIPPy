@@ -214,7 +214,7 @@ def test_rv_only_applies_per_planet_via_orbit_membership():
         },
     )
     chen = _resolve(
-        [{"name": "b"}, {"name": "c", "orbit_ndx": 1, "star_ndx": 1}],
+        [{"name": "b"}, {"name": "c"}],
         rvinstrument=_FakeRV([0]),
         orbit=orbit,
     )

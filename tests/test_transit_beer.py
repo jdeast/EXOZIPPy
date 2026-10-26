@@ -43,10 +43,23 @@ def _make_band(config):
     return Band(config, _DummyConfigManager())
 
 
-def _make_planet(config):
+class _PlanetConfigManager(_DummyConfigManager):
+    """The stub, with the raw system config planet membership is read from
+    (orbit.bodies.planet_membership): one star, the planet(s), and -- when
+    `orbit` -- an orbit block naming the planet."""
+
+    def __init__(self, planets, orbit):
+        self.system_config = {"star": [{"name": "A"}], "planet": planets}
+        if orbit:
+            self.system_config["orbit"] = [
+                {"name": "b", "primary": ["A"], "companion": ["b"]}
+            ]
+
+
+def _make_planet(config, orbit=False):
     # Stage 2 before stage 3, as System.prepare runs them: the mass
-    # coordinate's resolution reads orbit_map.
-    planet = Planet(config, _DummyConfigManager())
+    # coordinate's resolution reads the planet's orbit membership.
+    planet = Planet(config, _PlanetConfigManager(config, orbit))
     planet.build_maps()
     return planet
 
@@ -397,7 +410,9 @@ def test_planet_fitbeam_with_fitbeam():
 
 
 def test_planet_beam_uses_expression_with_beam_constrains_mass():
-    planet = _make_planet([{"name": "b", "beam_constrains_mass": True}])
+    planet = _make_planet(
+        [{"name": "b", "beam_constrains_mass": True}], orbit=True
+    )
     planet.register_parameters(system=_FakeSystemWithOrbit())
     assert planet.manifest["beam"] == "default"
 
@@ -412,7 +427,8 @@ def test_planet_fitbeam_and_beam_constrains_mass_together_derives():
     beam is computed whenever either is set.
     """
     planet = _make_planet(
-        [{"name": "b", "fitbeam": True, "beam_constrains_mass": True}]
+        [{"name": "b", "fitbeam": True, "beam_constrains_mass": True}],
+        orbit=True,
     )
     planet.register_parameters(system=_FakeSystemWithOrbit())
     assert planet.manifest["beam"] == "default"
@@ -501,7 +517,7 @@ def _beer_config(lc_file):
     return {
         "star": [{"name": "A", "mist": False}],
         "planet": [{"name": "b"}],
-        "orbit": [{"name": "b"}],
+        "orbit": [{"name": "b", "primary": ["A"], "companion": ["b"]}],
         "band": [
             {
                 "name": "TESS",
@@ -623,7 +639,7 @@ def test_reflect_ellip_beam_are_exactly_zero_by_default(tmp_path_factory):
     config = {
         "star": [{"name": "A", "mist": False}],
         "planet": [{"name": "b"}],
-        "orbit": [{"name": "b"}],
+        "orbit": [{"name": "b", "primary": ["A"], "companion": ["b"]}],
         "band": [{"name": "TESS", "filter": "TESS"}],
         "transit": [{"name": "inst0", "file": lc, "band": "TESS"}],
     }
@@ -679,7 +695,7 @@ def test_beam_diluted_when_sed_dilution_active(tmp_path_factory):
     config = {
         "star": [{"name": "A", "mist": False}, {"name": "B", "mist": False}],
         "planet": [{"name": "b", "fitbeam": True}],
-        "orbit": [{"name": "b"}],
+        "orbit": [{"name": "b", "primary": ["A"], "companion": ["b"]}],
         "band": [
             {"name": "V", "filter": "V", "ld_law": "quadratic", "star_ndx": 0}
         ],
@@ -759,7 +775,7 @@ def test_ellipsoidal_diluted_when_sed_dilution_active(tmp_path_factory):
     config = {
         "star": [{"name": "A", "mist": False}, {"name": "B", "mist": False}],
         "planet": [{"name": "b"}],
-        "orbit": [{"name": "b"}],
+        "orbit": [{"name": "b", "primary": ["A"], "companion": ["b"]}],
         "band": [
             {
                 "name": "V",

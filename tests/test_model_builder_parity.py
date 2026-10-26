@@ -141,7 +141,7 @@ def _transit_config(lc_file, sed_file):
     return {
         "star": [{"name": "A", "mist": False}, {"name": "B", "mist": False}],
         "planet": [{"name": "b", "fitbeam": True}],
-        "orbit": [{"name": "b"}],
+        "orbit": [{"name": "b", "primary": ["A"], "companion": ["b"]}],
         "band": [
             {
                 "name": "V",
@@ -351,8 +351,11 @@ def test_two_planet_ellipsoidal_terms_telescope_exactly(tmp_path_factory):
     )
     config = {
         "star": [{"name": "A", "mist": False}],
-        "planet": [{"name": "b"}, {"name": "c", "orbit_ndx": 1}],
-        "orbit": [{"name": "b"}, {"name": "c"}],
+        "planet": [{"name": "b"}, {"name": "c"}],
+        "orbit": [
+            {"name": "b", "primary": ["A"], "companion": ["b"]},
+            {"name": "c", "primary": ["A"], "companion": ["c"]},
+        ],
         "band": [
             {
                 "name": "V",
@@ -449,7 +452,7 @@ def _kelt17_split(tmp_path, n_rm=40, dense=False, tc_epoch=None):
         {"name": "TRES_RM", "file": "rm_inst.rv", "rm": "b", "rm_band": "V"},
         {"name": "TRES_ORB", "file": "orb_inst.rv"},
     ]
-    cfg["planet"].append({"name": "c", "orbit_ndx": 1})
+    cfg["planet"].append({"name": "c"})
     cfg["orbit"].append({"name": "c", "primary": ["A"], "companion": ["c"]})
     params["orbit.c.period"] = {"initval": 11.3}
     params["orbit.c.tc"] = {"initval": tc + 4.1}

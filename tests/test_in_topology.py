@@ -191,7 +191,7 @@ def test_the_system_method_delegates_to_the_function():
 
     config = {
         "star": [{"name": "A"}],
-        "planet": [{"name": "b", "star_ndx": 0, "orbit_ndx": 0}],
+        "planet": [{"name": "b"}],
         "orbit": [{"name": "b"}],
     }
     system = System(config, {})

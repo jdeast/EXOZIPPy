@@ -24,7 +24,19 @@ def _triple_lens_config(lc):
     the masked primary)."""
     return {
         "star": [{"name": "Lens"}, {"name": "Source"}],
-        "planet": [{"name": "b", "star_ndx": 0}, {"name": "c", "star_ndx": 0}],
+        "planet": [{"name": "b"}, {"name": "c"}],
+        # Neither companion moves, so each is paired with its host by a
+        # STATIC orbit: with two planets in the lens the host is not left
+        # implicit (orbit.bodies.planet_membership).
+        "orbit": [
+            {
+                "name": nm,
+                "type": "static",
+                "primary": ["Lens"],
+                "companion": [nm],
+            }
+            for nm in ("b", "c")
+        ],
         "mulensevent": [
             {
                 "finite_source": False,
@@ -237,7 +249,7 @@ def _mixed_config(lc, companions):
             stars.append({"name": name})
             lens_entries.append({"body": f"star.{name}"})
         else:
-            planets.append({"name": name, "star_ndx": 0})
+            planets.append({"name": name})
             lens_entries.append({"body": f"planet.{name}"})
 
     cfg = {
@@ -249,6 +261,18 @@ def _mixed_config(lc, companions):
     }
     if planets:
         cfg["planet"] = planets
+        # Each planet companion is paired with the lens primary by a static
+        # orbit (it does not move); with a second lens star beside it, its
+        # host is not left implicit (orbit.bodies.planet_membership).
+        cfg["orbit"] = [
+            {
+                "name": p["name"],
+                "type": "static",
+                "primary": ["Lens"],
+                "companion": [p["name"]],
+            }
+            for p in planets
+        ]
     return cfg
 
 

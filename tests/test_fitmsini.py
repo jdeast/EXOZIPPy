@@ -88,15 +88,33 @@ class _FakeSystem:
 
 
 class _FakeConfigManager:
-    def __init__(self, user_params=None):
+    def __init__(self, user_params=None, system_config=None):
         self.user_params = user_params if user_params is not None else {}
-        # No orbit block: every orbit type is the keplerian default
-        # (Planet.keplerian_geometry reads the raw config's orbit types).
-        self.system_config = {}
+        # Planet membership and the orbit types are read off the raw
+        # system config (orbit.bodies.planet_membership).
+        self.system_config = system_config or {}
+
+
+def _system_config(planet_cfg):
+    """One host star and one orbit per planet, membership by the orbit
+    groups -- the one spelling (a planet carries no orbit or host key)."""
+    return {
+        "star": [{"name": "A"}],
+        "planet": planet_cfg,
+        "orbit": [
+            {"name": p["name"], "primary": ["A"], "companion": [p["name"]]}
+            for p in planet_cfg
+        ],
+    }
 
 
 def _modes(planet_cfg, user_params=None, config=None, **comps):
-    comp = Planet(planet_cfg, config_manager=_FakeConfigManager(user_params))
+    comp = Planet(
+        planet_cfg,
+        config_manager=_FakeConfigManager(
+            user_params, _system_config(planet_cfg)
+        ),
+    )
     comp.build_maps()
     comp._resolve_mass_parameterization(_FakeSystem(config, **comps))
     return comp.mass_parameterizations
@@ -249,7 +267,7 @@ def test_a_chord_on_ANOTHER_orbit_also_rules_msini_out():
     orbit.cosi, so the cycle crosses orbits (it recursed in add_parameter
     for two RV orbits with one fitvcve -> fitchord)."""
     orbit = _FakeOrbit(n=2, inc_modes=["chord", "cosi"])
-    planets = [{"name": "b"}, {"name": "c", "orbit_ndx": 1}]
+    planets = [{"name": "b"}, {"name": "c"}]
     assert _modes(planets, rvinstrument=_FakeRV(), orbit=orbit) == [
         "linear",
         "linear",
@@ -278,13 +296,15 @@ def test_lens_companion_log_q_reader():
 # ---------------------------------------------------------------------------
 def _build(planet_extra, extra_params=None, n_planets=1):
     names = ["b", "c"][:n_planets]
-    planets = [{"name": nm, "orbit_ndx": i} for i, nm in enumerate(names)]
+    planets = [{"name": nm} for nm in names]
     for p, extra in zip(planets, planet_extra):
         p.update(extra)
     config = {
         "star": [{"name": "A", "mist": False}],
         "planet": planets,
-        "orbit": [{"name": nm} for nm in names],
+        "orbit": [
+            {"name": nm, "primary": ["A"], "companion": [nm]} for nm in names
+        ],
     }
     params = {
         "star.A.logmass": {"initval": 0.0, "sigma": 0.0},

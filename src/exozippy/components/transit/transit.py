@@ -15,6 +15,7 @@ from exozippy.outputs.texutils import latex_escape
 
 from .. import ltt
 from ..orbit import physics as orbit_physics
+from ..orbit.bodies import planet_membership
 from . import physics, spline
 
 
@@ -776,17 +777,15 @@ class Transit(Instrument):
     def _sole_planet_index(self, system, orbit_ndx):
         """The one planet on this orbit, or None if there is not exactly one.
 
-        Read off the raw config rather than ``planet.orbit_map``: this runs
-        at stage 1a, where the maps may not have been built yet.
+        Read off the raw config (``orbit.bodies.planet_membership``, the one
+        reader of planet membership) rather than ``planet.orbit_map``: this
+        runs at stage 1a, where the maps may not have been built yet.
         """
         planets = getattr(system, "planet", None)
         if planets is None:
             return None
-        on_orbit = [
-            j
-            for j, entry in enumerate(planets.config)
-            if int((entry or {}).get("orbit_ndx", 0)) == orbit_ndx
-        ]
+        membership = planet_membership(self.config_manager.system_config)
+        on_orbit = [j for j, (o, _) in enumerate(membership) if o == orbit_ndx]
         return on_orbit[0] if len(on_orbit) == 1 else None
 
     def _oversample_partition(self, inst_map):

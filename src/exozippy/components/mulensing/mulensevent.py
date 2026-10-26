@@ -24,7 +24,11 @@ import pymc as pm
 import pytensor.tensor as pt
 
 from exozippy.components.component import Component
-from exozippy.components.orbit.bodies import orbit_types, parse_orbit_bodies
+from exozippy.components.orbit.bodies import (
+    STATIC_TYPE,
+    orbit_types,
+    parse_orbit_bodies,
+)
 from exozippy.components.star.position import probe_star_radec
 from exozippy.config import (
     PRECEDENCE_DERIVED_DATA,
@@ -220,6 +224,12 @@ class MulensEvent(Component):
                 continue
             o = resolve_orbit_ref(config_manager, ref, f"source.{j}")
             t = types[o] if o < len(types) else "keplerian"
+            if t == STATIC_TYPE:
+                raise ValueError(
+                    f"source.{j}: orbit {ref!r} is type: static, a pairing "
+                    "with no dynamics, so it cannot move this source.  A "
+                    "source that does not move carries no 'orbit:' key."
+                )
             if t != "keplerian":
                 raise NotImplementedError(
                     f"source.{j}: orbit {ref!r} is type: {t}.  Linear (or "

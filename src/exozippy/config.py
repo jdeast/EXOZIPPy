@@ -1354,7 +1354,20 @@ class ConfigManager:
 
                     for raw_map in raw_maps:
                         instance_map = {}
+                        # A symbol mapped to None names a quantity THIS
+                        # instance does not have (a planet with no Keplerian
+                        # orbit has no orbital period): every relation that
+                        # reads it is left out of this instance, rather than
+                        # bound to some other instance's path or left as a
+                        # bare symbol shared across instances.
+                        absent = {
+                            sym_name
+                            for sym_name, path in raw_map.items()
+                            if path is None
+                        }
                         for sym_name, path in raw_map.items():
+                            if path is None:
+                                continue
                             if "." in str(path):
                                 instance_map[sym_name] = path
                             else:
@@ -1384,6 +1397,10 @@ class ConfigManager:
                                 subs[sym] = sp.Symbol(instance_map[sym.name])
 
                         for rel in getattr(module, "RELATIONS", []):
+                            if any(
+                                sym.name in absent for sym in rel.free_symbols
+                            ):
+                                continue
                             rel_inst = rel.subs(subs)
                             # Maps sharing symbols (e.g. per-source maps with a
                             # common lens mass) produce identical instances of

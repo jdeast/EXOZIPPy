@@ -4,7 +4,7 @@
 ``Transit._phased_lc_arrays`` is called per PLANET.  It used to read them at
 the planet index, which agrees with the orbit index only when planet i
 happens to sit on orbit i -- true in every shipped transit example, never
-by contract (``planet.orbit_ndx`` is free, and the orbit list can carry
+by contract (a planet's orbit is whichever block names it, and the orbit list can carry
 stellar orbits too).  Otherwise every phased panel folded on another
 orbit's period and tc, silently.
 
@@ -40,11 +40,9 @@ def swapped_orbits(tmp_path_factory):
     config = {
         "run": {"name": "swapped_lc"},
         "star": [{"name": "A", "mist": False}],
-        # planet b (index 0) -> orbit 1; planet c (index 1) -> orbit 0.
-        "planet": [
-            {"name": "b", "orbit_ndx": 1},
-            {"name": "c", "orbit_ndx": 0},
-        ],
+        # planet b (index 0) -> orbit 1; planet c (index 1) -> orbit 0,
+        # by the orbit groups.
+        "planet": [{"name": "b"}, {"name": "c"}],
         "orbit": [
             {"name": "c", "primary": ["A"], "companion": ["c"]},
             {"name": "b", "primary": ["A"], "companion": ["b"]},

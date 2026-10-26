@@ -684,7 +684,7 @@ def test_the_crossing_barrier_reads_the_engines_semi_major_axis(transit_lc):
     and this pins the two together so the copy cannot come back.
     """
     cfg = _transit_config(transit_lc, fitvcve=False)
-    cfg["planet"] = [{"name": "b"}, {"name": "c", "orbit_ndx": 1}]
+    cfg["planet"] = [{"name": "b"}, {"name": "c"}]
     cfg["orbit"] = [
         {"name": "b", "primary": ["A"], "companion": ["b"], "fitvcve": False},
         {"name": "c", "primary": ["A"], "companion": ["c"], "fitvcve": False},

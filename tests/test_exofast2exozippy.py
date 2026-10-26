@@ -577,17 +577,19 @@ def test_multi_planet_conversions_point_each_planet_at_its_orbit(
 ):
     """
     Given nplanets=2,
-    Then each planet block carries its own orbit_ndx -- without it every
-      planet would read orbit 0's geometry.
+    Then each planet is named by its own orbit block's companion group --
+      the one spelling of membership; the planet blocks carry no index.
     """
     driver = _DRIVER.replace("nplanets=1", "nplanets=2").replace(
         "circular=[1]", "circular=[1,0]"
     )
     config, _, _, _ = _convert(tmp_path, monkeypatch, driver)
-    assert config["planet"] == [
-        {"name": "b", "orbit_ndx": 0},
-        {"name": "c", "orbit_ndx": 1},
+    assert config["planet"] == [{"name": "b"}, {"name": "c"}]
+    groups = [
+        (o["name"], o["primary"], o["companion"]) for o in config["orbit"]
     ]
+    host = config["star"][0]["name"]
+    assert groups == [("b", [host], ["b"]), ("c", [host], ["c"])]
 
 
 # --------------------------------------------------------------------------

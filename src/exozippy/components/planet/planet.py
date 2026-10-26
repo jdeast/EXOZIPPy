@@ -4,7 +4,7 @@ import numpy as np
 import pymc as pm
 import pytensor.tensor as pt
 
-from exozippy.components.component import Component
+from exozippy.components.component import Component, in_topology
 from exozippy.components.parameterization import (
     merge_overrides,
     mode_manifest,
@@ -16,7 +16,12 @@ from exozippy.outputs.prose import get_collector, join_names
 from exozippy.outputs.texutils import latex_escape
 from exozippy.potentials import soft_lower_bound
 
-from ..orbit.bodies import TAYLOR_TYPES, orbit_types
+from ..orbit.bodies import (
+    REMOVED_PLANET_KEYS,
+    component_instance_names,
+    orbit_types,
+    planet_membership,
+)
 from ..orbit.orbit import (
     amplitude_constrained_orbits,
     inclination_constrained_orbits,
@@ -74,7 +79,12 @@ def _mass_parameterization_removed(value):
 # message (the mulensing bodies.REMOVED_KEYS pattern): a config naming one was
 # written for a spelling that no longer exists, and the user needs the
 # replacement, not silence.  {key: message(value)}.
-REMOVED_KEYS = {"mass_parameterization": _mass_parameterization_removed}
+# `orbit_ndx:` and `star_ndx:` are the second spelling of the orbit groups
+# (owned by orbit/bodies.py, whose `planet_membership` is the one reader).
+REMOVED_KEYS = {
+    "mass_parameterization": _mass_parameterization_removed,
+    **REMOVED_PLANET_KEYS,
+}
 
 
 def parse_mass_flags(entry, where):
@@ -305,26 +315,35 @@ class Planet(Component):
                     "fitvcve. At most one of fitlogq/fitmsini may be true."
                 ),
             },
-            {
-                "key": "star_ndx",
-                "kind": "ref",
-                "accepts": ["star"],
-                "required": False,
-                "doc": "Index of the host star (default 0).",
-            },
-            {
-                "key": "orbit_ndx",
-                "kind": "ref",
-                "accepts": ["orbit"],
-                "required": False,
-                "doc": "Index of the orbit this planet is on (default 0).",
-            },
         ]
 
     def build_maps(self):
-        """Stage 2: Define logical Numpy arrays. (Base class auto-converts to Tensors)."""
-        self.star_map = np.array([p.get("star_ndx", 0) for p in self.config])
-        self.orbit_map = np.array([p.get("orbit_ndx", 0) for p in self.config])
+        """Stage 2: the planet -> host star and planet -> orbit index maps.
+
+        Both are DERIVED from the orbit blocks' primary:/companion: groups
+        (`orbit.bodies.planet_membership`, the one reader): a planet carries
+        no key of its own for either, so the two cannot disagree.
+
+        `star_map` always exists -- every planet has a host.  `orbit_map`
+        exists only when EVERY planet is named by an orbit block; a planet
+        paired implicitly with no orbit (a static lens companion with no
+        orbit block) has none, and `orbit_ndx` (the per-planet list, None
+        there) is what to ask.  No sentinel index is invented: a reader that
+        needs an orbit for an orbit-less planet fails loudly instead of
+        indexing orbit -1.
+        """
+        membership = planet_membership(self.config_manager.system_config)
+        if len(membership) != self.n_elements:
+            raise RuntimeError(
+                f"[{self.prefix}] the system config declares "
+                f"{len(membership)} planet(s), but this component has "
+                f"{self.n_elements}; planet membership is read off the "
+                f"system config, which must hold this component's block."
+            )
+        self.orbit_ndx = [o for o, _ in membership]
+        self.star_map = np.array([h for _, h in membership], dtype=int)
+        if all(o is not None for o in self.orbit_ndx):
+            self.orbit_map = np.array(self.orbit_ndx, dtype=int)
 
     #: The summary figure's header, per planet: the Parameter label and the
     #: element it is read at -- the planet's own index, or the index of the
@@ -351,9 +370,11 @@ class Planet(Component):
         lookup = system.get_parameter_lookup()
         lines = []
         for p_idx, pname in enumerate(self.names):
-            o_idx = int(self.orbit_map[p_idx])
+            o_idx = self.orbit_ndx[p_idx]
             parts = []
             for label, owner in self.SUMMARY_HEADER:
+                if owner == "orbit" and o_idx is None:
+                    continue  # no orbit, so no period or eccentricity
                 param = lookup.get(label)
                 index = o_idx if owner == "orbit" else p_idx
                 summ = reported_summary(param, index)
@@ -375,43 +396,59 @@ class Planet(Component):
 
         Everything Planet derives from an orbit -- p, a, a/R*, b, K, msini,
         teq, the transit durations, the radius prior and the msini/crossing
-        potentials -- is Keplerian.  A planet whose orbit is a Taylor orbit
-        (`type: linear|quadratic`: a lens companion's linear orbital motion,
-        or an unresolved trend) has none of it, and reading the Taylor
-        orbit's inactive Keplerian bookkeeping as an orbit would be a
+        potentials -- is Keplerian.  A planet on a Taylor orbit (`type:
+        linear|quadratic`: a lens companion's linear orbital motion, or an
+        unresolved trend), on a `type: static` orbit (a pairing with no
+        dynamics), or on no orbit at all (the implicit static pairing of
+        `orbit.bodies.planet_membership`) has none of it, and reading a
+        non-Keplerian orbit's inactive bookkeeping as an orbit would be a
         silently wrong number.  So the question is per planet, not "is
-        there an orbit component" (review 8.8.20; the old test switched all
-        of it on for a lens planet on a linear lens orbit, which is why such
-        a planet was refused outright).
+        there an orbit component" (#485).
 
-        True when every planet's orbit is Keplerian, False when there is no
-        orbit or every planet's orbit is a Taylor orbit.  A MIX raises: the
-        manifest entries are whole-component, so one planet's geometry
-        cannot be declared while another's is absent (yet).
+        True when every planet's orbit is Keplerian, False when none is.  A
+        MIX raises: the manifest entries are whole-component, so one
+        planet's geometry cannot be declared while another's is absent
+        (yet).  A TRANSIT block with any planet off a Keplerian orbit raises
+        first: every transit file models every planet's transit geometry
+        (p, b, a/R*, the durations).
         """
-        if "orbit" not in system.active_components:
-            return False
-        # From the raw config (orbit_types), as Lens and the symbolic maps
-        # read orbit types: it is what the user wrote, available at any
-        # stage, and an index past the declared types is keplerian (the
-        # orbit `type:` default).
-        types = orbit_types(self.config_manager.system_config)
-        taylor = [
-            (types[int(o)] if int(o) < len(types) else "keplerian")
-            in TAYLOR_TYPES
-            for o in self.orbit_map
-        ]
-        if not any(taylor):
+        sys_cfg = self.config_manager.system_config
+        types = orbit_types(sys_cfg)
+        orbit_names = component_instance_names(sys_cfg, "orbit")
+        kinds = [None if o is None else types[o] for o in self.orbit_ndx]
+        keplerian = [k == "keplerian" for k in kinds]
+        if in_topology(system, "transit") is not None and not all(keplerian):
+            off = [
+                f"'{n}' ("
+                + (
+                    "in no orbit block"
+                    if k is None
+                    else f"on the type: {k} orbit '{orbit_names[o]}'"
+                )
+                + ")"
+                for n, k, o, kep in zip(
+                    self.names, kinds, self.orbit_ndx, keplerian
+                )
+                if not kep
+            ]
+            raise ValueError(
+                f"[{self.prefix}] planet(s) {', '.join(off)} have no "
+                f"Keplerian orbit, and this system has a transit block, "
+                f"which models every planet's Keplerian transit geometry.  "
+                f"Name each planet in the companion group of a Keplerian "
+                f"orbit block (type: keplerian, the default)."
+            )
+        if all(keplerian):
             return True
-        if all(taylor):
+        if not any(keplerian):
             return False
         raise NotImplementedError(
-            f"[{self.prefix}] planets {[n for n, t in zip(self.names, taylor) if t]} "
-            f"are on Taylor orbits and "
-            f"{[n for n, t in zip(self.names, taylor) if not t]} on Keplerian "
-            f"ones; a mix is not supported yet (the planet's orbit-derived "
-            f"parameters are declared for every planet or none; review "
-            f"8.8.20)."
+            f"[{self.prefix}] planets "
+            f"{[n for n, kep in zip(self.names, keplerian) if not kep]} have "
+            f"no Keplerian orbit and "
+            f"{[n for n, kep in zip(self.names, keplerian) if kep]} do; a mix "
+            f"is not supported yet (the planet's orbit-derived parameters are "
+            f"declared for every planet or none)."
         )
 
     def register_parameters(self, system):
@@ -738,7 +775,7 @@ class Planet(Component):
 
         modes, reasons = [], []
         for p, (flags, nm) in enumerate(zip(self.mass_flags, self.names)):
-            o = int(self.orbit_map[p])
+            o = self.orbit_ndx[p]
             has_orbit = orbit is not None
             chord = bool(chord_orbits)
 

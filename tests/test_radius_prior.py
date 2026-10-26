@@ -35,8 +35,10 @@ def _build(radius_entries, n_planets=1, star_radius=None):
     names = ["b", "c"][:n_planets]
     config = {
         "star": [{"name": "A", "mist": False}],
-        "planet": [{"name": nm, "orbit_ndx": i} for i, nm in enumerate(names)],
-        "orbit": [{"name": nm} for nm in names],
+        "planet": [{"name": nm} for nm in names],
+        "orbit": [
+            {"name": nm, "primary": ["A"], "companion": [nm]} for nm in names
+        ],
     }
     params = {
         "star.A.logmass": {"initval": 0.0, "sigma": 0.0},
