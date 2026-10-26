@@ -146,10 +146,12 @@ def main(argv=None):
         for c in caught:
             errors.append("model construction: %s" % c.message)
         add("submission", sub.run_validation())
+        # EVERY solution, active or not: Submission.run_validation() returns
+        # no per-solution messages for active ones (0 of 103 on 2026-10-26,
+        # when all 31 were active), so skipping them validated nothing.
         for eid, ev in sub.events.items():
             for sid, s in ev.solutions.items():
-                if not s.is_active:  # active ones are in run_validation
-                    add(sid, s.run_validation())
+                add(sid, s.run_validation())
     else:
         for f, j in sols.items():
             m = vp.check_solution_completeness(
