@@ -722,12 +722,33 @@ def event_json(ev):
     return {"event_id": event_id(ev)}
 
 
+#: The two kinds of UNRELIABLE reason (JDE, 2026-10-25: label them apart).
+#: EVIDENCE_UNRELIABLE: only the mode's lnZ, so its relative_probability,
+#: is untrustworthy (a refused bridge) -- harmless on a single-mode event.
+#: FIT_UNRELIABLE: something about the fit itself (forced, lp not
+#: reproduced, err_scale out of range, ANOMALY under a single lens).
+EVIDENCE_UNRELIABLE = "EVIDENCE_UNRELIABLE"
+FIT_UNRELIABLE = "FIT_UNRELIABLE"
+
+
+def split_unreliable(reasons):
+    """(evidence, fit): reliability_flags' UNRELIABLE reasons by kind."""
+    ev = [r for r in reasons or [] if r.startswith("bridge refused")]
+    return ev, [r for r in reasons or [] if r not in ev]
+
+
 def notes_markdown(sol, event):
     """The solution's notes (microlens-submit keeps notes in a Markdown file
     named by notes_path; there is no inline notes field)."""
     L = ["# %s" % sol["solution_id"], ""]
-    if sol["unreliable"]:
-        L.append("**UNRELIABLE:** " + "; ".join(sol["unreliable"]))
+    ev_bad, fit_bad = split_unreliable(sol["unreliable"])
+    if fit_bad:
+        L.append("**%s:** %s" % (FIT_UNRELIABLE, "; ".join(fit_bad)))
+        L.append("")
+    if ev_bad:
+        L.append("**%s:** %s (the relative_probability is indicative; the "
+                 "fit itself is not implicated)"
+                 % (EVIDENCE_UNRELIABLE, "; ".join(ev_bad)))  # fmt: skip
         L.append("")
     L.append(
         "Warnings: "
@@ -828,17 +849,20 @@ TIER_SCORED = "SCORED"
 #: microlens-submit's challenge tier (tier_validation.TIER_DEFINITIONS);
 #: the RMDC26 data are the beginner tier.
 CHALLENGE_TIER = "beginner"
-#: The PI supplies the team name; until then this is the clearly marked
-#: placeholder (it is NOT a valid name and must be replaced).
-TEAM_NAME_PLACEHOLDER = "TEAM_NAME_TBD"
+#: The team name, as the PI gave it (JDE, 2026-10-25).
+TEAM_NAME = "exozippy"
 
-#: Architecture rule (PI-approved; decided by Cannon Dev as owner).  The
-#: fits are one architecture per event, so for a 1S2L event the blind (s, q)
-#: grid's dchi2_np = chi2(no-planet row) - chi2(best node) stands in for the
-#: missing single-lens arm: above this, P(1S1L) ~ 0.  The campaign's grid
-#: dchi2 is bimodal (nothing between 10 and 100 on 2026-10-24), so the exact
-#: value of the cut does not move any event.
-ARCH_DCHI2_MIN = 50.0
+#: Architecture rule (JDE, 2026-10-25).  The fits are one architecture per
+#: event, so for a 1S2L event a direct single-lens arm (DIRECT_ARCH_GLOB) or
+#: else the blind (s, q) grid's dchi2_np = chi2(no-planet row) - chi2(best
+#: node) stands in for the missing single-lens arm: above this, P(1S1L) ~ 0.
+#: 10 is the DC2018 detectability cut (dchi2(PSPL - truth) < 10 is
+#: undetectable), so one number serves DC2018, DC2026 and Roman.  The
+#: alternative JDE allowed, dBIC > 10 (dchi2 > 10 + k ln N, ~42 for the
+#: grid's 3 lens parameters at N ~ 49000), moves no event either; calibrate
+#: on DC2018 in spring.  The campaign's grid dchi2 is bimodal (nothing
+#: between 10 and 100), so neither choice changes the submission.
+ARCH_DCHI2_MIN = 10.0
 #: A posterior "pins" q when its larger 68% half-width is below this
 #: fraction of the median (105: 2.6e-6 / 2.57e-5 = 10%).
 Q_PINNED_REL = 0.25
@@ -1062,7 +1086,8 @@ VERDICT_HEADER_LEGACY = (
     "  Rhat    chi2    ratio  outfrc"
 )
 #: verdict.out column name -> parse_verdict_line key.
-VERDICT_NUM_KEYS = {"Rhat": "rhat", "chi2": "chi2", "ratio": "ratio",
+VERDICT_NUM_KEYS = {"Rhat": "rhat", "Rhat_phys": "rhat_phys",
+                    "Rhat_all": "rhat_all", "chi2": "chi2", "ratio": "ratio",
                     "outfrc": "outfrac", "modes": "modes", "stuck": "stuck"}  # fmt: skip
 
 
@@ -1353,11 +1378,14 @@ NOTES_SECTION = "## Evidence, flags and conventions (exozippy report stage)"
 
 
 def solution_flags(sol):
-    """Short machine flags of one solution: UNRELIABLE / INDICATIVE /
-    WARN(n)."""
+    """Short machine flags of one solution: FIT_UNRELIABLE /
+    EVIDENCE_UNRELIABLE / INDICATIVE / WARN(n)."""
     f = []
-    if sol.get("unreliable"):
-        f.append("UNRELIABLE")
+    ev_bad, fit_bad = split_unreliable(sol.get("unreliable"))
+    if fit_bad:
+        f.append(FIT_UNRELIABLE)
+    if ev_bad:
+        f.append(EVIDENCE_UNRELIABLE)
     if sol.get("basis_indicative"):
         f.append("INDICATIVE")
     if sol.get("warnings"):
@@ -1407,8 +1435,10 @@ def event_notes_markdown(campaign_note, event):
     L.append("### Reliability flags")
     L.append("")
     for s in event["solutions"]:
-        L.append("- %s: UNRELIABLE: %s. Warnings: %s." % (
-            s["solution_id"], "; ".join(s.get("unreliable") or []) or "no",
+        ev_bad, fit_bad = split_unreliable(s.get("unreliable"))
+        L.append("- %s: %s: %s. %s: %s. Warnings: %s." % (
+            s["solution_id"], FIT_UNRELIABLE, "; ".join(fit_bad) or "no",
+            EVIDENCE_UNRELIABLE, "; ".join(ev_bad) or "no",
             "; ".join(s.get("warnings") or []) or "none"))  # fmt: skip
     cav = event.get("extinction_caveat")
     if cav:

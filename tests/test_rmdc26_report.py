@@ -315,7 +315,19 @@ def test_event_json_and_notes(R):
              warnings=[], lnZ=1.0, lnZ_err=0.2, re2=0.03, n_draws=100,
              p_raw=0.7, group="G1", group_members=[s["solution_id"]])  # fmt: skip
     txt = R.notes_markdown(s, {"arch_prob": {"1S2L": 1.0}, "missing": []})
-    assert "**UNRELIABLE:**" in txt and "err_scale F213" in txt
+    assert "**FIT_UNRELIABLE:** err_scale F213" in txt
+    assert "EVIDENCE_UNRELIABLE" not in txt
+    s["unreliable"].append("bridge refused (re2-too-large)")
+    txt = R.notes_markdown(s, {"arch_prob": {"1S2L": 1.0}, "missing": []})
+    assert "**EVIDENCE_UNRELIABLE:** bridge refused (re2-too-large)" in txt
+    assert R.split_unreliable(s["unreliable"]) == (
+        ["bridge refused (re2-too-large)"],
+        ["err_scale F213 = 21 outside [0.8, 1.25]"],
+    )
+    assert R.solution_flags(dict(s, warnings=[])) == [
+        "FIT_UNRELIABLE",
+        "EVIDENCE_UNRELIABLE",
+    ]
     assert R.CONVENTIONS in txt
     assert "RADIANS" in txt and "1S2L: 1" in txt
     assert "| t_0 | 2462793.51 | 0.001 | 0.002 |" in txt
@@ -555,8 +567,8 @@ def test_the_config_that_wrote_the_trace_is_found(R):
 
 
 def test_the_architecture_rule(R):
-    """1S2L: dchi2_np > 50 on the blind grid -> binary favoured, no flag;
-    <= 50 or no grid -> ARCHITECTURE_UNCERTAIN.  A pinned q under a small
+    """1S2L: dchi2_np > 10 on the blind grid -> binary favoured, no flag;
+    <= 10 or no grid -> ARCHITECTURE_UNCERTAIN.  A pinned q under a small
     dchi2 (105: dchi2 8, q 2.57e-5 +/- 2.6e-6) spells out the tension.
     1S1L: the audit decides; ANOMALY flags a possible missed companion."""
     v = R.architecture_verdict("1S2L", 3000.0)
@@ -566,10 +578,10 @@ def test_the_architecture_rule(R):
         in v["statement"]
     )
     assert (
-        R.architecture_verdict("1S2L", 50.0)["flag"]
+        R.architecture_verdict("1S2L", 10.0)["flag"]
         == "ARCHITECTURE_UNCERTAIN"
     )
-    assert R.architecture_verdict("1S2L", 50.01)["flag"] is None
+    assert R.architecture_verdict("1S2L", 10.01)["flag"] is None
     v = R.architecture_verdict("1S2L", 8.0, q=(2.57e-5, 2.6e-6, 2.5e-6))
     assert v["flag"] == "ARCHITECTURE_UNCERTAIN" and v["dchi2_np"] == 8.0
     assert (
@@ -607,7 +619,7 @@ def test_a_direct_comparison_supersedes_the_grid(R, tmp_path):
     )
     assert "the blind grid gave dchi2_np = 8.0" in v["statement"]
     assert "pins q" not in v["statement"]
-    v = R.architecture_verdict("1S2L", 3000.0, direct=dict(rec, dchi2=20.0))
+    v = R.architecture_verdict("1S2L", 3000.0, direct=dict(rec, dchi2=5.0))
     assert v["flag"] == "ARCHITECTURE_UNCERTAIN" and v["rule"] == "direct"
     v = R.architecture_verdict("1S1L", direct=rec)
     assert v["rule"] == "audit"
@@ -760,6 +772,22 @@ def test_the_verdict_row_is_parsed(R):
     )
     assert v["lc"] == "modes stuck 2/98%" and v["phy"] == "theta* off (13)"
     assert v["rhat"] == pytest.approx(1.23) and v["modes"] == 2.0
+    # 2026-10-25: Rhat split into LC / physical / global columns
+    hdr3 = (
+        "ev    LC verdict                               PHY verdict          "
+        "           Rhat  Rhat_phys  Rhat_all    chi2    ratio  outfrc  modes"
+        "  stuck"
+    )
+    v = R.parse_verdict_line(
+        "106   OK                                       Rhat_phys=1.53(mann."
+        "absks)     1.440      1.530     1.530    1.17     0.90   0.130      1"
+        "   1.00",
+        header=hdr3,
+    )
+    assert v["phy"] == "Rhat_phys=1.53(mann.absks)"
+    assert v["rhat"] == pytest.approx(1.44)
+    assert v["rhat_phys"] == pytest.approx(1.53)
+    assert v["rhat_all"] == pytest.approx(1.53) and v["stuck"] == 1.0
     assert "FULL" in R.tier_reason("FULL", v) and "withheld" in R.tier_reason(
         "SCORED", v
     )
