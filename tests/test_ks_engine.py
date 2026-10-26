@@ -417,6 +417,35 @@ def test_escalation_climbs_one_tier_at_a_time():
     assert _kinds(cm, "unsettled") == []
 
 
+def test_an_escalated_hint_on_a_derived_element_is_judged_in_its_plan_scale():
+    """
+    Given x = y + d with x pinned at 5, d a DEFAULT seed at 1 bounded at 2,
+      and y a DERIVED element with no init_scale of its own, carrying a
+      DATA hint at 1 and an upper bound of 3.5 (so the sampled seeds alone
+      cannot reach it and it has no propagated leaf scale either),
+    When the escalation moves y,
+    Then the move is judged in the scale the settle split it in -- the one
+      x = y + d implies from x and d -- instead of raising for want of a
+      declared scale.  This is the data-seeded t_E on the 2L1S DC2018
+      architecture config (tests/test_dc18_arch_config.py), the first
+      case where a settle MOVED a seed on a derived element.
+    """
+    cm = _toy(
+        {
+            "x": _blk(),
+            "y": {"lower": -1e6, "upper": 3.5},
+            "d": _blk(1.0, upper=2.0),
+        },
+        lambda S: [sp.Eq(S("x"), S("y") + S("d"))],
+        user={"x": 5.0},
+        roles={"x": "sampled", "y": "derived", "d": "sampled"},
+        hints={"y": (1.0, PRECEDENCE_DERIVED_DATA)},
+    )
+    assert _val(cm, "d") == pytest.approx(2.0)
+    assert _val(cm, "y") == pytest.approx(3.0, rel=1e-6)
+    assert _kinds(cm, "unsettled") == []
+
+
 def test_a_user_value_is_never_an_escalation_target():
     """
     Given x = u + d with x and u pinned by the user (x = 5, u = 1) and d a

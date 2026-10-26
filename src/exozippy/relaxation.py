@@ -1263,10 +1263,24 @@ class Engine:
         )
         new_fixed = dict(fixed)
         new_fixed.update(zip(movable, x))
+        # The change test uses the scale the correction was SPLIT in, read
+        # off the plan the settle started from.  A seed on a DERIVED element
+        # (a data-seeded t_E) has no declared or leaf scale -- only the
+        # one that plan implies -- so `self.scale(m)` without it is None and
+        # value_moved raises.  A moved seed was reached, so the split already
+        # required that scale; require it again here rather than guess.
+        split_plan = plan
+        moved_scales = {
+            m: self.require_scale(
+                m, f"to judge a move of a {tier_name} seed", split_plan
+            )
+            for m, a_m, x_m in zip(movable, a, x)
+            if a_m != x_m
+        }
         plan = self.closure(new_fixed, excluded)
         for m, a_m, x_m in zip(movable, a, x):
             if a_m != x_m and value_moved(
-                x_m, a_m, self.scale(m), m, self.periodic.get(m)
+                x_m, a_m, moved_scales[m], m, self.periodic.get(m)
             ):
                 self.moved[m] = (float(a_m), float(x_m), tier_name)
         return new_fixed, plan, self.violated(plan, excluded)
