@@ -160,20 +160,19 @@ def test_a_t_E_the_kinematics_derive_is_not_overridden(tmp_path):
     assert set(cm.seed_hint_sets[0]) == {"source.0.u_0"}
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "review 1.1.11: with the target positioned, the galactic-model "
-        "proper-motion seeds override a user t_E (17 -> 42.5 d) silently; "
-        "the defaults.yaml placeholder used to switch those seeds off"
-    ),
-)
 def test_a_user_t_E_without_t_0_is_held_and_t_0_u_0_are_found(tmp_path):
     """
     Given a params file that names t_E only (JDE 2026-10-01: "when the user
-    supplies [t_E], it should respect it"),
+    supplies [t_E], it should respect it"), with the target positioned and
+    q unseeded,
     When prepare() runs,
     Then the finder pushes t_0 and u_0 only, and t_E keeps the user value.
+
+    Until the engine escalated (review 1.1.11) this started at t_E 42.5 d:
+    log_q's default sits on its -9 bound, so at DEFAULT the companion mass
+    was the only absorber of mlens_total = M_star + M_planet, could not go
+    negative, and the relation was left violated.  Now the residual goes to
+    the lens distance (MULENS_LENS_DISTANCE), the next tier up.
     """
     t_E = 17.0
     cm = _prepare(tmp_path, {"mulensevent.t_E": {"initval": t_E}})
@@ -186,6 +185,9 @@ def test_a_user_t_E_without_t_0_is_held_and_t_0_u_0_are_found(tmp_path):
     probed = cm.probe_start(["mulensevent.0.t_E"])["mulensevent.0.t_E"]
     assert probed.user_value == pytest.approx(t_E)
     assert probed.source == "user"
+    # the stage-4 solve itself holds it, with nothing left violated
+    assert not [d for d in cm.diagnostics if d.get("kind") == "unsettled"]
+    assert cm._last_keep_report["escalated"]
 
 
 def test_all_three_given_runs_nothing(tmp_path):

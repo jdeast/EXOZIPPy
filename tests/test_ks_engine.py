@@ -22,6 +22,7 @@ import sympy as sp
 from exozippy.config import (
     PRECEDENCE_DEFAULT,
     PRECEDENCE_DERIVED_DATA,
+    PRECEDENCE_MULENS_LENS_DISTANCE,
     PRECEDENCE_USER,
     ConfigManager,
 )
@@ -354,3 +355,102 @@ def test_a_user_value_on_a_sampled_element_is_rigid():
     assert _val(cm, "x") == 5.0 and _val(cm, "y") == 2.0
     assert _val(cm, "z") == pytest.approx(3.0)
     assert cm._last_provenance["toy.0.x"] == PRECEDENCE_USER
+
+
+# ---------------------------------------------------------------------------
+# Escalation: what a tier cannot absorb inside its bounds goes UP (1.1.11)
+# ---------------------------------------------------------------------------
+def _kinds(cm, kind):
+    return [d for d in cm.diagnostics if d.get("kind") == kind]
+
+
+def test_a_tier_at_its_bound_hands_the_residual_to_the_next_tier_up():
+    """
+    Given x = h + d with x pinned at 5 by the user, h a DATA hint at 1 and
+      d a DEFAULT seed at 1 whose upper bound is 2,
+    When the engine settles it,
+    Then d moves as far as it can (to 2) and h absorbs only the rest (to
+      3): the lower tier's solution is preferred, and the part it cannot
+      absorb is escalated rather than left violated (review 1.1.11).  The
+      relation holds, nothing is reported unsettled, and the escalation is
+      recorded in the keep report.
+    """
+    cm = _toy(
+        {"x": _blk(), "h": _blk(), "d": _blk(1.0, upper=2.0)},
+        lambda S: [sp.Eq(S("x"), S("h") + S("d"))],
+        user={"x": 5.0},
+        hints={"h": (1.0, PRECEDENCE_DERIVED_DATA)},
+    )
+    assert _val(cm, "x") == 5.0
+    assert _val(cm, "d") == pytest.approx(2.0)
+    assert _val(cm, "h") == pytest.approx(3.0, rel=1e-6)
+    assert _kinds(cm, "unsettled") == []
+    ((_label, frm, steps),) = cm._last_keep_report["escalated"]
+    assert frm.startswith("DEFAULT") and steps[0][1] == ["toy.0.h"]
+
+
+def test_escalation_climbs_one_tier_at_a_time():
+    """
+    Given x = h + m + d with x pinned at 10, d a DEFAULT seed (bound 2), m
+      a MULENS_LENS_DISTANCE hint (bound 3) and h a DATA hint, all at 1,
+    When the engine settles it,
+    Then each tier takes what it can before the next one up moves: d to
+      2, m to 3, and h the remaining 5.
+    """
+    cm = _toy(
+        {
+            "x": _blk(),
+            "h": _blk(),
+            "m": _blk(upper=3.0),
+            "d": _blk(1.0, upper=2.0),
+        },
+        lambda S: [sp.Eq(S("x"), S("h") + S("m") + S("d"))],
+        user={"x": 10.0},
+        hints={
+            "h": (1.0, PRECEDENCE_DERIVED_DATA),
+            "m": (1.0, PRECEDENCE_MULENS_LENS_DISTANCE),
+        },
+    )
+    assert _val(cm, "d") == pytest.approx(2.0)
+    assert _val(cm, "m") == pytest.approx(3.0)
+    assert _val(cm, "h") == pytest.approx(5.0, rel=1e-6)
+    assert _kinds(cm, "unsettled") == []
+
+
+def test_a_user_value_is_never_an_escalation_target():
+    """
+    Given x = u + d with x and u pinned by the user (x = 5, u = 1) and d a
+      DEFAULT seed whose upper bound is 2,
+    When the engine settles it,
+    Then no seed above DEFAULT is upstream of the relation, so nothing
+      escalates: both user values are exact and the relation is reported
+      unsettled, as before 1.1.11.
+    """
+    cm = _toy(
+        {"x": _blk(), "u": _blk(), "d": _blk(1.0, upper=2.0)},
+        lambda S: [sp.Eq(S("x"), S("u") + S("d"))],
+        user={"x": 5.0, "u": 1.0},
+    )
+    assert _val(cm, "x") == 5.0 and _val(cm, "u") == 1.0
+    assert len(_kinds(cm, "unsettled")) == 1
+    assert cm._last_keep_report["escalated"] == []
+
+
+def test_an_escalation_that_cannot_settle_is_undone():
+    """
+    Given x = h + d with x pinned at 5, h a DATA hint at 1 bounded at 1.5
+      and d a DEFAULT seed at 1 bounded at 2,
+    When the engine settles it,
+    Then even the DATA tier cannot close the gap, so its move is undone (h
+      keeps its hint) and the relation is reported unsettled -- the start is
+      exactly what it was before escalation existed.
+    """
+    cm = _toy(
+        {"x": _blk(), "h": _blk(upper=1.5), "d": _blk(1.0, upper=2.0)},
+        lambda S: [sp.Eq(S("x"), S("h") + S("d"))],
+        user={"x": 5.0},
+        hints={"h": (1.0, PRECEDENCE_DERIVED_DATA)},
+    )
+    assert _val(cm, "h") == 1.0
+    assert len(_kinds(cm, "unsettled")) == 1
+    assert cm._last_keep_report["escalated"] == []
