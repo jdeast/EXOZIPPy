@@ -1,0 +1,65 @@
+background:
+  # The photocenter of the unresolved background at the astrometric
+  # reference epoch, relative to the primary microlensing source's position
+  # there (mas, East true arc / North).  Pinned at 0 by default: with a
+  # catalog solution a constant offset is nearly degenerate with the
+  # source's own position.  Free it (sigma: null, or a Gaussian) to fit it.
+  offset_e:
+    lower: -2000.0
+    upper: 2000.0
+    initval: 0.0
+    init_scale: 0.1
+    sigma: 0.0
+    unit: "mas"
+    internal_unit: "mas"
+    latex: "\\Delta\\alpha^*_{\\rm bg}"
+    description: "Unresolved background photocenter offset, East"
+  offset_n:
+    lower: -2000.0
+    upper: 2000.0
+    initval: 0.0
+    init_scale: 0.1
+    sigma: 0.0
+    unit: "mas"
+    internal_unit: "mas"
+    latex: "\\Delta\\delta_{\\rm bg}"
+    description: "Unresolved background photocenter offset, North"
+  # Its proper motion.  Sampled; on a bulge sightline Background.
+  # register_parameters gives it the field population's mean and
+  # dispersion as a Gaussian prior through the manifest "overrides"
+  # channel (logged at stage 3; a params entry replaces it), elsewhere it
+  # is uniform on these bounds, with a warning.
+  pm_ra:
+    lower: -50.0
+    upper: 50.0
+    initval: 0.0
+    init_scale: 0.1
+    unit: "mas/yr"
+    internal_unit: "mas/yr"
+    latex: "\\mu_{\\alpha*,{\\rm bg}}"
+    description: "Unresolved background proper motion (RA)"
+  pm_dec:
+    lower: -50.0
+    upper: 50.0
+    initval: 0.0
+    init_scale: 0.1
+    unit: "mas/yr"
+    internal_unit: "mas/yr"
+    latex: "\\mu_{\\delta,{\\rm bg}}"
+    description: "Unresolved background proper motion (Dec)"
+  # Its flux in each band it is listed in, relative to the primary source's
+  # baseline flux in that band, F_bg / F_S.  One element per (instance,
+  # band), spelled background.<name>.fluxratio_<k> with k the band's
+  # position in the instance's `bands:` list.  Uniform on these bounds
+  # unless the params file states a prior.  This is the seam the
+  # luminosity-function prior of the planned resolved-blends follow-up
+  # attaches to (background.md).
+  fluxratio:
+    lower: 0.0
+    upper: 1000.0
+    initval: 0.1
+    init_scale: 0.01
+    unit: ""
+    internal_unit: ""
+    latex: "F_{\\rm bg}/F_{S}"
+    description: "Unresolved background flux / source flux"

@@ -1395,7 +1395,10 @@ class Star(Component):
             astrom_modes = [
                 (c or {}).get("mode", "gaia") for c in (astrom or [])
             ]
-        has_abs_astrom = any(m in ("gaia", "abs") for m in astrom_modes)
+        # astrometryinstrument.ABSOLUTE_MODES, spelled out (import cycle).
+        has_abs_astrom = any(
+            m in ("gaia", "abs", "catalog") for m in astrom_modes
+        )
 
         if (
             in_system("mulensevent")
@@ -1465,11 +1468,17 @@ class Star(Component):
                 modes = getattr(astrom, "modes", None)
                 star_map = getattr(astrom, "star_map", None)
                 if modes is not None and star_map is not None:
+                    # astrometryinstrument.ABSOLUTE_MODES (spelled out: that
+                    # module imports star.position).  A psf_stars member's
+                    # position is measured too (review 8.10.3): it moves the
+                    # blended photocenter.
                     abs_astrom_idx = {
                         int(star_map[i])
                         for i, m in enumerate(modes)
-                        if m in ("gaia", "abs")
+                        if m in ("gaia", "abs", "catalog")
                     }
+                    for members in astrom.psf_stars:
+                        abs_astrom_idx |= {int(s) for s in members}
             # A lens whose position is derived from its source's (review
             # 8.10.4) makes the SOURCE's ra/dec measured too: pinning them at
             # a catalog value would pin the lens track to it, at a precision

@@ -488,10 +488,16 @@ class MulensEvent(Component):
         astrom = getattr(system, "astrometryinstrument", None)
         if astrom is None:
             return None
-        for c in astrom.config:
+        for i, c in enumerate(astrom.config):
             mode = c.get("mode", "gaia")
-            if mode in ("gaia", "abs") and int(c.get("star_ndx", 0)) == int(
-                l_idx
+            # astrometryinstrument.ABSOLUTE_MODES, spelled out (import
+            # cycle).  A lens named in a dataset's psf_stars (review 8.10.3)
+            # is measured too: its track moves that blended photocenter.
+            # psf_stars is resolved to indices at AstrometryInstrument
+            # construction, so this stays stage-safe.
+            if mode in ("gaia", "abs", "catalog") and (
+                int(c.get("star_ndx", 0)) == int(l_idx)
+                or int(l_idx) in astrom.psf_stars[i]
             ):
                 return int(l_idx)
         return None
