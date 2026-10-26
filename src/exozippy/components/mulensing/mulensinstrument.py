@@ -181,10 +181,6 @@ class MulensInstrument(Instrument):
         super().__init__(config, config_manager)
         self.label = "Microlensing Data"
         self.total_detrend_cols = 0
-        # _finite_source_limb_darkening is called from both build_likelihood
-        # and compile_plotters; the notice belongs to the topology, not to the
-        # call, so it is emitted once.
-        self._warned_multiband_ld = False
         # Each light curve's zeropoint magnitude system AS STATED, in the one
         # internal spelling (None = unstated = the band filter's native
         # system), translated at this boundary by the SAME parser the SED's
@@ -1876,6 +1872,25 @@ class MulensInstrument(Instrument):
                 logger.warning(
                     f"Instrument references unknown band '{n}'; LD will be skipped."
                 )
+            # Limb darkening is per light curve (_finite_source_limb_
+            # darkening), so a band-less light curve in a finite-source event
+            # sees a UNIFORM source while its neighbors see their bands'
+            # profiles.  Legitimate (nothing says which profile it should
+            # have), but worth one line: it used to borrow the first band's.
+            if (
+                system.mulensevent.finite_source
+                and np.any(self.band_map >= 0)
+                and np.any(self.band_map < 0)
+            ):
+                bandless = [
+                    n for n, b in zip(self.names, self.band_map) if b < 0
+                ]
+                logger.warning(
+                    f"{self.prefix}: light curve(s) {bandless} name no band: "
+                    "in a finite-source event, so their magnification uses a "
+                    "UNIFORM (not limb-darkened) source. Add band: to give "
+                    "them a profile."
+                )
 
         # SED-tied photometric zeropoint, one per light curve.  Declared only
         # where there is an SED to tie to; it is DERIVED (see the defaults.yaml
@@ -2251,25 +2266,35 @@ class MulensInstrument(Instrument):
             manifest[param] = entry
         return manifest
 
-    def _finite_source_limb_darkening(self, system):
-        """(u1, u2, bandpass) for the magnification, or (None, None, None).
+    def _finite_source_limb_darkening(self, system, i):
+        """(u1, u2, bandpass) for light curve ``i``'s magnification, or
+        (None, None, None).
 
-        ONE resolver, called by both `build_likelihood` and
-        `compile_plotters`.  It used to live inline in `build_likelihood`
-        only, so the plotters passed neither argument, `get_magnification_op`
-        computed `effective_bandpass = None`, and every plotted/GUI model
-        curve was the UNIFORM-source magnification while the likelihood fitted
-        the limb-darkened one -- a discrepancy of up to several percent, and
-        largest exactly where these plots are read (caustic crossings, the
-        finite-source peak).  A helper rather than a cached value because both
-        call sites want the live `band.u1` node; the warn-once flag is what
-        keeps the multi-band notice from being printed twice.
+        ONE resolver, reached by `build_likelihood` and `compile_plotters`
+        (both through `_model_flux`) and by astrometryinstrument for a
+        lensed dataset's `photometry:` light curve.  It used to live inline
+        in `build_likelihood` only, so the plotters passed neither argument,
+        `get_magnification_op` computed `effective_bandpass = None`, and every
+        plotted/GUI model curve was the UNIFORM-source magnification while the
+        likelihood fitted the limb-darkened one -- a discrepancy of up to
+        several percent, and largest exactly where these plots are read
+        (caustic crossings, the finite-source peak).  A helper rather than a
+        cached value because every call site wants the live `band.u1` node.
 
-        LD applies only when the lens is finite-source AND a Band component is
-        wired to at least one of this instrument's light curves; a uniform
-        source has no limb to darken.  Multiple distinct bands across one
-        instrument's finite-source light curves are not yet supported -- the
-        first band is used, and said so.
+        PER LIGHT CURVE.  The source profile is a property of the band the
+        light curve was taken in, so the answer is light curve ``i``'s own
+        band.  It used to be ONE (u1, u2, bandpass) for the whole
+        instrument -- the first band's, with a warning -- which put band I's
+        profile on every V-band point across exactly the caustic-crossing
+        epochs that carry the finite-source information (a 17 mmag I-vs-V
+        systematic; +40-55 chi2 per solution at the start of a real
+        OGLE-2013-BLG-0341 fit).  `_model_flux` groups the rows by band
+        (`_ld_groups`) and evaluates each band's profile on its own rows.
+
+        LD applies only when the lens is finite-source AND light curve ``i``
+        names a band; a uniform source has no limb to darken, and a light
+        curve with no `band:` has no profile to apply (register_parameters
+        warns once when that happens beside light curves that do).
 
         u2 IS THE SECOND (QUADRATIC) COEFFICIENT, and it is returned rather
         than dropped because dropping it was a real defect: the magnification
@@ -2286,20 +2311,11 @@ class MulensInstrument(Instrument):
         `"u2" in band.manifest` is the only safe test -- the same one
         transit.py and rm.py use (components/sed/sed.md).
         """
-        if not (
-            system.mulensevent.finite_source
-            and hasattr(system, "band")
-            and np.any(self.band_map >= 0)
-        ):
+        if not (system.mulensevent.finite_source and hasattr(system, "band")):
             return None, None, None
-
-        unique = sorted({int(b) for b in self.band_map if b >= 0})
-        if len(unique) > 1 and not self._warned_multiband_ld:
-            self._warned_multiband_ld = True
-            logger.warning(
-                "Multiple bands for finite-source instruments; using first band's u1."
-            )
-        band_idx = unique[0]
+        band_idx = int(self.band_map[i])
+        if band_idx < 0:
+            return None, None, None
         u2 = (
             system.band.u2.value[band_idx]
             if "u2" in system.band.manifest
@@ -2311,7 +2327,30 @@ class MulensInstrument(Instrument):
             system.band.names[band_idx],
         )
 
-    def _model_flux(self, system, t, obs_pos, inst, resolve_method=False):
+    def _ld_groups(self, system):
+        """The light curves partitioned by source profile.
+
+        Returns ``(group_of_lc, groups)``: ``group_of_lc[i]`` is light curve
+        ``i``'s group, and ``groups[g]`` the (sorted) light-curve indices
+        sharing group ``g``'s (u1, u2, bandpass) -- one group per band, plus
+        one for the band-less light curves (uniform source).  An event with
+        no limb darkening at all (a point source, or no Band component) is
+        ONE group, so its magnification is one call on every row, exactly
+        as before per-band limb darkening existed.  Any member of a group
+        is a valid argument to `_finite_source_limb_darkening` for it.
+        """
+        n = len(self.names)
+        if not (system.mulensevent.finite_source and hasattr(system, "band")):
+            return np.zeros(n, dtype=int), [np.arange(n)]
+        keys = [int(b) if b >= 0 else -1 for b in self.band_map]
+        unique = sorted(set(keys))
+        group_of_lc = np.array([unique.index(k) for k in keys], dtype=int)
+        groups = [np.flatnonzero(group_of_lc == g) for g in range(len(unique))]
+        return group_of_lc, groups
+
+    def _model_flux(
+        self, system, t, obs_pos, inst, row_lc, resolve_method=False
+    ):
         """The ONE detrend-free flux-model expression, in each row's own
         instrument flux system.
 
@@ -2327,12 +2366,28 @@ class MulensInstrument(Instrument):
         applies it through ``Instrument._detrended_model`` and the plots take
         it off the data (``detrend_corrected``), instrument.md.
 
+        ``row_lc`` (NUMPY, never symbolic) names the light curve whose limb
+        darkening each row takes: one index per row (the likelihood passes
+        ``self.inst_map``), or one int for every row (the plotter, which
+        compiles one curve per LD group, compile_plotters).  It is static
+        because the per-band partition must be: the rows of each band are
+        materialized as numpy index arrays at build time.
+
         Magnification: both the symbolic and Op paths take Skowron+2011
         geocentric deviations (AU); ``get_magnification_op`` dispatches.
-        u1/u2/bandpass come from the one LD resolver.  ``resolve_method`` is
-        the likelihood's: it lets ``resolve_auto_vbbl`` fix the backend's
-        method list before each source's Op is built (the plot grid reuses
-        that decision; the bracket spans the whole time axis, review 2.6.9).
+        ONE call per (source, LD group present), each on its group's rows
+        only, reassembled with ``pt.set_subtensor`` -- never ``pt.where``,
+        whose gradient multiplies the unselected branch by zero and turns a
+        NaN there into a NaN everywhere (CLAUDE.md).  The rows are disjoint
+        and cover the vector, so the cost stays one evaluation per epoch per
+        source however many bands there are.  With a single group present
+        (every single-band event; every point-source or LD-free one) it is
+        the one call on the whole vector, bit-identical to the
+        pre-per-band graph.  u1/u2/bandpass come from the one LD resolver.
+        ``resolve_method`` is the likelihood's: it lets ``resolve_auto_vbbl``
+        fix the backend's method list before each source's Op is built (the
+        plot grid reuses that decision; the bracket spans the whole time
+        axis, review 2.6.9).
 
         Flux: F = sum_j f_s,j A_j + f_b, with f_s,1 = f_s/(1+q_F) and
         f_s,2 = f_s q_F/(1+q_F) (q_F per instrument -- sources differ in
@@ -2340,23 +2395,46 @@ class MulensInstrument(Instrument):
         (f_blend may be negative, difference-imaging data live around zero),
         and the likelihood is Gaussian in flux, so nothing takes a log.
         """
-        u1, u2, bandpass = self._finite_source_limb_darkening(system)
+        group_of_lc, groups = self._ld_groups(system)
+        row_lc = np.asarray(row_lc)
+        if row_lc.ndim == 0:
+            row_group = None
+            present = [int(group_of_lc[int(row_lc)])]
+        else:
+            row_group = group_of_lc[row_lc]
+            present = [int(g) for g in np.unique(row_group)]
+
+        event = system.mulensevent
         n_src = self._n_sources
         A_per_source = []
         for j in range(n_src):
             if resolve_method:
-                system.mulensevent.resolve_auto_vbbl(index=j)
-            A_per_source.append(
-                system.mulensevent.get_magnification_op(
-                    t,
-                    obs_pos,
+                event.resolve_auto_vbbl(index=j)
+
+            def magnification(g, times, obs, j=j):
+                u1, u2, bandpass = self._finite_source_limb_darkening(
+                    system, int(groups[g][0])
+                )
+                return event.get_magnification_op(
+                    times,
+                    obs,
                     system,
                     index=j,
                     u1=u1,
                     u2=u2,
                     bandpass=bandpass,
                 )
-            )
+
+            if len(present) == 1:
+                A_per_source.append(magnification(present[0], t, obs_pos))
+                continue
+            A = pt.zeros_like(pt.as_tensor_variable(t), dtype="float64")
+            for g in present:
+                rows = np.flatnonzero(row_group == g)
+                A = pt.set_subtensor(
+                    A[rows], magnification(g, t[rows], obs_pos[rows])
+                )
+            A_per_source.append(A)
 
         fs = self.f_source.value[inst]
         fb = self.f_blend.value[inst]
@@ -2383,6 +2461,7 @@ class MulensInstrument(Instrument):
             t,
             self.observer_pos,
             self.inst_map_tensor,
+            self.inst_map,
             resolve_method=True,
         )
 
@@ -2921,19 +3000,44 @@ class MulensInstrument(Instrument):
         # the "physical + GP" curve is built on it too (see plot_data).  The
         # detrend term is not: it is per observation, and plot_data divides
         # it out of the data instead (Instrument.detrend_corrected).
-        model_flux = self._model_flux(system, t_input, obs_pos_input, inst_idx)
+        #
+        # ONE compiled curve per limb-darkening group (_ld_groups: one per
+        # band), each the same builder with that group's source profile on
+        # every grid point, and `_compiled_model_flux(t, obs_pos, i, ...)`
+        # dispatches on light curve i's group.  A grid point has no band of
+        # its own -- it takes the band of the light curve being drawn -- and
+        # the alternative, evaluating every band's profile on the grid and
+        # indexing by i inside one graph, multiplies the plotting VBM cost by
+        # the number of bands.  A single-group event compiles exactly the one
+        # function it always did.
+        group_of_lc, groups = self._ld_groups(system)
+        nodes, fns = [], []
+        for members in groups:
+            node = self._model_flux(
+                system, t_input, obs_pos_input, inst_idx, int(members[0])
+            )
+            nodes.append(node)
+            fns.append(
+                pytensor.function(
+                    inputs=[t_input, obs_pos_input, inst_idx] + param_symbols,
+                    outputs=node,
+                    on_unused_input="ignore",
+                )
+            )
 
         # Retained symbolically so plot_data can walk the graph for
         # param_deps (the evaluator skips components whose specs declare no
         # dependency on a moved slider -- empty deps would freeze the GUI's
-        # microlensing charts in live mode).
-        self._model_flux_node = model_flux
-
-        self._compiled_model_flux = pytensor.function(
-            inputs=[t_input, obs_pos_input, inst_idx] + param_symbols,
-            outputs=model_flux,
-            on_unused_input="ignore",
+        # microlensing charts in live mode).  Every group's curve, so a
+        # slider on any band's u1 counts.
+        self._model_flux_node = (
+            nodes[0] if len(nodes) == 1 else pt.stack(nodes)
         )
+
+        def compiled_model_flux(t, obs_pos, i, *values):
+            return fns[group_of_lc[int(i)]](t, obs_pos, i, *values)
+
+        self._compiled_model_flux = compiled_model_flux
 
         # Full per-instrument f_source / f_blend vectors at a given point, used
         # by plot() to rescale every data set onto the reference instrument's

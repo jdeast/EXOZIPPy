@@ -148,14 +148,11 @@ Two consequences:
   (`finite_source_LD_Yoo04` inside `+/- 5*rho*t_E` of `t_0`, point source
   outside). That path has no gradient, so the sampler is the synchronous `ptde` (the recommended default since PR #376) and
   NUTS is unavailable -- `Lens.sampler_requirements()` will say so if you try.
-* Limb darkening lives *inside* the magnification, and one magnification curve
-  is computed per source over every instrument's concatenated times, so a
-  per-band `u1` would need a per-band magnification. With more than one band
-  present the model warns "Multiple bands for finite-source instruments; using
-  first band's u1" and uses the **lowest-indexed** band any instrument
-  references. That is why `band:` lists `I` first: the peak, the only place
-  8.4 mag of magnification makes limb darkening matter, is covered by OGLE `I`
-  and SMARTS `I`.
+* Limb darkening lives *inside* the magnification, so each band gets its own
+  magnification call on its own epochs, with its own `u1`. The peak, the only
+  place 8.4 mag of magnification makes limb darkening matter, is covered by
+  OGLE `I` and SMARTS `I`. (Before review 8.6.10 every light curve used the
+  first band's `u1`, which is why `band:` used to have to list `I` first.)
 
 `t0_par: 2454233.667` anchors the Skowron+2011 geocentric frame. For
 terrestrial parallax the choice matters far less than for annual parallax --

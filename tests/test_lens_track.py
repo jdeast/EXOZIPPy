@@ -217,7 +217,7 @@ def test_lensrel_is_the_pair_difference_minus_the_centroid_shift(
             dev,
             system,
             0,
-            *mi._finite_source_limb_darkening(system),
+            *mi._finite_source_limb_darkening(system, inst._lens_phot[2]),
         )
         nodes += [cE, cN]
     sE, sN, lE, lN, rE, rN, cE, cN = _compile_at_start(model, nodes)

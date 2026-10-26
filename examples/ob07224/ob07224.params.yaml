@@ -184,13 +184,10 @@ star.Lens.pm_dec:
 # band's is genuinely fit (the lens transited the source, so the peak shape
 # measures the limb).
 #
-# V and R are PINNED, not fit, and that is a statement about the
-# architecture rather than about the star: limb darkening lives inside the
-# magnification and one magnification curve is computed per source over
-# every instrument's concatenated times, so only the LOWEST-indexed band any
-# instrument references is ever read (MulensInstrument
-# ._finite_source_limb_darkening, which warns that it did).  Left free, these
-# two would be exactly flat directions for the sampler to wander in.
+# V and R are PINNED at their tabulated values.  Each light curve now uses
+# its own band's u1 (review 8.6.10), so both are read, but by data that
+# barely constrain them: V is 14 SMARTS epochs, and none of the R-band sites
+# covers the peak, which is the only place the limb shows.
 band.I.u1:
     initval: 0.47
 band.V.u1:

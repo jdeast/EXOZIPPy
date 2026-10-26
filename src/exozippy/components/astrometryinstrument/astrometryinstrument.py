@@ -1209,7 +1209,10 @@ class AstrometryInstrument(Instrument):
             tau + hx, beta + hy, event.theta_E.value[0]
         )
         mi = system.mulensinstrument
-        u1, u2, bandpass = mi._finite_source_limb_darkening(system)
+        # The limb darkening of the source's centroid shift is the
+        # photometry: light curve's band (as in _apply_lens).
+        k = self._lens_phot[i]  # never None: _resolve_lens_photometry raises
+        u1, u2, bandpass = mi._finite_source_limb_darkening(system, k)
         _A, shift_n, shift_e = event.get_astrometric_terms(
             t, dev, system, index=0, u1=u1, u2=u2, bandpass=bandpass
         )
@@ -1310,7 +1313,7 @@ class AstrometryInstrument(Instrument):
         # limb darkening is that light curve's resolver (one resolver, the
         # plotted-equals-fitted rule); it matters only on the finite-source
         # Op path, where VBM integrates the centroid over the darkened disk.
-        u1, u2, bandpass = mi._finite_source_limb_darkening(system)
+        u1, u2, bandpass = mi._finite_source_limb_darkening(system, k)
         A, sN, sE = event.get_astrometric_terms(
             t, dev, system, index=j, u1=u1, u2=u2, bandpass=bandpass
         )

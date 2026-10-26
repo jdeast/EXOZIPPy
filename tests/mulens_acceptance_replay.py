@@ -93,6 +93,17 @@ uniform in Rp/R* (components/star/star.md, "Planet radius prior"):
 stored start (R* = 1 solRad).  Every recorded value is kept bit-identical;
 only that term and `n_terms` were added.
 
+The ob07224 fixture was re-recorded when finite-source limb darkening
+became per band (review 8.6.10, mulensing/mulensing.md "Limb darkening is
+per band, not per instrument").  Every light curve used to take the FIRST
+band's u1 (I, 0.47); SMARTS_V, the example's only V light curve (14
+epochs), now takes band V's pinned 0.64.  One move, explained:
+`RV:mulensinstrument.model` 23298.4498 -> 23300.7569 (+2.3071), all of it
+on SMARTS_V's rows (213.4015 -> 215.7086); every other light curve, every
+other term and the stored start are bit-identical.  The other multi-band
+finite-source fixtures did not move beyond rounding: ob09020 by 4e-11
+nats (its 5 V epochs), ob161003 not at all.
+
 ob161003 (2S2L) is the ONE example whose model changes BY CONSTRUCTION
 (review R1): its per-source event-level vectors collapse to scalars.  Its
 replay fixture is re-recorded post-split; the stage-0 recording is kept at

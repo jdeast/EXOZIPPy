@@ -59,13 +59,10 @@ galacticmodel:
     anchor_idx: 1                # anchor on the source, by microlensing convention
 
 band:
-  # "I" MUST be first.  With finite_source on and more than one band present,
-  # MulensInstrument._finite_source_limb_darkening uses the LOWEST band index
-  # any instrument references and warns that it did -- limb darkening lives
-  # inside the magnification, and one magnification curve is computed per
-  # source over every instrument's concatenated times.  The peak (the only
-  # place LD matters at 2350x magnification) is covered by OGLE I and SMARTS
-  # I, so I is the band whose u1 should win.
+  # Each light curve's magnification uses its OWN band's u1 (one
+  # magnification call per band, on that band's epochs; review 8.6.10).
+  # The peak (the only place LD matters at 2350x magnification) is covered
+  # by OGLE I and SMARTS I.
   - name: "I"
     filter: "Generic/Cousins.I"
     ld_law: "linear"

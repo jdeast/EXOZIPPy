@@ -271,7 +271,7 @@ def test_resolver_returns_u2_only_for_a_quadratic_band(tmp_path):
     for law, expected in (("quadratic", True), ("linear", False)):
         system = _fs_system(tmp_path / law, law)
         u1, u2, bandpass = (
-            system.mulensinstrument._finite_source_limb_darkening(system)
+            system.mulensinstrument._finite_source_limb_darkening(system, 0)
         )
         assert bandpass == "I"
         assert u1 is not None
@@ -294,7 +294,7 @@ def test_mulensmodel_backend_drops_u2_and_says_so(tmp_path, caplog):
     system = _fs_system(tmp_path, "quadratic", backend="mulensmodel")
     event = system.mulensevent
     _, u2, bandpass = system.mulensinstrument._finite_source_limb_darkening(
-        system
+        system, 0
     )
     assert u2 is not None
 
@@ -321,7 +321,7 @@ def test_vbm_backend_honours_u2(tmp_path):
     """
     system = _fs_system(tmp_path, "quadratic")
     _, u2, bandpass = system.mulensinstrument._finite_source_limb_darkening(
-        system
+        system, 0
     )
     assert system.mulensevent.backend == "vbm_direct"
     assert system.mulensevent._resolve_quadratic_ld(u2, bandpass) is True
@@ -336,7 +336,7 @@ def test_no_u2_means_no_quadratic_law(tmp_path):
     """
     system = _fs_system(tmp_path, "linear")
     _, u2, bandpass = system.mulensinstrument._finite_source_limb_darkening(
-        system
+        system, 0
     )
     assert u2 is None
     assert system.mulensevent._resolve_quadratic_ld(u2, bandpass) is False
@@ -358,7 +358,7 @@ def test_single_lens_backend_switches_only_when_u2_is_in_play(tmp_path, law):
     # Arrange
     system = _fs_system(tmp_path / law, law)
     u1, u2, bandpass = system.mulensinstrument._finite_source_limb_darkening(
-        system
+        system, 0
     )
     t_in = pt.dvector("t")
     obs_in = pt.dmatrix("obs")
@@ -391,7 +391,7 @@ def test_the_graph_actually_responds_to_u2(tmp_path):
     # Arrange
     system = _fs_system(tmp_path, "quadratic")
     u1, u2, bandpass = system.mulensinstrument._finite_source_limb_darkening(
-        system
+        system, 0
     )
     t_in = pt.dvector("t")
     obs_in = pt.dmatrix("obs")

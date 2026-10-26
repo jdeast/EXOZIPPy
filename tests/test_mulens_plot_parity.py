@@ -104,7 +104,7 @@ def test_finite_source_ld_resolver_finds_the_band(finite_source_system):
     # Arrange / Act
     u1, u2, bandpass = (
         finite_source_system.mulensinstrument._finite_source_limb_darkening(
-            finite_source_system
+            finite_source_system, 0
         )
     )
 
@@ -128,7 +128,7 @@ def test_plotted_magnification_is_the_limb_darkened_one(finite_source_system):
     # Arrange
     system = finite_source_system
     inst = system.mulensinstrument
-    u1, u2, bandpass = inst._finite_source_limb_darkening(system)
+    u1, u2, bandpass = inst._finite_source_limb_darkening(system, 0)
     times = inst.time[:40]
 
     # Act
