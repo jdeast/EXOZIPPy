@@ -131,14 +131,13 @@ baseline, so its blending is unconstrained by its own data (free solution
 with much else besides). It is seeded at no blending, which the sampler is
 free to leave.
 
-## Two caveats
+## Two notes
 
-- **Only one band's limb darkening is used.** EXOZIPPy warns at startup:
-  "Multiple bands for finite-source instruments; using first band's u1."
-  Auckland's R-band `u1` is declared and then ignored, and its light curve
-  is modelled with the I-band coefficient. Four of the five datasets are I,
-  so that is the lesser error, but it is a departure from Shin+18, who use
-  both.
+- **Each band's limb darkening is its own.** Each light curve's
+  magnification uses its own band's `u1` (review 8.6.10). Until then
+  Auckland's R-band `u1` was declared and ignored, and its light curve was
+  modelled with the I-band coefficient -- a departure from Shin+18, who use
+  both. It is now read, by Auckland's 91 epochs alone.
 - **The source radius is not separately identifiable.** `rho` is derived as
   `theta_*/theta_E`, and EXOZIPPy warns that `theta_E` and `D_S` absorb any
   rescaling of the radius. It is seeded (13.42 R_sun, which is
