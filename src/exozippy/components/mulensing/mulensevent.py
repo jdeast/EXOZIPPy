@@ -434,7 +434,10 @@ class MulensEvent(Component):
                     "Default 'vbm_direct' (VBMicrolensing, linear or "
                     "quadratic limb darkening); 'mulensmodel' is the A/B "
                     "reference, at most 2 lens bodies, and is linear-LD "
-                    "only."
+                    "only. Its finite-source single lens uses MulensModel's "
+                    "Yoo04 where u/rho <= 99 (the end of Yoo04's table) and "
+                    "a point source beyond, which is within 0.014 mmag "
+                    "there."
                 ),
             },
             {
@@ -2093,8 +2096,10 @@ class MulensEvent(Component):
         reaches the magnification"), that attribution was wrong: Yoo04's
         tables agree with the integral to <0.01 mmag at rho <= 0.01.  The
         ~5 mmag was the MulensModel backend's own method window, which
-        drops to a POINT source outside t_0 +/- 5 rho t_E, where the finite
-        source still raises A by ~rho^2/(8 u^2) ~ 0.5%.  VBM's ESPL is
+        dropped to a POINT source outside t_0 +/- 5 rho t_E, where the finite
+        source still raises A by ~rho^2/(8 u^2) ~ 0.5%.  (That window now
+        ends at z = u/rho = 99, the end of Yoo04's dense table, where the
+        point source is within 0.014 mmag; op.YOO04_Z_MAX.)  VBM's ESPL is
         within 0.1-0.2 mmag of the integral there and almost everywhere
         else; its two narrow weak spots (+/-1.2 mmag within 1% of rho of
         the limb crossing, and an error growing as u/rho -> 0, NaN at u ==

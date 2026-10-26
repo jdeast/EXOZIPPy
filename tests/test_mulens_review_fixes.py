@@ -162,8 +162,12 @@ def test_pspl_model_floors_nonpositive_rho():
     # Arrange: [t_0, u_0, t_E, pi_E_N, pi_E_E, rho]
     p = np.array([2450000.0, 0.1, 20.0, 0.0, 0.0, 0.0])
 
-    # Act
-    model = _build_pspl_model(p, COORDS, "auto_vbbl", use_rho=True)
+    # Act -- an explicit finite-source method, not "auto_vbbl": with rho at
+    # its floor, u_0 = 0.1 is far past the auto window's z = 99 edge
+    # (op.YOO04_Z_MAX), and that branch builds a point source WITHOUT rho.
+    model = _build_pspl_model(
+        p, COORDS, "finite_source_LD_Yoo04", use_rho=True
+    )
 
     # Assert
     assert float(model.parameters.rho) > 0

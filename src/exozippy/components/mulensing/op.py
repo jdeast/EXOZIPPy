@@ -130,6 +130,64 @@ def _safe_rho(value):
     return float(max(float(value), RHO_FLOOR))
 
 
+# The finite-source window of the MulensModel backend's single lens (review
+# 8.6.34): Yoo04 for z = u/rho <= YOO04_Z_MAX, a point source beyond.
+#
+# WHY A WINDOW AT ALL, rather than finite_source_LD_Yoo04 at every epoch.
+# MulensModel 3.x tabulates B0(z), B1(z) densely for 0 <= z <= 99 and then
+# has ONE more node, at z = 9900 (B0 = 1, B1 = 0), joined to the rest by a
+# cubic spline.  Between 99 and 9900 that spline is not B0: at z = 200 it
+# gives B0 - Gamma B1 - 1 = 2.5e-5 for 2.8e-6 (0.02 mmag), at 1000 2.5e-3
+# (2.7 mmag), at 5000 4.3e-2 (46 mmag).  Past 9900 it falls back to the
+# exact functions, a quad and a dblquad PER EPOCH.  Measured at the start
+# point under backend: mulensmodel, Yoo04 at every epoch moves the logp of
+# examples/ob161045 by -829 nats (the gap) and makes one logp evaluation of
+# examples/ob07224 254x slower (its baseline epochs sit past z = 9900).  So
+# "Yoo04 everywhere" is both wrong and slow, and the window must end inside
+# the dense table.  finite_source_LD_Yoo04_direct, the table-free variant,
+# is that same quad + dblquad at every epoch: accurate (within 2e-4 nats of
+# the window below on both examples), and 700-2000x slower.  The full
+# table is in mulensing.md.
+#
+# WHERE THE POINT SOURCE IS GOOD ENOUGH.  Expanding the point-lens A to
+# second order across the disk, A_fs = A + (<r^2>/4) lap(A), and
+# lap(A)/A = f(u)/u^2 with f(u) = 1 for u << 1 and f(u) < 1 for every u
+# (f = 0.85 at u = 1, 0.04 at u = 5).  For a linear limb-darkening law
+# I = 1 - u1 (1 - mu), <r^2> = rho^2 (15 - 7 u1) / (10 (3 - u1)), so
+#
+#     A_fs / A - 1 = c(u1) f(u) / z^2,   c(u1) = (15 - 7 u1) / (40 (3 - u1)),
+#
+# and c falls monotonically from 1/8 (uniform disk, the old rho^2/(8 u^2))
+# to 1/10 at u1 = 1.  In magnitudes, with a blend only diluting it, the
+# point source's error beyond z is at most 1.0857 * c / z^2 <= 0.136 / z^2.
+# At YOO04_Z_MAX = 99, the end of the dense table, that is 0.014 mmag for a
+# uniform disk and 0.013 mmag at u1 = 0.55, against 5.0 mmag at the z = 5
+# where the window used to end.  Checked against Yoo04's own table at
+# rho = 0.001: (A_Yoo04 / A - 1) = 1.138e-5 at z = 100 for c/z^2 =
+# 1.138e-5.  The level is far below any shipped light curve's photometric
+# error (the smallest is 1.0 mmag); going further would need the
+# table-free functions above, and buys < 0.014 mmag.
+YOO04_Z_MAX = 99.0
+
+
+def yoo04_half_window(u_0, rho, t_E):
+    """Half-width in time of the window in which z = u/rho <= YOO04_Z_MAX.
+
+    For the straight-line trajectory u^2 = u_0^2 + tau^2 that is
+    |t - t_0| <= t_E sqrt((Z rho)^2 - u_0^2); 0.0 when |u_0| >= Z rho, where
+    the whole light curve is a point source to <= 0.014 mmag (see
+    YOO04_Z_MAX).  Parallax bends the trajectory, so the edge is where z is
+    NEAR 99 rather than exactly 99 -- harmless, because both sides of it are
+    accurate there (the table to 1e-9 at z = 99 and still 4e-7 at 120; the
+    point source to 0.014 mmag at 99 and 0.05 at 50).
+    """
+    zmax_u = YOO04_Z_MAX * rho
+    u_0 = abs(u_0)
+    if u_0 >= zmax_u:
+        return 0.0
+    return t_E * float(np.sqrt(zmax_u * zmax_u - u_0 * u_0))
+
+
 def _build_pspl_model(p, coords, mag_method, use_rho=False):
     """Construct a MulensModel for PSPL (+ optional finite source).
 
@@ -137,8 +195,18 @@ def _build_pspl_model(p, coords, mag_method, use_rho=False):
     Extra trailing elements (u1) are ignored by the builder; LD is applied in perform().
     """
     mm_params = _base_mm_params(p)
+    half = 0.0
     if use_rho:
         mm_params["rho"] = _safe_rho(p[5])
+        if mag_method == "auto_vbbl":
+            half = yoo04_half_window(
+                mm_params["u_0"], mm_params["rho"], mm_params["t_E"]
+            )
+            if half == 0.0:
+                # |u_0| >= YOO04_Z_MAX rho: a point source at every epoch,
+                # to <= 0.014 mmag.  Built WITHOUT rho, because MulensModel
+                # warns on every call when rho is set and no method uses it.
+                del mm_params["rho"]
 
     model = mm.Model(parameters=mm_params, coords=coords)
     # The satellite channel is fed the Skowron+2011 geocentric deviations
@@ -150,18 +218,16 @@ def _build_pspl_model(p, coords, mag_method, use_rho=False):
 
     if isinstance(mag_method, list):
         model.set_magnification_methods(mag_method)
+    elif mag_method == "auto_vbbl" and half > 0.0:
+        # Yoo04 (interpolated B0/B1 tables) rather than Lee09 (direct 2-D
+        # integration, the slowest point-lens method in MulensModel), out
+        # to z = YOO04_Z_MAX; a point source beyond.
+        t_0 = mm_params["t_0"]
+        model.set_magnification_methods(
+            [t_0 - half, "finite_source_LD_Yoo04", t_0 + half]
+        )
     elif mag_method == "auto_vbbl":
-        if use_rho:
-            t_0, t_E = mm_params["t_0"], mm_params["t_E"]
-            window = 5.0 * mm_params["rho"] * t_E
-            # Yoo04 (interpolated B0/B1 tables, ~1e-4 accuracy, exact direct
-            # fallback outside the table range) instead of Lee09 (direct 2-D
-            # integration, the slowest point-lens method in MulensModel).
-            model.set_magnification_methods(
-                [t_0 - window, "finite_source_LD_Yoo04", t_0 + window]
-            )
-        else:
-            model.set_magnification_methods([-np.inf, "point_source", np.inf])
+        model.set_magnification_methods([-np.inf, "point_source", np.inf])
     else:
         model.set_magnification_methods([-np.inf, mag_method, np.inf])
     return model

@@ -26,8 +26,11 @@ magnifications rather than by reading the source:
      backend stays available as the A/B reference
      (test_single_lens_finite_source_backend_is_the_backend).  The reason
      that used to keep a linear band on MulensModel -- a ~5 mmag
-     disagreement blamed on Yoo04's tables -- is pinned against a direct
-     integration of the disk (test_espl_accuracy_against_direct_integration).
+     disagreement blamed on Yoo04's tables, really the reference backend's
+     own point-source window -- is pinned against a direct integration of
+     the disk, with that window now widened to the end of Yoo04's dense
+     table (test_espl_accuracy_against_direct_integration,
+     test_mulensmodel_window_ends_inside_the_dense_yoo04_table).
 """
 
 import logging
@@ -40,8 +43,10 @@ from scipy.integrate import quad
 from test_band_autopin_ld import _mulens_config, _mulens_params, _write_pspl_lc
 
 from exozippy.components.mulensing.op import (
+    YOO04_Z_MAX,
     MulensMagOp,
     VBMDirectMagOp,
+    yoo04_half_window,
 )
 from exozippy.system import System
 
@@ -247,21 +252,25 @@ def test_espl_accuracy_against_direct_integration():
     Given a linear-LD finite source on a single lens (rho = 0.01, u1 = 0.55)
       and a direct numerical integration of the disk as the reference,
     When VBM's ESPL, MulensModel's Yoo04 alone, and the mulensmodel backend's
-      own method window are compared with it,
-    Then VBM is within 0.25 mmag from u = 0.05 rho to 6 rho, Yoo04 alone is
-      within 0.05 mmag, and the backend window is off by > 2 mmag just
-      outside t_0 +/- 5 rho t_E.
+      own method window are compared with it, from u = 0.05 rho to 1000 rho,
+    Then VBM is within 0.25 mmag everywhere, the backend window within 0.05
+      mmag everywhere (inside it, Yoo04; past z = 99, a point source), and
+      Yoo04 alone within 0.05 mmag out to z = 99 but off by > 1 mmag at
+      z = 1000, inside the gap of MulensModel's B0/B1 table.
 
     This is the measurement behind routing every finite-source single lens
-    to VBM (MulensEvent._resolve_quadratic_ld).  The ~5 mmag VBM-vs-
-    MulensModel difference that once kept a linear band on MulensModel was
-    blamed on Yoo04's table interpolation; it is the backend's point-source
-    window, not Yoo04, and VBM is the accurate side of it.  If the last
-    assertion ever fails, the window was fixed -- update mulensing.md.
+    to VBM (MulensEvent._resolve_quadratic_ld) and behind the backend's
+    window (op.YOO04_Z_MAX, review 8.6.34).  The window used to end at
+    t_0 +/- 5 rho t_E and was off by > 2 mmag just outside it (PR #488);
+    it now ends at z = 99, where a point source is 0.013 mmag off.  If the
+    last assertion ever fails, MulensModel filled its table: Yoo04 at every
+    epoch may then be worth re-measuring -- update mulensing.md.
     """
     # Arrange
     rho, u1 = 0.01, 0.55
-    x = np.array([0.05, 0.3, 0.7, 1.0, 1.3, 3.0, 5.2, 6.0])
+    near = [0.05, 0.3, 0.7, 1.0, 1.3, 3.0, 5.2, 6.0]
+    far = [20.0, 60.0, 98.0, 101.0, 150.0, 1000.0]  # either side of z = 99
+    x = np.array(near + far)
     u = x * rho
     ref = np.array([_espl_reference(ui, rho, u1) for ui in u])
     # A trajectory with u_0 = 0.05 rho, timed to pass through those u.
@@ -292,10 +301,78 @@ def test_espl_accuracy_against_direct_integration():
 
     # Assert
     assert np.max(np.abs(d_vbm)) < 0.25, d_vbm
-    assert np.max(np.abs(d_yoo)) < 0.05, d_yoo
-    outside = x > 5.0
-    assert np.all(np.abs(d_window[outside]) > 2.0), d_window
-    assert np.max(np.abs(d_window[~outside])) < 0.05, d_window
+    assert np.max(np.abs(d_window)) < 0.05, d_window
+    in_table = x < YOO04_Z_MAX
+    assert np.max(np.abs(d_yoo[in_table])) < 0.05, d_yoo
+    assert abs(d_yoo[x == 1000.0][0]) > 1.0, d_yoo
+
+
+def test_mulensmodel_window_ends_inside_the_dense_yoo04_table():
+    """
+    Given MulensModel's B0/B1 interpolation table
+    When its nodes are read
+    Then they are dense out to at least op.YOO04_Z_MAX, and the window's
+      half-width puts its edge at z = YOO04_Z_MAX on a straight trajectory;
+      and when |u_0| is already past it the window is empty and the backend
+      is a point source at every epoch -- silently (MulensModel warns on
+      every call if rho is set and no method uses it) and within 0.02 mmag
+      of the disk integral.
+
+    The table jumps from z = 99 to a lone node at z = 9900, and the cubic
+    spline across that gap is not B0 (46 mmag off at z = 5000), so the
+    window must end inside the dense part.
+    """
+    # Arrange
+    import os
+
+    import MulensModel as mm
+
+    z = np.loadtxt(
+        os.path.join(mm.DATA_PATH, "interpolation_table_b0b1_v3.dat"),
+        usecols=0,
+    )
+    rho, t_E, u_0 = 0.003, 12.0, 0.4 * 0.003
+
+    # Act
+    gaps = np.diff(z[z <= YOO04_Z_MAX])
+    half = yoo04_half_window(u_0, rho, t_E)
+    z_edge = np.hypot(u_0, half / t_E) / rho
+
+    # Assert
+    assert z[z <= YOO04_Z_MAX].max() == pytest.approx(YOO04_Z_MAX)
+    assert gaps.max() <= 1.0, gaps.max()
+    assert z_edge == pytest.approx(YOO04_Z_MAX, rel=1e-12)
+    assert yoo04_half_window(-u_0, rho, t_E) == half
+    assert yoo04_half_window(100.0 * rho, rho, t_E) == 0.0
+
+
+def test_mulensmodel_backend_past_the_window_is_a_quiet_point_source():
+    """
+    Given a finite source whose closest approach is already past the window
+      (u_0 = 120 rho, rho = 0.01, u1 = 0.55)
+    When the mulensmodel backend's single-lens Op evaluates it
+    Then it raises no warning and is within 0.02 mmag of the disk integral.
+    """
+    # Arrange
+    import warnings
+
+    rho, u1, t_E = 0.01, 0.55, 20.0
+    u_0 = 120.0 * rho
+    tau = np.array([0.0, 0.5, 2.0])
+    times = t_E * tau
+    ref = np.array([_espl_reference(np.hypot(u_0, ti), rho, u1) for ti in tau])
+    op = MulensMagOp(
+        coords=COORDS, mag_method="auto_vbbl", use_rho=True, bandpass="I"
+    )
+
+    # Act
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        a = _run(op, [0.0, u_0, t_E, 0.0, 0.0, rho, u1], times)
+
+    # Assert
+    d = 2.5 * np.log10(a / ref) * 1000.0
+    assert np.max(np.abs(d)) < 0.02, d
 
 
 # ---------------------------------------------------------------------------
