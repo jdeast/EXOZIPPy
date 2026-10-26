@@ -21,7 +21,10 @@ discrepancy".
    reported as contradictions and take no part in the solve.
 3. HOW MUCH MOVES, inside the one tier that has to absorb, is the
    minimum-norm displacement in init_scale units.  A scale only ever splits
-   a correction between seeds of the SAME tier.
+   a correction between seeds of the SAME tier.  What that tier cannot
+   absorb inside its bounds ESCALATES: its seeds are held where its settle
+   left them and the next tier up with a seed upstream of the violated
+   relation settles the rest (review 1.1.11; see Engine._escalate).
 
 It is implemented as forward PROPAGATION from a growing set of fixed values:
 a relation with exactly one undetermined symbol is solved for it (the old
@@ -1260,10 +1263,24 @@ class Engine:
         )
         new_fixed = dict(fixed)
         new_fixed.update(zip(movable, x))
+        # The change test uses the scale the correction was SPLIT in, read
+        # off the plan the settle started from.  A seed on a DERIVED element
+        # (a data-seeded t_E) has no declared or leaf scale -- only the
+        # one that plan implies -- so `self.scale(m)` without it is None and
+        # value_moved raises.  A moved seed was reached, so the split already
+        # required that scale; require it again here rather than guess.
+        split_plan = plan
+        moved_scales = {
+            m: self.require_scale(
+                m, f"to judge a move of a {tier_name} seed", split_plan
+            )
+            for m, a_m, x_m in zip(movable, a, x)
+            if a_m != x_m
+        }
         plan = self.closure(new_fixed, excluded)
         for m, a_m, x_m in zip(movable, a, x):
             if a_m != x_m and value_moved(
-                x_m, a_m, self.scale(m), m, self.periodic.get(m)
+                x_m, a_m, moved_scales[m], m, self.periodic.get(m)
             ):
                 self.moved[m] = (float(a_m), float(x_m), tier_name)
         return new_fixed, plan, self.violated(plan, excluded)
@@ -1463,6 +1480,7 @@ class Engine:
             "dropped": [],
             "absorbed": [],
             "moved": [],
+            "escalated": [],
             "unsettled": [],
         }
         self.keep_report = rep
@@ -1525,6 +1543,9 @@ class Engine:
             tiers.setdefault(A[p].tier, []).append(p)
         for p in solver_seeds:
             tiers.setdefault(sol_tier, [])
+        # {tier: the seeds that tier FIXED (not absorbed)} -- the seeds an
+        # escalation from a lower tier may move (see _escalate)
+        tier_new = {}
         for tier in sorted(tiers, reverse=True):
             plan = self.closure(fixed, excluded)
             new, solved = [], []
@@ -1547,6 +1568,11 @@ class Engine:
                 fixed[p] = solver_seeds[p]
             name = self._tier_name(tier)
             fixed, plan, bad = self._settle(fixed, new, excluded, name)
+            tier_new[tier] = new
+            if bad:
+                fixed, plan, bad = self._escalate(
+                    fixed, plan, bad, tier, tier_new, excluded, rep
+                )
             for c in bad:
                 excluded.add(c.key)
                 rep["unsettled"].append([c.label, name])
@@ -1575,6 +1601,71 @@ class Engine:
                 continue
             fixed, plan = trial, tplan
         return fixed, plan, excluded
+
+    def _escalate(self, fixed, plan, bad, tier, tier_new, excluded, rep):
+        """Hand what tier `tier` could not absorb to the tiers above it.
+
+        `bad` are the checks still violated after `tier`'s own settle: its
+        seeds have moved as far as their bounds let them.  They are now HELD
+        where that settle left them, and the next tier UP that holds a seed
+        upstream of a violated check settles the residual -- moving only
+        those seeds, the minimum-norm amount, every satisfied check kept
+        satisfied.  Where it too falls short (its seeds at their bounds), the
+        next tier up takes what is left, and so on.  A lower tier's solution
+        is always preferred: a higher seed moves only by the part the lower
+        tiers provably cannot absorb, so no higher tier is traded against a
+        lower one.
+
+        Only SEEDS move, and only seeds of tiers below USER: a user value is
+        never one (rigid and kept values are not seeds).  The tiers are
+        visited in ascending order and every movable list is sorted, so the
+        result is deterministic.  If the chain leaves exactly the checks it
+        started with violated (or any new one), every escalated move is
+        undone and the start is what it was before -- the caller then
+        reports the unsettled relations as it always has.  Returns (fixed,
+        plan, still-violated checks).  (Review 1.1.11: DC2018_128 with a
+        user t_E and an unseeded q left mlens_total = M_star + M_planet
+        violated at DEFAULT, where log_q sat on its -9 bound, instead of
+        moving the lens distance at MULENS_LENS_DISTANCE.)"""
+        A = self.anchors
+        before = (dict(fixed), plan, list(bad), dict(self.moved))
+        bad_keys = {c.key for c in bad}
+        steps = []
+        for up in sorted(
+            t for t in tier_new if tier < t < self.ladder["USER"]
+        ):
+            if not bad:
+                break
+            syms = sorted({s for c in bad for s in c.symbols})
+            movable = [
+                p
+                for p in self._upstream(plan, syms, ("seed",), fixed)
+                if A[p].tier == up and p in tier_new[up]
+            ]
+            if not movable:
+                continue
+            name = (
+                f"{self._tier_name(up)} (escalated from "
+                f"{self._tier_name(tier)})"
+            )
+            fixed, plan, bad = self._settle(fixed, movable, excluded, name)
+            steps.append([self._tier_name(up), movable])
+        new_keys = {c.key for c in bad}
+        if not steps or not (new_keys < bad_keys):
+            fixed, plan, bad, self.moved = before
+            return fixed, plan, bad
+        for c in before[2]:
+            if c.key in new_keys:
+                continue
+            rep["escalated"].append([c.label, self._tier_name(tier), steps])
+            logger.info(
+                "The %s starts could not satisfy '%s' inside their bounds; "
+                "the residual was absorbed by %s.",
+                self._tier_name(tier),
+                c.label,
+                " then ".join(f"{t} {m}" for t, m in steps),
+            )
+        return fixed, plan, bad
 
     def _drop(self, p, a, ups, label, rep):
         rep["dropped"].append([p, a.value, ups, label])
