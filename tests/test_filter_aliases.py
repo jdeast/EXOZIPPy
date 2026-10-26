@@ -249,6 +249,41 @@ def _shipped_bc_filters():
     return [(fac, svo) for fac, ids in FILTER_SETS.items() for svo in ids]
 
 
+@pytest.mark.parametrize(
+    "svo, mist, facility",
+    [
+        # BC-2026-10-26: the Roman-bulge microlensing SEDs' passbands, one
+        # per new facility table (and the new column of an existing one).
+        ("HST/ACS_WFC.F606W", "ACS_WFC_F606W", "HST"),
+        ("HST/WFC3_UVIS2.F814W", "WFC3_UVIS2_F814W", "HST"),
+        ("HST/WFC3_IR.F167N", "WFC3_IR_F167N", "HST"),
+        ("Paranal/VISTA.Ks", "VISTA_Ks", "VISTA"),
+        ("CTIO/DECam.g", "DECam_g", "DECam"),
+        ("Euclid/VIS.vis", "Euclid_VIS", "Euclid"),
+    ],
+)
+def test_the_roman_bulge_passbands_resolve_to_their_facility_tables(
+    alias_df, svo, mist, facility
+):
+    """
+    Given the passbands added for the Roman-bulge SEDs (review 8.6.37),
+    When each SVO id is resolved through the alias table and mapped to the
+      table it is read from,
+    Then it names its MIST-style column and the facility table the
+      generator writes -- VISTA and DECam by INSTRUMENT, not by the SVO
+      site prefix (Paranal, CTIO), which hosts unrelated instruments.
+    """
+    from exozippy.components.sed.bc_grid import facility_from_svo_name
+    from exozippy.models.NextGen.generate_NextGen_BC_Tables import FILTER_SETS
+
+    assert resolve_filter_name(svo, alias_df, alias="MIST") == mist
+    assert (
+        resolve_filter_name(svo.split("/")[-1], alias_df, alias="SVO") == svo
+    )
+    assert facility_from_svo_name(svo) == facility
+    assert svo in FILTER_SETS[facility]
+
+
 @pytest.mark.parametrize("facility,svo", _shipped_bc_filters())
 def test_every_shipped_bc_filter_resolves_in_both_spellings(
     alias_df, facility, svo

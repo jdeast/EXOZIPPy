@@ -257,3 +257,11 @@ Unsupported	WFI_F146	        Unsupported	Roman/WFI.F146	      WFI.F146
 Unsupported	WFI_F158	        Unsupported	Roman/WFI.F158	      WFI.F158
 Unsupported	WFI_F184	        Unsupported	Roman/WFI.F184	      WFI.F184
 Unsupported	WFI_F213	        Unsupported	Roman/WFI.F213	      WFI.F213
+Unsupported	WFC3_UVIS2_F606W  	Unsupported	HST/WFC3_UVIS2.F606W  	WFC3_UVIS2.F606W
+Unsupported	WFC3_UVIS2_F814W  	Unsupported	HST/WFC3_UVIS2.F814W  	WFC3_UVIS2.F814W
+Unsupported	Euclid_VIS        	Unsupported	Euclid/VIS.vis        	VIS.vis
+Unsupported	VISTA_Z           	Unsupported	Paranal/VISTA.Z       	VISTA.Z
+Unsupported	VISTA_Y           	Unsupported	Paranal/VISTA.Y       	VISTA.Y
+Unsupported	VISTA_J           	Unsupported	Paranal/VISTA.J       	VISTA.J
+Unsupported	VISTA_H           	Unsupported	Paranal/VISTA.H       	VISTA.H
+Unsupported	VISTA_Ks          	Unsupported	Paranal/VISTA.Ks      	VISTA.Ks
