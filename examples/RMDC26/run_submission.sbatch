@@ -1,13 +1,14 @@
 #!/bin/bash
 #SBATCH --job-name=rmdc26_sub
-#SBATCH --partition=test
-#SBATCH --cpus-per-task=96
-#SBATCH --mem=400G
-#SBATCH --time=12:00:00
+#SBATCH --partition=sapphire,shared
+#SBATCH --cpus-per-task=48
+#SBATCH --mem=64G
+#SBATCH --time=08:00:00
 #SBATCH --output=/n/holylabs/jjohnson_lab/Lab/rmdc26_report/submission_v2/logs/submission_%j.log
 #
-# The RMDC26 submission from the campaign's MANIFEST, in ONE command, on the
-# TEST partition (never the login node):
+# The RMDC26 submission from the campaign's MANIFEST, in ONE command, as a batch job
+# (never the login node; sapphire,shared because the test partition was
+# mostly drained on 2026-10-26; 64G = 3x the measured MaxRSS of 18.7 GB):
 #
 #   sbatch examples/RMDC26/run_submission.sbatch [extra 01_evidence args]
 #
