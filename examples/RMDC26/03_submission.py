@@ -11,7 +11,7 @@ Reads what `01_evidence.py --manifest` wrote under $RMDC26_REPORT:
 
 and writes, under $RMDC26_REPORT:
 
-  submission/submission.json        team TEAM_NAME_TBD (placeholder), tier
+  submission/submission.json        team "exozippy", tier
                                     "beginner"
   submission/events/<id>/event.json
   submission/events/<id>/notes.md   the campaign's generated note VERBATIM
@@ -132,7 +132,11 @@ def build_submitted_event(row, rec, dchi2_table, campaign_note, direct=None):
         )
     e["architecture"] = av
 
-    max_rhat = verdict.get("rhat", float("nan"))
+    # The extinction caveat's calibration (29/29 fits under 1.3 recover the
+    # stated A_F146) was measured on the GLOBAL max Rhat.  Since 2026-10-25
+    # verdict.out's "Rhat" is the light-curve max only and "Rhat_all" the
+    # global one; older files have only "Rhat", which was then global.
+    max_rhat = verdict.get("rhat_all", verdict.get("rhat", float("nan")))
     if not np.isfinite(max_rhat):
         max_rhat = float(rec.get("max_rhat", np.nan))
     e["max_rhat"] = max_rhat
@@ -143,9 +147,13 @@ def build_submitted_event(row, rec, dchi2_table, campaign_note, direct=None):
         flags.append(av["flag"])
     if e["basis"] != "accepted":
         flags.append("INDICATIVE_EVIDENCE")
-    n_bad = sum(bool(s["unreliable"]) for s in sols)
-    if n_bad:
-        flags.append("UNRELIABLE(%d/%d)" % (n_bad, len(sols)))
+    split = [R.split_unreliable(s["unreliable"]) for s in sols]
+    n_fit = sum(bool(f) for _, f in split)
+    n_ev = sum(bool(e) for e, _ in split)
+    if n_fit:
+        flags.append("%s(%d/%d)" % (R.FIT_UNRELIABLE, n_fit, len(sols)))
+    if n_ev:
+        flags.append("%s(%d/%d)" % (R.EVIDENCE_UNRELIABLE, n_ev, len(sols)))
     if e["extinction_caveat"]:
         flags.append("EXTINCTION_CAVEAT")
     e["flags"] = flags
@@ -225,8 +233,8 @@ def summary_text(events, listing, problems, validation, lpm=None, recs=None):
     L = ["RMDC26 submission summary (%s)" % dt.datetime.now().isoformat(
         timespec="minutes"), ""]  # fmt: skip
     L.append("manifest: %s" % listing["manifest"])
-    L.append("team_name: %s (PLACEHOLDER: the PI supplies it); tier: %s"
-             % (R.TEAM_NAME_PLACEHOLDER, R.CHALLENGE_TIER))  # fmt: skip
+    L.append("team_name: %s; tier: %s"
+             % (R.TEAM_NAME, R.CHALLENGE_TIER))  # fmt: skip
     for t in (R.TIER_FULL, R.TIER_SCORED):
         evs = [e for e in events if e["tier"] == t]
         L.append("%-6s %2d events, %3d solutions (%d active): %s"
@@ -381,7 +389,7 @@ def main(argv=None):
     cd = cpu_details()
     if cd:
         hw["cpu_details_reporting_node"] = cd
-    R.dump_json({"team_name": R.TEAM_NAME_PLACEHOLDER,
+    R.dump_json({"team_name": R.TEAM_NAME,
                  "tier": R.CHALLENGE_TIER, "hardware_info": hw,
                  "repo_url": REPO_URL}, sub / "submission.json")  # fmt: skip
     validation = None
