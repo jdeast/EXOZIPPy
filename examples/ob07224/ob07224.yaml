@@ -41,9 +41,8 @@ source:
 mulensevent:
     # rho = 8.5e-4 and the lens TRANSITED the source (impact parameter
     # ~theta_*/3), so the finite source is the whole peak.  This puts the
-    # event on the MulensModel Op path (finite_source_LD_Yoo04 inside
-    # +/- 5*rho*t_E of t_0, point source outside), which has no gradient --
-    # hence ptde_async below.
+    # event on the VBMicrolensing ESPL Op (finite source at every epoch),
+    # which has no gradient -- hence ptde below.
   - finite_source: True
     # The geocentric frame's reference epoch.  For terrestrial parallax it
     # matters far less than for annual parallax (the whole signal is one
@@ -209,7 +208,7 @@ mulensinstrument:
 parameter_file: "ob07224.params.yaml"
 
 sampler:
-  # finite_source => the MulensModel Op path, which has no gradient
+  # finite_source => the VBMicrolensing Op path, which has no gradient
   # (components/mulensing/mulensing.md), so NUTS is not available.
   method: ptde          # synchronous PTDE, the recommended default since PR #376 (review 2.4.9): the VBM straggler tail that justified ptde_async is gone
   n_temps: 8

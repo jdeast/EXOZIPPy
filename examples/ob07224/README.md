@@ -106,10 +106,11 @@ Downstream this is completely generic: `MulensInstrument.load_data` asks
 barycentric position and `_abs_to_delta` converts it to the Skowron+2011
 geocentric deviation, exactly as it does for Spitzer in `examples/ob140939`.
 A ground site is a spacecraft whose orbit happens to be an Earth radius wide.
-Nothing in `lens.py` knows the difference. On MulensModel's side the model is
-built with `parallax(topocentric=False)` -- MulensModel's own topocentric term
-is *not* used, because EXOZIPPy has already put the observer in the right
-place.
+Nothing in `lens.py` knows the difference. The default VBMicrolensing Op
+projects that deviation itself; on the `backend: mulensmodel` reference the
+model is built with `parallax(topocentric=False)` -- MulensModel's own
+topocentric term is *not* used, because EXOZIPPy has already put the observer
+in the right place.
 
 Heights are nominal to ~100 m. That is `1.6e-5` of an Earth radius, four
 orders of magnitude below the effect being fitted.
@@ -144,9 +145,10 @@ placeholders).
 (`rho = 8.5e-4`, impact parameter `~theta_*/3`), so the peak *is* the source.
 Two consequences:
 
-* The event goes on the MulensModel Op path
-  (`finite_source_LD_Yoo04` inside `+/- 5*rho*t_E` of `t_0`, point source
-  outside). That path has no gradient, so the sampler is the synchronous `ptde` (the recommended default since PR #376) and
+* The event goes on the VBMicrolensing ESPL Op (`ESPLMag2`, the finite
+  source at every epoch; it used the MulensModel Op until the default
+  likelihood path dropped MulensModel -- see
+  `src/exozippy/components/mulensing/mulensing.md`). That path has no gradient, so the sampler is the synchronous `ptde` (the recommended default since PR #376) and
   NUTS is unavailable -- `Lens.sampler_requirements()` will say so if you try.
 * Limb darkening lives *inside* the magnification, so each band gets its own
   magnification call on its own epochs, with its own `u1`. The peak, the only

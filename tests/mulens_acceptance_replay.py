@@ -104,6 +104,19 @@ other term and the stored start are bit-identical.  The other multi-band
 finite-source fixtures did not move beyond rounding: ob09020 by 4e-11
 nats (its 5 V epochs), ob161003 not at all.
 
+The ob07224 fixture was re-recorded again when the default backend
+(`vbm_direct`) began routing EVERY finite-source single lens through
+VBMicrolensing's ESPL (`VBMDirectMagOp(n_companions=0)`), linear band
+included; it used to keep the MulensModel Op (mulensing/mulensing.md,
+"The limb-darkening LAW reaches the magnification").  One move, explained:
+`RV:mulensinstrument.model` 23300.7569 -> 23322.4157 (+21.6588).  By epoch,
++14.86 of it is at 5-10 rho t_E from t_0 and +6.07 at 10-30 rho t_E --
+exactly where the MulensModel Op's `auto_vbbl` window had dropped to a
+POINT source while the finite source still raises A by ~rho^2/(8 u^2) --
+with +0.48 inside 1 rho t_E, -0.08 at 1-5 and +0.33 beyond 30.  Every
+other term and the stored start are bit-identical, and no other fixture
+moved (every other fixture is a binary or N-lens event, already on VBM).
+
 ob161003 (2S2L) is the ONE example whose model changes BY CONSTRUCTION
 (review R1): its per-source event-level vectors collapse to scalars.  Its
 replay fixture is re-recorded post-split; the stage-0 recording is kept at

@@ -416,14 +416,14 @@ class VBMDirectMagOp(Op):
     (-tau, -u) and companion j sits at s_j*(cos alpha_j, -sin alpha_j) from
     the primary, with the origin shifted to the lens center of mass.
 
-    ``n_companions = 0`` is the SINGLE-lens (ESPL) case, which exists so that
-    a finite-source point lens can carry a quadratic limb-darkening law: it is
-    the only backend here that can (MulensModel's ``set_limb_coeff_u`` and its
-    Yoo04 B0/B1 formalism are linear-only).  It is NOT the default for a
-    single lens -- see MulensEvent.get_magnification_op, which keeps MulensModel
-    there unless a second LD coefficient is actually in play, because the two
-    disagree by up to ~5 mmag in the deep finite-source regime (Yoo04's table
-    interpolation) and a silent backend flip would move existing answers.
+    ``n_companions = 0`` is the SINGLE-lens (ESPL) case: under the default
+    ``backend: vbm_direct`` every finite-source single lens comes here,
+    whatever its band's LD law (MulensEvent.get_magnification_op).  It is also
+    the only backend here that carries a quadratic law for a point lens
+    (MulensModel's ``set_limb_coeff_u`` and its Yoo04 B0/B1 formalism are
+    linear-only).  ESPLMag2's accuracy against a direct disk integration, and
+    its one weak spot (u -> 0, where its error grows and it returns NaN at
+    u == 0 exactly), are in mulensing.md, the LD-law section.
 
     ``quadratic_ld`` selects VBM's LDquadratic profile and reads u2 from the
     tail of the param vector.  At u2 = 0 that profile reproduces LDlinear to

@@ -419,12 +419,12 @@ class MulensEvent(Component):
                 "accepts": ["vbm_direct", "mulensmodel"],
                 "required": False,
                 "doc": (
-                    "Magnification engine for the multi-lens Op path, and "
-                    "for a finite-source single lens whose band declares "
-                    "'ld_law: quadratic' (only VBMicrolensing can apply a "
-                    "quadratic limb-darkening profile). Default "
-                    "'vbm_direct'; 'mulensmodel' is the A/B reference and "
-                    "is linear-LD only."
+                    "Magnification engine for the Op path: binary and "
+                    "N-lens events and every finite-source single lens. "
+                    "Default 'vbm_direct' (VBMicrolensing, linear or "
+                    "quadratic limb darkening); 'mulensmodel' is the A/B "
+                    "reference, at most 2 lens bodies, and is linear-LD "
+                    "only."
                 ),
             },
             {
@@ -1938,7 +1938,9 @@ class MulensEvent(Component):
         ]
 
     def uses_op(self, index=0):
-        """True if get_magnification_op will dispatch to the MulensModel Op.
+        """True if get_magnification_op will dispatch to a magnification Op
+        (VBMDirectMagOp, or a MulensModel Op under ``backend:
+        mulensmodel``) rather than the symbolic point-lens formula.
 
         Event-level property (the lens bodies and finite_source flag are
         shared by all sources), so ``index`` is ignored beyond backward
@@ -1956,7 +1958,8 @@ class MulensEvent(Component):
     def sampler_requirements(self):
         """Declare sampler constraints for this event configuration.
 
-        Binary/finite-source lenses use the MulensModel Op, which is not
+        Binary/finite-source lenses use a magnification Op (VBMicrolensing,
+        or MulensModel under ``backend: mulensmodel``), which is not
         differentiable.  Gradient-based samplers (NUTS, numpyro, blackjax)
         will produce invalid results; PTDE is required.  The SYNCHRONOUS
         loop (ptde) is recommended -- since 2026-10-04 (review 2.4.9, TASK
@@ -1979,9 +1982,10 @@ class MulensEvent(Component):
                 "incompatible": {"nuts", "numpyro", "blackjax"},
                 "recommended": "ptde",
                 "reason": (
-                    "binary/finite-source microlensing uses the MulensModel "
-                    "Op, which is not differentiable -- gradient-based "
-                    "samplers produce invalid results"
+                    "binary/finite-source microlensing uses a "
+                    "VBMicrolensing (or MulensModel) magnification Op, which "
+                    "is not differentiable -- gradient-based samplers "
+                    "produce invalid results"
                 ),
             }
         return {}
@@ -2049,7 +2053,7 @@ class MulensEvent(Component):
         return f"{ra_deg}d {dec_deg}d"
 
     def _resolve_quadratic_ld(self, u2, effective_bandpass):
-        """Can the selected backend honour the band's second LD coefficient?
+        """Can the selected backend honor the band's second LD coefficient?
 
         Returns True to put u2 in the param vector, False to drop it -- and
         when it drops it, says so ONCE, because a silently ignored u2 is
@@ -2059,30 +2063,36 @@ class MulensEvent(Component):
         one combination of the sampled Kipping pair (q1, q2) becomes
         likelihood-free -- sampled, reported, and constrained by nothing.
 
-        WHO CAN DO WHAT:
+        THE RULE IS THE BACKEND, NOTHING ELSE.  Under ``backend: vbm_direct``
+        (the default) every Op-path event -- binary, N-lens, and every
+        finite-source single lens -- goes through ``VBMDirectMagOp``, whose
+        solvers all carry LDquadratic (BinaryMag2/MultiMag2 and, for the
+        point lens, ESPLMag2), so u2 is always honored.  Under ``backend:
+        mulensmodel`` (the A/B reference) it never is: ``set_limb_coeff_u``
+        takes one coefficient and the Yoo04 B0/B1 factorization MulensModel
+        uses for a finite point source is a linear-law formalism, so the
+        reference stays linear and says so.
 
-        * VBMicrolensing carries LDquadratic for the binary/N-lens solvers
-          (BinaryMag2/MultiMag2) and for the point lens (ESPLMag2).  So
-          `backend: vbm_direct` -- the default -- can honour u2 everywhere.
-        * MulensModel cannot, anywhere: `set_limb_coeff_u` takes one
-          coefficient and the Yoo04 B0/B1 factorization it uses for a
-          finite point source is a linear-law formalism.  `backend:
-          mulensmodel` is the A/B reference, so it keeps being linear and
-          says so.
-
-        WHY THE SINGLE-LENS DEFAULT IS NOT FLIPPED WHOLESALE.  A
-        finite-source point lens goes to MulensModel today, and VBM's
-        ESPLMag2 disagrees with Yoo04 by up to ~5 mmag (1.7 mmag rms) in
-        the deep finite-source regime u_0 << rho -- Yoo04's table
-        interpolation, measured at rho = 0.001-0.05.  Routing every FSPL
-        fit to VBM would therefore move existing answers by more than most
-        of these light curves' error bars, silently, as a side effect of an
-        unrelated fix.  So the switch is keyed on u2 actually being in
-        play: a `ld_law: linear` band keeps MulensModel and is
-        bit-identical to before, and only the configuration that was
-        already WRONG changes backend.  A user who wants VBM's ESPL for its
-        own sake still has no way to ask for it; that is a deliberately
-        separate decision (see notes).
+        WHY THE LD LAW NO LONGER PICKS THE SINGLE-LENS BACKEND.  Until the
+        change that introduced this docstring, a finite-source single lens
+        on a LINEAR band kept the MulensModel Op even under vbm_direct, so
+        that existing answers would not move: the two backends differed by
+        up to ~5 mmag, which was attributed to Yoo04's table interpolation.
+        Measured against a direct integration of a linear-LD disk (u1 =
+        0.55, rho = 0.001-0.05; mulensing.md, "The limb-darkening LAW
+        reaches the magnification"), that attribution was wrong: Yoo04's
+        tables agree with the integral to <0.01 mmag at rho <= 0.01.  The
+        ~5 mmag was the MulensModel backend's own method window, which
+        drops to a POINT source outside t_0 +/- 5 rho t_E, where the finite
+        source still raises A by ~rho^2/(8 u^2) ~ 0.5%.  VBM's ESPL is
+        within 0.1-0.2 mmag of the integral there and almost everywhere
+        else; its two narrow weak spots (+/-1.2 mmag within 1% of rho of
+        the limb crossing, and an error growing as u/rho -> 0, NaN at u ==
+        0) are VBM's own and are tabulated in mulensing.md.  So the
+        MulensModel route was the less accurate of the two as configured,
+        and no faster; MulensModel is off the default likelihood path
+        entirely.  The linear-band fits that moved are stated in
+        mulensing.md.
         """
         if u2 is None or effective_bandpass is None:
             return False
@@ -2098,7 +2108,7 @@ class MulensEvent(Component):
                 "source profile is linear in u1. Note that this leaves one "
                 "combination of the band's sampled (q1, q2) constrained by "
                 "nothing but its prior. Fixes: use the default 'backend: "
-                "vbm_direct' to honour u2, or declare 'ld_law: linear' on "
+                "vbm_direct' to honor u2, or declare 'ld_law: linear' on "
                 "the band to make the linear law deliberate and drop the "
                 "unconstrained coordinate."
             )
@@ -2131,7 +2141,7 @@ class MulensEvent(Component):
         uniform-source finite-source magnification.  u2 is the SECOND
         (quadratic) coefficient and is present only for a band declaring
         ``ld_law: quadratic`` -- see _resolve_quadratic_ld above for which
-        backends can honour it and what happens when the selected one
+        backends can honor it and what happens when the selected one
         cannot.
 
         Set ``use_op: true`` on the mulensevent block to force the Op (e.g.
@@ -2180,38 +2190,6 @@ class MulensEvent(Component):
                 "config directly, see examples/ob170114)."
             )
 
-        single_lens_vbm = (
-            n_lenses == 1
-            and use_rho
-            and (use_u2 or source_series is not None)
-            and self.backend == "vbm_direct"
-        )
-
-        if single_lens_vbm:
-            # ESPL through VBM: the only backend here that carries a
-            # quadratic limb-darkening law for a point lens, and the one a
-            # finite-source single lens with XALLARAP routes through (the
-            # MulensModel single-lens Op has no slot for a per-epoch
-            # trajectory shift).  Without xallarap it is reached ONLY when
-            # u2 is genuinely in play (_resolve_quadratic_ld), so a
-            # linear-band fit keeps MulensModel and stays bit-identical --
-            # see that method.
-            return self._vbm_op_call(
-                times,
-                obs_pos,
-                system,
-                index,
-                coords=coords,
-                use_rho=True,
-                effective_bandpass=effective_bandpass,
-                use_u2=use_u2,
-                u1=u1,
-                u2=u2,
-                source_series=source_series,
-                geometry_series=None,
-                n_companions=0,
-            )
-
         # Per-epoch companion geometry (lens orbital motion, C24) -- None
         # for a static lens.
         geometry_series = (
@@ -2220,7 +2198,14 @@ class MulensEvent(Component):
             else None
         )
 
-        if n_lenses >= 2 and self.backend == "vbm_direct":
+        if self.backend == "vbm_direct" and (n_lenses >= 2 or use_rho):
+            # EVERY binary/N-lens event and EVERY finite-source single lens
+            # (ESPL, n_companions == 0) under the default backend: whatever
+            # the band's LD law, with or without xallarap.  The finite-source
+            # single lens used to keep MulensModel unless u2 was in play; see
+            # _resolve_quadratic_ld for why it no longer does.  The one
+            # single-lens case left for the MulensModel Op below is a forced
+            # `use_op: true` on a POINT source, which asks for it by name.
             return self._vbm_op_call(
                 times,
                 obs_pos,
@@ -2384,11 +2369,11 @@ class MulensEvent(Component):
         the same centroid a MulensModel-backed light curve would imply
         (C18: the trajectory conventions are identical; op.py's class
         docstring: the origin is the centre of mass in both).  The A this
-        returns is therefore VBM's, which for a linear-LD finite-source
-        single lens differs from the MulensModel A the light curve fits by
-        up to ~5 mmag in the deep finite-source regime (mulensing.md, the
-        LD-law section) -- second order on a dilution WEIGHT, and stated
-        here so nobody hunts it as a bug.  The finite-source centroid is
+        returns is therefore VBM's -- the same A the light curve fits under
+        the default backend, and up to ~5 mmag from a ``backend:
+        mulensmodel`` light curve's on a finite-source single lens (that
+        backend's point-source window; mulensing.md, the LD-law section),
+        second order on a dilution WEIGHT.  The finite-source centroid is
         VBM's disk-integrated, limb-darkened one, so the stage-1 "valid
         only for rho << u" caveat does not apply on this path.  The Op has
         no gradient (``sampler_requirements`` already says so for any

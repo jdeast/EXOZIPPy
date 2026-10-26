@@ -21,11 +21,13 @@ magnifications rather than by reading the source:
      being consumed (test_u2_changes_the_finite_source_curve).
   3. The param-vector layout is self-describing, because u2 now sits where a
      naive `p[-1]` used to find u1 (test_param_labels_name_u2).
-  4. The single-lens backend is NOT flipped wholesale: MulensModel keeps the
-     FSPL path unless u2 is genuinely in play, because VBM's ESPLMag2 and
-     MulensModel's Yoo04 disagree by several mmag in the deep finite-source
-     regime and a silent backend change would move existing answers
-     (test_single_lens_keeps_mulensmodel_without_u2 and its sibling).
+  4. Under the default backend every finite-source single lens goes through
+     VBM's ESPL whatever the band's law, and the linear-only MulensModel
+     backend stays available as the A/B reference
+     (test_single_lens_finite_source_backend_is_the_backend).  The reason
+     that used to keep a linear band on MulensModel -- a ~5 mmag
+     disagreement blamed on Yoo04's tables -- is pinned against a direct
+     integration of the disk (test_espl_accuracy_against_direct_integration).
 """
 
 import logging
@@ -34,6 +36,7 @@ import numpy as np
 import pytensor
 import pytensor.tensor as pt
 import pytest
+from scipy.integrate import quad
 from test_band_autopin_ld import _mulens_config, _mulens_params, _write_pspl_lc
 
 from exozippy.components.mulensing.op import (
@@ -194,42 +197,105 @@ def test_quadratic_ld_without_a_bandpass_is_inert():
     assert "band.u2" not in op._param_labels()
 
 
-def test_vbm_espl_and_mulensmodel_yoo04_disagree_enough_to_matter():
-    """
-    Given a resolved finite source on a single lens with LINEAR limb darkening,
-    When VBM's ESPL and MulensModel's Yoo04 magnifications are compared,
-    Then they differ by more than a fraction of a mmag.
+def _disk_integral(u, a):
+    """Integral of the point-lens A over a uniform disk of radius ``a`` whose
+    center sits ``u`` from the lens: analytic in r from the lens
+    (int A r dr = r sqrt(r^2 + 4) / 2), numerical in the polar angle."""
 
-    This is the measurement that justifies NOT flipping the single-lens
-    default backend: Yoo04 interpolates B0/B1 tables, VBM integrates, and the
-    difference is real.  If this test ever starts failing because the two
-    agree, the conditional dispatch in MulensEvent._resolve_quadratic_ld can be
-    simplified away -- so it is a guard on the REASON, not just the behaviour.
+    def g(r):
+        return 0.5 * r * np.sqrt(r * r + 4.0)
+
+    if u < a:
+
+        def inside(th):
+            s = np.sin(th)
+            return g(u * np.cos(th) + np.sqrt(a * a - u * u * s * s))
+
+        return 2.0 * quad(inside, 0.0, np.pi, epsrel=1e-12, limit=200)[0]
+    k = a / u
+
+    # theta = arcsin(k sin psi) removes the square-root endpoint behavior.
+    def outside(psi):
+        st = k * np.sin(psi)
+        ct = np.sqrt(1.0 - st * st)
+        half = a * np.cos(psi)
+        jac = k * np.cos(psi) / ct
+        return (g(u * ct + half) - g(max(u * ct - half, 0.0))) * jac
+
+    return 2.0 * quad(outside, 0.0, np.pi / 2, epsrel=1e-12, limit=200)[0]
+
+
+def _espl_reference(u, rho, u1):
+    """Linear-LD finite-source point-lens magnification by direct
+    integration: annuli of the uniform disk weighted by I = 1 - u1 (1 - mu),
+    with the radius written rho sin(phi) so the limb is not singular."""
+    pts = [np.arcsin(u / rho)] if u < rho else None
+    annuli = quad(
+        lambda phi: np.sin(phi) * _disk_integral(u, rho * np.sin(phi)),
+        0.0,
+        np.pi / 2,
+        epsrel=1e-10,
+        limit=200,
+        points=pts,
+    )[0]
+    flux = (1.0 - u1) * _disk_integral(u, rho) + u1 * annuli
+    return flux / (np.pi * rho * rho * (1.0 - u1 / 3.0))
+
+
+def test_espl_accuracy_against_direct_integration():
+    """
+    Given a linear-LD finite source on a single lens (rho = 0.01, u1 = 0.55)
+      and a direct numerical integration of the disk as the reference,
+    When VBM's ESPL, MulensModel's Yoo04 alone, and the mulensmodel backend's
+      own method window are compared with it,
+    Then VBM is within 0.25 mmag from u = 0.05 rho to 6 rho, Yoo04 alone is
+      within 0.05 mmag, and the backend window is off by > 2 mmag just
+      outside t_0 +/- 5 rho t_E.
+
+    This is the measurement behind routing every finite-source single lens
+    to VBM (MulensEvent._resolve_quadratic_ld).  The ~5 mmag VBM-vs-
+    MulensModel difference that once kept a linear band on MulensModel was
+    blamed on Yoo04's table interpolation; it is the backend's point-source
+    window, not Yoo04, and VBM is the accurate side of it.  If the last
+    assertion ever fails, the window was fixed -- update mulensing.md.
     """
     # Arrange
-    times = _times()
-    vbm = VBMDirectMagOp(
-        coords=COORDS,
-        n_companions=0,
-        use_rho=True,
-        bandpass="I",
-        quadratic_ld=False,
+    rho, u1 = 0.01, 0.55
+    x = np.array([0.05, 0.3, 0.7, 1.0, 1.3, 3.0, 5.2, 6.0])
+    u = x * rho
+    ref = np.array([_espl_reference(ui, rho, u1) for ui in u])
+    # A trajectory with u_0 = 0.05 rho, timed to pass through those u.
+    t0, te = 0.0, 20.0
+    u0 = u[0]
+    times = t0 + te * np.sqrt(np.maximum(u * u - u0 * u0, 0.0))
+    params = [t0, u0, te, 0.0, 0.0, rho, u1]
+    vbm_op = VBMDirectMagOp(
+        coords=COORDS, n_companions=0, use_rho=True, bandpass="I"
     )
-    mm_op = MulensMagOp(
+    window_op = MulensMagOp(
+        coords=COORDS, mag_method="auto_vbbl", use_rho=True, bandpass="I"
+    )
+    yoo_op = MulensMagOp(
         coords=COORDS,
-        mag_method="auto_vbbl",
+        mag_method="finite_source_LD_Yoo04",
         use_rho=True,
         bandpass="I",
     )
 
     # Act
-    a_vbm = _run(vbm, _single_params(0.55), times)
-    a_mm = _run(mm_op, _single_params(0.55), times)
-    dmag_mmag = 2.5 * np.log10(a_vbm / a_mm) * 1000.0
+    def mmag(a):
+        return 2.5 * np.log10(a / ref) * 1000.0
+
+    d_vbm = mmag(_run(vbm_op, params, times))
+    d_window = mmag(_run(window_op, params, times))
+    d_yoo = mmag(_run(yoo_op, params, times))
 
     # Assert
-    assert np.all(np.isfinite(a_mm))
-    assert np.max(np.abs(dmag_mmag)) > 0.3
+    assert np.max(np.abs(d_vbm)) < 0.25, d_vbm
+    assert np.max(np.abs(d_yoo)) < 0.05, d_yoo
+    outside = x > 5.0
+    assert np.all(np.abs(d_window[outside]) > 2.0), d_window
+    assert np.max(np.abs(d_window[~outside])) < 0.05, d_window
 
 
 # ---------------------------------------------------------------------------
@@ -331,8 +397,7 @@ def test_no_u2_means_no_quadratic_law(tmp_path):
     """
     Given a LINEAR band,
     When the dispatcher resolves the LD law,
-    Then it reports no quadratic law -- so the single-lens path keeps
-      MulensModel and an existing fit is bit-identical.
+    Then it reports no quadratic law -- the VBM Op is built with LDlinear.
     """
     system = _fs_system(tmp_path, "linear")
     _, u2, bandpass = system.mulensinstrument._finite_source_limb_darkening(
@@ -342,21 +407,30 @@ def test_no_u2_means_no_quadratic_law(tmp_path):
     assert system.mulensevent._resolve_quadratic_ld(u2, bandpass) is False
 
 
-@pytest.mark.parametrize("law", ["linear", "quadratic"])
-def test_single_lens_backend_switches_only_when_u2_is_in_play(tmp_path, law):
+@pytest.mark.parametrize(
+    "law, backend",
+    [
+        ("linear", None),
+        ("quadratic", None),
+        ("linear", "mulensmodel"),
+    ],
+)
+def test_single_lens_finite_source_backend_is_the_backend(
+    tmp_path, law, backend
+):
     """
     Given a finite-source SINGLE lens,
     When the magnification graph is built,
-    Then a linear band produces the MulensModel Op and a quadratic band
-      produces the VBM ESPL Op.
+    Then the default backend produces the VBM ESPL Op whatever the band's
+      law (LDquadratic exactly when the band is quadratic), and an explicit
+      `backend: mulensmodel` still produces the MulensModel Op.
 
-    This is the decision recorded in the docstring of
-    MulensEvent._resolve_quadratic_ld,
-    pinned as behaviour: the backend moves only for the configuration that was
-    already producing the wrong profile, never for one that was fine.
+    A linear band used to keep MulensModel under the default backend; the
+    rule recorded in MulensEvent._resolve_quadratic_ld is now the backend
+    alone.  The mulensmodel case pins that the A/B reference survives.
     """
     # Arrange
-    system = _fs_system(tmp_path / law, law)
+    system = _fs_system(tmp_path / f"{law}_{backend}", law, backend=backend)
     u1, u2, bandpass = system.mulensinstrument._finite_source_limb_darkening(
         system, 0
     )
@@ -370,12 +444,14 @@ def test_single_lens_backend_switches_only_when_u2_is_in_play(tmp_path, law):
     op = node.owner.op
 
     # Assert
-    if law == "linear":
+    if backend == "mulensmodel":
         assert isinstance(op, MulensMagOp)
+        assert op.use_rho and op.bandpass == "I"
     else:
         assert isinstance(op, VBMDirectMagOp)
         assert op.n_companions == 0
-        assert op.quadratic_ld is True
+        assert op.use_rho and op.bandpass == "I"
+        assert op.quadratic_ld is (law == "quadratic")
 
 
 def test_the_graph_actually_responds_to_u2(tmp_path):
