@@ -2073,9 +2073,9 @@ class MulensEvent(Component):
         uses for a finite point source is a linear-law formalism, so the
         reference stays linear and says so.
 
-        WHY THE LD LAW NO LONGER PICKS THE SINGLE-LENS BACKEND.  Until the
-        change that introduced this docstring, a finite-source single lens
-        on a LINEAR band kept the MulensModel Op even under vbm_direct, so
+        WHY THE LD LAW NO LONGER PICKS THE SINGLE-LENS BACKEND.  Until
+        #488, a finite-source single lens on a LINEAR band kept the
+        MulensModel Op even under vbm_direct, so
         that existing answers would not move: the two backends differed by
         up to ~5 mmag, which was attributed to Yoo04's table interpolation.
         Measured against a direct integration of a linear-LD disk (u1 =
