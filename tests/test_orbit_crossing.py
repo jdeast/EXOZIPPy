@@ -27,10 +27,8 @@ def _config(n_planets, **planet_extra):
     names = ["b", "c", "d"][:n_planets]
     planets = []
     for k, nm in enumerate(names):
-        # orbit_ndx is what puts each planet on its OWN orbit; without it
-        # every planet maps to orbit 0 and the pairs are skipped as
-        # co-orbital.
-        cfg = {"name": nm, "orbit_ndx": k}
+        # The orbit groups below put each planet on its OWN orbit.
+        cfg = {"name": nm}
         cfg.update(planet_extra.get(nm, {}))
         planets.append(cfg)
     return {

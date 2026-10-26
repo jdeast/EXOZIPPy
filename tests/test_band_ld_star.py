@@ -174,7 +174,7 @@ def test_transit_registers_the_planet_host_star():
     band = _band_for(["TESS"])
     system = _StubSystem(
         star=_stars("A", "B"),
-        planet=_StubComp([{"name": "b", "star_ndx": 1}]),
+        planet=_StubComp([{"name": "b"}], star_map=np.array([1])),
         transit=_StubComp([{"name": "S48", "band": "TESS"}]),
     )
 
@@ -197,7 +197,7 @@ def test_transit_over_several_hosts_warns_rather_than_raising(caplog):
     system = _StubSystem(
         star=_stars("A", "B"),
         planet=_StubComp(
-            [{"name": "b", "star_ndx": 0}, {"name": "c", "star_ndx": 1}]
+            [{"name": "b"}, {"name": "c"}], star_map=np.array([0, 1])
         ),
         transit=_StubComp([{"name": "S48", "band": "TESS"}]),
     )

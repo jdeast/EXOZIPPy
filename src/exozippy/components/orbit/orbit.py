@@ -24,13 +24,20 @@ from exozippy.potentials import soft_lower_bound, soft_upper_bound
 # this import is required even though it's not used explicitly
 # it registers all the mathematical relations
 from . import physics
-from .bodies import TAYLOR_TYPES, component_instance_names, parse_orbit_bodies
+from .bodies import (
+    STATIC_TYPE,
+    TAYLOR_TYPES,
+    component_instance_names,
+    parse_orbit_bodies,
+)
 
 # Every legal `type:` of an orbit block.  `keplerian` is the default; the
 # Taylor types are the low-order expansions of an orbit too long to resolve
-# (orbit.md "Taylor orbits"); `nbody` is reserved for the integrator backend
-# review 8.8.15 describes and is refused until it exists.
-ORBIT_TYPES = ("keplerian",) + TAYLOR_TYPES + ("nbody",)
+# (orbit.md "Taylor orbits"); `static` is a pairing with no dynamics
+# (orbit.md "Planet membership has one spelling"); `nbody` is reserved for
+# the integrator backend review 8.8.15 describes and is refused until it
+# exists.
+ORBIT_TYPES = ("keplerian",) + TAYLOR_TYPES + (STATIC_TYPE, "nbody")
 
 
 def amplitude_constrained_orbits(system, orbit):
@@ -260,7 +267,7 @@ class Orbit(Component):
                     f"(review 8.8.15).  Use keplerian, or linear/quadratic "
                     f"for an orbit too long for the data to resolve."
                 )
-            if t in TAYLOR_TYPES:
+            if t != "keplerian":
                 bad = [k for k in self._KEPLERIAN_ONLY_KEYS if k in c]
                 if bad:
                     raise ValueError(
@@ -269,12 +276,13 @@ class Orbit(Component):
                         f"eccentricity, inclination or period to set them "
                         f"on.  Remove them."
                     )
-            elif "epoch" in c:
+            if t not in TAYLOR_TYPES and "epoch" in c:
                 raise ValueError(
                     f"[{self.prefix}.{name}] 'epoch:' is the reference epoch "
                     f"of a Taylor orbit (type: linear or quadratic); a "
-                    f"Keplerian orbit's epoch is its tc.  Remove the key or "
-                    f"set the orbit's type."
+                    f"type: {t} orbit has none"
+                    + (" (its epoch is its tc)" if t == "keplerian" else "")
+                    + ".  Remove the key or set the orbit's type."
                 )
             types.append(t)
         return types
@@ -283,6 +291,21 @@ class Orbit(Component):
     def is_taylor(self):
         """Per orbit: is this a Taylor orbit (type linear or quadratic)?"""
         return np.array([t in TAYLOR_TYPES for t in self.types], dtype=bool)
+
+    @property
+    def is_keplerian(self):
+        """Per orbit: is this a Keplerian orbit?
+
+        NOT the complement of `is_taylor`: a `type: static` orbit is neither
+        (a pairing with no dynamics -- no elements, no coefficients).  Ask
+        this, never `~is_taylor`, wherever the question is "does this orbit
+        have Keplerian elements"."""
+        return np.array([t == "keplerian" for t in self.types], dtype=bool)
+
+    @property
+    def is_static(self):
+        """Per orbit: is this a static orbit (a pairing with no dynamics)?"""
+        return np.array([t == STATIC_TYPE for t in self.types], dtype=bool)
 
     # The two eccentricity parameterizations, as a mode table (see
     # components/parameterization.py).  `hk` samples the sqrt(e)cos/sin(omega)
@@ -647,12 +670,6 @@ class Orbit(Component):
                         f"sqrt((1 + R_P/R_*)^2 - b^2), so it is defined by a "
                         f"radius ratio -- and this orbit's companion group "
                         f"holds {n_planets}"
-                        + (
-                            " (no planet block's orbit_ndx points at it)"
-                            if n_planets == 0
-                            and "companion" not in (self.config[i] or {})
-                            else ""
-                        )
                         + ".  Sample 'cosi' here (drop the key), or split "
                         "the bodies onto their own orbits."
                     )
@@ -712,11 +729,11 @@ class Orbit(Component):
             if system is not None
             else [False] * self.n_elements
         )
-        # A Taylor orbit has no eccentricity at all: its (inactive) Keplerian
-        # entries stay on the plain sqrt(e) mode, so no V_c/V_e Jacobian or
-        # root mixture is ever built for it.
+        # A Taylor or static orbit has no eccentricity at all: its (inactive)
+        # Keplerian entries stay on the plain sqrt(e) mode, so no V_c/V_e
+        # Jacobian or root mixture is ever built for it.
         default_on = [
-            on and not taylor for on, taylor in zip(default_on, self.is_taylor)
+            on and bool(kep) for on, kep in zip(default_on, self.is_keplerian)
         ]
         fitvcve = []
         for i, c in enumerate(self.config):
@@ -838,7 +855,11 @@ class Orbit(Component):
                     "companion's ds_dt/dalpha_dt -- with no period, "
                     "eccentricity, mass or K.  Needs an explicit 'primary:'; "
                     "'companion:' may be omitted for an unseen body.  "
-                    "'nbody' is reserved and not implemented."
+                    "'static': a pairing with no dynamics -- it names "
+                    "'primary:' and 'companion:' (both required) and "
+                    "declares no parameters; it is how a planet that does "
+                    "not move (a static microlensing lens companion) gets "
+                    "its host.  'nbody' is reserved and not implemented."
                 ),
             },
             {
@@ -862,9 +883,11 @@ class Orbit(Component):
                     "Body group forming the primary of this two-body "
                     "Keplerian arc: a list of star/planet instance names or "
                     "star.X/planet.X paths (a multi-body group is treated as "
-                    "a point mass at its barycenter). Omit both primary and "
-                    "companion to use the legacy implicit host/planet "
-                    "topology."
+                    "a point mass at its barycenter). This is the ONE "
+                    "spelling of membership: a planet's orbit and host star "
+                    "are derived from these groups. Both may be omitted "
+                    "only when the system has exactly one orbit, one star "
+                    "and one planet, which the orbit then pairs."
                 ),
             },
             {
@@ -941,20 +964,20 @@ class Orbit(Component):
         projects Keplerian elements, which a Taylor orbit does not have.  A
         consumer that can use one asks `taylor_membership`, and one that
         cannot is refused at stage 3 by `_taylor_consumers` -- never left to
-        drop the orbit in silence.
+        drop the orbit in silence.  Static orbits are in neither: a pairing
+        with no dynamics moves nothing, so no instrument sees it.
         """
-        return self._membership(star_idx, taylor=False)
+        return self._membership(star_idx, self.is_keplerian)
 
     def taylor_membership(self, star_idx):
         """`star_membership`'s twin over the TAYLOR orbits."""
-        return self._membership(star_idx, taylor=True)
+        return self._membership(star_idx, self.is_taylor)
 
-    def _membership(self, star_idx, taylor):
+    def _membership(self, star_idx, kind_mask):
         out = []
         key = ("star", int(star_idx))
-        is_taylor = self.is_taylor
         for i in range(self.n_elements):
-            if bool(is_taylor[i]) != taylor:
+            if not kind_mask[i]:
                 continue
             if key in self.primary_bodies[i]:
                 out.append((i, "primary"))
@@ -1516,6 +1539,7 @@ class Orbit(Component):
         # parameters, and an unsupported consumer must fail before anything
         # is built against an orbit it cannot read.
         self._taylor_consumer_map = self._taylor_consumers(system)
+        self._refuse_static_readers(system)
 
         # 1. Peer into the config (Pre-flight windows)
         # tc is periodic (tc and tc + P are the same solution), so one full
@@ -1723,17 +1747,18 @@ class Orbit(Component):
         spin_targets = rm_orbits_in_system(system) | dt_orbits_in_system(
             system
         )
-        taylor_targets = sorted(
+        non_keplerian_targets = sorted(
             nm
             for nm in spin_targets
-            if nm in self.names and self.is_taylor[list(self.names).index(nm)]
+            if nm in self.names
+            and not self.is_keplerian[list(self.names).index(nm)]
         )
-        if taylor_targets:
+        if non_keplerian_targets:
             raise NotImplementedError(
-                f"[{self.prefix}] rm:/dopptom name Taylor orbit(s) "
-                f"{taylor_targets}; the Rossiter-McLaughlin and Doppler "
-                f"tomography models need a transit geometry, which a "
-                f"type: linear/quadratic orbit does not have."
+                f"[{self.prefix}] rm:/dopptom name non-Keplerian orbit(s) "
+                f"{non_keplerian_targets}; the Rossiter-McLaughlin and "
+                f"Doppler tomography models need a transit geometry, which "
+                f"a type: linear/quadratic/static orbit does not have."
             )
         unknown_targets = spin_targets - set(self.names)
         if unknown_targets:
@@ -1863,16 +1888,19 @@ class Orbit(Component):
         # reported: a Taylor orbit must self-declare that it has no period,
         # eccentricity, mass or K (review 8.8.14, "inactive must never be
         # reported") -- and the Taylor coefficients its consumers read are
-        # active on them alone.  A system with no Taylor orbit takes neither
-        # branch, so its manifest is exactly what it always was.
-        if self.is_taylor.any():
-            keplerian = ~self.is_taylor
+        # active on them alone.  A static orbit (a pairing with no dynamics)
+        # is the same minus the coefficients: every Keplerian entry inactive,
+        # nothing else declared.  A system with only Keplerian orbits takes
+        # neither branch, so its manifest is exactly what it always was.
+        keplerian = self.is_keplerian
+        if not keplerian.all():
             if not keplerian.any():
-                # Nothing Keplerian at all (an RV trend alone): a parameter
-                # no instance has is not a parameter of this system, so it
-                # is omitted rather than declared wholly inactive -- the
-                # rule mode_manifest applies, and the reason every
-                # Keplerian consumer below has nothing to read.
+                # Nothing Keplerian at all (an RV trend alone, or only
+                # static pairings): a parameter no instance has is not a
+                # parameter of this system, so it is omitted rather than
+                # declared wholly inactive -- the rule mode_manifest
+                # applies, and the reason every Keplerian consumer below has
+                # nothing to read.
                 self.manifest = {}
             for key in list(self.manifest):
                 self.manifest[key] = restrict_active(
@@ -1904,8 +1932,7 @@ class Orbit(Component):
 
         RAISES, naming the orbit, for every consumer that would otherwise
         read a Taylor orbit as if it were Keplerian or drop it in silence:
-        astrometry, transits (a planet whose orbit_ndx points at one),
-        Rossiter-McLaughlin/Doppler tomography (refused where the spin
+        astrometry, Rossiter-McLaughlin/Doppler tomography (refused where the spin
         targets are read), xallarap, an RV star in the COMPANION group (its
         trend is the primary's scaled by a mass ratio no Taylor orbit has),
         and a quadratic lens orbit (the magnification backends take first
@@ -1956,31 +1983,14 @@ class Orbit(Component):
                     f"t_E/t_0/u_0/alpha.  Use a keplerian source orbit."
                 )
 
-        planet_cfgs = (
-            getattr(self.config_manager, "system_config", None) or {}
-        ).get("planet") or []
-        if not isinstance(planet_cfgs, list):
-            planet_cfgs = [planet_cfgs]
         # A planet on a Taylor orbit has no Keplerian geometry, and Planet
         # then declares none (Planet.keplerian_geometry) -- legal when
         # nothing needs it, e.g. a lens planet whose only reader is the
-        # lens's linear orbital motion (review 8.8.20).  What needs it is a
-        # TRANSIT: every transit file models every planet (p, b, a/R*, the
-        # durations), so a transit block with a planet on a Taylor orbit
-        # cannot be built.  (RM/DT and astrometry on a Taylor orbit are
-        # refused by their own checks above and below.)
-        if in_topology(system, "transit") is not None:
-            for j, pc in enumerate(planet_cfgs):
-                o = int((pc or {}).get("orbit_ndx", 0))
-                if o in consumers:
-                    raise ValueError(
-                        f"[{self.prefix}.{name(o)}] planet "
-                        f"{(pc or {}).get('name', j)!r} has orbit_ndx {o}, a "
-                        f"type: {self.types[o]} orbit, and this system has a "
-                        f"transit block, which models every planet's "
-                        f"Keplerian transit geometry; point the planet's "
-                        f"orbit_ndx at a Keplerian orbit."
-                    )
+        # lens's linear orbital motion (#485).  What needs it is a TRANSIT,
+        # and that refusal lives in Planet.keplerian_geometry, which sees
+        # every way a planet can lack the geometry (a Taylor orbit, a static
+        # one, or none).  (RM/DT and astrometry on a Taylor orbit are refused
+        # by their own checks above and below.)
 
         ast = components.get("astrometryinstrument")
         if ast is not None:
@@ -2019,6 +2029,41 @@ class Orbit(Component):
                 f"be free dimensions no likelihood term constrains."
             )
         return consumers
+
+    def _refuse_static_readers(self, system):
+        """RAISE where a consumer would read geometry from a static orbit.
+
+        A `type: static` orbit is a pairing with no dynamics: it says which
+        bodies belong together (a planet's host) and nothing else, so no
+        dataset can measure it.  The readers that name an orbit directly
+        refuse it here or at their own construction -- a lens companion's
+        `orbit:` (Lens), a source's xallarap `orbit:` (MulensEvent), an
+        `rm:`/Doppler-tomography target (the spin-target check), and an
+        astrometric `rel` dataset (here).  RVs and gaia/abs astrometry reach
+        orbits through `star_membership`, which holds Keplerian orbits only,
+        so a star in a static pairing is simply not moved by it.
+        """
+        static = {int(o) for o in np.nonzero(self.is_static)[0]}
+        if not static:
+            return
+        components = getattr(system, "active_components", None) or {}
+        ast = components.get("astrometryinstrument")
+        if ast is None:
+            return
+        bad = sorted(
+            {
+                self.names[ast.rel_orbit[i]]
+                for i, mode in enumerate(ast.modes)
+                if mode == "rel" and ast.rel_orbit[i] in static
+            }
+        )
+        if bad:
+            raise ValueError(
+                f"[{self.prefix}] relative astrometry names static orbit(s) "
+                f"{bad}; a type: static orbit is a pairing with no "
+                f"dynamics, so there is no relative motion to fit.  Give "
+                f"the orbit its type (keplerian, the default)."
+            )
 
     def _taylor_epochs(self, system, consumers):
         """Per orbit: the Taylor expansion's reference epoch (BJD_TDB), NaN
@@ -2601,23 +2646,6 @@ class Orbit(Component):
                         f"disabled."
                     )
                     return False
-        # A planet in a companion group should point its orbit_ndx here
-        # (transit/planet geometry reads the orbit through that map).
-        planet_cfgs = (
-            getattr(self.config_manager, "system_config", None) or {}
-        ).get("planet") or []
-        for i in range(self.n_elements):
-            for ctype, idx in self.companion_bodies[i]:
-                if ctype != "planet" or idx >= len(planet_cfgs):
-                    continue
-                o_ndx = int((planet_cfgs[idx] or {}).get("orbit_ndx", 0))
-                if o_ndx != i:
-                    logger.warning(
-                        f"[{self.prefix}.{self.names[i]}] companion planet."
-                        f"{idx} has orbit_ndx={o_ndx}, not {i}; the planet's "
-                        f"transit/RV geometry will follow orbit {o_ndx} "
-                        f"while its mass moves this orbit."
-                    )
         return True
 
     def _ltt_reporting_mask(self, system):
@@ -2890,10 +2918,10 @@ class Orbit(Component):
         return pt.as_tensor_variable(np.asarray(mask, dtype="float64"))
 
     def build_likelihood(self, model, system):
-        if self.is_taylor.all():
-            # Only Taylor orbits: no eccentricity, chord or retarded
-            # geometry exists to bound or describe (their manifest has none
-            # of those parameters -- register_parameters).
+        if not self.is_keplerian.any():
+            # Only Taylor or static orbits: no eccentricity, chord or
+            # retarded geometry exists to bound or describe (their manifest
+            # has none of those parameters -- register_parameters).
             return
         self._add_eccentricity_bound(system)
         self._add_vcve_terms(system)
@@ -3240,11 +3268,14 @@ class Orbit(Component):
             np.full(self.n_elements, physics.MAX_ECC)
         )
         # A planet-free system (a stellar binary) legitimately has no planet
-        # component; one that HAS planets alongside an orbit always declares
-        # `max_ecc` (Planet.register_parameters, `has_orbit`), so it is read
-        # directly -- a probe here would silently drop the collision limit.
+        # component, and planets with no Keplerian orbit (a static lens
+        # companion beside a source's xallarap orbit) have no max_ecc to
+        # give; planets that DO have Keplerian geometry always declare it
+        # (Planet.register_parameters, `has_orbit` = keplerian_geometry), so
+        # it is read directly -- a probe here would silently drop the
+        # collision limit.
         planets = system.active_components.get("planet")
-        if planets is not None:
+        if planets is not None and planets.keplerian_geometry(system):
             if not isinstance(getattr(planets, "max_ecc", None), Parameter):
                 raise RuntimeError(
                     f"[{self.prefix}] the collision bound needs planet."
@@ -3259,11 +3290,11 @@ class Orbit(Component):
                     pt.minimum(threshold[o], planets.max_ecc.value[p]),
                 )
 
-        if self.is_taylor.any():
-            # A Taylor orbit has no eccentricity: its secosw/sesinw are
-            # inactive bookkeeping pins and must not enter a potential.
+        if not self.is_keplerian.all():
+            # A Taylor or static orbit has no eccentricity: its secosw/sesinw
+            # are inactive bookkeeping pins and must not enter a potential.
             kep = pt.as_tensor_variable(
-                np.nonzero(~self.is_taylor)[0].astype("int32")
+                np.nonzero(self.is_keplerian)[0].astype("int32")
             )
             e_unclipped = e_unclipped[kep]
             threshold = threshold[kep]

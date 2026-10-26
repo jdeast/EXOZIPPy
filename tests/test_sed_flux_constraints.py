@@ -315,7 +315,7 @@ def test_astrometry_fluxfrac_derived_from_sed(tmp_path):
     config = {
         "star": [{"name": "A", "mist": False}, {"name": "C", "mist": False}],
         "planet": [{"name": "BH"}],
-        "orbit": [{"name": "BH"}],
+        "orbit": [{"name": "BH", "primary": ["A"], "companion": ["BH"]}],
         "band": [{"name": "GaiaG", "filter": "GAIA2r.G", "ld_law": "linear"}],
         "astrometryinstrument": [
             {

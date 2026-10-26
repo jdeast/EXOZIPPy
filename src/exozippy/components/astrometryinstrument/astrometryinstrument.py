@@ -23,7 +23,7 @@ Supports three data modes (set per instrument via 'mode' in the config):
          COMPANION group relative to its PRIMARY group.  Use 'orbit'
          (orbit instance name or index) to select which orbit the
          measurements trace; 'planet_ndx' remains as a legacy alias
-         (resolved through that planet's orbit_ndx).  When a group holds
+         (resolved to the orbit whose companion group holds that planet).  When a group holds
          several bodies, the modeled position is the group photocenter:
          the barycenter orbit of the referenced orbit, plus the
          photocenter wobble of any sub-orbit nested inside a group
@@ -146,7 +146,10 @@ import pytensor
 import pytensor.tensor as pt
 
 from exozippy.components.instrument import Instrument
-from exozippy.components.orbit.bodies import component_instance_names
+from exozippy.components.orbit.bodies import (
+    component_instance_names,
+    planet_membership,
+)
 from exozippy.components.parameterization import (
     merge_overrides,
     pin_unselected,
@@ -227,8 +230,8 @@ class AstrometryInstrument(Instrument):
         ]
 
         # rel mode: which orbit the measurements trace (name or index in
-        # 'orbit'; legacy 'planet_ndx' resolves through the planet's
-        # orbit_ndx).
+        # 'orbit'; legacy 'planet_ndx' resolves to the orbit holding that
+        # planet).
         sys_cfg = getattr(config_manager, "system_config", None) or {}
         orbit_names = component_instance_names(sys_cfg, "orbit")
         planet_cfgs = sys_cfg.get("planet") or []
@@ -255,11 +258,27 @@ class AstrometryInstrument(Instrument):
                         f"[{self.prefix}.{self.names[i]}] unknown orbit "
                         f"'{ref}'; orbits are {orbit_names}."
                     )
+            elif "planet_ndx" not in c:
+                # Neither key: orbit 0, the documented default (unchanged).
+                idx = 0
             else:
-                j = int(c.get("planet_ndx", 0))
-                p_cfg = planet_cfgs[j] if j < len(planet_cfgs) else {}
-                # same default as Planet.build_maps' orbit_map
-                idx = int((p_cfg or {}).get("orbit_ndx", 0))
+                j = int(c["planet_ndx"])
+                if j >= len(planet_cfgs):
+                    raise ValueError(
+                        f"[{self.prefix}.{self.names[i]}] planet_ndx {j} out "
+                        f"of range; the system has {len(planet_cfgs)} "
+                        f"planet(s).  Name the orbit with 'orbit:' instead."
+                    )
+                # The planet's orbit, from the orbit blocks' groups (the one
+                # reader, orbit.bodies.planet_membership).
+                idx = planet_membership(sys_cfg)[j][0]
+                if idx is None:
+                    raise ValueError(
+                        f"[{self.prefix}.{self.names[i]}] planet_ndx {j} "
+                        f"names a planet that no orbit block holds, so "
+                        f"there is no orbit to trace; name the orbit with "
+                        f"'orbit:'."
+                    )
             self.rel_orbit.append(idx)
 
     @property
@@ -683,8 +702,8 @@ class AstrometryInstrument(Instrument):
         # star_map only.  There WAS a `planet_map` here, built from the
         # legacy `planet_ndx` key and read by nothing: rel-mode orbit
         # resolution moved into __init__ (self.rel_orbit, which resolves
-        # `orbit:` by name or index and falls back to the named planet's
-        # orbit_ndx), and every other consumer wants the orbit, not the
+        # `orbit:` by name or index, or the orbit holding the named
+        # planet), and every other consumer wants the orbit, not the
         # planet.  Stage 5 auto-converts every `*_map` attribute into an
         # int32 shared variable, so the dead assignment cost one per fit.
         self.star_map = np.array([c.get("star_ndx", 0) for c in self.config])

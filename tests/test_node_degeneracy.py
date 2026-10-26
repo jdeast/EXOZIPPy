@@ -184,7 +184,6 @@ def test_the_predicate_is_per_orbit_not_per_system(tmp_path):
         ],
     }
     params = _params()
-    config["planet"][1]["orbit_ndx"] = 1
     params["orbit.c.period"] = {"initval": 31.0}
     params["orbit.c.tc"] = {"initval": 2455010.0}
     params["planet.c.radius"] = {"initval": 1.0}

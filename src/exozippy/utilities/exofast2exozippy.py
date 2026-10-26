@@ -1894,11 +1894,10 @@ def _emit_config(
         L.append("")
 
     L.append("planet:")
-    for i, p in enumerate(planet_names):
+    # Each planet's orbit and host come from the orbit blocks' groups below
+    # (one spelling); the planet carries no index of its own.
+    for p in planet_names:
         L.append(f'  - name: "{p}"')
-        if len(planet_names) > 1:
-            # Without it every planet would read orbit 0's geometry.
-            L.append(f"    orbit_ndx: {i}")
     L.append("")
 
     L.append("orbit:")

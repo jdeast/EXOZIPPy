@@ -29,7 +29,7 @@ from exozippy.config import ConfigManager
 
 PLANET_SYSTEM = {
     "star": [{"name": "A"}],
-    "planet": [{"name": "b", "star_ndx": 0, "orbit_ndx": 0}],
+    "planet": [{"name": "b"}],
     "orbit": [{"name": "b"}],
 }
 
@@ -250,10 +250,13 @@ def test_unit_override_applies_only_to_the_element_that_declared_it():
     two_planets = {
         "star": [{"name": "A"}],
         "planet": [
-            {"name": "b", "star_ndx": 0, "orbit_ndx": 0},
-            {"name": "c", "star_ndx": 0, "orbit_ndx": 1},
+            {"name": "b"},
+            {"name": "c"},
         ],
-        "orbit": [{"name": "b"}, {"name": "c"}],
+        "orbit": [
+            {"name": "b", "primary": ["A"], "companion": ["b"]},
+            {"name": "c", "primary": ["A"], "companion": ["c"]},
+        ],
     }
     cm = ConfigManager(
         {
