@@ -849,6 +849,14 @@ TIER_SCORED = "SCORED"
 #: microlens-submit's challenge tier (tier_validation.TIER_DEFINITIONS);
 #: the RMDC26 data are the beginner tier.
 CHALLENGE_TIER = "beginner"
+#: Events the PI rejected after review, with the reason; they are not
+#: submitted whatever their tier, and the summary lists them.
+PI_REJECTED = {
+    6: "JDE 2026-10-26: 7 modes, likely noise from a bad fit, and no clear "
+    "winner (every bridge refused; the indicative-lnZ leader m4 is held by "
+    "one chain, the max-lp mode m2 by 12, the largest m1 by 52); rejected",
+}
+
 #: The team name, as the PI gave it (JDE, 2026-10-25).
 TEAM_NAME = "exozippy"
 

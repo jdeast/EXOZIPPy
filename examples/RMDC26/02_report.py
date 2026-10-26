@@ -98,7 +98,21 @@ def build_event(ev, recs):
     # A refused bridge still reports its estimate in lnZ (status lnZ_bridge
     # + log_norm); evidence.py sets lnZ itself for every mode it attempted.
     err = np.array([s["lnZ_err"] for s in sols], dtype=float)
-    pr = R.robust_probabilities(lnz, err) if sols else {"groups": []}
+    occ = np.array([s.get("occupancy", np.nan) for s in sols], dtype=float)
+    if (basis != "accepted" and len(sols) > 1 and np.all(np.isfinite(occ))
+            and occ.sum() > 0):  # fmt: skip
+        # Nothing accepted: a softmax of REFUSED lnZ quoted 1.0 vs 1e-32 for
+        # mode separations no bridge certified (008, 110, 156 on
+        # 2026-10-26).  Fall back to the posterior's chain occupancy -- the
+        # sampler's own mode weights, no sharper than the chains are -- with
+        # no lnZ floor (grouping on occupancy has no meaning).
+        basis = "INDICATIVE (no accepted bridge; chain occupancy)"
+        with np.errstate(divide="ignore"):
+            lnz = np.log(occ / occ.sum())
+        err = np.zeros_like(lnz)
+        pr = R.robust_probabilities(lnz, err, floor=0.0)
+    else:
+        pr = R.robust_probabilities(lnz, err) if sols else {"groups": []}
     eligible = np.array([np.isfinite(v) for v in lnz], bool)
     act, rel = (
         R.active_and_renormalized(pr["p_robust"], eligible)
