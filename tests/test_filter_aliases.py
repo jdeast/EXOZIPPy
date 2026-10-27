@@ -260,6 +260,9 @@ def _shipped_bc_filters():
         ("Paranal/VISTA.Ks", "VISTA_Ks", "VISTA"),
         ("CTIO/DECam.g", "DECam_g", "DECam"),
         ("Euclid/VIS.vis", "Euclid_VIS", "Euclid"),
+        ("MOA/MOA-II.R", "MOA_II_R", "MOA"),
+        ("Spitzer/IRAC.I1", "IRAC_3.6", "Spitzer"),
+        ("UKIRT/UKIDSS.H", "UKIDSS_H", "UKIRT"),
     ],
 )
 def test_the_roman_bulge_passbands_resolve_to_their_facility_tables(

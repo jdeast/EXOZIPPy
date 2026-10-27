@@ -265,3 +265,4 @@ Unsupported	VISTA_Y           	Unsupported	Paranal/VISTA.Y       	VISTA.Y
 Unsupported	VISTA_J           	Unsupported	Paranal/VISTA.J       	VISTA.J
 Unsupported	VISTA_H           	Unsupported	Paranal/VISTA.H       	VISTA.H
 Unsupported	VISTA_Ks          	Unsupported	Paranal/VISTA.Ks      	VISTA.Ks
+Unsupported	MOA_II_R          	Unsupported	MOA/MOA-II.R          	MOA-II.R

@@ -228,6 +228,13 @@ FILTER_SETS: Dict[str, List[str]] = {
         "CTIO/DECam.z",
         "CTIO/DECam.Y",
     ],
+    # BC-2026-10-26 item 6: every mulensinstrument band needs a BC column
+    # once an sed: block is on, and MOA-II's wide red band is the one SVO
+    # carries (MOA/MOA-II.R; there is no MOA-II.Red id).  IRAC.I1 for
+    # OGLE-2017-BLG-1275's Spitzer source flux, UKIDSS H for catalog rows.
+    "MOA": ["MOA/MOA-II.R"],
+    "Spitzer": ["Spitzer/IRAC.I1"],
+    "UKIRT": ["UKIRT/UKIDSS.H"],
 }
 
 
@@ -269,6 +276,11 @@ NATIVE_SYSTEM: Dict[str, str] = {
     **{f: "Vega" for f in FILTER_SETS["HST"]},
     **{f: "Vega" for f in FILTER_SETS["VISTA"]},  # VVV / VIRAC
     **{f: "AB" for f in FILTER_SETS["DECam"]},  # DECaPS2
+    # MOA photometry is instrumental and calibrated per event against a
+    # catalog; Vega is the convention radish asked for (2026-10-26).
+    **{f: "Vega" for f in FILTER_SETS["MOA"]},
+    **{f: "Vega" for f in FILTER_SETS["Spitzer"]},  # IRAC Vega (Reach+2005)
+    **{f: "Vega" for f in FILTER_SETS["UKIRT"]},  # UKIDSS Vega (Hewett+2006)
 }
 
 

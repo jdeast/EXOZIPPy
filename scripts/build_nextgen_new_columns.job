@@ -1,0 +1,42 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 8
+#$ -q mThM.q
+#$ -l use_himem=TRUE
+#$ -cwd
+#$ -j y
+#$ -N nextgencols
+#$ -o scripts/build_nextgen_new_columns.$JOB_ID.log
+#
+# Step 2 for the columns the shipped tables lack (generate_bc_tables is
+# incremental: existing cells are read from the published tables and
+# skipped), from the processed spectra build_nextgen_processed_spectra.job
+# leaves in ~/spectra; then the complete box of every facility.
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export OMP_NUM_THREADS=1
+cd $HOME/python/EXOZIPPy
+echo "commit $(git rev-parse --short HEAD) on $(git branch --show-current)   $(date)   slots $NSLOTS"
+python -u - <<'PY'
+import time
+from pathlib import Path
+from exozippy.components.sed.bc_grid import (
+    DEFAULT_MODEL_ROOT, bc_table_path, bc_table_filter_columns, complete_axes, read_bc_table, read_bc_meta,
+)
+from exozippy.models.NextGen import generate_NextGen_BC_Tables as gen
+proc = Path.home() / "spectra" / "BT-NextGen_AGSS2009_processed"
+t0 = time.time()
+plan = gen.plan_bc_work(gen.FILTER_SETS)
+print("plan:", {fac: (len(todo), [c for c in todo.columns if c not in gen.GRID_KEY_COLS]) for fac, todo in plan.items()})
+gen.generate_bc_tables(processed_path=proc, save=True)
+print(f"step 2 done in {time.time()-t0:.0f} s")
+for fac in gen.FILTER_SETS:
+    p = bc_table_path(DEFAULT_MODEL_ROOT, "NextGen", fac)
+    df = read_bc_table(p); cols = bc_table_filter_columns(p); box = complete_axes(df, cols)
+    print(f"{fac:12s} cols {len(cols):3d} rows {len(df):6d} logg {box['logg_pts'].min():.1f}-{box['logg_pts'].max():.1f} teff {box['teff_pts'].min():.0f}-{box['teff_pts'].max():.0f} av {box['av_pts'].max():.0f}")
+print("DONE")
+PY
+echo "exit $?   $(date)"

@@ -1,0 +1,85 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 8
+#$ -q mThM.q
+#$ -l use_himem=TRUE
+#$ -cwd
+#$ -j y
+#$ -N nextgenspec
+#$ -o scripts/build_nextgen_processed_spectra.$JOB_ID.log
+#
+# Bring the full BT-NextGen (AGSS2009) grid to this machine as the
+# pipeline's step-1 product: for each [Fe/H], fetch that plane's raw ASCII
+# spectra from SVO (models/NextGen/fetch_raw_spectra.py), resample them onto
+# the R = 20000 grid (process_missing_spectra), and delete the raw files --
+# ~90 GB pass through, ~8 GB of processed parquets stay, so any later filter
+# request (BC-2026-10-26 and after) is minutes of step 2.  Waits for SVO to
+# answer before starting (it was down on 2026-10-26).
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export OMP_NUM_THREADS=1
+cd $HOME/python/EXOZIPPy
+echo "commit $(git rev-parse --short HEAD) on $(git branch --show-current)   $(date)   slots $NSLOTS"
+python -u - <<'PY'
+import shutil, time, urllib.request
+from pathlib import Path
+
+from exozippy.models.NextGen import generate_NextGen_BC_Tables as gen
+from exozippy.models.NextGen.fetch_raw_spectra import (
+    SSAP_URL, fetch_nodes, grid_nodes_from_yaml, svo_index,
+)
+from exozippy.models.NextGen.nextgen_spectra import get_NextGen2009_filename, ALPHA_GRID_PTS
+
+raw = Path.home() / "spectra" / "BT-NextGen_AGSS2009"
+proc = Path.home() / "spectra" / "BT-NextGen_AGSS2009_processed"
+grid = gen.read_grid_yaml()
+
+# SVO comes and goes (2026-10-27: up 12:25-12:46, then down again), so a
+# failed download means "wait for SVO and resume", never "give up": files
+# already on disk are skipped by fetch_nodes, so every resume is incremental.
+deadline = time.time() + 96 * 3600
+
+def wait_for_svo(poll=120):
+    while True:
+        try:
+            urllib.request.urlopen(SSAP_URL, timeout=60).read(1024)
+            return
+        except Exception as exc:
+            if time.time() > deadline:
+                raise SystemExit(f"SVO still unreachable at the deadline: {exc}")
+            print(time.strftime("%F %T"), "SVO unreachable, retrying in", poll, "s:", str(exc)[:80], flush=True)
+            time.sleep(poll)
+
+wait_for_svo()
+print(time.strftime("%F %T"), "SVO answers; starting", flush=True)
+cache = raw / "svo_index.votable.xml"
+idx = svo_index(raw, refresh=not cache.is_file())
+t0 = time.time()
+for feh in grid["feh"]:
+    plane = {**grid, "feh": [float(feh)]}
+    nodes = grid_nodes_from_yaml(plane)
+    done = proc / gen._processed_filename(float(feh))
+    while True:
+        try:
+            out = fetch_nodes(nodes, raw, index=idx, n_workers=8)
+            break
+        except RuntimeError as exc:  # one file failed after its retries: SVO went away
+            print(time.strftime("%F %T"), f"feh={feh:+.1f}: download interrupted ({str(exc)[:100]}); waiting for SVO", flush=True)
+            wait_for_svo()
+    print(f"feh={feh:+.1f}: fetched {len(out['fetched'])}, present {len(out['present'])}, unavailable {len(out['unavailable'])}  ({time.time()-t0:.0f} s)", flush=True)
+    print(gen.process_missing_spectra(plane, raw_path=raw, processed_path=proc, n_workers=8, skip_unavailable=True), flush=True)
+    # free the raw plane (the processed parquet is the product); keep the index
+    n = 0
+    for teff in grid["teff"]:
+        for logg in grid["logg"]:
+            for alpha in ALPHA_GRID_PTS:
+                p = raw / get_NextGen2009_filename({"teff": teff, "logg": logg, "feh": float(feh), "alpha": float(alpha)})
+                if p.is_file():
+                    p.unlink(); n += 1
+    print(f"feh={feh:+.1f}: processed parquet {done.stat().st_size/1e6:.0f} MB; {n} raw files removed  ({time.time()-t0:.0f} s)", flush=True)
+print("DONE", f"{time.time()-t0:.0f} s; processed set:", shutil.disk_usage(proc).used // 1e9, "GB used on the volume")
+PY
+echo "exit $?   $(date)"
