@@ -931,11 +931,13 @@ class Star(Component):
     #: What a star in an orbit group shares with its group's anchor (JDE
     #: 2026-10-26: "if we make it some kind of orbit (even static), that
     #: should automatically trigger several links (if fit): distance,
-    #: proper motion, initfeh, age, av").
+    #: proper motion, initfeh, age, av"), and the systemic radial velocity
+    #: (JDE 2026-10-27): a bound system has one space velocity.
     ORBIT_LINKED_PARAMS = (
         "distance",
         "pm_ra",
         "pm_dec",
+        "rv",
         "initfeh",
         "age",
         "av",
@@ -1015,11 +1017,14 @@ class Star(Component):
         channel ``ConfigManager.add_link`` (never ``user_params``), made
         hard by ``sigma: 0`` through the opt-in ``"overrides"`` channel.
 
-        The proper motion is the SYSTEM's barycentric motion: a Keplerian
-        orbit adds the orbital motion on top where a consumer models it
-        (the gaia/abs photocenter wobble of a primary-group star, a
-        xallarap source, a lens orbit), and a Taylor or static orbit adds
-        none on the sky.
+        The proper motion and ``rv`` are the SYSTEM's barycentric space
+        velocity: a Keplerian orbit adds the orbital motion on top where a
+        consumer models it (the gaia/abs photocenter wobble of a
+        primary-group star, a xallarap source, a lens orbit, an RV
+        dataset's ``orbit.K`` sum), and a Taylor or static orbit adds none
+        on the sky.  Under a galacticmodel a member linked on distance, pm
+        and rv contributes no velocity density of its own
+        (``linked_star_structure``).
 
         Per (star, parameter), only where the parameter is DECLARED and
         ACTIVE for the star; active on one of the pair and not the other

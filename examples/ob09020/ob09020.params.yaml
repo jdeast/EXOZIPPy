@@ -53,8 +53,6 @@ lens.L2.q:
     initval: 0.275
 star.L1.distance:
     initval: 747.0            # pc, Y16 D_L
-star.L2.distance:
-    initval: 747.0            # pc
 
 # S11 Sec. 3.2: "We assume the source to be in the Galactic Bulge at
 # Ds = 8 kpc, and thus the source parallax is pi_s = 0.125 mas" -- the

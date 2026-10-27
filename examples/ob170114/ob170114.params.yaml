@@ -159,8 +159,6 @@ star.SComp.mass:
                                   # interrogate.
 star.Source.distance:
     initval: 8540.0               # D_S assumed 8.54 kpc (red clump)
-star.SComp.distance:
-    initval: 8540.0               # one binary
 
 # Proper motions -- ALL FOUR leaves pinned, because t_E and pi_E are
 # derived from them and for this event the Gould-2004 helio->geo term
@@ -181,10 +179,6 @@ star.SComp.distance:
 star.Source.pm_ra:
     initval: -3.0
 star.Source.pm_dec:
-    initval: -3.0
-star.SComp.pm_ra:
-    initval: -3.0
-star.SComp.pm_dec:
     initval: -3.0
 star.L1.pm_ra:
     initval: -0.831156            # = -3.0 + 2.168844

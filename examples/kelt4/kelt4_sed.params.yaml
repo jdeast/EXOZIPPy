@@ -34,12 +34,6 @@ star.A.av:
 # delta-V (~2.95 mag A to B+C, so ~3.7 mag each assuming near-equal
 # components) via a crude V-band main-sequence color estimate -- not a
 # literature value, just a starting point for the sampler.
-star.B.distance:
-  initval: star.A.distance
-  sigma: 0
-star.B.av:
-  initval: star.A.av
-  sigma: 0
 star.B.feh:
   initval: star.A.feh
   sigma: 0
@@ -50,12 +44,6 @@ star.B.radius:
 star.B.teff:
   initval: 4800
 
-star.C.distance:
-  initval: star.A.distance
-  sigma: 0
-star.C.av:
-  initval: star.A.av
-  sigma: 0
 star.C.feh:
   initval: star.A.feh
   sigma: 0
