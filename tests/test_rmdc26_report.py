@@ -858,3 +858,49 @@ def test_results_csv_is_read_in_both_schemas(tmp_path):
     da, dt = V.roundtrip(sol, rs)
     assert da == pytest.approx(0.0, abs=1e-9) and dt < 1e-3
     assert V.roundtrip(sol, {}) == (None, None)
+
+
+def test_pi_rejected_events_carry_a_reason(R):
+    """A PI rejection is explicit: an int event id and a non-empty reason
+    (006, JDE 2026-10-26: 7 modes with no clear winner)."""
+    assert 6 in R.PI_REJECTED
+    for ev, why in R.PI_REJECTED.items():
+        assert isinstance(ev, int) and "JDE" in why
+
+
+def test_no_accepted_bridge_falls_back_to_chain_occupancy(R):
+    """When every bridge is refused, the probabilities come from the chain
+    occupancy, not a softmax of refused lnZ (008 shipped 1.0 vs 1.3e-32 for
+    occupancy 0.977 / 0.012 on 2026-10-26)."""
+    import importlib.util
+
+    sys.path.insert(0, str(EX))
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "rmdc26_report02", EX / "02_report.py"
+        )
+        P = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(P)
+    finally:
+        sys.path.remove(str(EX))
+
+    def mode(k, lnz, occ, refused=True):
+        return {"mode": k, "lnZ": lnz, "lnZ_err": 1.0, "occupancy": occ,
+                "bridge_refused": refused, "bridge_state": "re2-too-large"
+                if refused else "ok", "n_chains": 10, "summary": {},
+                "lpcheck": {"dlp_max_abs": 0.0}}  # fmt: skip
+
+    rec = {"fit": "008", "arch": "1S2L", "event": 8,
+           "lpcheck": {"dlp_max_abs": 0.0}, "stuck_frac": 0.0,
+           "lp_rhat": 1.0, "invalid_frac": 0.0, "max_rhat": 1.1,
+           "converged": True, "equilibrated": True,
+           "modes": [mode(1, 1000.0, 0.9768), mode(2, 927.0, 0.0119)]}  # fmt: skip
+    e = P.build_event(8, [rec])
+    p = [s["relative_probability"] for s in e["solutions"]]
+    assert "chain occupancy" in e["basis"]
+    assert p[0] == pytest.approx(0.9768 / 0.9887)
+    assert p[1] == pytest.approx(0.0119 / 0.9887)
+    # one accepted bridge: lnZ governs as before
+    rec["modes"][0]["bridge_refused"] = False
+    e = P.build_event(8, [rec])
+    assert e["basis"] == "accepted"

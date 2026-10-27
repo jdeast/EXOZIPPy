@@ -229,7 +229,8 @@ def master_lpcheck(listing):
     return out
 
 
-def summary_text(events, listing, problems, validation, lpm=None, recs=None):
+def summary_text(events, listing, problems, validation, lpm=None, recs=None,
+                 rejected=()):  # fmt: skip
     L = ["RMDC26 submission summary (%s)" % dt.datetime.now().isoformat(
         timespec="minutes"), ""]  # fmt: skip
     L.append("manifest: %s" % listing["manifest"])
@@ -241,6 +242,11 @@ def summary_text(events, listing, problems, validation, lpm=None, recs=None):
                  % (t, len(evs), sum(len(e["solutions"]) for e in evs),
                     sum(s["is_active"] for e in evs for s in e["solutions"]),
                     " ".join(R.ev3(e["event"]) for e in evs)))  # fmt: skip
+    L.append("PI-REJECTED (not submitted, %d):" % len(rejected))
+    for ev, tier, why in rejected:
+        L.append("  %s [%s]: %s" % (R.ev3(ev), tier, why))
+    if not rejected:
+        L.append("  none")
     unc = [e for e in events if e["architecture"]["flag"] == R.ARCH_UNCERTAIN]
     L.append("")
     L.append("FOR PI REVIEW -- ARCHITECTURE_UNCERTAIN (%d):" % len(unc))
@@ -350,10 +356,13 @@ def main(argv=None):
     rep.mkdir(parents=True, exist_ok=True)
     if (sub / "events").exists():
         shutil.rmtree(sub / "events")
-    events, recs = [], {}
+    events, recs, rejected = [], {}, []
     for row in listing["submitted"]:
         ev = int(row["event"])
         if row.get("unusable"):
+            continue
+        if ev in R.PI_REJECTED:
+            rejected.append((ev, row.get("tier"), R.PI_REJECTED[ev]))
             continue
         p = R.OUT / "evidence" / R.ev3(ev) / (row["fit"] + ".json")
         if not p.exists():
@@ -407,7 +416,7 @@ def main(argv=None):
                     for e in events],
          "problems": problems}, rep / "submission_summary.json")  # fmt: skip
     txt = summary_text(events, listing, problems, validation,
-                       master_lpcheck(listing), recs)  # fmt: skip
+                       master_lpcheck(listing), recs, rejected)  # fmt: skip
     (rep / "submission_summary.txt").write_text(txt)
     print(txt)
     bad = validation is None and not a.no_validate
