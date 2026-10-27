@@ -91,12 +91,17 @@ Per-instrument config keys:
                       the filter of the SED-derived fluxfrac below.  rel:
                       the filter in which the SED weighs the two sides of
                       each NESTED orbit's photocenter (_pair_beta).
-  companion_star_ndx: gaia/abs/catalog -- index of the star modeling the
-                      luminous companion.  When band, companion_star_ndx,
-                      and a sed: block are all present, the photocenter
-                      flux fraction is derived from the SED
-                      (beta = F_c/(F_c+F_host) in the band) instead of
-                      being sampled; the sampled fluxfrac element is
+  companion_star_ndx: gaia/abs/catalog -- index of the OTHER luminous
+                      star inside the target's PSF: for a primary-group
+                      target its companion, for a companion-group target
+                      the primary (it names "the target's companion in
+                      the PSF", not an orbit-group role).  It must share
+                      a Keplerian orbit with star_ndx (raises otherwise).
+                      When band, companion_star_ndx, and a sed: block are
+                      all present, the photocenter flux fraction is
+                      derived from the SED (b = F_c/(F_c+F_target) in
+                      the band; a band the BC grid lacks raises) instead
+                      of being sampled; the sampled fluxfrac element is
                       fixed (unused).  Ignored with a warning on a rel
                       dataset, which has no per-instrument fraction.
   microlensing      : gaia/abs/catalog -- model the astrometric microlensing
@@ -178,13 +183,48 @@ unknowable from sky-plane data); this is handled by restricting bigomega
 to [0, 180] (Orbit._restrict_bigomega_halfplane), with a table note
 documenting the artificial boundary.
 
-Model limitations (v1): the gaia/abs photocenter wobble sums over the
-orbits whose PRIMARY group contains the target star, with a single
-per-instrument companion flux fraction (fluxfrac, default 0 = dark
-companions); orbits holding the star in their companion group are not yet
-modeled there (warned).  Relative positions are Keplerian two-body per
-orbit plus one level of nested photocenter wobble; light travel time and
-aberration are neglected.
+The photocenter of an absolute dataset (gaia/abs/catalog; review 8.10.6;
+skyframe.md, "The photocenter of an unresolved pair").  The modeled track
+is star_ndx's five-parameter track -- its ra/dec at the epoch, the
+system's proper motion and parallax (an orbit member's pm and distance are
+tied to its orbit anchor, orbit.md) -- plus the photocenter's wobble about
+the SYSTEM BARYCENTER.  So star.<target>.ra/dec is the barycenter's
+position at the epoch as that dataset sees it, not the star's own mean
+position, whichever group the star is in.  With x_rel = x_companion_group
+- x_primary_group of an orbit, the primary group sits at -(M_c/M) x_rel and
+the companion group at +(M_p/M) x_rel, and the PSF's photocenter is
+(1 - b) x_target + b x_other, b the OTHER side's share of the light:
+
+    target in the PRIMARY group:    x_rel (b - M_c/M)
+    target in the COMPANION group:  x_rel (M_p/M - b)
+
+summed over EVERY Keplerian orbit holding the target, on either side (a
+KELT-4 C target moves with BC and with A-BC), each with its own mass
+fractions.  `fluxfrac` (and the SED's fraction) is always "the other
+star's share of the light in this PSF" -- the companion's for a primary
+target, the primary's for a companion target; one spelling for both.  The
+PSF holds the target and at most ONE other light
+(orbit.bodies.photocenter_stars):
+
+  * SED path (band + companion_star_ndx + sed): the named star, at its own
+    position in every orbit (the one it shares with the target, and any
+    the target is not in -- its own inner orbit moves it too).  Every
+    other star is outside the PSF.
+  * sampled fluxfrac: a light standing at the other GROUP's barycenter of
+    the target's orbit.  Unambiguous only for a target in ONE Keplerian
+    orbit whose other group holds no orbit of its own; otherwise a
+    nonzero fluxfrac RAISES (which orbit's light? where inside the group?)
+    and the remedy is the SED path.  The dark default (fluxfrac pinned at
+    0) is legal in any topology: no other light, the target's own motion.
+
+Model limitations: one other light per PSF (a PSF holding three luminous
+stars -- KELT-4 C with both B and A unresolved -- cannot be stated);
+relative positions are Keplerian two-body per orbit plus one level of
+nested photocenter wobble; light travel time and aberration are neglected.
+Each member star with absolute data carries its OWN ra/dec, so two
+datasets on two stars of one system fit two barycenter zero points (their
+separation is not used); linking ra/dec to the anchor would be the step
+that joins them.
 """
 
 import logging
@@ -203,6 +243,7 @@ import pytensor.tensor as pt
 from exozippy.components.instrument import Instrument
 from exozippy.components.orbit.bodies import (
     component_instance_names,
+    photocenter_stars,
     planet_membership,
 )
 from exozippy.components.parameterization import (
@@ -730,8 +771,12 @@ class AstrometryInstrument(Instrument):
                 "accepts": ["star"],
                 "required": False,
                 "doc": (
-                    "gaia/abs/catalog only. Index or name of the companion star for "
-                    "the SED-derived photocenter flux fraction (with band). "
+                    "gaia/abs/catalog only. Index or name of the OTHER luminous "
+                    "star "
+                    "inside the target's PSF (the companion of a primary-group "
+                    "target, the primary of a companion-group one) for the "
+                    "SED-derived photocenter flux fraction (with band); it "
+                    "must share a Keplerian orbit with star_ndx. "
                     "Ignored with a warning in rel mode, whose photocenter "
                     "is weighed per nested orbit instead -- a rel dataset's "
                     "fluxfrac is inactive, not merely pinned."
@@ -1229,7 +1274,8 @@ class AstrometryInstrument(Instrument):
 
         The membership ``orbit.amplitude_constrained_orbits`` reads: a rel
         dataset times the orbit it names; a gaia/abs photocenter wobble sums
-        the orbits whose PRIMARY group contains the target star.  An epoch's
+        every Keplerian orbit holding one of its ``photocenter_stars``, on
+        either side (review 8.10.6).  An epoch's
         information is its squared sky-plane speed over its squared error
         (``timing.sky_speed_sq``, at the seeded e, omega, cos i and
         conjunction), averaged over direction -- the node and the scan angle
@@ -1238,10 +1284,11 @@ class AstrometryInstrument(Instrument):
           * rel: the speed of the relative orbit, whose angular size is read
             off the data themselves (the median separation), against the
             mean of the radial and tangential variances;
-          * gaia/abs: the photocenter of a dark companion, ``a parallax M_c
-            / M_total`` from the seeded group masses, period and parallax
-            (a luminous companion pulls it in by its flux fraction, which
-            is ignored), against the along-scan error (half the speed
+          * gaia/abs: the target's own orbit about the barycenter, ``a
+            parallax M_c / M_total`` for a primary-group target and ``a
+            parallax M_p / M_total`` for a companion-group one, from the
+            seeded group masses, period and parallax (the flux fraction,
+            which pulls the photocenter in, is ignored), against the along-scan error (half the speed
             squared, for one dimension of two) or the mean E/N variance.
         """
         from ..orbit import timing
@@ -1267,11 +1314,13 @@ class AstrometryInstrument(Instrument):
                 )
             else:
                 s = int(self.config[i].get("star_ndx", 0))
-                targets = [
-                    o
-                    for o, role in orbit.star_membership(s)
-                    if role == "primary"
-                ]
+                stars = photocenter_stars(
+                    self.config[i], self.config_manager.system_config
+                )
+                roles = {}
+                for star in reversed(stars):  # the target's role wins
+                    roles.update(orbit.star_membership(star))
+                targets = sorted(roles)
                 plx = self._seeded_parallax(system, orbit, s)
                 if mode == "gaia":
                     inv_var = 0.5 * d["err"] ** -2.0
@@ -1282,10 +1331,13 @@ class AstrometryInstrument(Instrument):
                 if mode != "rel":
                     m_pri, m_com = orbit.seeded_group_masses(system, o)
                     m_tot = m_pri + m_com
+                    # A body's own orbit about the barycenter: M_c/M for a
+                    # primary-group one, M_p/M for a companion-group one.
+                    m_other = m_com if roles[o] == "primary" else m_pri
                     amplitude = (
                         timing.semimajor_axis_au(seed.period[o], m_tot)
                         * plx
-                        * m_com
+                        * m_other
                         / m_tot
                     )
                 v2 = timing.sky_speed_sq(
@@ -1387,11 +1439,10 @@ class AstrometryInstrument(Instrument):
                             f"`band:` instead."
                         )
                     continue
-                if (
-                    c.get("band") is None
-                    or c.get("companion_star_ndx") is None
-                ):
+                stars = photocenter_stars(c, self.config_manager.system_config)
+                if len(stars) == 1:
                     continue
+                self._check_sed_pair(system, i, *stars)
                 self._sed_fluxfrac[i] = True
 
         # The OPT-IN pin, through the one helper (review 3.14.11).  "Selected"
@@ -1423,6 +1474,40 @@ class AstrometryInstrument(Instrument):
             for key in ("blend_dE", "blend_dN"):
                 self.manifest[key] = {"mask": lensed, "inactive_value": 0.0}
             self._register_blend_split(lensed)
+
+    def _check_sed_pair(self, system, i, target, other):
+        """The SED path's ``companion_star_ndx`` must name ANOTHER star of
+        the target's own orbit system: the model places that light by the
+        orbits the two share (``_photocenter_terms``), from the system's one
+        barycenter.  A star sharing no Keplerian orbit with the target sits
+        on its own track -- a blend, not a companion -- and this model has
+        no term for it (for a microlensing source, `psf_stars:` does), so
+        it RAISES rather than reading its light as if it rode the
+        target's orbit, which is what it used to do."""
+        where = f"[{self.prefix}.{self.names[i]}]"
+        if other == target:
+            raise ValueError(
+                f"{where} companion_star_ndx {other} is the target star "
+                f"itself (star_ndx); it names the OTHER luminous star "
+                f"inside the PSF."
+            )
+        orbits = getattr(system, "orbit", None)
+        shared = (
+            set()
+            if orbits is None
+            else {o for o, _ in orbits.star_membership(target)}
+            & {o for o, _ in orbits.star_membership(other)}
+        )
+        if not shared:
+            raise ValueError(
+                f"{where} companion_star_ndx {other} shares no Keplerian "
+                f"orbit with the target star {target}, so its light is not "
+                f"a companion's on the target's orbit: an unrelated star in "
+                f"the PSF is a blend, which gaia/abs/catalog mode models "
+                f"only around a microlensing source (`psf_stars:`). Put "
+                f"both stars in one orbit's groups, or drop "
+                f"companion_star_ndx."
+            )
 
     def _resolve_lens_hook(self, system):
         """Which datasets carry the centroid shift, of which source, with
@@ -1776,31 +1861,42 @@ class AstrometryInstrument(Instrument):
     # ------------------------------------------------------------------
     def _sed_beta_node(self, system, i):
         """
-        Photocenter flux fraction for instrument i: the SED-predicted
-        beta = F_companion / (F_companion + F_host) in the instrument's
-        band when configured (see module docstring), else the sampled
-        fluxfrac element. Falls back to the sampled parameter with a
-        warning if the band's filter is missing from the SED's BC grid.
+        Photocenter flux fraction ``b`` of dataset i: the fraction of the
+        light in its PSF that comes from the OTHER star of the pair the
+        photocenter holds -- for a primary-group target the companion side,
+        for a companion-group target the primary side (module docstring,
+        "The photocenter").  On the SED path (band + companion_star_ndx +
+        a sed: block) it is ``F_c / (F_c + F_target)`` in the dataset's
+        band, c = companion_star_ndx; otherwise the sampled fluxfrac
+        element.
+
+        A band whose filter the SED's BC grid lacks RAISES.  It used to warn
+        and return the sampled element -- which the SED path pins at 0, so
+        the fit silently became a dark-companion fit the user had not asked
+        for.
         """
-        if not getattr(self, "_sed_fluxfrac", [False] * self.n_elements)[i]:
+        if not self._sed_fluxfrac[i]:
             return self.fluxfrac.value[i]
 
+        where = f"[{self.prefix}.{self.names[i]}]"
         sed = system.sed
-        band_name = self.config[i].get("band")
-        band_names = list(system.band.names) if hasattr(system, "band") else []
+        band_name = self.config[i]["band"]
+        band = getattr(system, "band", None)
+        band_names = [] if band is None else list(band.names)
         if band_name not in band_names:
             raise ValueError(
-                f"astrometryinstrument {self.names[i]} references unknown "
-                f"band '{band_name}'. Available bands: {band_names}."
+                f"{where} references unknown band '{band_name}'. Available "
+                f"bands: {band_names}."
             )
-        filter_key = system.band.filter_mist[band_names.index(band_name)]
+        filter_key = band.filter_mist[band_names.index(band_name)]
         if not sed.has_filter(filter_key):
-            logger.warning(
-                f"astrometryinstrument {self.names[i]}: band filter "
-                f"'{filter_key}' is not in the SED's BC grid; using the "
-                f"sampled fluxfrac (fixed at its initval)."
+            raise ValueError(
+                f"{where} band '{band_name}' (filter '{filter_key}') is not "
+                f"in the SED's BC grid, so the SED cannot weigh the "
+                f"photocenter (companion_star_ndx). Use a band the grid "
+                f"carries, or drop companion_star_ndx and set fluxfrac in "
+                f"the params file."
             )
-            return self.fluxfrac.value[i]
 
         host = int(self.star_map[i])
         comp = int(self.config[i]["companion_star_ndx"])
@@ -1808,29 +1904,124 @@ class AstrometryInstrument(Instrument):
         F_h = 10 ** (-0.4 * sed.predict_star_appmag(host, filter_key, system))
         return F_c / (F_c + F_h)
 
-    def _photocenter_terms(self, system, star_idx, beta):
+    def _photocenter_orbits(self, system, i):
+        """``[(orbit, role_target, role_other), ...]`` of absolute dataset i:
+        every KEPLERIAN orbit that moves its photocenter, ascending, with the
+        target's role in it and the other light's ('primary', 'companion', or
+        None when that body is not in the orbit).
+
+        The photocenter holds the target and at most ONE other light
+        (``orbit.bodies.photocenter_stars``): on the SED path the star
+        ``companion_star_ndx`` names, with its own role per orbit; on the
+        sampled-fluxfrac path a body standing for "the other side" of the
+        target's orbit, so its role is always the opposite of the target's.
+        The sampled path can say that only where it is unambiguous, and
+        RAISES otherwise (``_check_sampled_photocenter``)."""
+        orbits = system.orbit
+        stars = photocenter_stars(
+            self.config[i], self.config_manager.system_config
+        )
+        roles = [dict(orbits.star_membership(s)) for s in stars]
+        flip = {"primary": "companion", "companion": "primary"}
+        out = []
+        for o in sorted(set().union(*roles)):
+            r_t = roles[0].get(o)
+            r_c = roles[1].get(o) if len(stars) == 2 else flip[r_t]
+            out.append((o, r_t, r_c))
+        return out
+
+    def _fluxfrac_is_dark(self, i):
+        """True when dataset i's sampled fluxfrac is pinned at 0 -- the
+        dark-companion default (defaults.yaml) -- so no other light enters
+        its photocenter.  Read off the BUILT parameter's roles (stage 6+)."""
+        p = self.fluxfrac
+        if p.element_is_sampled(i) or p.element_is_derived(i):
+            return False
+        return float(np.ravel(p.initval)[i]) == 0.0
+
+    def _check_sampled_photocenter(self, system, i, terms):
+        """Refuse what a single sampled fluxfrac cannot describe.
+
+        A sampled ``fluxfrac`` is one number, "the other side's light", and
+        it places that light at the other GROUP's barycenter.  Two
+        topologies make that a guess, and each RAISES naming the dataset and
+        the orbits (CLAUDE.md, no fallbacks) -- unless fluxfrac is the dark
+        default 0, where there is no other light to place:
+
+          * the target is in two or more Keplerian orbits: which orbit's
+            other side is the light?  (KELT-4 A: the planet b, or B+C?)
+          * the other group of its one orbit holds a Keplerian orbit of its
+            own: the light then wobbles inside that group, by an amount one
+            fraction cannot split (the SED can, star by star).
+
+        The remedy for both is the SED path: ``band:`` +
+        ``companion_star_ndx:`` naming the luminous star in the PSF.
         """
-        Photocenter wobble of one star for gaia/abs data: per-orbit
-        semimajor axes in mas, a_phot = a_rel*(M_c/M_tot - beta)*plx, over
-        the orbits whose primary group contains the star.  Returns
-        (a_phot vector node, orbit index array), or (None, None) when no
-        orbit moves this star.
+        if self._fluxfrac_is_dark(i):
+            return
+        orbits = system.orbit
+        where = f"[{self.prefix}.{self.names[i]}]"
+        remedy = (
+            "Name the luminous star inside the PSF with `band:` + "
+            "`companion_star_ndx:` (a sed: block weighs it star by star), "
+            "or pin fluxfrac at 0 (dark companions)."
+        )
+        if len(terms) > 1:
+            names = [orbits.names[o] for o, _, _ in terms]
+            raise ValueError(
+                f"{where} star {int(self.star_map[i])} is in Keplerian "
+                f"orbits {names}, and a sampled fluxfrac cannot say which "
+                f"orbit's other side its light comes from. {remedy}"
+            )
+        o, r_t, _ = terms[0]
+        other = set(
+            orbits.companion_bodies[o]
+            if r_t == "primary"
+            else orbits.primary_bodies[o]
+        )
+        nested = [
+            orbits.names[o2]
+            for o2 in range(orbits.n_elements)
+            if o2 != o
+            and orbits.is_keplerian[o2]
+            and set(orbits.bodies(o2)) <= other
+        ]
+        if nested:
+            raise ValueError(
+                f"{where} the other group of orbit {orbits.names[o]} holds "
+                f"Keplerian orbit(s) {nested}, so the light a sampled "
+                f"fluxfrac places at that group's barycenter actually "
+                f"wobbles inside it. {remedy}"
+            )
+
+    def _photocenter_terms(self, system, i, beta):
+        """
+        Photocenter wobble of absolute dataset i: per-orbit amplitudes in
+        mas for ``Orbit.get_sky_position(relative=False)`` -- whose unit
+        vector is the PRIMARY group's own orbit about the barycenter, along
+        ``-x_rel`` -- over every Keplerian orbit that moves the photocenter
+        (``_photocenter_orbits``).  Returns ``(a_phot vector node, orbit
+        index array)``, or ``(None, None)`` when no orbit moves it.
+
+        With x_P = -(M_c/M) x_rel and x_C = +(M_p/M) x_rel, the photocenter
+        ``(1 - b) x_target + b x_other`` is ``k x_rel`` with, per orbit
+        (amplitude = -k a_rel plx):
+
+            target primary,   other companion:  k = b - M_c/M
+            target companion, other primary:    k = M_p/M - b
+            both in one group:                  k = -M_c/M  or  +M_p/M
+            target only (other not in orbit):   k = (1 - b)(-M_c/M or +M_p/M)
+            other only (target not in orbit):   k = b (-M_c/M or +M_p/M)
+
+        The first row is the only one there was before review 8.10.6, and
+        it is built as the same expression, so a primary-group fit is
+        bit-identical.
         """
         orbits = getattr(system, "orbit", None)
         if orbits is None:
             return None, None
-        members = orbits.star_membership(star_idx)
-        if any(role == "companion" for _, role in members):
-            names = [
-                orbits.names[o] for o, role in members if role == "companion"
-            ]
-            logger.warning(
-                f"[{self.prefix}] star {star_idx} is in the COMPANION "
-                f"group of orbit(s) {names}; that photocenter contribution "
-                f"is not modeled for gaia/abs data yet."
-            )
-        prim = [o for o, role in members if role == "primary"]
-        if not prim:
+        terms = self._photocenter_orbits(system, i)
+        if not terms:
             return None, None
         if not hasattr(orbits, "a"):
             raise ValueError(
@@ -1838,13 +2029,42 @@ class AstrometryInstrument(Instrument):
                 f"parameters (a/masses), but the orbit component's "
                 f"body groups did not resolve against the active system."
             )
-        omap = np.asarray(prim, dtype=int)
-        mass_frac = orbits.m_companion.value[omap] / orbits.m_total.value[omap]
-        plx = system.star.parallax.value[star_idx]
-        return (
-            orbits.a.value[omap] * RSUN_AU * (mass_frac - beta) * plx,
-            omap,
-        )
+        if not self._sed_fluxfrac[i]:
+            self._check_sampled_photocenter(system, i, terms)
+        omap = np.asarray([o for o, _, _ in terms], dtype=int)
+        plx = system.star.parallax.value[int(self.star_map[i])]
+        if all(r == ("primary", "companion") for _, *r in terms):
+            mass_frac = (
+                orbits.m_companion.value[omap] / orbits.m_total.value[omap]
+            )
+            coef = mass_frac - beta
+        else:
+            coef = pt.stack(
+                [self._photocenter_coef(orbits, *term, beta) for term in terms]
+            )
+        return orbits.a.value[omap] * RSUN_AU * coef * plx, omap
+
+    @staticmethod
+    def _photocenter_coef(orbits, o, r_t, r_c, beta):
+        """One orbit's amplitude, in units of its a_rel, for
+        ``get_sky_position(relative=False)``: ``-k`` of the table in
+        ``_photocenter_terms``."""
+        m_tot = orbits.m_total.value[o]
+        # Each body's displacement along the PRIMARY's direction (-x_rel):
+        # +M_c/M for a primary-group body, -M_p/M for a companion-group one.
+        along = {
+            "primary": orbits.m_companion.value[o] / m_tot,
+            "companion": -orbits.m_primary.value[o] / m_tot,
+        }
+        if r_t == "primary" and r_c == "companion":
+            return along["primary"] - beta
+        if r_t == "companion" and r_c == "primary":
+            return beta - orbits.m_primary.value[o] / m_tot
+        if r_t == r_c:
+            return along[r_t]
+        if r_c is None:
+            return (1.0 - beta) * along[r_t]
+        return beta * along[r_c]
 
     def _pair_beta(self, system, i, o2):
         """
@@ -2009,7 +2229,7 @@ class AstrometryInstrument(Instrument):
             P_E, P_N = d["P_E"], d["P_N"]
         dE, dN = self._star_track(system, d, s, t, P_E, P_N)
 
-        a_phot, omap = self._photocenter_terms(system, s, beta)
+        a_phot, omap = self._photocenter_terms(system, d["index"], beta)
         if a_phot is not None:
             dE_orb, dN_orb = system.orbit.get_sky_position(
                 pt.as_tensor_variable(t), a_phot, omap
@@ -2432,9 +2652,7 @@ class AstrometryInstrument(Instrument):
                 self._photo_nodes.append(None)
                 continue
             beta = self._sed_beta_node(system, i)
-            a_phot, omap = self._photocenter_terms(
-                system, self.datasets[i]["star_ndx"], beta
-            )
+            a_phot, omap = self._photocenter_terms(system, i, beta)
             if a_phot is None:
                 self._compiled_photo.append(None)
                 self._photo_nodes.append(None)

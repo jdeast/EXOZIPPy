@@ -412,3 +412,30 @@ def planet_membership(system_config):
             f"      companion: [{pname}]"
         )
     return out
+
+
+def photocenter_stars(entry, system_config):
+    """The stars whose light a gaia/abs/catalog dataset's photocenter holds,
+    as the model weighs them: ``(star_ndx,)`` -- the target alone, every
+    other body dark or carried by the sampled ``fluxfrac`` -- or, on the SED
+    path (``band:`` + ``companion_star_ndx:`` + a ``sed:`` block),
+    ``(star_ndx, companion_star_ndx)``.
+
+    THE one reader of which stars move a dataset's photocenter: the
+    astrometry model (``AstrometryInstrument._photocenter_terms``) and every
+    "which orbits does astrometry measure" predicate (orbit.py's
+    ``_astrometric_orbits``, ``_node_degenerate_orbits``, the Taylor refusal,
+    ``epochs_constraining``) ask it, so they can never disagree.  The orbits
+    a dataset measures are then every KEPLERIAN orbit holding one of these
+    stars, on either side (``Orbit.star_membership``).  Config-level, so it
+    answers at any stage.  ``entry`` is the dataset's config block (an
+    absolute-mode one: the caller filters rel/lensrel).
+    """
+    stars = [int(entry.get("star_ndx", 0))]
+    if (
+        "sed" in (system_config or {})
+        and entry.get("band") is not None
+        and entry.get("companion_star_ndx") is not None
+    ):
+        stars.append(int(entry["companion_star_ndx"]))
+    return tuple(stars)
