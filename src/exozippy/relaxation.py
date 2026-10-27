@@ -379,6 +379,10 @@ class Engine:
 
         # Directed user links (initval/mu): target := expr(deps), USER.
         self.links = []
+        # Who stated each link: "user" (params file) or a component rule
+        # (ConfigManager.add_link, e.g. "orbit").  A component link's target
+        # is ranked as a propagated value in the ledger, not as a USER one.
+        self.link_origins = {}
         for target, fld, plink, expr in directed_links:
             a = anchors.get(target)
             if (
@@ -390,6 +394,7 @@ class Engine:
                 # the target outranks it.
                 continue
             syms = sorted(expr.free_symbols, key=str)
+            self.link_origins[target] = plink.origin
             self.links.append(
                 (
                     target,
@@ -867,7 +872,8 @@ class Engine:
                 v = lam(values)
                 if not math.isfinite(v):
                     continue
-                st = Step("link", target, deps, f"user link: {expr_str}", lam)
+                who = self.link_origins.get(target, "user")
+                st = Step("link", target, deps, f"{who} link: {expr_str}", lam)
                 values[target] = v
                 steps.append(st)
                 determined_by[target] = st
@@ -979,7 +985,8 @@ class Engine:
             checks.append(
                 Check(
                     "link",
-                    f"{target} = {expr_str} (user link)",
+                    f"{target} = {expr_str} "
+                    f"({self.link_origins.get(target, 'user')} link)",
                     syms,
                     gl,
                     parts,
@@ -1704,7 +1711,10 @@ class Engine:
         for st in plan.steps:
             if st.kind == "standalone":
                 out[st.target] = L["DERIVED_MIXED"]
-            elif st.kind == "link":
+            elif (
+                st.kind == "link"
+                and self.link_origins.get(st.target, "user") == "user"
+            ):
                 out[st.target] = L["USER"]
             else:
                 ins = [out[i] for i in st.inputs if i in out]
