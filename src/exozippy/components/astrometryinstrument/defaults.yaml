@@ -64,3 +64,18 @@ astrometryinstrument:
     internal_unit: "mas"
     latex: "\\Delta\\delta_{b}"
     description: "Blend photocenter offset, North"
+  # A star named in `psf_stars:` relative to the source's baseline flux in
+  # this dataset's band, F_star / F_S, SAMPLED only where the dataset sets
+  # `fitpsfflux: true` (the SED cannot predict the band).  One element per
+  # (dataset, member), spelled astrometryinstrument.<dataset>.psf_fluxratio_<k>
+  # with k the member's position in psf_stars.  Uniform on these bounds
+  # unless the params file states a prior.
+  psf_fluxratio:
+    lower: 0.0
+    upper: 1000.0
+    initval: 0.1
+    init_scale: 0.01
+    unit: ""
+    internal_unit: ""
+    latex: "F_{\\star}/F_{S}"
+    description: "PSF star flux / source flux"

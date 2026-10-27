@@ -30,7 +30,8 @@ that **a `C`-rule is not finished until both carry it**: pull the paper repo, ma
 matching edit there, and name that commit in this one. Both are in step through `C31`
 (paper commits `3476111`, 2026-09-23, which added `C29` and `C30`, `7eeeb42`, 2026-09-24,
 which brought `C30` to stage 2, `eaa5936`, 2026-10-02, which corrected `C21`/`C22`
-with this file's 3.6.5 edit, and `a7745ed`, 2026-10-06, which added `C31`). The paper is not licensed to run ahead -- it did once, and
+with this file's 3.6.5 edit, `a7745ed`, 2026-10-06, which added `C31`, and `5182558` + `6e6dbd1`,
+2026-10-26, which gave `C30` the general blended photocenter and the catalog solution). The paper is not licensed to run ahead -- it did once, and
 the drift lasted exactly as long as it took somebody to notice.
 
 ## Notation used below
@@ -409,8 +410,23 @@ frame anchor both come from it), `x_b` the blend photocenter (`astrometryinstrum
 `blend_dN`, mas from the reference position, fixed on the sky, pinned at 0 by default).
 The first bracket is dilution -- time dependent, suppressed exactly at peak; the second is
 the blend dragging the centroid as the source brightens and fades, and in a bulge field it
-can dominate. The lens's own flux is part of `f_b` and sits at `x_s + theta_E dtheta`; it is
-NOT split out (follow-up in review 8.10.1).
+can dominate. Unless the dataset says otherwise the lens's own flux is part of `f_b` and the
+blend is fixed on the sky. The general form (review 8.10.3), with every flux relative to the
+source's baseline flux `f_s` in the astrometric band, puts each MODELED star j in the PSF (the
+lens, at `x_s + theta_E dtheta` by C9 and its own parallax; a modeled neighbor) on its own
+track `x_j(t)` and the light no star models -- the sightline's unresolved background,
+`src/exozippy/components/background/background.md` -- at its own photocenter
+`x_bg(t) = x_s(t_ref) + d_bg + mu_bg (t - t_ref)`, with no parallax of its own:
+
+    x_obs(t) = [A (x_s + delta_theta) + sum_j r_j x_j(t) + r_bg x_bg(t)] / (A + sum_j r_j + r_bg)
+
+which is the display above when nothing is split out: one blend carrying all of `f_b`, held
+at a fixed `x_b`.
+A CATALOG solution (Gaia, VIRAC2) is the catalog's own weighted least-squares five-parameter
+fit to `x_obs(t)` at its epochs, never `x_s`'s parameters: at baseline
+`mu_cat - mu_s = [sum_j r_j (mu_j - mu_s) + r_bg (mu_bg - mu_s)] / (1 + sum_j r_j + r_bg)`,
+the lens's term being `r_L mu_rel` (C7), plus whatever the event inside the window maps
+onto.
 
 - Implemented in: `MulensEvent.get_centroid_shift` (the shift, from the same `(tau, beta)`
   pair `get_magnification` builds, rotated onto `(N, E)` by C9's `tau_hat`/`beta_hat`) and
@@ -433,6 +449,12 @@ NOT split out (follow-up in review 8.10.1).
   astrometric Op is a SEPARATE INSTANCE and the light curve stays bit-identical. Always
   VBM, whatever the photometric `backend:` (MulensModel has no centroid; C18 makes the
   trajectories identical). No gradient, like the photometry it rides with.
+- The general form is `AstrometryInstrument._apply_lens` with `psf_stars:` (members on
+  `_star_track`, ratios from `_flux_ratios`) and `background:` (`Background.track`,
+  `Background.flux_ratio`); the catalog
+  observable is `mode: catalog` (`catalog_projection`). Pinned by
+  `tests/test_catalog_astrometry.py` against tracks simulated from the three stars' own
+  motions and an independent least-squares fit.
 - Pinned by: `tests/test_astrometric_microlensing.py` -- the closed form against a direct
   image solve of the lens equation, and the HANDEDNESS test (a lens passing North of the
   source pushes the centroid South, East pushes West), which fails under a mirrored
