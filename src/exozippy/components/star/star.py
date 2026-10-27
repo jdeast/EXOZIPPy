@@ -928,21 +928,38 @@ class Star(Component):
         return {"overrides": {"lower": floors.tolist()}}
 
     def _pin_unmeasured_neighbor_pm(self, system):
-        """Pin a modeled NEIGHBOR's proper motion at the field mean unless
-        an astrometry dataset reads it (review 8.9.7(a), 8.10.3).
+        """Pin a modeled NEIGHBOR's proper motion at the field mean when
+        NOTHING constrains it (review 8.9.7(a), 8.10.3).
 
         A neighbor is a star on a microlensing sightline that is neither a
         lens nor a source body nor in any orbit group (a companion moves
-        with its system).  Nothing reads its pm unless a gaia/abs/catalog
-        dataset targets it or names it in ``psf_stars:`` -- a catalog proper
-        motion is the flux-weighted motion of everything in its PSF -- so
-        an unread one is pinned through the opt-in "overrides" channel (a
-        params entry frees it; no user_params write) at the bulge field
-        mean on a bulge sightline (``background.bulge_field_pm_prior``: the
-        pinned value then sits at the center of the galactic model's bulge
-        velocity Gaussian, as 8.9.7(a) asks).  A read one stays free, under
-        the galactic kinematic prior where there is one.  Off the bulge
-        there is no field mean to pin at: free, with a warning.
+        with its system).  The rule (JDE 2026-10-26): "if nothing
+        constrains it, pin it.  but if something constrains it (like
+        galactic model, distance, pm) don't."  Per neighbor, in order:
+
+        1. TIED -- the params file links its pm to another star's (a bound
+           companion; ``star.<name>.pm_ra: {initval: star.Source.pm_ra,
+           sigma: 0}``).  The link is the value, so no start is hinted.
+           The ``sigma: 0`` below is what makes an initval-only link hard
+           rather than a start (``Component._wire_user_links``).
+        2. FREE under the galactic kinematic prior when a galacticmodel is
+           in the topology: its ``kinematic_prior`` covers the WHOLE star
+           vector, each star at its own (sampled) distance (star.md, "The
+           stellar distance prior"), so nothing is pinned at all.
+        3. FREE when a gaia/abs/catalog dataset targets it or names it in
+           ``psf_stars:`` (a catalog proper motion is the flux-weighted
+           motion of everything in its PSF).
+        4. Otherwise PINNED through the opt-in "overrides" channel (a params
+           entry frees it; no user_params write) at the bulge field mean on
+           a bulge sightline (``background.bulge_field_pm_prior``), the
+           start through ``add_hint``.  Off the bulge there is no field mean
+           to pin at: free, with a warning.
+
+        A neighbor whose DISTANCE is hard-linked to another star's but
+        whose pm is not linked is warned about in case 4: a bound companion
+        should share its host's motion, but a distance link alone states
+        only a shared position (star.md, "Linked stars"), so the code does
+        not tie the pm on its own.
         """
         event = getattr(system, "mulensevent", None)
         if event is None or "pm_ra" not in self.manifest:
@@ -963,6 +980,15 @@ class Star(Component):
         neighbors = [i for i in range(self.n_elements) if i not in bodies]
         if not neighbors:
             return
+        has_gm, _imf = self._galactic_imf(system)
+        if has_gm:
+            logger.info(
+                f"[{self.prefix}] neighbor star(s) "
+                f"{[self.names[i] for i in neighbors]}: proper motion free "
+                f"under the galactic kinematic prior at each star's own "
+                f"distance (review 8.9.7(a))."
+            )
+            return
         measured = set()
         astrom = getattr(system, "astrometryinstrument", None)
         if astrom is not None:
@@ -974,6 +1000,15 @@ class Star(Component):
         unread = [i for i in neighbors if i not in measured]
         if not unread:
             return
+        cm = self.config_manager
+        pm_links = [
+            set(cm.get_element_links(self.prefix, key).get("initval", {}))
+            for key in ("pm_ra", "pm_dec")
+        ]
+        tied = [i for i in unread if i in pm_links[0] and i in pm_links[1]]
+        dist_linked = set(
+            cm.get_element_links(self.prefix, "distance").get("initval", {})
+        ) & set(self.user_pinned_stars("distance"))
         from exozippy.components.background.background import (
             bulge_field_pm_prior,
             on_bulge_sightline,
@@ -989,10 +1024,10 @@ class Star(Component):
         names = [self.names[i] for i in unread]
         if not on_bulge_sightline(ra, dec):
             logger.warning(
-                f"[{self.prefix}] neighbor star(s) {names}: no astrometry "
-                f"reads their proper motion and the sightline is off the "
-                f"bulge, so there is no field mean to pin it at; it stays "
-                f"free (pin it in the params file)."
+                f"[{self.prefix}] neighbor star(s) {names}: no galactic "
+                f"model or astrometry constrains their proper motion and the "
+                f"sightline is off the bulge, so there is no field mean to "
+                f"pin it at; it stays free (pin it in the params file)."
             )
             return
         (mu_ra, mu_dec), _sigma = bulge_field_pm_prior(ra, dec)
@@ -1000,20 +1035,43 @@ class Star(Component):
             # The pin is structural (sigma 0 through "overrides", under the
             # params file); the value it pins at is a ranked START, which
             # has one channel, add_hint -- the same rank the microlensing
-            # pm seeds from the galactic model use.
+            # pm seeds from the galactic model use.  A tied star's link is
+            # its value, so it gets the pin (which makes the link hard) and
+            # no hint.
             sigma = np.full(self.n_elements, np.nan)
             sigma[unread] = 0.0
             self.manifest[key] = merge_overrides(
                 self.manifest[key], {"sigma": sigma.tolist()}
             )
             for i in unread:
-                self.config_manager.add_hint(f"star.{i}.{key}", mu)
+                if i not in tied:
+                    self.config_manager.add_hint(f"star.{i}.{key}", mu)
+        if tied:
+            logger.info(
+                f"[{self.prefix}] neighbor star(s) "
+                f"{[self.names[i] for i in tied]}: proper motion tied by the "
+                f"params-file link (a bound companion)."
+            )
+        pinned = [i for i in unread if i not in tied]
+        if not pinned:
+            return
         logger.info(
-            f"[{self.prefix}] neighbor star(s) {names}: proper motion pinned "
-            f"at the bulge field mean ({mu_ra:.2f}, {mu_dec:.2f}) mas/yr -- "
-            f"no astrometry reads it (review 8.9.7(a)); naming the star in "
-            f"a gaia/abs/catalog dataset's psf_stars frees it."
+            f"[{self.prefix}] neighbor star(s) "
+            f"{[self.names[i] for i in pinned]}: proper motion pinned at the "
+            f"bulge field mean ({mu_ra:.2f}, {mu_dec:.2f}) mas/yr -- no "
+            f"galactic model or astrometry constrains it (review 8.9.7(a)); "
+            f"a galacticmodel block, or naming the star in a gaia/abs/catalog "
+            f"dataset's psf_stars, frees it."
         )
+        companions = [self.names[i] for i in pinned if i in dist_linked]
+        if companions:
+            logger.warning(
+                f"[{self.prefix}] star(s) {companions}: distance hard-linked "
+                f"to another star's but proper motion pinned at the bulge "
+                f"field mean.  If this is a bound companion, link its "
+                f"proper motion too (star.<name>.pm_ra: {{initval: "
+                f"star.<host>.pm_ra, sigma: 0}}, and pm_dec)."
+            )
 
     def _pm_manifest_entry(self, system):
         """pm_ra/pm_dec manifest entry: sampled everywhere, except that a

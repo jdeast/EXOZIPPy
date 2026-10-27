@@ -26,6 +26,7 @@ by the catalog with a five-parameter line.  Pinned here:
 import numpy as np
 import pymc as pm
 import pytensor
+import pytensor.tensor as pt
 import pytest
 
 from exozippy.components.astrometryinstrument.astrometryinstrument import (
@@ -820,3 +821,123 @@ def test_neighbor_pm_is_pinned_unless_astrometry_reads_it(truth_files):
     system2, _ = _build(_config(tmp), params2)
     sigma2, _init2 = _neighbor_pm(system2)
     assert sigma2 is None or not np.isclose(float(sigma2), 0.0)
+
+
+def _unread_neighbor(tmp):
+    """The truth config and params with no dataset naming the neighbor
+    (psf_stars: [Lens]) and no params entry on its proper motion."""
+    params = _params()
+    del params["star.Neighbor.pm_ra"], params["star.Neighbor.pm_dec"]
+    cfg = _config(tmp)
+    for d in cfg["astrometryinstrument"]:
+        d["psf_stars"] = ["Lens"]
+    for k in ("Gaia", "VIRAC"):
+        del params[f"astrometryinstrument.{k}.psf_fluxratio_1"]
+    return cfg, params
+
+
+@pytest.mark.slow
+def test_bound_companion_pm_is_tied_by_its_link(truth_files, caplog):
+    """
+    Given a neighbor no dataset names, whose distance and proper motion the
+    params file links to the source's (a bound companion),
+    When the system is built with no galacticmodel,
+    Then its pm is the source's pm -- a hard link, not a pin at the field
+    mean -- and no start is hinted for it;
+    And a neighbor linked on distance ALONE is pinned, with a warning
+    naming how to tie it (a distance link states a shared position only).
+    """
+    import logging
+
+    tmp = truth_files[0]
+    cfg, params = _unread_neighbor(tmp)
+    params["star.Neighbor.distance"] = {
+        "initval": "star.Source.distance",
+        "sigma": 0,
+    }
+    for key in ("pm_ra", "pm_dec"):
+        params[f"star.Neighbor.{key}"] = {
+            "initval": f"star.Source.{key}",
+            "sigma": 0,
+        }
+    system, model = _build(cfg, params)
+    star = system.star
+    for p in (star.pm_ra, star.pm_dec):
+        assert 2 in (p.element_links or {}).get("hard", {})
+    pmra, pmdec = _start_values(model, [star.pm_ra.value, star.pm_dec.value])
+    assert pmra[2] == pmra[1] and pmdec[2] == pmdec[1]
+    assert pmra[1] == pytest.approx(MU_S[0])
+    assert "star.2.pm_ra" not in system.config_manager.hints
+
+    cfg2, params2 = _unread_neighbor(tmp)
+    params2["star.Neighbor.distance"] = {
+        "initval": "star.Source.distance",
+        "sigma": 0,
+    }
+    with caplog.at_level(
+        logging.WARNING, logger="exozippy.components.star.star"
+    ):
+        system2, _ = _build(cfg2, params2)
+    sigma2, _init2 = _neighbor_pm(system2)
+    assert sigma2 == 0.0
+    assert any(
+        "If this is a bound companion" in r.message for r in caplog.records
+    )
+
+
+@pytest.mark.slow
+def test_neighbor_pm_is_free_under_the_galactic_prior_at_its_distance(
+    truth_files,
+):
+    """
+    Given a neighbor no dataset names, with its distance free, and a
+    galacticmodel in the topology,
+    When the system is built,
+    Then its pm is NOT pinned (the kinematic prior constrains it), and that
+    prior on its pm depends on its own distance: the logp difference
+    between two proper motions changes when only the neighbor's distance
+    changes (pm = v / (K d)).
+    """
+    from pytensor.graph.replace import graph_replace
+
+    tmp = truth_files[0]
+    cfg, params = _unread_neighbor(tmp)
+    cfg["galacticmodel"] = [{"star_ndx": 1}]
+    params["star.Neighbor.distance"] = {"initval": D_N}
+    system, model = _build(cfg, params)
+    star = system.star
+    sigma, _init = _neighbor_pm(system)
+    assert sigma is None or not np.isclose(float(sigma), 0.0)
+    free = {v.name for v in model.free_RVs}
+    assert any("pm_ra" in n for n in free)
+
+    d_in = pt.dvector("d")
+    ra_in = pt.dvector("pmra")
+    dec_in = pt.dvector("pmdec")
+    pot = graph_replace(
+        model["galacticmodel.kinematic_prior"],
+        {
+            star.distance.value: d_in,
+            star.pm_ra.value: ra_in,
+            star.pm_dec.value: dec_in,
+        },
+        strict=False,
+    )
+    fn = pytensor.function(
+        [d_in, ra_in, dec_in] + model.free_RVs, pot, on_unused_input="ignore"
+    )
+    ip = model.initial_point()
+    rest = [ip[v.name] for v in model.free_RVs]
+    d0, ra0, dec0 = _start_values(
+        model, [star.distance.value, star.pm_ra.value, star.pm_dec.value]
+    )
+
+    def logp(d_n, pmra_n):
+        d, ra = d0.copy(), ra0.copy()
+        d[2], ra[2] = d_n, pmra_n
+        return float(fn(d, ra, dec0, *rest))
+
+    near = logp(2000.0, -4.0) - logp(2000.0, 4.0)
+    far = logp(8000.0, -4.0) - logp(8000.0, 4.0)
+    assert np.isfinite(near) and np.isfinite(far)
+    assert abs(near - far) > 0.1
