@@ -50,10 +50,13 @@ background:
   # Its flux in each band it is listed in, relative to the primary source's
   # baseline flux in that band, F_bg / F_S.  One element per (instance,
   # band), spelled background.<name>.fluxratio_<k> with k the band's
-  # position in the instance's `bands:` list.  Uniform on these bounds
-  # unless the params file states a prior.  This is the seam the
-  # luminosity-function prior of the planned resolved-blends follow-up
-  # attaches to (background.md).
+  # position in the instance's `bands:` list.  SAMPLED, uniform on these
+  # bounds unless the params file states a prior -- except in a band a
+  # microlensing light curve covers, where the element is DERIVED
+  # (from_lightcurve: that light curve's f_blend/f_source minus the
+  # instance's psf_stars) and these bounds act as a soft barrier.  This is
+  # the seam the luminosity-function prior of the planned resolved-blends
+  # follow-up attaches to (background.md).
   fluxratio:
     lower: 0.0
     upper: 1000.0
@@ -63,3 +66,12 @@ background:
     internal_unit: ""
     latex: "F_{\\rm bg}/F_{S}"
     description: "Unresolved background flux / source flux"
+    expressions:
+      from_lightcurve:
+        # member_flux is a context node injected by Background.add_parameter
+        # (the psf_stars' SED flux relative to the source, per element).
+        func_name: "calc_background_fluxratio"
+        deps:
+          - "mulensinstrument.f_blend[lc_map]"
+          - "mulensinstrument.f_source[lc_map]"
+          - "member_flux"

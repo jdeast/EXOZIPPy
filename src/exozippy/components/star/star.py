@@ -927,6 +927,94 @@ class Star(Component):
             )
         return {"overrides": {"lower": floors.tolist()}}
 
+    def _pin_unmeasured_neighbor_pm(self, system):
+        """Pin a modeled NEIGHBOR's proper motion at the field mean unless
+        an astrometry dataset reads it (review 8.9.7(a), 8.10.3).
+
+        A neighbor is a star on a microlensing sightline that is neither a
+        lens nor a source body nor in any orbit group (a companion moves
+        with its system).  Nothing reads its pm unless a gaia/abs/catalog
+        dataset targets it or names it in ``psf_stars:`` -- a catalog proper
+        motion is the flux-weighted motion of everything in its PSF -- so
+        an unread one is pinned through the opt-in "overrides" channel (a
+        params entry frees it; no user_params write) at the bulge field
+        mean on a bulge sightline (``background.bulge_field_pm_prior``: the
+        pinned value then sits at the center of the galactic model's bulge
+        velocity Gaussian, as 8.9.7(a) asks).  A read one stays free, under
+        the galactic kinematic prior where there is one.  Off the bulge
+        there is no field mean to pin at: free, with a warning.
+        """
+        event = getattr(system, "mulensevent", None)
+        if event is None or "pm_ra" not in self.manifest:
+            return
+        bodies = {
+            int(idx)
+            for t, idx in list(event.lens_bodies) + list(event.source_bodies)
+            if t == "star"
+        }
+        orbit = getattr(system, "orbit", None)
+        if orbit is not None:
+            for k in range(orbit.n_elements):
+                for t, idx in list(orbit.primary_bodies[k]) + list(
+                    orbit.companion_bodies[k]
+                ):
+                    if t == "star":
+                        bodies.add(int(idx))
+        neighbors = [i for i in range(self.n_elements) if i not in bodies]
+        if not neighbors:
+            return
+        measured = set()
+        astrom = getattr(system, "astrometryinstrument", None)
+        if astrom is not None:
+            for i, m in enumerate(astrom.modes):
+                # astrometryinstrument.ABSOLUTE_MODES (import cycle)
+                if m in ("gaia", "abs", "catalog"):
+                    measured.add(int(astrom.config[i].get("star_ndx", 0)))
+                    measured |= {int(s) for s in astrom.psf_stars[i]}
+        unread = [i for i in neighbors if i not in measured]
+        if not unread:
+            return
+        from exozippy.components.background.background import (
+            bulge_field_pm_prior,
+            on_bulge_sightline,
+        )
+        from exozippy.components.star.position import require_star_radec
+
+        _s_type, s_idx = event.source_bodies[0]
+        ra, dec = require_star_radec(
+            self.config_manager,
+            int(s_idx),
+            f"[{self.prefix}] the sightline of the neighbor pm pin",
+        )
+        names = [self.names[i] for i in unread]
+        if not on_bulge_sightline(ra, dec):
+            logger.warning(
+                f"[{self.prefix}] neighbor star(s) {names}: no astrometry "
+                f"reads their proper motion and the sightline is off the "
+                f"bulge, so there is no field mean to pin it at; it stays "
+                f"free (pin it in the params file)."
+            )
+            return
+        (mu_ra, mu_dec), _sigma = bulge_field_pm_prior(ra, dec)
+        for key, mu in (("pm_ra", mu_ra), ("pm_dec", mu_dec)):
+            # The pin is structural (sigma 0 through "overrides", under the
+            # params file); the value it pins at is a ranked START, which
+            # has one channel, add_hint -- the same rank the microlensing
+            # pm seeds from the galactic model use.
+            sigma = np.full(self.n_elements, np.nan)
+            sigma[unread] = 0.0
+            self.manifest[key] = merge_overrides(
+                self.manifest[key], {"sigma": sigma.tolist()}
+            )
+            for i in unread:
+                self.config_manager.add_hint(f"star.{i}.{key}", mu)
+        logger.info(
+            f"[{self.prefix}] neighbor star(s) {names}: proper motion pinned "
+            f"at the bulge field mean ({mu_ra:.2f}, {mu_dec:.2f}) mas/yr -- "
+            f"no astrometry reads it (review 8.9.7(a)); naming the star in "
+            f"a gaia/abs/catalog dataset's psf_stars frees it."
+        )
+
     def _pm_manifest_entry(self, system):
         """pm_ra/pm_dec manifest entry: sampled everywhere, except that a
         lens with `fitmurel: true` flips its PRIMARY lens star's element to
@@ -1414,6 +1502,7 @@ class Star(Component):
                     "distance": self._distance_manifest_entry(system),
                 }
             )
+            self._pin_unmeasured_neighbor_pm(system)
         elif astrom_modes:
             self.manifest.setdefault("distance", None)
 

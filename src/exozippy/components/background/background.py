@@ -30,12 +30,15 @@ import logging
 import numpy as np
 
 from exozippy.components.component import Component
+from exozippy.components.orbit.bodies import component_instance_names
 from exozippy.components.star.position import require_star_radec
 from exozippy.constants import (
     BULGE_VELOCITY_SIGMA_2,
     K_VEL_CONVERSION,
     SUN_GC_DISTANCE,
 )
+
+from . import physics  # noqa: F401 -- registers calc_background_fluxratio
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +78,10 @@ def on_bulge_sightline(ra_rad, dec_rad):
 
 class Background(Component):
     prose_noun = "unresolved background"
+    # member_flux (one entry per fluxratio element) is injected by
+    # add_parameter for the derived from_lightcurve expression.
+    context_dep_names = frozenset({"member_flux"})
+    aligned_context_deps = frozenset({"member_flux"})
 
     def __init__(self, config, config_manager):
         super().__init__(config, config_manager)
@@ -103,6 +110,94 @@ class Background(Component):
         for i, bands in enumerate(self.bands):
             for b in bands:
                 self._flux_index[(i, b)] = len(self._flux_index)
+        self.psf_stars = []
+        for i, c in enumerate(self.config):
+            where = f"[{self.prefix}.{self.names[i]}]"
+            refs = c.get("psf_stars") or []
+            if not isinstance(refs, list):
+                raise ValueError(
+                    f"{where} psf_stars must be a list of star names or "
+                    f"indices; got {refs!r}."
+                )
+            self.psf_stars.append(
+                [
+                    self.resolve_star_ndx(r, f"{where} psf_stars {r!r}")
+                    for r in refs
+                ]
+            )
+        self._resolve_light_curve_ties()
+
+    def _resolve_light_curve_ties(self):
+        """Which fluxratio elements are DERIVED from a light curve.
+
+        A band of an instance's ``bands:`` that a microlensing light curve
+        covers (its ``band:``) is tied to it: there the background's flux is
+        ``f_blend/f_source`` of that light curve minus the instance's
+        ``psf_stars`` (background.md).  ``light_curves:`` names the ones to
+        tie; without it every light curve in a listed band is a candidate
+        and two in one band RAISE (KMT's three I-band sites each have their
+        own blend -- which one the background is, is the user's statement).
+        ``light_curves: []`` ties none.  Read from the raw system config, so
+        the map exists by stage 2.  Sets ``self._tie[e]`` per fluxratio
+        element: a light-curve index or None.
+        """
+        sys_cfg = getattr(self.config_manager, "system_config", None) or {}
+        lc_cfgs = sys_cfg.get("mulensinstrument") or []
+        if not isinstance(lc_cfgs, list):
+            lc_cfgs = [lc_cfgs]
+        lc_names = component_instance_names(sys_cfg, "mulensinstrument")
+        lc_bands = [(c or {}).get("band") for c in lc_cfgs]
+        self._tie = [None] * len(self._flux_index)
+        for i, c in enumerate(self.config):
+            where = f"[{self.prefix}.{self.names[i]}]"
+            named = c.get("light_curves")
+            if named is None:
+                candidates = list(range(len(lc_names)))
+            else:
+                if not isinstance(named, list):
+                    raise ValueError(
+                        f"{where} light_curves must be a list of "
+                        f"mulensinstrument names; got {named!r}."
+                    )
+                candidates = []
+                for ref in named:
+                    if ref not in lc_names:
+                        raise ValueError(
+                            f"{where} light_curves names {ref!r}; the light "
+                            f"curves are {lc_names}."
+                        )
+                    k = lc_names.index(ref)
+                    if lc_bands[k] not in self.bands[i]:
+                        raise ValueError(
+                            f"{where} light curve {ref!r} is in band "
+                            f"{lc_bands[k]!r}, which `bands:` "
+                            f"({self.bands[i]}) does not list."
+                        )
+                    candidates.append(k)
+            for b in self.bands[i]:
+                hits = [k for k in candidates if lc_bands[k] == b]
+                if len(hits) > 1:
+                    raise ValueError(
+                        f"{where} light curves {[lc_names[k] for k in hits]} "
+                        f"are all in band {b!r}, and each has its own blend: "
+                        f"name the one this background is with "
+                        f"`light_curves:` (the others then carry their own "
+                        f"f_blend), or `light_curves: []` to tie none."
+                    )
+                if hits:
+                    self._tie[self._flux_index[(i, b)]] = hits[0]
+        self._lc_names = lc_names
+
+    def build_maps(self):
+        # Per fluxratio element, the light curve a derived element reads
+        # (0, unread, on a sampled one).
+        self.lc_map = np.array(
+            [0 if k is None else int(k) for k in self._tie], dtype=int
+        )
+
+    def tied_band(self, i, band):
+        """Is instance ``i``'s flux in ``band`` derived from a light curve?"""
+        return self._tie[self._flux_index[(i, band)]] is not None
 
     @property
     def prefix(self):
@@ -130,6 +225,30 @@ class Background(Component):
                     "the position in this list."
                 ),
             },
+            {
+                "key": "light_curves",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "mulensinstrument light curves whose blend this "
+                    "background is: in each one's band the fluxratio is "
+                    "DERIVED, f_blend/f_source minus psf_stars. Default: "
+                    "every light curve in a listed band (two in one band "
+                    "raise); [] ties none."
+                ),
+            },
+            {
+                "key": "psf_stars",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Modeled non-source stars inside the tied light curves' "
+                    "PSF besides this background (e.g. the lens), whose "
+                    "SED fluxes the tie subtracts. Default: none."
+                ),
+            },
         ]
 
     def register_parameters(self, system):
@@ -151,13 +270,30 @@ class Background(Component):
         owners = [
             self.names[i] for i, bands in enumerate(self.bands) for _ in bands
         ]
+        fluxratio = {"shape": (len(owners),), "element_owners": owners}
+        tied = np.array([k is not None for k in self._tie], dtype=bool)
+        self._tie_filter = {}
+        if tied.any():
+            # One spelling, two roles (parameter.md): DERIVED where a light
+            # curve covers the band, sampled elsewhere.  Its defaults.yaml
+            # bounds become a soft barrier on the derived elements, which
+            # is what keeps "the modeled stars exceed the light curve's
+            # blend" a pull rather than a NaN (background.md).
+            fluxratio["expr_key"] = {"from_lightcurve": tied.copy()}
+            self._check_tie_members(system)
+            for e, k in enumerate(self._tie):
+                if k is not None:
+                    logger.info(
+                        f"[{self.prefix}] {self.prefix}.{owners[e]}."
+                        f"fluxratio_{self._element_band_pos(e)} is DERIVED: "
+                        f"f_blend/f_source of light curve "
+                        f"'{self._lc_names[k]}' minus psf_stars "
+                        f"{self.psf_stars[self.names.index(owners[e])]}."
+                    )
         self.manifest = {
             "offset_e": None,
             "offset_n": None,
-            "fluxratio": {
-                "shape": (len(owners),),
-                "element_owners": owners,
-            },
+            "fluxratio": fluxratio,
         }
         ra, dec = require_star_radec(
             self.config_manager,
@@ -168,13 +304,16 @@ class Background(Component):
             (mu_ra, mu_dec), sigma = bulge_field_pm_prior(ra, dec)
             n = self.n_elements
             for key, mu in (("pm_ra", mu_ra), ("pm_dec", mu_dec)):
+                # The prior through "overrides" (under the params file);
+                # the start at its center through add_hint, the one
+                # channel for a component-computed start.
                 self.manifest[key] = {
-                    "overrides": {
-                        "mu": [mu] * n,
-                        "sigma": [sigma] * n,
-                        "initval": [mu] * n,
-                    }
+                    "overrides": {"mu": [mu] * n, "sigma": [sigma] * n}
                 }
+                for i in range(n):
+                    self.config_manager.add_hint(
+                        f"{self.prefix}.{i}.{key}", mu
+                    )
             logger.info(
                 f"[{self.prefix}] field proper-motion prior on "
                 f"{self.names}: (pm_ra*, pm_dec) ~ N(({mu_ra:.2f}, "
@@ -193,8 +332,75 @@ class Background(Component):
                 f"background.<name>.pm_ra/pm_dec {{mu, sigma}}."
             )
 
+    def _element_band_pos(self, e):
+        """Position k of fluxratio element ``e`` in its instance's bands."""
+        for (i, b), idx in self._flux_index.items():
+            if idx == e:
+                return self.bands[i].index(b)
+        raise KeyError(e)
+
+    def _check_tie_members(self, system):
+        """The members' flux in a tied band must be predictable by the SED:
+        a light curve has no psf_fluxratio of its own, and a sampled member
+        ratio would be a second, competing statement of the same flux."""
+        for (i, b), e in self._flux_index.items():
+            if self._tie[e] is None or not self.psf_stars[i]:
+                continue
+            where = f"[{self.prefix}.{self.names[i]}]"
+            sed = getattr(system, "sed", None)
+            band = getattr(system, "band", None)
+            fix = (
+                f"or leave band {b!r} untied (`light_curves:` without that "
+                f"light curve), which samples the background's flux there"
+            )
+            if sed is None or band is None or b not in list(band.names):
+                raise ValueError(
+                    f"{where} the background's flux in band {b!r} is derived "
+                    f"from a light curve minus psf_stars "
+                    f"{self.psf_stars[i]}, whose fluxes there need the SED "
+                    f"and a band: block naming {b!r}; add them, {fix}."
+                )
+            fk = band.filter_mist[list(band.names).index(b)]
+            if not sed.has_filter(fk):
+                raise ValueError(
+                    f"{where} band {b!r} (filter {fk!r}) is not in the SED's "
+                    f"BC grid, so psf_stars {self.psf_stars[i]} have no "
+                    f"predicted flux there; {fix}."
+                )
+            self._tie_filter[e] = fk
+
+    def add_parameter(self, model, param_name, system, context_nodes=None):
+        """Inject ``member_flux`` -- per fluxratio element, the summed SED
+        flux of the instance's psf_stars relative to the primary source in
+        that element's band (0 where untied or with no members) -- for the
+        derived ``from_lightcurve`` expression; an SED forward-model node,
+        which no manifest dep can spell (the zeropoint idiom)."""
+        if param_name == "fluxratio" and not context_nodes:
+            context_nodes = {"member_flux": self._member_flux(system)}
+        return super().add_parameter(model, param_name, system, context_nodes)
+
+    def _member_flux(self, system):
+        import pytensor.tensor as pt
+
+        out = []
+        for (i, _b), e in sorted(self._flux_index.items(), key=lambda t: t[1]):
+            fk = self._tie_filter.get(e)
+            if fk is None:
+                out.append(pt.constant(0.0, dtype="float64"))
+                continue
+            sed = system.sed
+            m_s = sed.predict_star_appmag(self.source_star, fk, system)
+            total = 0.0
+            for s in self.psf_stars[i]:
+                total = total + 10 ** (
+                    -0.4 * (sed.predict_star_appmag(s, fk, system) - m_s)
+                )
+            out.append(pt.as_tensor_variable(total))
+        return pt.stack(out)
+
     def build_likelihood(self, model, system):
-        """No likelihood of its own: the datasets that name it read it."""
+        """No likelihood of its own: the datasets that name it read it, and
+        the light-curve tie is the derived expression itself."""
         return None
 
     # ------------------------------------------------------------------

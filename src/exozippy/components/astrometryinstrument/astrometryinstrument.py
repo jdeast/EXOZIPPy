@@ -1636,6 +1636,26 @@ class AstrometryInstrument(Instrument):
                         f"{band!r}, which its `bands:` ({bg.bands[k]}) does "
                         f"not list; add it there."
                     )
+                if bg.tied_band(k, band):
+                    # In a light-curve band the background's flux is the
+                    # light curve's blend LESS the background's psf_stars;
+                    # this dataset must split the same light the same way,
+                    # or a star is counted twice (or not at all).
+                    if sorted(members) != sorted(bg.psf_stars[k]):
+                        raise ValueError(
+                            f"{where} reads background '{bg.names[k]}' in "
+                            f"band {band!r}, where its flux is derived from "
+                            f"a light curve minus its psf_stars "
+                            f"{bg.psf_stars[k]}; this dataset's psf_stars "
+                            f"are {members}.  Name the same stars in both."
+                        )
+                    if self.fitpsfflux[i]:
+                        raise ValueError(
+                            f"{where} fitpsfflux samples the members' flux, "
+                            f"and in band {band!r} the background's derived "
+                            f"flux already uses their SED prediction: drop "
+                            f"fitpsfflux here."
+                        )
                 self._background[i] = k
 
     def has_split(self, i):

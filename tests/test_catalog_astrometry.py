@@ -664,3 +664,159 @@ def test_psf_stars_on_an_unlensed_dataset_raise(tmp_path):
     with pytest.raises(ValueError, match="no lens term"):
         system = System(cfg, user_params=params)
         system.prepare()
+
+
+# ----------------------------------------------------------------------
+# 6. The light-curve tie and the neighbor pm rule
+# ----------------------------------------------------------------------
+def _tied_config(tmp, bg_extra=None, lcs=None):
+    """The truth config with the light curve in band I and the background
+    listing I too, so its I-band flux is tied to the light curve."""
+    cfg = _config(tmp)
+    cfg["band"] = [
+        {"name": "I", "filter": "Generic/Cousins.I", "ld_law": "linear"}
+    ]
+    cfg["mulensinstrument"] = lcs or [
+        {"name": "OGLE", "file": str(tmp / "lc.dat"), "band": "I"}
+    ]
+    if lcs:
+        for d in cfg["astrometryinstrument"]:
+            d["photometry"] = lcs[-1]["name"]
+    cfg["background"] = [
+        {"name": "Bg", "bands": ["G", "Ks", "I"], **(bg_extra or {})}
+    ]
+    return cfg
+
+
+@pytest.mark.slow
+def test_background_flux_in_a_light_curve_band_is_derived(truth_files):
+    """
+    Given a background listing the light curve's band (I) besides the two
+    catalog bands, with no psf_stars of its own,
+    When the system is built,
+    Then its I-band element (fluxratio_2) is DERIVED and equals the light
+    curve's f_blend/f_source exactly -- a constraint, not a second free
+    parameter -- while the two catalog-band elements stay as they were
+    (pinned here by the test's params); one parameter, one spelling.
+    """
+    tmp = truth_files[0]
+    system, model = _build(_tied_config(tmp), _params())
+    bg, mi = system.background, system.mulensinstrument
+    assert bg.tied_band(0, "I") and not bg.tied_band(0, "G")
+    assert bg.fluxratio.element_is_derived(2)
+    assert not bg.fluxratio.element_is_derived(0)
+    fr, fb, fs = _start_values(
+        model, [bg.fluxratio.value, mi.f_blend.value, mi.f_source.value]
+    )
+    assert fr[2] == pytest.approx(fb[0] / fs[0], rel=1e-12)
+    np.testing.assert_allclose(fr[:2], [R_BG["Gaia"], R_BG["VIRAC"]])
+    # The [0, 1000] bounds are a SOFT barrier on the derived element (a
+    # modeled star brighter than the blend is a pull, not a NaN).
+    names = [p.name for p in model.potentials]
+    assert any("background.fluxratio" in n for n in names), names
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    "bg_extra, lcs_fn, match",
+    [
+        # members in a tied band need the SED
+        ({"psf_stars": ["Lens"]}, None, "need the SED"),
+        # two light curves in one band: which blend is the background's?
+        (
+            None,
+            lambda tmp: [
+                {"name": "A", "file": str(tmp / "lc.dat"), "band": "I"},
+                {"name": "B", "file": str(tmp / "lc.dat"), "band": "I"},
+            ],
+            "each has its own blend",
+        ),
+    ],
+)
+def test_light_curve_tie_misconfigurations_raise(
+    truth_files, bg_extra, lcs_fn, match
+):
+    tmp = truth_files[0]
+    lcs = None if lcs_fn is None else lcs_fn(tmp)
+    with pytest.raises(ValueError, match=match):
+        params = _params()
+        if lcs is not None:
+            del params["mulensinstrument.OGLE.err_scale"]
+        _build(_tied_config(tmp, bg_extra, lcs), params)
+
+
+@pytest.mark.slow
+def test_two_light_curves_in_a_band_tie_the_named_one(truth_files):
+    tmp = truth_files[0]
+    lcs = [
+        {"name": "A", "file": str(tmp / "lc.dat"), "band": "I"},
+        {"name": "B", "file": str(tmp / "lc.dat"), "band": "I"},
+    ]
+    params = _params()
+    del params["mulensinstrument.OGLE.err_scale"]
+    system, _model = _build(
+        _tied_config(tmp, {"light_curves": ["B"]}, lcs), params
+    )
+    assert system.background.lc_map[2] == 1
+    assert system.background.tied_band(0, "I")
+
+
+@pytest.mark.slow
+def test_dataset_in_a_tied_band_must_split_like_the_background(truth_files):
+    """
+    Given the background's I flux tied to the light curve with no
+    psf_stars, and a catalog in band I that names the lens and neighbor,
+    When the system is prepared,
+    Then it raises: the light curve's blend already holds those stars in
+    the background, so the catalog would count them twice.
+    """
+    tmp = truth_files[0]
+    cfg = _tied_config(tmp)
+    cfg["astrometryinstrument"][1]["band"] = "I"
+    with pytest.raises(ValueError, match="Name the same stars"):
+        _build(cfg, _params())
+
+
+def _neighbor_pm(system):
+    star = system.star
+    n = star.n_elements
+    sigma = star.pm_ra.sigma
+    if sigma is not None:
+        sigma = np.broadcast_to(np.atleast_1d(sigma), (n,))[2]
+    init = np.broadcast_to(np.atleast_1d(star.pm_ra.initval), (n,))[2]
+    return sigma, init
+
+
+@pytest.mark.slow
+def test_neighbor_pm_is_pinned_unless_astrometry_reads_it(truth_files):
+    """
+    Given a modeled neighbor with no params entry on its proper motion,
+    When no astrometry dataset names it (psf_stars: [Lens] only),
+    Then its pm is pinned at the bulge field mean (review 8.9.7(a));
+    When a catalog names it in psf_stars,
+    Then its pm is free.
+    """
+    from exozippy.components.background.background import (
+        bulge_field_pm_prior,
+    )
+
+    tmp = truth_files[0]
+    params = _params()
+    del params["star.Neighbor.pm_ra"], params["star.Neighbor.pm_dec"]
+
+    cfg = _config(tmp)
+    for d in cfg["astrometryinstrument"]:
+        d["psf_stars"] = ["Lens"]
+    for k in ("Gaia", "VIRAC"):
+        del params[f"astrometryinstrument.{k}.psf_fluxratio_1"]
+    system, _ = _build(cfg, params)
+    sigma, init = _neighbor_pm(system)
+    (mu_ra, _mu_dec), _s = bulge_field_pm_prior(RA, DEC)
+    assert sigma == 0.0
+    assert init == pytest.approx(mu_ra)
+
+    params2 = _params()
+    del params2["star.Neighbor.pm_ra"], params2["star.Neighbor.pm_dec"]
+    system2, _ = _build(_config(tmp), params2)
+    sigma2, _init2 = _neighbor_pm(system2)
+    assert sigma2 is None or not np.isclose(float(sigma2), 0.0)
