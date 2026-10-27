@@ -670,9 +670,11 @@ def test_psf_stars_on_an_unlensed_dataset_raise(tmp_path):
 # ----------------------------------------------------------------------
 # 6. The light-curve tie and the neighbor pm rule
 # ----------------------------------------------------------------------
-def _tied_config(tmp, bg_extra=None, lcs=None):
+def _tied_config(tmp, bg_extra=None, lcs=None, sed=True):
     """The truth config with the light curve in band I and the background
-    listing I too, so its I-band flux is tied to the light curve."""
+    listing I too, so its I-band flux is tied to the light curve.  With
+    ``sed`` (the default) an SED block predicts the members' I flux, which
+    every tie needs: the lens is always a member."""
     cfg = _config(tmp)
     cfg["band"] = [
         {"name": "I", "filter": "Generic/Cousins.I", "ld_law": "linear"}
@@ -686,43 +688,107 @@ def _tied_config(tmp, bg_extra=None, lcs=None):
     cfg["background"] = [
         {"name": "Bg", "bands": ["G", "Ks", "I"], **(bg_extra or {})}
     ]
+    if sed:
+        sedfile = tmp / "tie.sed.yaml"
+        sedfile.write_text("model: NextGen\nfilters: []\n")
+        cfg["sed"] = {"file": str(sedfile)}
     return cfg
+
+
+def _members_flux(system, members):
+    """The members' SED flux relative to the primary source in the tied
+    band, as a node built from the SED's own per-star magnitudes -- an
+    independent sum, not Background._member_flux."""
+    sed = system.sed
+    fk = system.background._tie_filter[system.background._flux_index[(0, "I")]]
+    m_s = sed.predict_star_appmag(system.background.source_star, fk, system)
+    names = list(system.star.names)
+    return sum(
+        10
+        ** (-0.4 * (sed.predict_star_appmag(names.index(s), fk, system) - m_s))
+        for s in members
+    )
+
+
+def _identity_residuals(system, model, members, e, n_points=6, seed=11):
+    """``fluxratio[e] - (f_blend/f_source - sum_members F_j/F_S)`` and the
+    derived value itself, at the start and at random raw points around it."""
+    bg, mi = system.background, system.mulensinstrument
+    k = int(bg.lc_map[e])
+    nodes = [
+        bg.fluxratio.value[e],
+        mi.f_blend.value[k] / mi.f_source.value[k]
+        - _members_flux(system, members),
+    ]
+    fn = pytensor.function(model.free_RVs, nodes, on_unused_input="ignore")
+    ip = model.initial_point()
+    rng = np.random.default_rng(seed)
+    out = []
+    for n in range(n_points):
+        vals = []
+        for v in model.value_vars:
+            x = np.asarray(ip[v.name], dtype=float)
+            if n:
+                x = x + rng.normal(0.0, 0.3, size=x.shape)
+            vals.append(x)
+        got, want = fn(*vals)
+        out.append((float(got), float(want)))
+    return out
 
 
 @pytest.mark.slow
 def test_background_flux_in_a_light_curve_band_is_derived(truth_files):
     """
     Given a background listing the light curve's band (I) besides the two
-    catalog bands, with no psf_stars of its own,
+      catalog bands, with psf_stars [Lens, Neighbor] and an SED,
     When the system is built,
     Then its I-band element (fluxratio_2) is DERIVED and equals the light
-    curve's f_blend/f_source exactly -- a constraint, not a second free
-    parameter -- while the two catalog-band elements stay as they were
-    (pinned here by the test's params); one parameter, one spelling.
+      curve's f_blend/f_source minus the lens's and the neighbor's SED
+      fluxes relative to the source, to 1e-12, at the start and at random
+      points -- an identity, not a second free parameter -- while the two
+      catalog-band elements stay as they were; the tie reads the members'
+      SED fluxes, so the soft [0, 1000] barrier is the only potential it
+      adds.
     """
     tmp = truth_files[0]
-    system, model = _build(_tied_config(tmp), _params())
-    bg, mi = system.background, system.mulensinstrument
+    cfg = _tied_config(tmp, {"psf_stars": ["Lens", "Neighbor"]})
+    system, model = _build(cfg, _params())
+    bg = system.background
     assert bg.tied_band(0, "I") and not bg.tied_band(0, "G")
     assert bg.fluxratio.element_is_derived(2)
     assert not bg.fluxratio.element_is_derived(0)
+    pts = _identity_residuals(system, model, ["Lens", "Neighbor"], 2)
+    for got, want in pts:
+        assert got == pytest.approx(want, rel=1e-12, abs=1e-12)
+    # the points really differ, and the members really are subtracted
+    assert len({round(g, 9) for g, _w in pts}) == len(pts)
     fr, fb, fs = _start_values(
-        model, [bg.fluxratio.value, mi.f_blend.value, mi.f_source.value]
+        model,
+        [
+            bg.fluxratio.value,
+            system.mulensinstrument.f_blend.value,
+            system.mulensinstrument.f_source.value,
+        ],
     )
-    assert fr[2] == pytest.approx(fb[0] / fs[0], rel=1e-12)
+    assert fr[2] < fb[0] / fs[0] - 1e-3
     np.testing.assert_allclose(fr[:2], [R_BG["Gaia"], R_BG["VIRAC"]])
-    # The [0, 1000] bounds are a SOFT barrier on the derived element (a
-    # modeled star brighter than the blend is a pull, not a NaN).
     names = [p.name for p in model.potentials]
     assert any("background.fluxratio" in n for n in names), names
 
 
 @pytest.mark.slow
 @pytest.mark.parametrize(
-    "bg_extra, lcs_fn, match",
+    "bg_extra, lcs_fn, sed, match",
     [
-        # members in a tied band need the SED
-        ({"psf_stars": ["Lens"]}, None, "need the SED"),
+        # the gap this guards: the lens left out of psf_stars would be
+        # counted as unresolved background (wrong position, wrong pm)
+        (None, None, True, "\\['Lens'\\].*necessarily in that blend"),
+        ({"psf_stars": ["Neighbor"]}, None, True, "necessarily in"),
+        # a source is lensed: its light is f_source, not blend
+        ({"psf_stars": ["Lens", "Source"]}, None, True, "SOURCE"),
+        ({"psf_stars": ["Lens", "Lens"]}, None, True, "names a star twice"),
+        # members in a tied band need the SED -- and the lens always is one
+        ({"psf_stars": ["Lens"]}, None, False, "need the SED"),
         # two light curves in one band: which blend is the background's?
         (
             None,
@@ -730,20 +796,55 @@ def test_background_flux_in_a_light_curve_band_is_derived(truth_files):
                 {"name": "A", "file": str(tmp / "lc.dat"), "band": "I"},
                 {"name": "B", "file": str(tmp / "lc.dat"), "band": "I"},
             ],
+            True,
             "each has its own blend",
+        ),
+        # the SED blend tie on the tied light curve states the same split
+        (
+            {"psf_stars": ["Lens"]},
+            lambda tmp: [
+                {
+                    "name": "OGLE",
+                    "file": str(tmp / "lc.dat"),
+                    "band": "I",
+                    "sed_constrains_blend": True,
+                }
+            ],
+            True,
+            "sed_constrains_blend: true",
         ),
     ],
 )
 def test_light_curve_tie_misconfigurations_raise(
-    truth_files, bg_extra, lcs_fn, match
+    truth_files, bg_extra, lcs_fn, sed, match
 ):
     tmp = truth_files[0]
     lcs = None if lcs_fn is None else lcs_fn(tmp)
     with pytest.raises(ValueError, match=match):
         params = _params()
-        if lcs is not None:
+        if lcs is not None and lcs[0]["name"] != "OGLE":
             del params["mulensinstrument.OGLE.err_scale"]
-        _build(_tied_config(tmp, bg_extra, lcs), params)
+        _build(_tied_config(tmp, bg_extra, lcs, sed=sed), params)
+
+
+@pytest.mark.slow
+def test_a_tied_band_the_bc_grid_lacks_raises(truth_files):
+    """
+    Given the light curve in a band whose filter the SED's BC grid lacks
+      (a label with no SVO identity), tied to the background,
+    When the system is prepared,
+    Then it raises naming the band and the fix (untie that light curve):
+      the lens's flux there has no prediction, so the tie cannot be made.
+    """
+    tmp = truth_files[0]
+    cfg = _tied_config(tmp, {"psf_stars": ["Lens"]})
+    # a label with no SVO identity: the grid skips it (sed.py,
+    # _collect_band_filters), so the SED loads and cannot predict it
+    cfg["band"].append({"name": "Kv", "filter": "MIRILRS", "ld_law": "linear"})
+    cfg["mulensinstrument"][0]["band"] = "Kv"
+    cfg["background"][0]["bands"] = ["G", "Ks", "Kv"]
+    with pytest.raises(ValueError, match="not in the SED's BC grid"):
+        _build(cfg, _params())
 
 
 @pytest.mark.slow
@@ -756,7 +857,8 @@ def test_two_light_curves_in_a_band_tie_the_named_one(truth_files):
     params = _params()
     del params["mulensinstrument.OGLE.err_scale"]
     system, _model = _build(
-        _tied_config(tmp, {"light_curves": ["B"]}, lcs), params
+        _tied_config(tmp, {"light_curves": ["B"], "psf_stars": ["Lens"]}, lcs),
+        params,
     )
     assert system.background.lc_map[2] == 1
     assert system.background.tied_band(0, "I")
@@ -765,17 +867,150 @@ def test_two_light_curves_in_a_band_tie_the_named_one(truth_files):
 @pytest.mark.slow
 def test_dataset_in_a_tied_band_must_split_like_the_background(truth_files):
     """
-    Given the background's I flux tied to the light curve with no
-    psf_stars, and a catalog in band I that names the lens and neighbor,
+    Given the background's I flux tied to the light curve with psf_stars
+    [Lens], and a catalog in band I that names the lens and neighbor,
     When the system is prepared,
-    Then it raises: the light curve's blend already holds those stars in
-    the background, so the catalog would count them twice.
+    Then it raises: the light curve's blend holds the neighbor in the
+    background, so the catalog would count it twice.
     """
     tmp = truth_files[0]
-    cfg = _tied_config(tmp)
+    cfg = _tied_config(tmp, {"psf_stars": ["Lens"]})
     cfg["astrometryinstrument"][1]["band"] = "I"
     with pytest.raises(ValueError, match="Name the same stars"):
         _build(cfg, _params())
+
+
+def _lc_only(tmp, lens_comp=False, xallarap=False, psf_stars=("Lens",)):
+    """A light-curve-only sightline (no astrometry) whose background is
+    the I-band blend's remainder: optionally a luminous stellar lens
+    companion (2L1S) or an unlensed companion on the source's orbit."""
+    sedfile = tmp / "tie.sed.yaml"
+    sedfile.write_text("model: NextGen\nfilters: []\n")
+    stars = [{"name": "Lens"}, {"name": "Source"}, {"name": "Neighbor"}]
+    lens = [{"body": "star.Lens", "name": "Lens"}]
+    source = {"body": "star.Source", "name": "Source"}
+    cfg = {
+        "name": "bgtie",
+        "star": stars,
+        "mulensevent": [{}],
+        "lens": lens,
+        "source": [source],
+        "band": [
+            {"name": "I", "filter": "Generic/Cousins.I", "ld_law": "linear"}
+        ],
+        "mulensinstrument": [
+            {"name": "OGLE", "file": str(tmp / "lc.dat"), "band": "I"}
+        ],
+        "sed": {"file": str(sedfile)},
+        "background": [
+            {"name": "Bg", "bands": ["I"], "psf_stars": list(psf_stars)}
+        ],
+    }
+    params = {
+        k: v
+        for k, v in _params().items()
+        if not k.startswith(("astrometryinstrument.", "background.Bg.flux"))
+    }
+    if lens_comp:
+        stars.append({"name": "Comp"})
+        lens.append({"body": "star.Comp", "name": "Comp"})
+        params["lens.Comp.log_s"] = {"initval": 0.6, "sigma": 0}
+        params["lens.Comp.alpha"] = {"initval": 30.0, "sigma": 0}
+        params["lens.Comp.q"] = {"initval": 0.3}
+        params["star.Comp.distance"] = {"initval": D_L, "sigma": 0}
+    if xallarap:
+        stars.append({"name": "SComp"})
+        cfg["orbit"] = [
+            {"name": "X", "primary": ["Source"], "companion": ["SComp"]}
+        ]
+        source["orbit"] = "X"
+    return cfg, params
+
+
+@pytest.mark.slow
+def test_a_luminous_lens_companion_is_subtracted(truth_files):
+    """
+    Given a stellar binary lens (Lens + Comp, both star blocks) and the
+      background tied to the I-band light curve with psf_stars [Lens, Comp],
+    When the system is built,
+    Then the derived flux is f_blend/f_source minus BOTH lens bodies' SED
+      fluxes, to 1e-12 at random points, and the tie makes both lens stars
+      SEEN by the SED (their SED-side parameters sampled), while the
+      neighbor -- in no PSF list and read by nothing -- stays unseen;
+    And psf_stars [Lens] alone RAISES naming the companion, which is
+      necessarily in the blend.
+    """
+    tmp = truth_files[0]
+    cfg, params = _lc_only(tmp, lens_comp=True, psf_stars=("Lens", "Comp"))
+    system, model = _build(cfg, params)
+    assert system.background.event_blend_stars(system) == [0, 3]
+    for got, want in _identity_residuals(system, model, ["Lens", "Comp"], 0):
+        assert got == pytest.approx(want, rel=1e-12, abs=1e-12)
+    seen = np.asarray(system.sed.seen_star_mask(system))
+    assert seen[0] and seen[1] and seen[3] and not seen[2]
+
+    cfg2, params2 = _lc_only(tmp, lens_comp=True, psf_stars=("Lens",))
+    with pytest.raises(ValueError, match="\\['Comp'\\].*necessarily"):
+        _build(cfg2, params2)
+
+
+@pytest.mark.slow
+def test_an_unlensed_source_companion_must_be_subtracted(truth_files):
+    """
+    Given a source moving on its own keplerian orbit (xallarap) around a
+      star SComp that is not a source,
+    When the background is tied to the light curve with psf_stars [Lens],
+    Then it RAISES naming SComp: an orbit the light curve resolves in time
+      is far below any PSF, so its light is in the blend; and
+      event_blend_stars names it (not the source).
+    """
+    tmp = truth_files[0]
+    cfg, params = _lc_only(tmp, xallarap=True)
+    with pytest.raises(ValueError, match="\\['SComp'\\].*necessarily"):
+        _build(cfg, params)
+    cfg2, params2 = _lc_only(tmp, xallarap=True, psf_stars=("Lens", "SComp"))
+    system = System(cfg2, user_params=params2)
+    system.prepare()
+    assert system.background.event_blend_stars(system) == [0, 3]
+    assert system.background.psf_stars == [[0, 3]]
+
+
+@pytest.mark.slow
+def test_tied_gradients_agree_in_c_and_jax(truth_files):
+    """
+    Given the tied light-curve-only model (point-source single lens, the
+      symbolic path) with the lens and a neighbor subtracted,
+    When logp and its gradient are evaluated in C and through JAX at the
+      start and at a displaced point,
+    Then both are finite and agree (the derived element and its soft
+      barrier carry no where-trap).
+    """
+    jax = pytest.importorskip("jax")
+    jax.config.update("jax_enable_x64", True)
+    from pymc.sampling.jax import get_jaxified_logp
+
+    tmp = truth_files[0]
+    cfg, params = _lc_only(tmp, psf_stars=("Lens", "Neighbor"))
+    _system, model = _build(cfg, params)
+    ip = model.initial_point()
+    logp_c, dlogp_c = model.compile_logp(), model.compile_dlogp()
+    logp_fn = get_jaxified_logp(model)
+    rng = np.random.default_rng(3)
+    for shift in (0.0, 0.2):
+        pt_ = {
+            k: np.asarray(v) + shift * rng.normal(size=np.shape(v))
+            for k, v in ip.items()
+        }
+        lp_c, g_c = float(logp_c(pt_)), np.asarray(dlogp_c(pt_))
+        vals = [pt_[v.name] for v in model.value_vars]
+        lp_j = float(logp_fn(vals))
+        g_j = jax.grad(
+            lambda *v: logp_fn(list(v)), argnums=tuple(range(len(vals)))
+        )(*vals)
+        g_j = np.concatenate([np.ravel(np.asarray(g)) for g in g_j])
+        assert np.isfinite(lp_c) and np.all(np.isfinite(g_c))
+        assert lp_j == pytest.approx(lp_c, rel=1e-9, abs=1e-6)
+        np.testing.assert_allclose(g_j, g_c, rtol=1e-7, atol=1e-7)
 
 
 def _neighbor_pm(system):

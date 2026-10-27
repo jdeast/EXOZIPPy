@@ -119,12 +119,15 @@ class Background(Component):
                     f"{where} psf_stars must be a list of star names or "
                     f"indices; got {refs!r}."
                 )
-            self.psf_stars.append(
-                [
-                    self.resolve_star_ndx(r, f"{where} psf_stars {r!r}")
-                    for r in refs
-                ]
-            )
+            stars = [
+                self.resolve_star_ndx(r, f"{where} psf_stars {r!r}")
+                for r in refs
+            ]
+            if len(set(stars)) != len(stars):
+                raise ValueError(
+                    f"{where} psf_stars names a star twice: {refs}."
+                )
+            self.psf_stars.append(stars)
         self._resolve_light_curve_ties()
 
     def _resolve_light_curve_ties(self):
@@ -184,6 +187,24 @@ class Background(Component):
                         f"`light_curves:` (the others then carry their own "
                         f"f_blend), or `light_curves: []` to tie none."
                     )
+                for k in hits:
+                    if (lc_cfgs[k] or {}).get("sed_constrains_blend", False):
+                        # The same decomposition stated twice (background.md,
+                        # "The light-curve tie": not with sed_constrains_blend).
+                        raise ValueError(
+                            f"{where} light curve {lc_names[k]!r} sets "
+                            f"sed_constrains_blend: true, and this background "
+                            f"is its blend's remainder in band {b!r}: both "
+                            f"say f_blend = (modeled non-source stars) + "
+                            f"(unmodeled light), the blend tie through its "
+                            f"own neighbor_flux and a sed_blend_sigma "
+                            f"Gaussian, the background exactly, with its fluxratio "
+                            f">= 0 barrier already the 'blend holds at least "
+                            f"the lens' bound.  Drop sed_constrains_blend "
+                            f"there, or leave that light curve out of "
+                            f"`light_curves:` (the background is then "
+                            f"sampled in band {b!r})."
+                        )
                 if hits:
                     self._tie[self._flux_index[(i, b)]] = hits[0]
         self._lc_names = lc_names
@@ -233,9 +254,11 @@ class Background(Component):
                 "doc": (
                     "mulensinstrument light curves whose blend this "
                     "background is: in each one's band the fluxratio is "
-                    "DERIVED, f_blend/f_source minus psf_stars. Default: "
+                    "DERIVED, f_blend/f_source minus the psf_stars' SED "
+                    "fluxes (needs the SED to predict that band). Default: "
                     "every light curve in a listed band (two in one band "
-                    "raise); [] ties none."
+                    "raise); [] ties none. Not with sed_constrains_blend "
+                    "on the same light curve (raises)."
                 ),
             },
             {
@@ -244,9 +267,14 @@ class Background(Component):
                 "accepts": None,
                 "required": False,
                 "doc": (
-                    "Modeled non-source stars inside the tied light curves' "
-                    "PSF besides this background (e.g. the lens), whose "
-                    "SED fluxes the tie subtracts. Default: none."
+                    "Every modeled non-source star inside the tied light "
+                    "curves' PSF -- the lens (always), a luminous lens "
+                    "companion, an unlensed companion on a source's orbit, "
+                    "a resolved neighbor -- whose SED fluxes the tie "
+                    "subtracts; the same list an astrometry dataset reading "
+                    "this background in a tied band names. A tied band "
+                    "missing a lens body or source-orbit companion raises. "
+                    "Default: none."
                 ),
             },
         ]
@@ -281,14 +309,19 @@ class Background(Component):
             # blend" a pull rather than a NaN (background.md).
             fluxratio["expr_key"] = {"from_lightcurve": tied.copy()}
             self._check_tie_members(system)
+            star_names = list(system.star.names)
             for e, k in enumerate(self._tie):
                 if k is not None:
+                    members = [
+                        star_names[s]
+                        for s in self.psf_stars[self.names.index(owners[e])]
+                    ]
                     logger.info(
                         f"[{self.prefix}] {self.prefix}.{owners[e]}."
                         f"fluxratio_{self._element_band_pos(e)} is DERIVED: "
                         f"f_blend/f_source of light curve "
                         f"'{self._lc_names[k]}' minus psf_stars "
-                        f"{self.psf_stars[self.names.index(owners[e])]}."
+                        f"{members} (their SED fluxes)."
                     )
         self.manifest = {
             "offset_e": None,
@@ -339,40 +372,137 @@ class Background(Component):
                 return self.bands[i].index(b)
         raise KeyError(e)
 
-    def _check_tie_members(self, system):
-        """The members' flux in a tied band must be predictable by the SED:
-        a light curve has no psf_fluxratio of its own, and a sampled member
-        ratio would be a second, competing statement of the same flux."""
+    def event_blend_stars(self, system):
+        """The modeled stars the EVENT itself puts inside every light
+        curve's PSF, so in every tied band's blend (background.md, "Which
+        stars").  Every lens body that is a star (the primary, always, and a
+        luminous companion: the lens-companion separation is ~theta_E) and
+        every star on the far side of a source's own orbit (an unlensed
+        xallarap companion: an orbit the light curve resolves in time is far
+        below any PSF), less the sources (their light is lensed, the
+        f_source half).  A planet is dark here (the SED predicts no planet
+        flux).  A star merely bound to a lens or source body in a static or
+        RV orbit group, or a resolved neighbor, is NOT on this list: whether
+        its light is in a given PSF is the user's statement, `psf_stars:`.
+        """
+        from exozippy.components.orbit.bodies import parse_orbit_bodies
+
+        event = system.mulensevent
+        sources = {int(i) for t, i in event.source_bodies if t == "star"}
+        stars = {int(i) for t, i in event.lens_bodies if t == "star"}
+        xal = [
+            (o, side)
+            for o, side in zip(event.source_orbit_idx, event.source_orbit_side)
+            if o is not None
+        ]
+        if xal:
+            sys_cfg = self.config_manager.system_config
+            prim, comp = parse_orbit_bodies(sys_cfg.get("orbit"), sys_cfg)
+            for o, side in xal:
+                far = comp[o] if side == 1 else prim[o]
+                stars |= {int(i) for t, i in far if t == "star"}
+        return sorted(stars - sources)
+
+    def load_data(self, system):
+        """No data of its own; stage 1 is where the tie's MEMBERSHIP is
+        checked (config only, so before any other component's stage-3
+        bookkeeping can trip over a star the tie would have made SEEN)."""
+        if getattr(system, "mulensevent", None) is not None:
+            self._check_tie_membership(system)
+
+    def _check_tie_membership(self, system):
+        """In a tied band the derived flux subtracts exactly the instance's
+        psf_stars, so the identity
+
+            F_bg/F_S = f_blend/f_source - sum_{j in psf_stars} F_j/F_S
+
+        holds with the RIGHT stars only if psf_stars holds every star the
+        event puts in the blend (``event_blend_stars``) and no source -- both
+        RAISE here, naming the star."""
+        star_names = list(system.star.names)
+        sources = {int(i) for t, i in system.mulensevent.source_bodies}
+        required = self.event_blend_stars(system)
         for (i, b), e in self._flux_index.items():
-            if self._tie[e] is None or not self.psf_stars[i]:
+            if self._tie[e] is None:
                 continue
             where = f"[{self.prefix}.{self.names[i]}]"
+            members = self.psf_stars[i]
+            lc = self._lc_names[self._tie[e]]
+            named = [star_names[s] for s in members]
+            lensed = [star_names[s] for s in members if s in sources]
+            if lensed:
+                raise ValueError(
+                    f"{where} psf_stars names {lensed}, a microlensing "
+                    f"SOURCE: its light is the light curve's f_source, not "
+                    f"part of its blend."
+                )
+            missing = [star_names[s] for s in required if s not in members]
+            if missing:
+                raise ValueError(
+                    f"{where} the background's flux in band {b!r} is light "
+                    f"curve {lc!r}'s blend minus psf_stars {named}, and "
+                    f"{missing} -- a lens body, or an unlensed companion on "
+                    f"a source's orbit -- is necessarily in that blend: "
+                    f"list it in psf_stars (psf_stars is every modeled "
+                    f"non-source star in the PSF, the lens included, as on "
+                    f"an astrometry dataset), or leave {lc!r} out of "
+                    f"`light_curves:` so the band is sampled."
+                )
+
+    def _check_tie_members(self, system):
+        """Stage 3: every member's flux in a tied band must be the SED's
+        prediction -- a light curve has no psf_fluxratio of its own, and a
+        sampled member ratio would be a second, competing statement of the
+        same flux.  The lens is always a member (stage 1,
+        ``_check_tie_membership``), so a tied band always needs the SED:
+        there is no member-free tie to skip."""
+        star_names = list(system.star.names)
+        for (i, b), e in self._flux_index.items():
+            if self._tie[e] is None:
+                continue
+            where = f"[{self.prefix}.{self.names[i]}]"
+            lc = self._lc_names[self._tie[e]]
+            named = [star_names[s] for s in self.psf_stars[i]]
             sed = getattr(system, "sed", None)
             band = getattr(system, "band", None)
             fix = (
-                f"or leave band {b!r} untied (`light_curves:` without that "
-                f"light curve), which samples the background's flux there"
+                f"or leave band {b!r} untied (`light_curves:` without light "
+                f"curve {lc!r}), which samples the background's flux there"
             )
             if sed is None or band is None or b not in list(band.names):
                 raise ValueError(
                     f"{where} the background's flux in band {b!r} is derived "
-                    f"from a light curve minus psf_stars "
-                    f"{self.psf_stars[i]}, whose fluxes there need the SED "
-                    f"and a band: block naming {b!r}; add them, {fix}."
+                    f"from light curve {lc!r} minus psf_stars {named}, whose "
+                    f"fluxes there need the SED and a band: block naming "
+                    f"{b!r}; add them, {fix}."
                 )
             fk = band.filter_mist[list(band.names).index(b)]
             if not sed.has_filter(fk):
                 raise ValueError(
                     f"{where} band {b!r} (filter {fk!r}) is not in the SED's "
-                    f"BC grid, so psf_stars {self.psf_stars[i]} have no "
-                    f"predicted flux there; {fix}."
+                    f"BC grid, so psf_stars {named} have no predicted flux "
+                    f"there; {fix}."
                 )
             self._tie_filter[e] = fk
+
+    def sed_read_stars(self, system):
+        """The stars whose SED flux the light-curve tie reads: the primary
+        source and every tied instance's psf_stars (empty with no tie).
+        ``SED.photometric_readers`` asks, so a lens only the tie sees is
+        SEEN (its SED-side parameters sampled, not pinned)."""
+        if not any(k is not None for k in self._tie):
+            return []
+        # MulensEvent._validate_bodies: every source body is a star.
+        out = {int(system.mulensevent.source_bodies[0][1])}
+        for (i, _b), e in self._flux_index.items():
+            if self._tie[e] is not None:
+                out |= set(self.psf_stars[i])
+        return sorted(out)
 
     def add_parameter(self, model, param_name, system, context_nodes=None):
         """Inject ``member_flux`` -- per fluxratio element, the summed SED
         flux of the instance's psf_stars relative to the primary source in
-        that element's band (0 where untied or with no members) -- for the
+        that element's band (0 where untied) -- for the
         derived ``from_lightcurve`` expression; an SED forward-model node,
         which no manifest dep can spell (the zeropoint idiom)."""
         if param_name == "fluxratio" and not context_nodes:
@@ -383,12 +513,22 @@ class Background(Component):
         import pytensor.tensor as pt
 
         out = []
-        for (i, _b), e in sorted(self._flux_index.items(), key=lambda t: t[1]):
+        for (i, b), e in sorted(self._flux_index.items(), key=lambda t: t[1]):
             fk = self._tie_filter.get(e)
             if fk is None:
                 out.append(pt.constant(0.0, dtype="float64"))
                 continue
             sed = system.sed
+            needed = [self.source_star] + list(self.psf_stars[i])
+            if not sed.can_predict(needed):
+                raise ValueError(
+                    f"[{self.prefix}.{self.names[i]}] the SED severed one of "
+                    f"stars {needed} (no BC grid hosts its start; sed.md, "
+                    f"the no-grid fallback), so the light-curve tie cannot "
+                    f"subtract psf_stars in band {b!r}; leave that light "
+                    f"curve out of `light_curves:` (the band is then "
+                    f"sampled)."
+                )
             m_s = sed.predict_star_appmag(self.source_star, fk, system)
             total = 0.0
             for s in self.psf_stars[i]:
