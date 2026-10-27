@@ -1517,6 +1517,48 @@ class ConfigManager:
         expr = plink.expr.subs(subs) if subs else plink.expr
         return tf * expr if tf != 1.0 else expr
 
+    def add_link(self, target_path, expr_str, origin):
+        """A COMPONENT's hard link: ``target_path.initval = expr_str``.
+
+        The component channel for a tie the topology implies (a star in an
+        orbit group shares its anchor's distance, proper motion, initfeh,
+        age and av -- ``Star._link_orbit_members``).  It lands in
+        ``self.links`` beside the user's, so the engine, the build graph and
+        ``Component._wire_user_links`` treat it exactly as they treat a
+        params-file link, but it is NEVER a ``user_params`` entry
+        (CLAUDE.md), and its ``origin`` keeps it out of the user's column of
+        the provenance ledger: the engine ranks its target as a propagated
+        value, not a USER one.  The link is hard only where the target's
+        resolved ``sigma`` is 0, which the caller supplies through its
+        manifest ``"overrides"`` channel.  Stage 3 only: the engine reads
+        the links at stage 4.
+
+        Both paths in the index form.  A target that already carries an
+        ``initval`` or ``mu`` link raises -- the caller decides precedence
+        against the user's links before calling, so reaching here with one
+        is a bookkeeping bug.
+        """
+        from .linking import ParamLink, parse_link_expression
+
+        existing = self.links.get(target_path, {})
+        if "initval" in existing or "mu" in existing:
+            raise ValueError(
+                f"add_link({target_path!r}, {expr_str!r}, origin={origin!r}): "
+                f"the target already carries a link "
+                f"({sorted(existing)}); the caller must not add a second one."
+            )
+        expr, deps = parse_link_expression(
+            expr_str, self.system_config, f" (on {target_path}.initval)"
+        )
+        self.links.setdefault(target_path, {})["initval"] = ParamLink(
+            target_path=target_path,
+            field="initval",
+            expr_str=expr_str,
+            expr=expr,
+            dep_paths=list(deps),
+            origin=origin,
+        )
+
     def get_element_links(self, comp_type, param_name):
         """
         Return the user-defined links targeting elements of one parameter:
@@ -3646,10 +3688,12 @@ class ConfigManager:
             entry = user_entry(self.user_params, path)
             if entry is not None and entry.get("initval") is not None:
                 return "user"
-            if path in (self.links or {}) and (
-                "initval" in self.links[path] or "mu" in self.links[path]
-            ):
-                return "user"
+            linked = (self.links or {}).get(path, {})
+            for fld in ("initval", "mu"):
+                if fld in linked:
+                    # A component link (``add_link``) is a tie the topology
+                    # implies, not a value the user wrote.
+                    return "user" if linked[fld].origin == "user" else "solved"
         return "default"
 
     def export_solution(

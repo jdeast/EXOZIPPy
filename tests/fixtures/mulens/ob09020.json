@@ -83,7 +83,6 @@
   ],
   "star.distance_raw": [
    0.0,
-   0.0,
    0.0
   ],
   "star.logmass_raw": [
@@ -92,11 +91,9 @@
   ],
   "star.pm_dec_raw": [
    0.0,
-   0.0,
    0.0
   ],
   "star.pm_ra_raw": [
-   0.0,
    0.0,
    0.0
   ],
@@ -111,7 +108,7 @@
  },
  "terms": {
   "POT:galacticmodel.imf_prior": -1.6547794206769335,
-  "POT:galacticmodel.kinematic_prior": 14.90034999646931,
+  "POT:galacticmodel.kinematic_prior": -0.6078398206302307,
   "POT:gaussian_prior.orbit.xbigomega": -0.40691672621661684,
   "POT:gaussian_prior.orbit.ybigomega": -0.09308327378337489,
   "POT:logit_uniform_prior.band.u1": -4.681943244794005,
@@ -129,10 +126,10 @@
   "POT:logit_uniform_prior.rvinstrument.jitter_variance": -9.250141695388853,
   "POT:logit_uniform_prior.source.t_0": -2.487094152870278,
   "POT:logit_uniform_prior.source.u_0": -1.3863059589957878,
-  "POT:logit_uniform_prior.star.distance": -12.417829635654815,
+  "POT:logit_uniform_prior.star.distance": -7.5134699969510645,
   "POT:logit_uniform_prior.star.logmass": -3.3790772926919455,
-  "POT:logit_uniform_prior.star.pm_dec": -4.158883097473898,
-  "POT:logit_uniform_prior.star.pm_ra": -4.1588830869266165,
+  "POT:logit_uniform_prior.star.pm_dec": -2.7725887354540073,
+  "POT:logit_uniform_prior.star.pm_ra": -2.772588724906726,
   "POT:logit_uniform_prior.star.radius": -5.456071697295337,
   "POT:logit_uniform_prior.star.rv": -4.1588830833596715,
   "POT:low_bound.lens.q": -3.016245514697053e-251,
@@ -149,7 +146,7 @@
   "POT:low_bound.mulensevent.theta_E": -9.85967654375977e-305,
   "POT:low_bound.mulensinstrument.f_blend": -8.873708889383794e-304,
   "POT:low_bound.mulensinstrument.f_source": -6.238322633717684,
-  "POT:mulensevent.event_rate_prior": 3.9731680786080936,
+  "POT:mulensevent.event_rate_prior": 3.973168078608094,
   "POT:mulensevent.mu_rel_singularity": -9.85967654375977e-305,
   "POT:mulensevent.source_behind_lens": -9.85967654375977e-305,
   "POT:mulensevent.theta_E_singularity": -9.85967654375977e-305,
@@ -171,7 +168,7 @@
   "RV:band.u1_raw": -2.756815599614018,
   "RV:mulensinstrument.err_scale_raw": -8.270446798842054,
   "RV:mulensinstrument.log_f_total_raw": -8.270446798842054,
-  "RV:mulensinstrument.model": 33685.874023999786,
+  "RV:mulensinstrument.model": 33685.87402399989,
   "RV:mulensinstrument.q_source_raw": -8.270446798842054,
   "RV:orbit.cosi_raw": -0.9189385332046727,
   "RV:orbit.logP_raw": -0.9189385332046727,
@@ -185,12 +182,12 @@
   "RV:rvinstrument.model": 4.9943834200646275,
   "RV:source.t_0_raw": -0.9189385332046727,
   "RV:source.u_0_raw": -0.9189385332046727,
-  "RV:star.distance_raw": -2.756815599614018,
+  "RV:star.distance_raw": -1.8378770664093453,
   "RV:star.logmass_raw": -1.8378770664093453,
-  "RV:star.pm_dec_raw": -2.756815599614018,
-  "RV:star.pm_ra_raw": -2.756815599614018,
+  "RV:star.pm_dec_raw": -1.8378770664093453,
+  "RV:star.pm_ra_raw": -1.8378770664093453,
   "RV:star.radius_raw": -0.9189385332046727,
   "RV:star.rv_raw": -2.756815599614018
  },
- "total_logp": 33528.159830668505
+ "total_logp": 33523.08540481392
 }

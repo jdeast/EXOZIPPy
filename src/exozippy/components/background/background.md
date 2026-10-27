@@ -13,8 +13,11 @@ A ground-based (or Gaia) PSF around a microlensing target holds the source's ima
 luminous lens, the occasional resolved neighbor, and the stars below any high-resolution
 catalog's completeness limit summed over the PSF. The first three are star blocks: the lens
 and the source always, a resolved neighbor once it is given its own star block (with MIST
-structure; its pm is pinned at the field mean unless an astrometry dataset names it in
-`psf_stars:`, `Star._pin_unmeasured_neighbor_pm` -- the planned resolved-blends follow-up). The last
+structure; a bound companion is an orbit group instead, which ties its distance and pm to
+its host's; a neighbor's pm is tied where the params file links it, free under a
+galacticmodel or when an astrometry dataset names it in `psf_stars:`, and pinned at the
+field mean only when none of these constrains it, `Star._pin_unmeasured_neighbor_pm` and
+`components/star/star.md` -- the planned resolved-blends follow-up). The last
 is not a star and has no star's parameters; it is a STATISTICAL background, and this
 component is its one spelling (review 8.10.3, JDE 2026-10-26: the "unmodeled remainder" of
 the blend split and the planned follow-up's "unresolved background" are the same light and

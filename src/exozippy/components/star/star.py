@@ -20,6 +20,7 @@ from exozippy.constants import (
     HYDROGEN_BURNING_LIMIT,
     MSUN_TO_MEARTH,
 )
+from exozippy.manifest import interpret_manifest_entry, normalize_selector
 from exozippy.outputs.prose import get_collector
 
 from . import physics
@@ -927,22 +928,275 @@ class Star(Component):
             )
         return {"overrides": {"lower": floors.tolist()}}
 
+    #: What a star in an orbit group shares with its group's anchor (JDE
+    #: 2026-10-26: "if we make it some kind of orbit (even static), that
+    #: should automatically trigger several links (if fit): distance,
+    #: proper motion, initfeh, age, av").
+    ORBIT_LINKED_PARAMS = (
+        "distance",
+        "pm_ra",
+        "pm_dec",
+        "initfeh",
+        "age",
+        "av",
+    )
+
+    def orbit_anchors(self, system):
+        """{star index: anchor star index} for every star in an orbit group.
+
+        Every STAR in either group of ANY orbit (Keplerian, Taylor or
+        static) belongs to that orbit's ANCHOR, the first star of its
+        primary group; planets take no part.  Hierarchies chain to the root
+        anchor (KELT-4: B -> C in orbit BC, B and C -> A in orbit A-BC, so
+        both resolve to A).  A star whose orbits resolve to two different
+        roots, and a cycle, RAISE naming the orbits: a star has one system.
+        A star that anchors its own group and is in no other is absent.
+        """
+        orbit = getattr(system, "orbit", None)
+        if orbit is None:
+            return {}
+        parents = {}  # star -> {anchor: orbit name}
+        for k in range(orbit.n_elements):
+            prim = [int(i) for t, i in orbit.primary_bodies[k] if t == "star"]
+            comp = [
+                int(i) for t, i in orbit.companion_bodies[k] if t == "star"
+            ]
+            if not prim:
+                continue
+            anchor = prim[0]
+            for s in prim[1:] + comp:
+                if s != anchor:
+                    parents.setdefault(s, {})[anchor] = orbit.names[k]
+
+        def root(s, seen):
+            if s in seen:
+                raise ValueError(
+                    f"[{self.prefix}] the orbit groups form a cycle through "
+                    f"star(s) {[self.names[i] for i in seen]}: each orbit "
+                    f"ties its stars to its first primary star, so no star "
+                    f"can be its own anchor's member."
+                )
+            if s not in parents:
+                return s
+            roots = {a: root(a, seen | {s}) for a in sorted(parents[s])}
+            if len(set(roots.values())) > 1:
+                detail = ", ".join(
+                    f"orbit {parents[s][a]!r} -> {self.names[r]}"
+                    for a, r in roots.items()
+                )
+                raise ValueError(
+                    f"[{self.prefix}] star {self.names[s]} is in orbit "
+                    f"groups that belong to different systems ({detail}). "
+                    f"A star in an orbit group shares its anchor's "
+                    f"distance and motion, so its orbits must chain to one "
+                    f"root star."
+                )
+            return next(iter(roots.values()))
+
+        return {s: root(s, frozenset()) for s in sorted(parents)}
+
+    def _user_entry_for(self, i, param):
+        """Star ``i``'s most specific params-file entry on ``param``, or
+        None (index, then name, then broadcast spelling)."""
+        params = getattr(self.config_manager, "user_params", None) or {}
+        for key in (
+            f"{self.prefix}.{i}.{param}",
+            f"{self.prefix}.{self.names[i]}.{param}",
+            f"{self.prefix}.{param}",
+        ):
+            entry = user_entry(params, key)
+            if entry is not None:
+                return entry
+        return None
+
+    def _link_orbit_members(self, system):
+        """Tie every star in an orbit group to its anchor (``orbit_anchors``)
+        on ``ORBIT_LINKED_PARAMS``: a hard link, through the component
+        channel ``ConfigManager.add_link`` (never ``user_params``), made
+        hard by ``sigma: 0`` through the opt-in ``"overrides"`` channel.
+
+        The proper motion is the SYSTEM's barycentric motion: a Keplerian
+        orbit adds the orbital motion on top where a consumer models it
+        (the gaia/abs photocenter wobble of a primary-group star, a
+        xallarap source, a lens orbit), and a Taylor or static orbit adds
+        none on the sky.
+
+        Per (star, parameter), only where the parameter is DECLARED and
+        ACTIVE for the star; active on one of the pair and not the other
+        RAISES naming both (one system, one value), and so does a member
+        whose element is DERIVED (it already has a value of its own).  The
+        user's params file wins, per link:
+
+        - a hand link identical to this one (``initval: star.<anchor>.<p>,
+          sigma: 0``) is kept, with a warning that it is redundant;
+        - any other user statement on the member's element -- a ``mu`` or
+          ``sigma`` (a prior, a pin), any other link, or a link on the
+          anchor's element that reads the member's -- BREAKS that one link,
+          reported at startup;
+        - a bare ``initval`` is only a start; the link supplies the value.
+        """
+        anchors = self.orbit_anchors(system)
+        if not anchors:
+            return
+        cm = self.config_manager
+        n = self.n_elements
+        added, redundant, broken, superseded = {}, [], [], []
+        for param in self.ORBIT_LINKED_PARAMS:
+            if param not in self.manifest:
+                continue
+            parsed = interpret_manifest_entry(self.manifest[param])
+            where = f"{self.prefix}.{param}"
+            active = parsed.activity_mask(n, where)
+            derived = np.zeros(n, dtype=bool)
+            if parsed.expr_key is not None:
+                derived[:] = True
+            for sel in (parsed.expr_selectors or {}).values():
+                derived |= normalize_selector(sel, n, where)
+            pin = []
+            for i, a in anchors.items():
+                pair = f"{self.names[i]} (member) and {self.names[a]} (anchor)"
+                if active[i] != active[a]:
+                    have, lack = (a, i) if active[a] else (i, a)
+                    raise ValueError(
+                        f"[{where}] stars {pair} are in one orbit system, "
+                        f"which shares {param}, but {param} is a parameter "
+                        f"of {self.names[have]} and not of "
+                        f"{self.names[lack]}. Give both the same topology "
+                        f"(e.g. the same mist:/parsec: switch, or an SED row "
+                        f"for both), or take the member out of the orbit "
+                        f"group."
+                    )
+                if not active[i]:
+                    continue
+                if derived[i]:
+                    raise ValueError(
+                        f"[{where}] stars {pair}: the member's {param} is "
+                        f"derived by its own expression, so it cannot also "
+                        f"be tied to the anchor's. Make the star whose "
+                        f"{param} is derived the FIRST star of the orbit's "
+                        f"primary group."
+                    )
+                target = f"{self.prefix}.{i}.{param}"
+                source = f"{self.prefix}.{a}.{param}"
+                link = cm.links.get(target, {})
+                entry = self._user_entry_for(i, param) or {}
+                reverse = any(
+                    target in pl.dep_paths
+                    for pl in cm.links.get(source, {}).values()
+                )
+                if link:
+                    hand = link.get("initval")
+                    same = (
+                        set(link) == {"initval"}
+                        and hand.dep_paths == [source]
+                        and str(hand.expr) == source
+                        and entry.get("sigma") == 0
+                    )
+                    if same:
+                        redundant.append(f"{self.names[i]}.{param}")
+                    else:
+                        broken.append(
+                            f"{self.names[i]}.{param} (params-file link: "
+                            + ", ".join(
+                                f"{f}: {pl.expr_str}" for f, pl in link.items()
+                            )
+                            + ")"
+                        )
+                    continue
+                if reverse or "mu" in entry or "sigma" in entry:
+                    why = (
+                        "the anchor's entry links to it"
+                        if reverse
+                        else ", ".join(
+                            f"{f}: {entry[f]}"
+                            for f in ("mu", "sigma")
+                            if f in entry
+                        )
+                    )
+                    broken.append(f"{self.names[i]}.{param} ({why})")
+                    continue
+                if entry.get("initval") is not None:
+                    superseded.append(f"{self.names[i]}.{param}")
+                cm.add_link(target, source, origin="orbit")
+                pin.append(i)
+                added.setdefault((i, a), []).append(param)
+            if pin:
+                self.manifest[param] = self._merge_sigma_pin(
+                    self.manifest[param], pin
+                )
+        for (i, a), params in added.items():
+            logger.info(
+                f"[{self.prefix}] orbit group: {self.names[i]} shares "
+                f"{', '.join(params)} with {self.names[a]} (hard link)."
+            )
+        if redundant:
+            logger.warning(
+                f"[{self.prefix}] params-file link(s) on {redundant} repeat "
+                f"the link an orbit group makes on its own; they can be "
+                f"deleted."
+            )
+        if broken:
+            logger.warning(
+                f"[{self.prefix}] orbit-group link(s) NOT made, because the "
+                f"params file states something else for the member: "
+                f"{'; '.join(broken)}."
+            )
+        if superseded:
+            logger.info(
+                f"[{self.prefix}] the params-file initval on {superseded} is "
+                f"unused: an orbit group ties the element to its anchor."
+            )
+
+    def _merge_sigma_pin(self, entry, elements):
+        """``entry`` with ``sigma: 0`` on ``elements`` in its "overrides",
+        keeping any per-element sigma override already there."""
+        parsed = interpret_manifest_entry(entry)
+        sigma = (parsed.overrides or {}).get("sigma")
+        if sigma is None:
+            out = np.full(self.n_elements, np.nan)
+        elif np.ndim(sigma) == 0:
+            out = np.full(self.n_elements, float(sigma))
+        else:
+            out = np.asarray(sigma, dtype=float).copy()
+        out[list(elements)] = 0.0
+        return merge_overrides(entry, {"sigma": out.tolist()})
+
     def _pin_unmeasured_neighbor_pm(self, system):
-        """Pin a modeled NEIGHBOR's proper motion at the field mean unless
-        an astrometry dataset reads it (review 8.9.7(a), 8.10.3).
+        """Pin a modeled NEIGHBOR's proper motion at the field mean when
+        NOTHING constrains it (review 8.9.7(a), 8.10.3).
 
         A neighbor is a star on a microlensing sightline that is neither a
         lens nor a source body nor in any orbit group (a companion moves
-        with its system).  Nothing reads its pm unless a gaia/abs/catalog
-        dataset targets it or names it in ``psf_stars:`` -- a catalog proper
-        motion is the flux-weighted motion of everything in its PSF -- so
-        an unread one is pinned through the opt-in "overrides" channel (a
-        params entry frees it; no user_params write) at the bulge field
-        mean on a bulge sightline (``background.bulge_field_pm_prior``: the
-        pinned value then sits at the center of the galactic model's bulge
-        velocity Gaussian, as 8.9.7(a) asks).  A read one stays free, under
-        the galactic kinematic prior where there is one.  Off the bulge
-        there is no field mean to pin at: free, with a warning.
+        with its system).  The rule (JDE 2026-10-26): "if nothing
+        constrains it, pin it.  but if something constrains it (like
+        galactic model, distance, pm) don't."  Per neighbor, in order:
+
+        1. TIED -- the params file links its pm to another star's
+           (``star.<name>.pm_ra: {initval: star.Source.pm_ra, sigma: 0}``).
+           The link is the value, so no start is hinted.  The ``sigma: 0``
+           below is what makes an initval-only link hard rather than a
+           start (``Component._wire_user_links``).  A BOUND companion is
+           spelled as an orbit group instead (``type: static`` if it does
+           not move), which ties it automatically
+           (``_link_orbit_members``) and makes it no neighbor at all.
+        2. FREE under the galactic kinematic prior when a galacticmodel is
+           in the topology: its ``kinematic_prior`` covers the WHOLE star
+           vector, each star at its own (sampled) distance (star.md, "The
+           stellar distance prior"), so nothing is pinned at all.
+        3. FREE when a gaia/abs/catalog dataset targets it or names it in
+           ``psf_stars:`` (a catalog proper motion is the flux-weighted
+           motion of everything in its PSF).
+        4. Otherwise PINNED through the opt-in "overrides" channel (a params
+           entry frees it; no user_params write) at the bulge field mean on
+           a bulge sightline (``background.bulge_field_pm_prior``), the
+           start through ``add_hint``.  Off the bulge there is no field mean
+           to pin at: free, with a warning.
+
+        A neighbor whose DISTANCE is hard-linked to another star's but
+        whose pm is not linked is warned about in case 4: a distance link
+        alone states only a shared position (star.md, "Linked stars"), so
+        the code does not tie the pm on its own; the warning names the
+        orbit group that would.
         """
         event = getattr(system, "mulensevent", None)
         if event is None or "pm_ra" not in self.manifest:
@@ -963,6 +1217,15 @@ class Star(Component):
         neighbors = [i for i in range(self.n_elements) if i not in bodies]
         if not neighbors:
             return
+        has_gm, _imf = self._galactic_imf(system)
+        if has_gm:
+            logger.info(
+                f"[{self.prefix}] neighbor star(s) "
+                f"{[self.names[i] for i in neighbors]}: proper motion free "
+                f"under the galactic kinematic prior at each star's own "
+                f"distance (review 8.9.7(a))."
+            )
+            return
         measured = set()
         astrom = getattr(system, "astrometryinstrument", None)
         if astrom is not None:
@@ -974,6 +1237,15 @@ class Star(Component):
         unread = [i for i in neighbors if i not in measured]
         if not unread:
             return
+        cm = self.config_manager
+        pm_links = [
+            set(cm.get_element_links(self.prefix, key).get("initval", {}))
+            for key in ("pm_ra", "pm_dec")
+        ]
+        tied = [i for i in unread if i in pm_links[0] and i in pm_links[1]]
+        dist_linked = set(
+            cm.get_element_links(self.prefix, "distance").get("initval", {})
+        ) & set(self.user_pinned_stars("distance"))
         from exozippy.components.background.background import (
             bulge_field_pm_prior,
             on_bulge_sightline,
@@ -989,10 +1261,10 @@ class Star(Component):
         names = [self.names[i] for i in unread]
         if not on_bulge_sightline(ra, dec):
             logger.warning(
-                f"[{self.prefix}] neighbor star(s) {names}: no astrometry "
-                f"reads their proper motion and the sightline is off the "
-                f"bulge, so there is no field mean to pin it at; it stays "
-                f"free (pin it in the params file)."
+                f"[{self.prefix}] neighbor star(s) {names}: no galactic "
+                f"model or astrometry constrains their proper motion and the "
+                f"sightline is off the bulge, so there is no field mean to "
+                f"pin it at; it stays free (pin it in the params file)."
             )
             return
         (mu_ra, mu_dec), _sigma = bulge_field_pm_prior(ra, dec)
@@ -1000,20 +1272,43 @@ class Star(Component):
             # The pin is structural (sigma 0 through "overrides", under the
             # params file); the value it pins at is a ranked START, which
             # has one channel, add_hint -- the same rank the microlensing
-            # pm seeds from the galactic model use.
-            sigma = np.full(self.n_elements, np.nan)
-            sigma[unread] = 0.0
-            self.manifest[key] = merge_overrides(
-                self.manifest[key], {"sigma": sigma.tolist()}
+            # pm seeds from the galactic model use.  A tied star's link is
+            # its value, so it gets the pin (which makes the link hard) and
+            # no hint.
+            self.manifest[key] = self._merge_sigma_pin(
+                self.manifest[key], unread
             )
             for i in unread:
-                self.config_manager.add_hint(f"star.{i}.{key}", mu)
+                if i not in tied:
+                    self.config_manager.add_hint(f"star.{i}.{key}", mu)
+        if tied:
+            logger.info(
+                f"[{self.prefix}] neighbor star(s) "
+                f"{[self.names[i] for i in tied]}: proper motion tied by the "
+                f"params-file link (a bound companion)."
+            )
+        pinned = [i for i in unread if i not in tied]
+        if not pinned:
+            return
         logger.info(
-            f"[{self.prefix}] neighbor star(s) {names}: proper motion pinned "
-            f"at the bulge field mean ({mu_ra:.2f}, {mu_dec:.2f}) mas/yr -- "
-            f"no astrometry reads it (review 8.9.7(a)); naming the star in "
-            f"a gaia/abs/catalog dataset's psf_stars frees it."
+            f"[{self.prefix}] neighbor star(s) "
+            f"{[self.names[i] for i in pinned]}: proper motion pinned at the "
+            f"bulge field mean ({mu_ra:.2f}, {mu_dec:.2f}) mas/yr -- no "
+            f"galactic model or astrometry constrains it (review 8.9.7(a)); "
+            f"a galacticmodel block, or naming the star in a gaia/abs/catalog "
+            f"dataset's psf_stars, frees it."
         )
+        companions = [self.names[i] for i in pinned if i in dist_linked]
+        if companions:
+            logger.warning(
+                f"[{self.prefix}] star(s) {companions}: distance hard-linked "
+                f"to another star's but proper motion pinned at the bulge "
+                f"field mean.  If this is a bound companion, put it in an "
+                f"orbit group with its host (an orbit block with primary: "
+                f"[<host>], companion: [<name>], type: static if it does "
+                f"not move), which ties its distance and proper motion to "
+                f"the host's."
+            )
 
     def _pm_manifest_entry(self, system):
         """pm_ra/pm_dec manifest entry: sampled everywhere, except that a
@@ -1599,6 +1894,7 @@ class Star(Component):
         # Last: the manifest is complete, so readership can be answered for
         # every parameter at once.
         self._apply_structure_activity(system)
+        self._link_orbit_members(system)
 
     # Floor inside the volume prior's log, in pc.  The same clip
     # galacticmodel applies before its own volume element

@@ -64,7 +64,6 @@
   ],
   "star.distance_raw": [
    0.0,
-   0.0,
    0.0
   ],
   "star.logmass_raw": [
@@ -73,11 +72,9 @@
   ],
   "star.pm_dec_raw": [
    0.0,
-   0.0,
    0.0
   ],
   "star.pm_ra_raw": [
-   0.0,
    0.0,
    0.0
   ],
@@ -93,7 +90,7 @@
  },
  "terms": {
   "POT:galacticmodel.imf_prior": -5.61987466293619,
-  "POT:galacticmodel.kinematic_prior": 33.71297314938548,
+  "POT:galacticmodel.kinematic_prior": 9.468901515746511,
   "POT:gaussian_prior.lens.xalpha": -0.3780107162176545,
   "POT:gaussian_prior.lens.yalpha": -0.12198928378235384,
   "POT:gaussian_prior.orbit.xbigomega": -0.04397833900031094,
@@ -116,10 +113,10 @@
   "POT:logit_uniform_prior.planet.radius": -4.615221501842092,
   "POT:logit_uniform_prior.source.t_0": -2.4397022381963143,
   "POT:logit_uniform_prior.source.u_0": -1.386358363167978,
-  "POT:logit_uniform_prior.star.distance": -8.526466584952546,
+  "POT:logit_uniform_prior.star.distance": -5.976788841910725,
   "POT:logit_uniform_prior.star.logmass": -3.8753275205287085,
-  "POT:logit_uniform_prior.star.pm_dec": -4.158883085434928,
-  "POT:logit_uniform_prior.star.pm_ra": -4.158883085228754,
+  "POT:logit_uniform_prior.star.pm_dec": -2.772588723415037,
+  "POT:logit_uniform_prior.star.pm_ra": -2.7725887232088633,
   "POT:logit_uniform_prior.star.radius": -12.476203247925252,
   "POT:logit_uniform_prior.star.rv": -4.1588830833596715,
   "POT:low_bound.lens.q": -9.85967654375977e-305,
@@ -177,12 +174,12 @@
   "RV:planet.radius_raw": -0.9189385332046727,
   "RV:source.t_0_raw": -0.9189385332046727,
   "RV:source.u_0_raw": -0.9189385332046727,
-  "RV:star.distance_raw": -2.756815599614018,
+  "RV:star.distance_raw": -1.8378770664093453,
   "RV:star.logmass_raw": -1.8378770664093453,
-  "RV:star.pm_dec_raw": -2.756815599614018,
-  "RV:star.pm_ra_raw": -2.756815599614018,
+  "RV:star.pm_dec_raw": -1.8378770664093453,
+  "RV:star.pm_ra_raw": -1.8378770664093453,
   "RV:star.radius_raw": -1.8378770664093453,
   "RV:star.rv_raw": -2.756815599614018
  },
- "total_logp": 5939.965259001473
+ "total_logp": 5923.8002694345305
 }
