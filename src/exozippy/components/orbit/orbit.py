@@ -29,6 +29,7 @@ from .bodies import (
     TAYLOR_TYPES,
     component_instance_names,
     parse_orbit_bodies,
+    photocenter_stars,
 )
 
 # Every legal `type:` of an orbit block.  `keplerian` is the default; the
@@ -89,13 +90,22 @@ def _astrometric_orbits(system, orbit):
             if ast.rel_orbit[i] is not None:
                 out.add(ast.rel_orbit[i])
         else:
-            # gaia/abs photocenter wobble sums the orbits whose primary
-            # group contains the target star.
-            s = int(ast.config[i].get("star_ndx", 0))
-            out.update(
-                o for o, role in orbit.star_membership(s) if role == "primary"
-            )
+            # A gaia/abs/catalog photocenter moves with every Keplerian
+            # orbit holding one of its stars, on either side (review
+            # 8.10.6: the companion-group side used to be dropped).
+            out.update(_photocenter_orbits(system, orbit, ast.config[i]))
     return out
+
+
+def _photocenter_orbits(system, orbit, entry):
+    """The Keplerian orbits an absolute astrometric dataset's photocenter
+    moves with: every orbit holding one of ``photocenter_stars`` (the target,
+    and on the SED path its ``companion_star_ndx``), primary or companion
+    side.  The one membership rule the model
+    (``AstrometryInstrument._photocenter_orbits``) and every predicate here
+    share."""
+    stars = photocenter_stars(entry, system.config)
+    return {o for s in stars for o, _ in orbit.star_membership(s)}
 
 
 def inclination_constrained_orbits(system, orbit):
@@ -2005,7 +2015,11 @@ class Orbit(Component):
                     group = self.primary_bodies[o] + self.companion_bodies[o]
                     stars = {idx for t, idx in group if t == "star"}
                 else:
-                    stars = {int(ast.config[i].get("star_ndx", 0))}
+                    stars = set(
+                        photocenter_stars(
+                            ast.config[i], self.config_manager.system_config
+                        )
+                    )
                 for t in consumers:
                     if stars & {
                         idx for ty, idx in self.bodies(t) if ty == "star"
@@ -2312,11 +2326,8 @@ class Orbit(Component):
                     if ast.rel_orbit[i] is not None:
                         astrometric.add(ast.rel_orbit[i])
                 else:
-                    s_idx = int(ast.config[i].get("star_ndx", 0))
                     astrometric.update(
-                        o
-                        for o, role in self.star_membership(s_idx)
-                        if role == "primary"
+                        _photocenter_orbits(system, self, ast.config[i])
                     )
         # A xallarap orbit is astrometry-LIKE for this predicate: the
         # source's sky track enters the trajectory, and a sky track of any

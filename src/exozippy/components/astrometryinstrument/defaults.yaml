@@ -21,10 +21,12 @@ astrometryinstrument:
         func_name: "calc_jitter"
         deps: [ "jitter_variance" ]
   fluxfrac:
-    # Fractional flux of the companion(s) in this instrument's band,
-    # beta = F_2 / (F_1 + F_2).  The photocenter semimajor axis is
-    # a_phot = a_rel * (M_2/M_tot - beta); beta = 0 (default, fixed)
-    # corresponds to a dark companion (photocenter = primary).
+    # The OTHER star's share of the light in this dataset's PSF, in its
+    # band: b = F_other / (F_target + F_other) -- the companion side's for
+    # a primary-group target, the primary side's for a companion-group one.
+    # The photocenter wobbles as x_rel (b - M_c/M) or x_rel (M_p/M - b)
+    # (astrometryinstrument.py, "The photocenter"); b = 0 (default, fixed)
+    # is a dark companion (photocenter = the target star).
     lower: 0.0
     upper: 1.0
     initval: 0.0

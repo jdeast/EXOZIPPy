@@ -230,7 +230,10 @@ def _astrometry_sed_case(tmp_path, extra_user_params=None):
     config = {
         "star": [{"name": "A", "mist": False}, {"name": "C", "mist": False}],
         "planet": [{"name": "BH"}],
-        "orbit": [{"name": "BH", "primary": ["A"], "companion": ["BH"]}],
+        # C rides the BH orbit's companion group: companion_star_ndx must
+        # share a Keplerian orbit with the target (review 8.10.6), and an
+        # unrelated star in the PSF is a blend, which this mode refuses.
+        "orbit": [{"name": "BH", "primary": ["A"], "companion": ["BH", "C"]}],
         "band": [{"name": "GaiaG", "filter": "GAIA2r.G", "ld_law": "linear"}],
         "astrometryinstrument": [
             {
