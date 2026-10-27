@@ -1,5 +1,6 @@
 """A star in an orbit group shares its anchor's distance, proper motion,
-initfeh, age and av (JDE 2026-10-26; ``Star._link_orbit_members``,
+systemic rv, initfeh, age and av (JDE 2026-10-26, rv 2026-10-27;
+``Star._link_orbit_members``,
 star.md "Linked stars", orbit.md "Hierarchical orbits and body groups").
 
 Every STAR in either group of any orbit -- Keplerian, Taylor or static --
@@ -19,7 +20,7 @@ import pytest
 
 from exozippy.system import System
 
-LINKED = ("distance", "pm_ra", "pm_dec", "initfeh", "age", "av")
+LINKED = ("distance", "pm_ra", "pm_dec", "rv", "initfeh", "age", "av")
 RA_DEG, DEC_DEG = 266.4168, -29.0078
 
 
@@ -125,7 +126,7 @@ def test_every_shared_parameter_is_linked_on_every_orbit_type(
 ):
     """
     Given stars A and B in one orbit (Keplerian, linear Taylor or static),
-    with distance, pm, initfeh, age and av all declared for both,
+    with distance, pm, rv, initfeh, age and av all declared for both,
     When the system is prepared,
     Then each of B's elements is hard-linked to A's through the component
     channel (origin "orbit", sigma 0 through the overrides channel), and
@@ -289,3 +290,83 @@ def test_a_parameter_on_one_star_only_raises(files, model_root):
     cfg["evolutionarymodel"] = [{"star": "A", "model_root": model_root}]
     with pytest.raises(ValueError, match=r"B \(member\) and A \(anchor\)"):
         _prepare(cfg, _params())
+
+
+@pytest.mark.slow
+def test_a_member_linked_on_position_and_velocity_adds_no_kinematic_term(
+    files, model_root
+):
+    """
+    Given A and B on a static orbit under the galactic model,
+    When the model is built,
+    Then B shares A's position AND all three velocity coordinates
+    (pm_ra, pm_dec, rv) -- the structure for which the kinematic prior
+    adds nothing for B (``test_galactic_linked_stars.py``,
+    ``test_fully_linked_member_contributes_nothing``) -- and B's rv starts
+    at A's.
+    """
+    from exozippy.components.galacticmodel.galacticmodel import (
+        linked_star_structure,
+    )
+
+    system = _prepare(
+        _config(files, model_root, [ORBITS["static"]]),
+        _params({"star.A.rv": {"initval": 12000.0}}),
+    )
+    model = system.build_model()
+    star = system.star
+    root_of, vel_linked, refused = linked_star_structure(star, 2)
+    assert list(root_of) == [0, 0]
+    assert vel_linked == {1: (0, 1, 2)}
+    assert refused == []
+
+    fn = pytensor.function(
+        model.free_RVs, star.rv.value, on_unused_input="ignore"
+    )
+    ip = model.initial_point()
+    vals = fn(*[ip[v.name] for v in model.free_RVs])
+    assert vals[1] == vals[0] == pytest.approx(12000.0)
+
+
+@pytest.mark.slow
+def test_a_user_rv_prior_breaks_only_the_rv_link(files, model_root, caplog):
+    """
+    Given a Gaussian prior the user put on B's rv (a measured systemic
+    velocity of its own), and a bare rv initval nowhere else,
+    When the system is prepared,
+    Then B's rv is not orbit-linked, every other parameter still is, and
+    the startup output says the rv link was not made.
+    """
+    params = _params({"star.B.rv": {"mu": 3000.0, "sigma": 500.0}})
+    with caplog.at_level(
+        logging.WARNING, logger="exozippy.components.star.star"
+    ):
+        system = _prepare(
+            _config(files, model_root, [ORBITS["static"]]), params
+        )
+    links = _orbit_links(system)
+    assert set(links) == {f"star.1.{p}" for p in LINKED if p != "rv"}
+    assert any(
+        "NOT made" in r.message and "B.rv" in r.message for r in caplog.records
+    )
+
+
+@pytest.mark.slow
+def test_a_bare_rv_initval_on_the_member_is_reported_unused(
+    files, model_root, caplog
+):
+    """
+    Given a bare initval on B's rv (a start, not a statement),
+    When the system is prepared,
+    Then B's rv is still orbit-linked and an INFO line says the initval is
+    unused.
+    """
+    params = _params({"star.B.rv": {"initval": 5000.0}})
+    with caplog.at_level(logging.INFO, logger="exozippy.components.star.star"):
+        system = _prepare(
+            _config(files, model_root, [ORBITS["static"]]), params
+        )
+    assert _orbit_links(system)["star.1.rv"] == "star.0.rv"
+    assert any(
+        "unused" in r.message and "B.rv" in r.message for r in caplog.records
+    )

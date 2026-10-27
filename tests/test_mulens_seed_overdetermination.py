@@ -68,7 +68,6 @@ def _seed_over_the_chain(pi_e_e):
     config, params = _load()
     for leaf in ("pm_ra", "pm_dec"):
         del params[f"star.Source.{leaf}"]
-        del params[f"star.SComp.{leaf}"]
     params["mulensevent.t_E"] = {"initval": T_E_PUB}
     params["mulensevent.pi_E_N"] = {"initval": PI_E_N_PUB}
     params["mulensevent.pi_E_E"] = {"initval": pi_e_e}

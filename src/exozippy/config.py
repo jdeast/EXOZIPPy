@@ -1521,8 +1521,8 @@ class ConfigManager:
         """A COMPONENT's hard link: ``target_path.initval = expr_str``.
 
         The component channel for a tie the topology implies (a star in an
-        orbit group shares its anchor's distance, proper motion, initfeh,
-        age and av -- ``Star._link_orbit_members``).  It lands in
+        orbit group shares its anchor's distance, proper motion, rv,
+        initfeh, age and av -- ``Star._link_orbit_members``).  It lands in
         ``self.links`` beside the user's, so the engine, the build graph and
         ``Component._wire_user_links`` treat it exactly as they treat a
         params-file link, but it is NEVER a ``user_params`` entry

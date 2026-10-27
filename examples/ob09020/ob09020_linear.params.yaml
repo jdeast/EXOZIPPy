@@ -108,8 +108,6 @@ star.L1.mass:
     initval: 0.888
 star.L1.distance:
     initval: 747.0            # pc
-star.L2.distance:
-    initval: 747.0            # pc
 
 # S11 Sec. 3.2's assumed source distance (pi_s = 0.125 mas); see the
 # keplerian sibling.

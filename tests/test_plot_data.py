@@ -126,7 +126,8 @@ def transit_built():
 # A minimal star-only SED build (the kelt4 three-star A/B/C deblend), so
 # the SED component's plot_data can be tested without the full kelt4.yaml's
 # astrometry/transit/rv machinery. Mirrors the star portion of
-# kelt4_sed.params.yaml.
+# kelt4_sed.params.yaml, plus the distance/av links kelt4.yaml's orbit
+# groups make on their own (this config has no orbit block).
 _SED_CONFIG = {
     "run": {"name": "kelt4"},
     "star": [

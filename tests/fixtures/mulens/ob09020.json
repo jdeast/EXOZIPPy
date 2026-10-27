@@ -102,13 +102,12 @@
   ],
   "star.rv_raw": [
    0.0,
-   0.0,
    0.0
   ]
  },
  "terms": {
   "POT:galacticmodel.imf_prior": -1.6547794206769335,
-  "POT:galacticmodel.kinematic_prior": -0.6078398206302307,
+  "POT:galacticmodel.kinematic_prior": 10.987787203330678,
   "POT:gaussian_prior.orbit.xbigomega": -0.40691672621661684,
   "POT:gaussian_prior.orbit.ybigomega": -0.09308327378337489,
   "POT:logit_uniform_prior.band.u1": -4.681943244794005,
@@ -131,7 +130,7 @@
   "POT:logit_uniform_prior.star.pm_dec": -2.7725887354540073,
   "POT:logit_uniform_prior.star.pm_ra": -2.772588724906726,
   "POT:logit_uniform_prior.star.radius": -5.456071697295337,
-  "POT:logit_uniform_prior.star.rv": -4.1588830833596715,
+  "POT:logit_uniform_prior.star.rv": -2.772588722239781,
   "POT:low_bound.lens.q": -3.016245514697053e-251,
   "POT:low_bound.lens.s": -9.85967654375977e-305,
   "POT:low_bound.mulensevent.mlens_total": -9.85967654375977e-305,
@@ -187,7 +186,7 @@
   "RV:star.pm_dec_raw": -1.8378770664093453,
   "RV:star.pm_ra_raw": -1.8378770664093453,
   "RV:star.radius_raw": -0.9189385332046727,
-  "RV:star.rv_raw": -2.756815599614018
+  "RV:star.rv_raw": -1.8378770664093453
  },
- "total_logp": 33523.08540481392
+ "total_logp": 33536.9862647322
 }
