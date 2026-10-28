@@ -632,6 +632,15 @@ class VBMDirectMagOp(Op):
         vbm = VBMicrolensing.VBMicrolensing()
         vbm.Tol = self._accuracy
         vbm.RelTol = self._relative_accuracy
+        # Workaround for a VBM false convergence (pending upstream): with
+        # the default minannuli = 1 the limb-darkened Mag2 calls can accept
+        # the first annulus and return the UNIFORM-source value, 2.5% low
+        # near a caustic, with no warning.  A uniform source is exact in one
+        # annulus, and a second would nearly double its cost, so only an Op
+        # that carries limb darkening sets it.  mulensing.md, "VBM's limb-
+        # darkened finite source never stops after one annulus".
+        if self.bandpass is not None:
+            vbm.minannuli = 2
         # Fill the astrox1/astrox2 accumulators during every magnification
         # call.  Off on a photometric Op: it moves BinaryMag2's A in the
         # last bit (class docstring), and nothing there reads them.
