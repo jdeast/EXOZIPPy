@@ -273,6 +273,11 @@ def test_every_nuts_backend_samples_the_flat_raw(backend):
         if backend == "pymc":
             idata = pm.sample(cores=2, **kw)
         else:
+            # blackjax: vectorized, because parallel is one jax.pmap device
+            # per chain and an earlier test on this worker may already have
+            # started JAX with one device (#506; run.py warns and switches).
+            if backend == "blackjax":
+                kw["nuts_sampler_kwargs"] = {"chain_method": "vectorized"}
             idata = pm.sample(nuts_sampler=backend, **kw)
 
     # Assert

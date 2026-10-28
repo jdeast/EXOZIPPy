@@ -82,6 +82,34 @@ from .whitening import prepare_whitening
 
 logger = logging.getLogger(__name__)
 
+
+def _blackjax_chain_method(chain_method, chains, n_devices):
+    """
+    The chain method blackjax can actually run with ``n_devices`` JAX devices.
+
+    pymc's blackjax path maps ``chain_method: parallel`` onto ``jax.pmap``,
+    one chain per device, with no check that the devices exist.  Importing
+    ``pymc.sampling.jax`` forces 100 host devices through ``XLA_FLAGS``, but
+    that only takes effect if the JAX backend has not started yet; once
+    anything in the process has touched JAX (a notebook, a second fit, an
+    earlier test on the same xdist worker) there is one CPU device and two
+    chains crash inside ``pmap`` with an opaque "cannot select an axis to
+    squeeze out" (#506).  Vectorized chains run the same NUTS kernel under
+    ``jax.vmap`` on one device, so warn and switch.  numpyro is not routed
+    through here: its MCMC already warns and runs the chains sequentially.
+    """
+    if chain_method != "parallel" or chains <= n_devices:
+        return chain_method
+    logger.warning(
+        f"sampler.chain_method: parallel needs one JAX device per chain, but "
+        f"{chains} chains were requested and JAX has {n_devices} device(s) "
+        f"(the JAX backend started before pymc could raise the host device "
+        f"count). Running the blackjax chains vectorized on one device "
+        f"instead; set 'chain_method: vectorized' to silence this."
+    )
+    return "vectorized"
+
+
 # Every key `_run_fit` reads off the `sampler:` block. Anything else is
 # warned about and ignored, so this set must stay a superset of the keys the
 # code actually consumes: a key missing here produces a warning saying it will
@@ -1415,6 +1443,10 @@ def _run_fit(config, gui, user_params=None):
                 from pymc.sampling.jax import sample_jax_nuts
 
                 chain_method = sampler_cfg.get("chain_method", "parallel")
+                if method == "blackjax":
+                    chain_method = _blackjax_chain_method(
+                        chain_method, chains, jax.local_device_count()
+                    )
                 # No `initvals=`: the start is `Model.initial_point()` and
                 # `System.recenter_whitening_anchor` made that the polished
                 # start by construction (review 4.3.1).  VERIFIED against
