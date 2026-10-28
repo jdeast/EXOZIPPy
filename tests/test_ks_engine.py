@@ -483,3 +483,36 @@ def test_an_escalation_that_cannot_settle_is_undone():
     assert _val(cm, "h") == 1.0
     assert len(_kinds(cm, "unsettled")) == 1
     assert cm._last_keep_report["escalated"] == []
+
+
+def test_a_settle_never_moves_a_seed_no_check_sees():
+    """
+    Given x = a + b with x pinned at 5 by the user and a, b two DEFAULT
+      seeds (so the DEFAULT tier settles), plus a third DEFAULT seed t that
+      no relation mentions, whose defaults.yaml start (10) is OUTSIDE its
+      bounds [0, 2],
+    When the engine settles the DEFAULT tier,
+    Then t keeps its defaults.yaml start and reports DEFAULT provenance.
+      A settle moves only the coordinates a check reaches.  It used to clip
+      EVERY movable coordinate into its bounds on each Gauss-Newton step, so
+      t landed on its upper bound and reported DERIVED_MIXED ("solved"): an
+      unseeded value that looked informed.  That is how a `type: static`
+      orbit (whose default eccentricity relations settle at DEFAULT) made a
+      DC2018 1L2S source's out-of-window default t_0 look informed and
+      switched the peak finder off for it (review 1.6.21;
+      tests/test_dc18_arch_config.py).
+    """
+    cm = _toy(
+        {
+            "x": _blk(scale=1.0),
+            "a": _blk(1.0, scale=1.0),
+            "b": _blk(1.0, scale=3.0),
+            "t": _blk(10.0, lower=0.0, upper=2.0),
+        },
+        lambda S: [sp.Eq(S("x"), S("a") + S("b"))],
+        user={"x": 5.0},
+    )
+    # Non-vacuity: the DEFAULT tier did settle.
+    assert _val(cm, "a") == pytest.approx(1.3, rel=1e-6)
+    assert _val(cm, "t") == 10.0
+    assert cm._last_provenance["toy.0.t"] == PRECEDENCE_DEFAULT

@@ -1180,16 +1180,23 @@ class Engine:
                         1 / 32,
                         1 / 64,
                     ):
+                        # Bound only the coordinates this step MOVES.  A
+                        # coordinate no check sees keeps its anchor, even an
+                        # out-of-bounds defaults.yaml one: clipping every
+                        # coordinate parked an unseeded source t_0 on its
+                        # window edge and reported it DERIVED_MIXED, so it
+                        # looked informed (review 1.6.21).  Its bound is the
+                        # leaf's business, not the settle's.
                         xt = x.copy()
-                        xt[cols] = a[cols] + s[cols] * (u + frac * (u_new - u))
-                        hit = (xt < lo) | (xt > hi)
-                        xt = np.clip(xt, lo, hi)
+                        step = a[cols] + s[cols] * (u + frac * (u_new - u))
+                        hit_c = (step < lo[cols]) | (step > hi[cols])
+                        xt[cols] = np.clip(step, lo[cols], hi[cols])
                         rt, vt = resid(xt)
                         if np.all(np.isfinite(rt)) and np.sum(
                             (rt / sr) ** 2
                         ) < np.sum(rn**2):
                             x, r, vals = xt, rt, vt
-                            free &= ~hit
+                            free[cols[hit_c]] = False
                             accepted = True
                             break
                     if not accepted:
