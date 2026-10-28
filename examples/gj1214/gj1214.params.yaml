@@ -73,9 +73,12 @@ band.MIRILRS.q2:
 mann.A.ks_offset:
   initval: -0.14583661367844059
 
-# Softened SED barrier on the derived loggsed (transition width 0.25 dex,
-# half a NextGen logg cell), added while the star sat past the grid's old
-# logg 5.0 ceiling (README; sed.md).
+# GJ 1214 is an M dwarf at logg = 5.022, past what was the NextGen BC
+# grid's logg 5.0 ceiling, so its bolometric corrections were EXTRAPOLATED
+# off the grid's edge (the SED warns by name and value whenever a star is
+# off the grid).  This widens the SED's soft loggsed barrier to half a
+# NextGen logg cell (transition width 0.25 dex); treat teffsed, radiussed
+# and fbolsed accordingly.  Numbers and history: README.md.
 star.A.loggsed:
   bound_scale: 25.0
 
