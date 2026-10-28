@@ -143,14 +143,14 @@
   "POT:up_bound.mulensinstrument.f_source": -2.957902963127931e-304,
   "POT:up_bound.planet.mass": -9.85967654375977e-305,
   "POT:up_bound.source.rho": -9.85967654375977e-305,
-  "POT:up_bound.star.loggsed": -8.009706259326033e-269,
+  "POT:up_bound.star.loggsed": -9.85967654375977e-305,
   "RV:band.u1_raw": -0.9189385332046727,
   "RV:lens.log_s_raw": -0.9189385332046727,
   "RV:lens.xalpha_raw": -0.9189385332046727,
   "RV:lens.yalpha_raw": -0.9189385332046727,
   "RV:mulensinstrument.err_scale_raw": -2.756815599614018,
   "RV:mulensinstrument.log_f_total_raw": -2.756815599614018,
-  "RV:mulensinstrument.model": 45604.535729743075,
+  "RV:mulensinstrument.model": 45604.53599401064,
   "RV:mulensinstrument.q_source_raw": -2.756815599614018,
   "RV:planet.log_q_raw": -0.9189385332046727,
   "RV:source.t_0_raw": -0.9189385332046727,
@@ -166,5 +166,5 @@
   "RV:star.teff_raw": -0.9189385332046727,
   "RV:star.teffsed_raw": -0.9189385332046727
  },
- "total_logp": 45542.37003904056
+ "total_logp": 45542.3703033081
 }

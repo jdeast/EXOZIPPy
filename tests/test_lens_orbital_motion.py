@@ -110,6 +110,16 @@ def _series(times, p):
     return p["s"] + p["ds_dt"] * dt_yr, p["alpha"] + p["dalpha_dt"] * dt_yr
 
 
+def _mulensmodel_kernel(op):
+    """The direct Op with VBM's default minannuli = 1, which is what
+    MulensModel's own VBM instance runs: these are plumbing-parity tests
+    against an identical kernel.  The direct Op forces a second LD annulus
+    (mulensing.md, "VBM's limb-darkened finite source never stops after one
+    annulus"), which moves A at the ~1e-5 level, inside Tol."""
+    op._vbm.minannuli = 1
+    return op
+
+
 def _compile_om(op):
     p = pt.dvector("p")
     t = pt.dvector("t")
@@ -162,12 +172,14 @@ def test_vbm_per_epoch_matches_mulensmodel_linear_motion():
     """
     times, obs = _times_and_obs()
     vbm_fn = _compile_om(
-        VBMDirectMagOp(
-            coords=_COORDS,
-            n_companions=1,
-            use_rho=True,
-            bandpass="I",
-            orbital_motion=True,
+        _mulensmodel_kernel(
+            VBMDirectMagOp(
+                coords=_COORDS,
+                n_companions=1,
+                use_rho=True,
+                bandpass="I",
+                orbital_motion=True,
+            )
         )
     )
     mm_fn = _compile(
@@ -646,8 +658,10 @@ def test_mulensmodel_backend_applies_finite_source_at_stellar_q():
         )
     )
     vbm_fn = _compile(
-        VBMDirectMagOp(
-            coords=_COORDS, n_companions=1, use_rho=True, bandpass="I"
+        _mulensmodel_kernel(
+            VBMDirectMagOp(
+                coords=_COORDS, n_companions=1, use_rho=True, bandpass="I"
+            )
         )
     )
     a_mm = mm_fn(pv, times, obs)

@@ -158,7 +158,7 @@
   "RV:lens.yalpha_raw": -0.9189385332046727,
   "RV:mulensinstrument.err_scale_raw": -6.432569732432707,
   "RV:mulensinstrument.log_f_total_raw": -6.432569732432707,
-  "RV:mulensinstrument.model": 79591.65045551145,
+  "RV:mulensinstrument.model": 79591.64436118095,
   "RV:mulensinstrument.q_flux_raw": -6.432569732432707,
   "RV:mulensinstrument.q_source_raw": -6.432569732432707,
   "RV:source.t_0_raw": -1.8378770664093453,
@@ -170,5 +170,5 @@
   "RV:star.radius_raw": -1.8378770664093453,
   "RV:star.rv_raw": -3.6757541328186907
  },
- "total_logp": 79400.67660985189
+ "total_logp": 79400.67051552143
 }
