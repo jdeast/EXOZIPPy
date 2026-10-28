@@ -200,6 +200,12 @@ there:
     events/194/DC2018_194.yaml
     events/223/DC2018_223.yaml
 
+The 21 `sweep2/`, `sweep3/`, `sweep4/`, `ab047/loggwide` and
+`ab194/{mamajek,mistlens}` configs named a `*_seed.json` that no longer
+exists (its content is the `_seed.params.yaml` fragment above); the key was
+deleted from them in #508 and nothing else changed, so they now build with
+the built-in peak finder's seeds.
+
 The 22 pre-v0.1.0 configs (event options on the `lens:` block) under
 `configs/` and `events*/128/` already did not build and were left
 untouched; `configs/README.md` says how to port one.
