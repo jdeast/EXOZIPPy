@@ -32,7 +32,6 @@ star.Lens.feh:
     initval: 0.0
 star.Source.mass:
     initval: 0.3
-    sigma: 0.0
 star.Source.teff:
     initval: 3500
 star.Source.feh:
