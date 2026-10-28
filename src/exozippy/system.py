@@ -1611,8 +1611,9 @@ class System(Component):
 
         1. LOGIT elements -- ``Parameter.recenter_on_start`` folds the
            displacement into the ANCHOR and zeroes ``raw_initval``.  Free:
-           section C's correction cancels the raw N(0,1) symbolically, so the
-           anchor is pure parameterization and moving it changes no density.
+           a logit element's raw coordinate is flat and section C's Jacobian
+           alone makes its prior uniform, so the anchor is pure
+           parameterization and moving it changes no density.
            ``raw = 0`` then IS the polished start.
         2. GAUSSIAN-PATH elements -- the center is NOT touched.  There
            ``raw ~ N(0,1)`` IS the prior and ``gaussian_mus`` is the prior
@@ -1733,11 +1734,14 @@ class System(Component):
         the same PHYSICAL posterior density -- the observation term is
         identical and every prior term is symmetric under the reflection, both
         asserted in tests/test_node_degeneracy.py -- so a folded draw's stored
-        lp is still its lp.  Where a coordinate's raw excursion trips
-        `_RAW_CANCELLATION_CLIP` (tc's does, by ~1e5 raw units), the
-        difference that clip introduces is an artifact of the sampled
-        coordinate rather than a density, and re-deriving lp from the folded
-        raws would record the artifact instead of removing it.
+        lp is still its lp.  The RAW-space lp of the two labels differs only
+        by tc's logit Jacobian (~1 nat on the test system: the moved tc sits
+        at a different q), an artifact of the sampled coordinate rather than
+        a density, and re-deriving lp from the folded raws would record the
+        artifact instead of removing it.  (Before review 1.2.9 the artifact
+        was the raw-cancellation clip's wall at |raw| = 1e4 -- tc's excursion
+        reaches ~1e5 -- worth ~1e10 nats; the logit raw coordinate is flat
+        now and that clip is gone.)
         """
         posterior = getattr(idata, "posterior", None)
         if posterior is None:

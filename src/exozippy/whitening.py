@@ -19,8 +19,9 @@ Parameter.set_whitening(), which updates the pytensor.shared whitening scales
 in place -- no model rebuild, and the posterior is provably unchanged.
 
 That proof covers the LOGIT branch only -- an element with two finite bounds,
-where section C of Parameter.build_pymc cancels the raw N(0,1) prior
-symbolically for any scale, so the scale affects conditioning alone.  It is
+whose raw coordinate is flat (Parameter.build_pymc's _raw_logp) and whose
+uniform prior is section C's Jacobian for any scale, so the scale affects
+conditioning alone.  It is
 exactly the set set_whitening rescales.  Every NON-logit element (anything
 without two finite bounds) is left untouched, because there the raw N(0,1) IS
 the prior: N(mu, sigma) when a sigma was given, and N(initval, init_scale)
@@ -47,8 +48,6 @@ import os
 
 import numpy as np
 
-from exozippy.components.parameter import raised_raw_cancellation_clip
-
 logger = logging.getLogger(__name__)
 
 # target = 0.5 nats (dlogp=0.5 <-> dchi2=1, the EXOFASTv2 convention); for a
@@ -59,7 +58,7 @@ _PROBE_MIN_STEP = 1.0e-8  # raw units; floor on a returned step
 _PROBE_RTOL = 0.05  # accept a step whose drop is within 5% of target
 _PROBE_MAX_BISECT = 40
 _PROBE_FLAT_SCALE = 1.0  # fallback when neither direction reaches target;
-# raw variables are N(0,1) by construction, so 1.0
+# one raw unit is one preliminary scale by construction, so 1.0
 # is the natural unit for a direction logp ignores.
 
 # An element whose gradient contributes more than this many nats over one
@@ -264,7 +263,8 @@ def probe_scales(
        sigma: on examples/ob140939 a start ~5900 nats below the posterior
        returned scales ~1000x too small, the mass matrix re-widened the raw
        posterior to sd ~5e3, and the sampler diverged on 86% of draws
-       against parameter.py's _RAW_CANCELLATION_CLIP wall at |raw|=1e4.
+       against the raw-cancellation clip's wall at |raw|=1e4 (since
+       removed: review 1.2.9, parameter.py's _raw_logp).
     2. When C never reaches the target (h <= 0: locally linear directions,
        ridges, saddles), fall back to EXOFASTv2's exofast_getmcmcscale
        convention of searching each sign for the one-sided 0.5-nat drop,
@@ -360,47 +360,69 @@ def probe_scales(
     return map_lp, scales
 
 
-# The probe's reach upward is NOT _WHITEN_MAX_STEP.  parameter.py's
-# _RAW_CANCELLATION_CLIP puts a near-vertical wall in logp at |raw| = the
-# clip (past it the +0.5*raw**2 correction stops tracking pm.Normal's
-# -0.5*raw**2, so the drop reaches 0.5 nats within 0.5/clip of the wall).
-# The probe cannot see any real contour beyond it, so at the sampler's clip
-# of 1e4 an element whose preliminary scale was too tight by more than ~4
-# orders measured exactly 1e4 -- inside the old escalation window, hence no
-# re-probe and no warning, and the model stayed silently under-whitened
-# (review 1.2.1: the ob140939 divergence family).  The wall is a sampler
-# safety device, not a property of the posterior, so the probe RAISES it for
-# its own duration.
-#
-# How far may it honestly be raised?  The clip exists because the two
-# -0.5*raw**2 terms cancel only to float64 precision of the larger one, a
-# residual of ~0.5*raw**2 * 2**-52 nats.  That reaches the probe's own 0.5-nat
-# target near |raw| = sqrt(2**53) ~ 7e7, which is the hard ceiling.  At 1e6
-# the residual is 0.5*1e12*2.2e-16 ~ 1.1e-4 nats against a 0.5-nat target
-# (2e-4 relative, well inside _PROBE_RTOL = 5%), and it buys 6 orders of
-# magnitude of reach per round.  Do not raise it toward 7e7 to buy the last
-# order: the noise there is the measurement.
-_PROBE_RAW_CLIP = 1.0e6
-
 # A measured multiplier at/beyond these marks was CLIPPED by one of the
-# probe's three limits -- the step floor, the max step, or the wall above --
-# so the true scale was only bounded, not resolved.  Each mark is half the
-# corresponding limit, i.e. one bracketing step inside it.  Escalation applies
-# the clipped value (already a huge improvement) and re-probes just those
-# elements in the new raw coordinates, where the residual error is within
-# range again; it repeats until nothing is clipped, so the reach is not a
-# hardcoded number of orders of magnitude on either side.  Per round that is
-# ~14 orders down (_WHITEN_MIN_STEP) and ~6 up (_PROBE_RAW_CLIP, the binding
-# limit -- _WHITEN_MAX_STEP is far beyond it); the cap below only stops a
+# probe's two limits -- the step floor or the max step -- so the true scale
+# was only bounded, not resolved.  Each mark is half the corresponding limit,
+# i.e. one bracketing step inside it.  Escalation applies the clipped value
+# (already a huge improvement) and re-probes just those elements in the new
+# raw coordinates, where the residual error is within range again; it repeats
+# until nothing is clipped, so the reach is not a hardcoded number of orders
+# of magnitude on either side.  Per round that is ~14 orders down
+# (_WHITEN_MIN_STEP) and ~9 up (_WHITEN_MAX_STEP); the cap below only stops a
 # pathological non-converging case, and reaching it warns.
+#
+# There used to be a THIRD limit on the up side, and it is gone for good
+# (review 1.2.9).  parameter.py cancelled a raw N(0, 1) on every logit
+# element with a +0.5*raw**2 term clipped at |raw| = 1e4, which put a
+# near-vertical wall in logp there; the probe found THAT wall instead of the
+# posterior's contour (review 1.2.1, the ob140939 divergences) and so raised
+# the clip to 1e6 for its own duration, and this mark was
+# 0.5 * min(_WHITEN_MAX_STEP, 1e6).  The raw coordinate of a logit element
+# is now flat (parameter.py, _raw_logp), so there is no cancellation, no
+# clip and no wall: the marks derive from the probe's own step limits only.
+# If a wall ever reappears in raw space it must be added here too, or the
+# probe will again report it as a measured scale.
+#
+# What the wall did that WAS needed, and what replaces it: it guaranteed
+# every logit element a contour within reach, so an element too tight by
+# more than the probe's reach measured "the wall", was clipped, and
+# escalated.  Without it such an element measures FLAT, which on its own
+# would keep the preliminary scale and stop.  But a logit element is never
+# genuinely flat: its prior alone, the Jacobian log(q(1-q)), costs 0.5 nats
+# within |delta lq| ~ 1.5 of any start (whitening.md, "What flat means"),
+# so a flat probe of one proves only that the scale is beyond the reach.
+# _flat_logit_is_clipped therefore books it AT the reach (_WHITEN_MAX_STEP),
+# which _CLIP_HI reads as clipped, and escalation proceeds exactly as the
+# wall used to make it -- but now from a statement about the measurement,
+# not from a term in the density.  A NON-logit element that measures flat
+# keeps NaN: there flat can be real.
 _CLIP_LO = 2.0 * _WHITEN_MIN_STEP
-_CLIP_HI = 0.5 * min(_WHITEN_MAX_STEP, _PROBE_RAW_CLIP)
+_CLIP_HI = 0.5 * _WHITEN_MAX_STEP
 _MAX_ESCALATION_ROUNDS = 8
 
 
 def _param_for_raw(lookup, key):
     name = key[: -len("_raw")] if key.endswith("_raw") else key
     return lookup.get(name)
+
+
+def _logit_raw_mask(par):
+    """Per raw-vector element: is it on the logit path?  (Raw order is the
+    parameter's sampled_idx order.)"""
+    tf = par._raw_transform
+    return np.asarray(tf["use_logit"], dtype=bool)[tf["sampled_idx"]]
+
+
+def _flat_logit_is_clipped(mult, logit_mask):
+    """Book a FLAT (NaN) probe of a logit element at the probe's reach.
+
+    See the note above _CLIP_LO: a logit element cannot be flat, so a flat
+    probe means its scale lies beyond _WHITEN_MAX_STEP, and the escalation
+    must be told so.  Returns a new array; non-logit NaNs are left alone.
+    """
+    out = np.asarray(mult, dtype=float).reshape(-1).copy()
+    out[logit_mask & ~np.isfinite(out)] = _WHITEN_MAX_STEP
+    return out
 
 
 def _refetch_raw_start(system, model, fallback):
@@ -469,15 +491,11 @@ def apply_measured_whitening(system, model, raw_start=None, logp_fn=None):
     bounds, whether its width came from a sigma or from init_scale -- are
     never rescaled.
 
-    The whole measurement runs with parameter.py's raw-cancellation clip
-    raised to _PROBE_RAW_CLIP: at its sampling value that wall, not the
-    posterior, is what a badly-too-tight element's 0.5-nat contour would be
-    (see _PROBE_RAW_CLIP).  It is restored before this returns.
-
     Elements whose measured multiplier hit the probe's dynamic-range limits
-    (a preliminary scale off by more than ~6 orders of magnitude too tight or
+    (a preliminary scale off by more than ~9 orders of magnitude too tight or
     ~14 too loose, e.g. a period constrained to nanoseconds against day-scale
-    bounds) are escalated: the clipped correction is applied, then just those
+    bounds; a logit element that probes FLAT counts as too tight, see
+    _flat_logit_is_clipped) are escalated: the clipped correction is applied, then just those
     elements are re-probed in the new raw coordinates, where the residual
     error is resolvable.  That repeats until nothing is clipped, so the reach
     is a product of rounds rather than a fixed number of orders of magnitude;
@@ -501,18 +519,6 @@ def apply_measured_whitening(system, model, raw_start=None, logp_fn=None):
     if logp_fn is None:
         logp_fn = model.compile_logp()
 
-    # The clip is raised for the WHOLE pass, not just around each probe call:
-    # the escalation loop below alternates probing with set_whitening, and a
-    # measurement taken under a different wall than the one it is compared
-    # against is exactly the confusion this fixes.  Restored on exit, by the
-    # context manager, on the error path too -- sampling must never see the
-    # raised value.
-    with raised_raw_cancellation_clip(_PROBE_RAW_CLIP):
-        return _measure_and_apply(system, model, raw_start, logp_fn)
-
-
-def _measure_and_apply(system, model, raw_start, logp_fn):
-    """apply_measured_whitening's body, under the raised probe-time clip."""
     n_elements = sum(v.size for v in raw_start.values())
     logger.debug(
         f"Whitening: probing {n_elements} raw element(s) for their "
@@ -577,6 +583,8 @@ def _measure_and_apply(system, model, raw_start, logp_fn):
             raw_scales[key] = np.ones_like(flat_mult).reshape(mult.shape)
             applied[key] = np.zeros(flat_mult.size, dtype=bool)
             continue
+        flat_mult = _flat_logit_is_clipped(flat_mult, _logit_raw_mask(par))
+        multipliers[key] = flat_mult.reshape(multipliers[key].shape).copy()
         post = par.set_whitening(flat_mult)
         raw_scales[key] = np.asarray(post, dtype=float).reshape(mult.shape)
         # applied: finite multiplier that landed as 1.0 in the new raw units
@@ -608,7 +616,7 @@ def _measure_and_apply(system, model, raw_start, logp_fn):
         round_i += 1
         logger.warning(
             f"Whitening: {len(clipped)} element(s) hit the probe's dynamic "
-            f"range (preliminary scale off by >6 orders of magnitude too "
+            f"range (preliminary scale off by >9 orders of magnitude too "
             f"tight, or >14 too loose); escalation round {round_i}: "
             + "; ".join(f"{k}[{i}]" for k, i in clipped)
         )
@@ -620,9 +628,15 @@ def _measure_and_apply(system, model, raw_start, logp_fn):
             par = _param_for_raw(lookup, key)
             n = multipliers[key].size
             mult2 = np.ones(n)
+            logit_mask = _logit_raw_mask(par)
             for i, m in elems.items():
-                # A flat (NaN) re-probe leaves the cumulative alone and drops
-                # the element from the loop: nothing more can be measured.
+                # A flat re-probe of a LOGIT element is still "beyond the
+                # reach" (see _flat_logit_is_clipped) and escalates again.
+                # A flat (NaN) re-probe of anything else leaves the
+                # cumulative alone and drops the element from the loop:
+                # nothing more can be measured.
+                if logit_mask[i] and not np.isfinite(m):
+                    m = _WHITEN_MAX_STEP
                 latest[key].flat[i] = m
                 if np.isfinite(m) and m > 0:
                     mult2[i] = m
