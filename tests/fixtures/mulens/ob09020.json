@@ -167,7 +167,7 @@
   "RV:band.u1_raw": -2.756815599614018,
   "RV:mulensinstrument.err_scale_raw": -8.270446798842054,
   "RV:mulensinstrument.log_f_total_raw": -8.270446798842054,
-  "RV:mulensinstrument.model": 33685.87402399989,
+  "RV:mulensinstrument.model": 33686.127387674715,
   "RV:mulensinstrument.q_source_raw": -8.270446798842054,
   "RV:orbit.cosi_raw": -0.9189385332046727,
   "RV:orbit.logP_raw": -0.9189385332046727,
@@ -188,5 +188,5 @@
   "RV:star.radius_raw": -0.9189385332046727,
   "RV:star.rv_raw": -1.8378770664093453
  },
- "total_logp": 33536.9862647322
+ "total_logp": 33537.239628406955
 }

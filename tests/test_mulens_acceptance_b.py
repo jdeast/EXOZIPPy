@@ -414,8 +414,20 @@ def test_ob161003_collapse_reconciles_against_the_presplit_recording():
     # physics off for a comparison is the same move as the analytic
     # err_scale and u1 reconciliations further down: the recording's
     # values stay untouched, and every later change is accounted for.
+    # Likewise the forced second limb-darkening annulus (`vbm.minannuli =
+    # 2`, mulensing.md "VBM's limb-darkened finite source never stops after
+    # one annulus"), which moves this data term by -7.5e-8 relative: the
+    # recording ran VBM's default of 1, so the build does too.
     import exozippy.components.mulensing.mulensevent as mulensevent_mod
+    import exozippy.components.mulensing.op as op_mod
     import exozippy.ephemeris as ephemeris_mod
+
+    build_vbm = op_mod.VBMDirectMagOp._build_vbm
+
+    def _recording_annuli(self):
+        vbm = build_vbm(self)
+        vbm.minannuli = 1
+        return vbm
 
     presplit = load(os.path.join(FIXTURES, "presplit", "ob161003.json"))
     fixture = load_fixture("ob161003")
@@ -430,6 +442,9 @@ def test_ob161003_collapse_reconciles_against_the_presplit_recording():
         unittest.mock.patch.object(
             mulensevent_mod, "FRAME_VELOCITY_STEP_DAYS", 0.5
         ),
+        unittest.mock.patch.object(
+            op_mod.VBMDirectMagOp, "_build_vbm", _recording_annuli
+        ),
     ):
         system, model = build(fixture, extra_params=_OB161003_PRESPLIT_PM)
         # ACT -- decompose at this model's own solved start (which the
@@ -437,9 +452,9 @@ def test_ob161003_collapse_reconciles_against_the_presplit_recording():
         parts, _, reconciles, _ = decompose(system, model)
     assert reconciles, "the instrument stopped reconciling; fix it first"
 
-    # The 1.10.13 motion itself, with the Earth placed as the code now
-    # places it: a bounded, directional shift of the data term at the same
-    # start, well inside 1e-4 relative, and nothing like the 1e-9 edge
+    # The 1.10.13 motion itself (plus the second annulus), with the Earth
+    # placed as the code now places it: a bounded, directional shift of
+    # the data term at the same start, well inside 1e-4 relative, and nothing like the 1e-9 edge
     # held below.  Pins that the switch above is what separates the two
     # builds, so a future change cannot hide behind it.
     system_now, model_now = build(fixture, extra_params=_OB161003_PRESPLIT_PM)

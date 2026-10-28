@@ -117,6 +117,27 @@ with +0.48 inside 1 rho t_E, -0.08 at 1-5 and +0.33 beyond 30.  Every
 other term and the stored start are bit-identical, and no other fixture
 moved (every other fixture is a binary or N-lens event, already on VBM).
 
+Eight fixtures were re-recorded when every limb-darkened VBMDirectMagOp
+began forcing a second annulus (`vbm.minannuli = 2`; mulensing/mulensing.md,
+"VBM's limb-darkened finite source never stops after one annulus").  Every
+stored start is bit-identical, and the only term the change moves is
+`RV:mulensinstrument.model` (measured by replaying each start at
+minannuli 1 and 2 on one machine): ob09020 +0.2534 nats, OGLE_0383LD
+-0.0526, ob07224 -0.0155, ob161003 -0.0061, ob170114 +0.0051, the three
+KMT-2019-BLG-1806 configs +0.0003 each.  Per epoch these are ordinary
+Tol-level moves, no false convergence: at most 1.8e-4 relative in A
+(OGLE_0383LD, at A ~ 1.1-1.2), 2.7e-5 (ob09020), 8.6e-6 (ob07224), and in
+each case toward a Tol = 1e-5 reference (largest error vs that reference,
+minannuli 1 -> 2: 2.6e-4 -> 2.0e-4, 3.8e-5 -> 2.9e-5, 1.2e-5 -> 5.2e-6).
+ob09020 and OGLE_0383LD exceeded the physics tolerance, hence the
+re-record; the other six were re-recorded so the strict tier stays
+bit-exact.  The re-record also absorbed drift master already carried
+(identical at minannuli 1): OGLE_0383LD's model term by 3.6e-7 and five
+prior terms by <= 1.2e-10 nats, and KMT-2019-BLG-1806's
+`up_bound.star.loggsed` from -8.0e-269 to -9.9e-305.  The other six
+fixtures (DC2018_128 x3, point source; ob08092 and ob140939 x2, symbolic
+PSPL) do not move at all: none has a limb-darkened finite-source VBM call.
+
 ob161003 (2S2L) is the ONE example whose model changes BY CONSTRUCTION
 (review R1): its per-source event-level vectors collapse to scalars.  Its
 replay fixture is re-recorded post-split; the stage-0 recording is kept at

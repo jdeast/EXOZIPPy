@@ -84,6 +84,16 @@ def _times_and_obs(n=400, span=150.0):
     return times, dev + offset[None, :]
 
 
+def _mulensmodel_kernel(op):
+    """The direct Op with VBM's default minannuli = 1, which is what
+    MulensModel's own VBM instance runs: these are plumbing-parity tests
+    against an identical kernel.  The direct Op forces a second LD annulus
+    (mulensing.md, "VBM's limb-darkened finite source never stops after one
+    annulus"), which moves A at the ~1e-5 level, inside Tol."""
+    op._vbm.minannuli = 1
+    return op
+
+
 def _compile(op):
     p = pt.dvector("p")
     t = pt.dvector("t")
@@ -159,8 +169,10 @@ def test_vbm_direct_matches_mulensmodel_binary_with_parallax_and_ld(
         )
     )
     f_dir = _compile(
-        VBMDirectMagOp(
-            coords=_COORDS, n_companions=1, use_rho=True, bandpass="Z087"
+        _mulensmodel_kernel(
+            VBMDirectMagOp(
+                coords=_COORDS, n_companions=1, use_rho=True, bandpass="Z087"
+            )
         )
     )
     f_ps = _compile(
