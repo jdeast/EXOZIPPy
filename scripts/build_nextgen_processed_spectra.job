@@ -42,7 +42,7 @@ grid = gen.read_grid_yaml()
 # already on disk are skipped by fetch_nodes, so every resume is incremental.
 deadline = time.time() + 96 * 3600
 
-def wait_for_svo(poll=120):
+def wait_for_svo(poll=900):  # 15 min: SVO is recovering from an attack; do not hammer it
     while True:
         try:
             urllib.request.urlopen(SSAP_URL, timeout=60).read(1024)
