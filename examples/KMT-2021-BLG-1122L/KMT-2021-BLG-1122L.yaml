@@ -36,6 +36,24 @@ lens:
 source:
   - body: star.Source
 
+# The companions are bound to the primary and do not move (no orbital
+# motion is fit): a `type: static` orbit per companion, primary <-> that
+# companion, as every lens companion's orbit is.  The pairing ties each
+# companion's distance, proper motion, rv and av to the primary's
+# (components/orbit/orbit.md, "type: static"), so the system has one
+# position and one space velocity and the companions add no kinematic
+# term.  The lens entries name no orbit: a companion that does not move
+# carries no `orbit:`.
+orbit:
+  - name: "LB"
+    type: static
+    primary: [Lens]
+    companion: [LensB]
+  - name: "LC"
+    type: static
+    primary: [Lens]
+    companion: [LensC]
+
 galacticmodel:
   - name: "KMT-2021-BLG-1122L"
     anchor_idx: 3              # anchor on the source (star.Source)
