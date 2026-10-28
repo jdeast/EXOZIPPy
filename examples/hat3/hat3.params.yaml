@@ -1,9 +1,6 @@
-# Start values are the MAP of a converged fit of this config (4 TESS
-# sectors, nuts, 500 tune + 1000 draws x 4 chains), so the short smoke-test
-# run in hat3.yaml starts in the right place; the priors, bounds and their
-# citations are the example's own.
-#
-# The seeds are one point (the MAP), so the chains are scattered around it.
+# Start values are the MAP of a converged fit of this config (README), so
+# the short smoke-test run starts in the right place; the priors, bounds
+# and citations are the example's own.  One seed: chains are scattered.
 overdisperse: true
 
 # this is always helpful
@@ -13,11 +10,7 @@ star.A.feh:
     sigma: 0.08
     citation: high-resolution spectroscopy
 
-# the sigma is only necessary because we're not fiting an evolutionary model
-# it should be removed in a final run
-star.A.mass:
-    mu: 0.92
-    sigma: 0.05
+# The Torres relations constrain the mass; this is a start value.
 star.A.logmass:
     initval: -0.04173949
 

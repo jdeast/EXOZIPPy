@@ -1,11 +1,7 @@
 star.A.radius:
   initval: 1.610
 star.A.mass:
-  # Seed only. The prior on A's mass/radius now comes from the torres: block
-  # in kelt4_rv+transit+sed.yaml, which replaces the hand-entered
-  # Eastman+2015 value (1.204 +/- 0.05) this used to impose. Torres predicts
-  # ~1.263 solMass at A's starting teff/logg/feh, about 1.2 sigma above that
-  # old prior, so A's mass should settle slightly higher than before.
+  # Seed only: the torres: block in the config constrains A's mass/radius.
   initval: 1.204
 star.A.teff:
   initval: 6207
@@ -80,7 +76,6 @@ rvinstrument.EXPERT.gamma:
   lower: -1000
   upper: 1000
 rvinstrument.EXPERT.jitter_variance:
-  lower: -1000
   upper: 1000
 
 rvinstrument.FIES.gamma:
@@ -94,13 +89,11 @@ rvinstrument.HIRES.gamma:
   lower: -100
   upper: 100
 rvinstrument.HIRES.jitter_variance:
-  lower: -100
   upper: 100
 
 rvinstrument.TRES.gamma:
   lower: -100
   upper: 100
 rvinstrument.TRES.jitter_variance:
-  lower: -1000
   upper: 1000
 

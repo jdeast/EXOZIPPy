@@ -147,7 +147,7 @@ free to leave.
 `t_E` and `rho` are deliberately NOT seeded directly: both are derived from
 the physical chain, and seeding them alongside the physical leaves
 over-determines the relaxation engine at equal rank -- the failure
-`ob170114`'s params file documents, and one measured here.
+`ob170114`'s README documents, and one measured here.
 
 ## Running it
 

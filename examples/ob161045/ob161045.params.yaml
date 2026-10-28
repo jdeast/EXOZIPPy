@@ -3,15 +3,9 @@
 # limb-darkening coefficients and error re-scaling factors from their
 # Table 1.
 #
-# Only initvals are used for the trajectory: published uncertainties are NOT
-# mapped to sigma (a Gaussian prior would double-count the data), and
-# whitening scales are measured from the data at startup.
-#
-# Convention note: Shin+18's t_0, u_0, t_E and rho are the standard
-# MulensModel/Skowron quantities, which are EXOZIPPy's verbatim (C18
-# identity) -- no alpha or q here to shift or invert, this being a single
-# lens.  t_0 is quoted as HJD' = HJD - 2450000 and is written out in full
-# below, because the data files carry full Julian Dates.
+# Only initvals are used for the trajectory: published uncertainties are
+# not mapped to sigma.  Conventions, the limb-darkening conversion and the
+# flux seeds are explained in README.md.
 
 star.Lens.ra:
     initval: 264.213291           # 17:36:51.19 (OGLE EWS; Shin+18 Sec 2.1.1)
@@ -32,39 +26,16 @@ star.Source.dec:
 source.Source.t_0:
     initval: 2457559.201          # HJD' 7559.201 +/- 0.001
 
-# NEGATIVE, as published.  The sign is not measurable from these data: with
-# a single lens and NO parallax fit (no Spitzer photometry ships here), the
-# likelihood is exactly symmetric under u_0 -> -u_0, which is precisely why
-# Shin+18 carry (-, +) and (+, +) as a degenerate pair and why their two
-# columns differ only in that sign.  It is seeded at the published value
-# rather than flipped, and a fit is free to sit in either mirror.
+# Negative, as published; the sign is not measurable here (README).
 source.Source.u_0:
     initval: -0.01308             # -1.308e-2 +0.033/-0.042 (10^-2 units)
 
 # --------------------------------------------------------------------
-# THE PHYSICAL CHAIN IS THE COORDINATE SYSTEM -- t_E and rho are NOT seeded
+# t_E and rho are derived from the physical chain below, not seeded
+# (README).  Targets (Shin+18 Eq. 7, Sec 2.3.1, Eq. A1): theta_E = 0.244
+# mas, theta_* = 7.80 uas, M_L = 0.08 M_sun, D_L = 5.02 kpc,
+# mu_rel = 0.244 mas / 11.981 d = 7.44 mas/yr.
 # --------------------------------------------------------------------
-# Both are DERIVED here: t_E from the masses/distances/proper motions, and
-# rho = theta_star/theta_E from the source radius and distance.  Seeding
-# them directly alongside the physical leaves over-determines the
-# relaxation engine at equal rank, and the reconciliation then moves
-# whatever it likes -- the failure ob170114's params file documents, and
-# the one measured on this example: with `mulensevent.t_E` and
-# `source.Source.rho` seeded, the built start put u_0 at -0.0248 against
-# the published -0.01308 and varied from build to build.
-#
-# So the leaves below are seeded instead, and t_E, theta_E and rho come out
-# of them.  Target values (Shin+18 Eq. 7, Sec 2.3.1 and Eq. A1):
-#
-#     theta_E   = 0.244 +/- 0.015 mas
-#     theta_*   = 7.80 +/- 0.47 uas      -> rho = 0.0320, as published
-#     M_L       = 0.08 +/- 0.01 M_sun    (at the brown-dwarf boundary)
-#     D_L       = 5.02 +/- 0.14 kpc
-#     mu_rel    = theta_E / t_E = 0.244 mas / 11.981 d = 7.44 mas/yr
-#
-# The source radius follows from theta_* and an assumed D_S = 8 kpc:
-#     R_S = theta_*[mas] * 215.032 * D_S[pc] / 1000 = 13.42 R_sun,
-# a bulge giant, which is what a measurable theta_* implies.
 star.Lens.mass:
     initval: 0.08
 star.Lens.distance:
@@ -72,19 +43,12 @@ star.Lens.distance:
 star.Source.distance:
     initval: 8000.0
 
-# The source radius is what sets rho, and the light curve's grip on it is
-# the whole point of this event.  It is left FREE (no sigma) but seeded:
-# EXOZIPPy warns at startup that the radius is not separately identifiable
-# -- theta_E and D_S absorb any rescaling of it -- so the seed is what puts
-# rho at the published value, and the transit's upper limit on rho is the
-# real information that holds it there.  Supply an `sed:` block or an
-# explicit prior to break the degeneracy harder.
+# theta_* = 7.80 uas at D_S = 8 kpc: R_S = 13.42 R_sun.  Free (README).
 star.Source.radius:
     initval: 13.42
 
-# mu_rel's MAGNITUDE is what matters (7.44 mas/yr); its DIRECTION is not
-# constrained by these data, since no parallax is fit without the Spitzer
-# photometry.  Split arbitrarily along RA with a bulge source at rest.
+# |mu_rel| = 7.44 mas/yr; its direction is unconstrained here, so it is
+# split along RA with a bulge source at rest.
 star.Source.pm_ra:
     initval: 0.0
 star.Source.pm_dec:
@@ -97,19 +61,10 @@ star.Lens.pm_dec:
 # --------------------------------------------------------------------
 # Limb darkening -- Shin+18 Table 1, CONVERTED
 # --------------------------------------------------------------------
-# Their table quotes Gamma; this codebase's band.u1 is the ordinary linear
-# coefficient u of I(mu)/I(0) = 1 - u(1 - mu).  The two are related by
-# Gamma = 2u/(3 - u), i.e. u = 3*Gamma/(2 + Gamma):
-#
-#     Gamma_I = 0.5103  ->  u = 3(0.5103)/2.5103 = 0.60985
-#     Gamma_R = 0.6583  ->  u = 3(0.6583)/2.6583 = 0.74292
-#
-# Taking the Gammas as u verbatim would put the I-band coefficient 16% low.
-# Pinned (sigma: 0) because they are fixed inputs to the published fit, not
-# fitted quantities -- the same treatment Shin+18 give them.
-#
-# The R value is the one Shin+18 modified for Auckland's Wratten 12 filter:
-# Gamma_R = (Gamma_R + Gamma_V)/2 = (0.61118 + 0.7048)/2 = 0.6583.
+# Shin+18 quote Gamma; band.u1 is the linear u = 3 Gamma/(2 + Gamma):
+#     Gamma_I = 0.5103 -> 0.60985,  Gamma_R = 0.6583 -> 0.74292
+# Pinned, as in the published fit.  Gamma_R is Shin+18's Auckland
+# (Wratten 12) value, (Gamma_R + Gamma_V)/2.
 band.I.u1:
     initval: 0.60985
     sigma: 0
@@ -120,21 +75,8 @@ band.Auckland_R.u1:
 # --------------------------------------------------------------------
 # Baseline flux
 # --------------------------------------------------------------------
-# log_f_total's default initval is -6 against ~-7.07 here, so these are
-# seeded.  They are the weighted linear-flux solution at the published
-# trajectory, with the published limb darkening and error rescaling
-# applied -- the same calculation the table in the README reports.
-#
-# THE BLENDING IS SMALL AND CONSISTENT: q_source = f_source/f_total comes
-# out 1.022-1.030 at OGLE and all three KMT sites, i.e. ~3% blending, with
-# chi2/N of 1.00-1.04.  Nothing here goes near q_source's [0, 2] bound.
-#
-# That is worth recording because an earlier version of this example, built
-# on re-derived three-column flux files rather than these reductions,
-# measured q_source = 2.161 +/- 0.006 at KMTC and appeared to need the
-# bound widened.  It did not: that number was an artifact of reconstructing
-# a total flux from difference imaging with a solved reference, not a
-# property of the event.  The bound is fine; the data were not.
+# Weighted linear-flux solution at the published trajectory, limb
+# darkening and error rescaling (README, "Blending").
 mulensinstrument.OGLE.log_f_total:
     initval: -7.0734
 mulensinstrument.OGLE.q_source:
@@ -152,13 +94,8 @@ mulensinstrument.KMTA.log_f_total:
 mulensinstrument.KMTA.q_source:
     initval: 1.029
 
-# AUCKLAND'S BLENDING IS NOT CONSTRAINED BY ITS OWN DATA, and this seed is
-# a prior rather than a measurement.  Its 91 epochs span only HJD'
-# 7558.90-7563.96, all within 2.5 d of t_0, so it never reaches baseline:
-# the free solution gives q_source = 4.3 +/- 1.5, consistent with the other
-# sites' ~1.03 at 2.2 sigma and with almost anything else.  Seeded at no
-# blending, which the sampler is free to leave.  Its flux scale differs
-# from the I-band sets because it is a different band and zeropoint.
+# Auckland never reaches baseline, so its blending is a seed at no
+# blending, not a measurement (README).
 mulensinstrument.Auckland.log_f_total:
     initval: -6.4203          # log10(3.7998e-07)
 mulensinstrument.Auckland.q_source:
@@ -167,13 +104,8 @@ mulensinstrument.Auckland.q_source:
 # --------------------------------------------------------------------
 # Error re-scaling -- Shin+18, as distributed with the data
 # --------------------------------------------------------------------
-# The reductions ship the final rescaling as
-#     error_new = coeff_A * sqrt(error_old**2 + coeff_B**2)
-# with coeff_B = 0 for every dataset, so this is a pure multiplicative
-# factor and maps one-to-one onto err_scale.  Initvals, NOT pins:
-# err_scale stays free, as in every other shipped fit.  Applying them
-# brings chi2/N to 1.00-1.04 at OGLE and the three KMT sites, which is the
-# check that these are the right factors for these files.
+# error_new = coeff_A * sqrt(error_old**2 + coeff_B**2) with coeff_B = 0,
+# so coeff_A maps one-to-one onto err_scale (initvals, not pins).
 mulensinstrument.OGLE.err_scale:
     initval: 0.913
 mulensinstrument.KMTC.err_scale:

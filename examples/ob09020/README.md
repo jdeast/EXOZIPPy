@@ -402,3 +402,29 @@ Unpinned, the source distance runs to its 100 kpc bound (the source
 radius and distance both absorb the pinned `rho`), so S11's 8 kpc stays.
 The per-instrument flux and `err_scale` seeds still date from the static
 geometry; the acceptance fit refreshes them.
+
+`star.Source.radius` is left free in both params files: with
+`finite_source` on, `rho` is read but the radius is not separately
+identifiable. Skowron measure `theta_* = 4.45 +/- 0.40 uas`, an angle;
+imposing it as a radius would feed the assumed source distance back in as
+if it were measured.
+
+**The linear-motion rates (`ob09020_linear.params.yaml`).** Skowron's
+`gamma_par` and `gamma_perp` are converted to EXOZIPPy's `ds_dt` (a rate
+in Einstein radii of the total mass per year, so it carries the `s_0`
+factor `gamma_par` divides out) and `dalpha_dt` (`-gamma_perp`, in deg/yr
+rather than rad/yr); the params file writes out the arithmetic. Both
+conversions were checked by measurement rather than trusted, because each
+is silent if wrong -- every variant still builds a well-behaved light
+curve, just not this event's. Measured at the earlier "2 par. motion"
+seeds (`gamma_perp = 2.78`):
+
+| `dalpha_dt` | start logp |
+|---|---|
+| as written (-159.28 deg/yr) | -127,419 (best) |
+| rates zeroed (static) | -238,715 |
+| sign flipped (+159.28) | -400,108 |
+| rad mistaken for deg (-2.78) | -241,877 |
+
+So the sign, the unit and the `s_0` factor are each confirmed, and the
+linear rates are worth ~111,000 nats over a static model at that start.

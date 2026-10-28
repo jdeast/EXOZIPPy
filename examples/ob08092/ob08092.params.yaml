@@ -1,8 +1,4 @@
-# initialized from this paper (just the secondary subevent in Table 1)
-# https://ui.adsabs.harvard.edu/abs/2014ApJ...795...42P/abstract
-
-# eventually, these will be initialized from the LC by running Jennifer Yee's MMEXOFAST
-# for now, we're taking the values from Poleski+ 2014, Table 1
+# Poleski et al. 2014, ApJ 795, 42, Table 1 (the secondary subevent only).
 source.Source.t_0:
     initval: 2455379.571
 source.Source.u_0:
@@ -10,11 +6,7 @@ source.Source.u_0:
 mulensevent.t_E:
     initval: 17.94
 
-# these were iteratively determined from the curvatures of previous runs
-# they are not strictly necessary, but make the autotuning faster/more reliable
-
-# --- Physical Parameters for the LENS (Sampled) ---
-# these could be initialized from the LC metadata?
+# Event coordinates.
 star.Lens.ra:
     initval: 266.872583333
     sigma: 0
@@ -28,46 +20,10 @@ star.Source.dec:
     initval: -34.7265555556
     sigma: 0
 
-# these kinematic initializations are now the default for mulensing, constrained primarily by the galactic model and ra/dec
-# --- Physical Parameters for the Lens (Sampled) ---
-#star.Lens.distance:
-#    initval: 8100.0  # Poleski+ 2014
-#star.Lens.pm_ra:
-#    initval: -3.0    # mas/yr
-#star.Lens.pm_dec:
-#    initval: -4.0    # mas/yr
-#star.Lens.rv:
-#    initval: 0.0
-
-# --- Physical Parameters for the SOURCE (Sampled) ---
-#star.Source.rv:
-#    initval: -50000.0
-#star.Source.distance:
-#    initval: 9700.0  # Poleski+ 2014
-#star.Source.pm_ra:
-#    initval: -6.0    # mas/yr
-#    # sigma: 3.0 # this comes from the galactic prior
-#star.Source.pm_dec:
-#    initval: -6.0    # mas/yr
-#    # sigma: 3.0 # this comes from teh galactic prior
-
-# how does he get this? source/blend flux? prior?
-# No `sigma: 0` needed: this is a point-source fit with no SED, so nothing
-# reads the source radius and it is not a parameter of this configuration at
-# all (review 3.8.1).  The initval is kept because it is what the reported
-# value would be, and because it is the right start if an sed: block is ever
-# added -- which flips all six of these back to free automatically.
+# Point-source fit with no SED: nothing reads the stellar radius, teff or
+# feh below, so they are starts only (README).
 star.Source.radius:
     initval: 0.519 # Poleski+ 2014
-#star.Lens.logmass:
-#    initval: -0.8239     # M_sun (Typical M-dwarf lens)
-
-# these don't impact the likelihood, and as of review 3.8.1 they are not
-# sampled for such fits either -- which is what the old note here asked for
-# ("eventually, they won't even be sampled for such fits"), now done by
-# Star.structure_consumers rather than by hand.  The arbitrary ~M dwarf values
-# stay as start values: add an `sed:` block (or mann/torres) and these become
-# free, constrained parameters again with no edit to this file.
 star.Lens.radius:
     initval: 0.3
 star.Lens.teff:
@@ -76,7 +32,6 @@ star.Lens.feh:
     initval: 0.0
 star.Source.mass:
     initval: 0.3
-    sigma: 0.0
 star.Source.teff:
     initval: 3500
 star.Source.feh:

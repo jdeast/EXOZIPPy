@@ -19,21 +19,16 @@ source.SourceA.u_0:
 source.SourceB.u_0:
     initval: 0.135
 
-# t_E is event-level (one lens system, one co-moving source system -> one
-# Einstein-crossing time; Jung+2017's Table 1 likewise prints ONE t_E);
-# referenced to the TOTAL lens mass.  Pre-split this file seeded the SAME
-# 28.931 d on both sources' per-source copies.
+# t_E is event-level (Jung+2017 print one t_E), referenced to the total
+# lens mass.
 mulensevent.t_E:
     initval: 28.931
 
 lens.LensB.s:
     initval: 1.033
 
-# alpha: relaxation engine propagates the initval to xalpha/yalpha.
-# Jung et al. 2017 report alpha = 48.243 deg; their convention maps to
-# MulensModel's (used internally) as alpha_MM = 180 - alpha_paper.
-# (Verified by chi2 scan over {±alpha, 180±alpha} × u_0 sign: 131.757 with
-# u_0 > 0 gives chi2/N ~ 1.25; all other combinations are catastrophic.)
+# Jung et al. 2017 report alpha = 48.243 deg; here alpha = 180 - 48.243
+# (verified by a chi2 scan; README, conventions.md).
 lens.LensB.alpha:
     initval: 131.757
 
@@ -44,8 +39,6 @@ source.SourceB.rho:
     initval: 0.001293
 
 # q = M_LensB / M_Lens (~1.19: the "companion" is the more massive body).
-# EXOZIPPy's relaxation engine propagates this through the symbolic relation
-# q * M_primary = M_companion to set LensB's mass initval automatically.
 lens.LensB.q:
     initval: 1.188
 
@@ -56,19 +49,10 @@ star.dec:
     initval: -27.188861
     sigma: 0
 
-# Proper motions: all four leaves of the mu_rel chain are seeded, because
-# t_E is DERIVED (t_E = theta_E / mu_rel_geo) and a t_E seed alone leaves
-# the engine a two-dimensional family of proper-motion splits to land on
-# (the documented failure mode -- see examples/ob07224's params for the
-# full derivation of the same recipe).  Jung+2017's standard solution has
-# no parallax, so the DIRECTION of mu_rel is unconstrained by the data;
-# what these seeds pin is (a) the magnitude, so the derived t_E starts on
-# the published 28.931 d, and (b) an arbitrary-but-stated axis (due south)
-# for the direction.  The magnitude is theta_E/t_E = 0.8392544/28.931 *
-# 365.25 = 10.5954746 mas/yr on top of a nominal bulge-mean source pm.
-# Before these seeds the engine chose the split itself, and its choice
-# changed with the internal ordering of the (renamed) relation set -- the
-# start silently rotated phi_pi ~90 deg and missed the t_E seed by 7%.
+# Proper motions: all four leaves of the mu_rel chain are seeded, so the
+# derived t_E starts on the published 28.931 d (README).  No parallax, so
+# the direction is arbitrary (due south): |mu_rel| = theta_E/t_E =
+# 0.8392544/28.931 * 365.25 = 10.5954746 mas/yr on a nominal bulge source.
 star.SourceA.pm_ra:
     initval: -3.0
 star.SourceA.pm_dec:
@@ -77,24 +61,3 @@ star.Lens.pm_ra:
     initval: -3.0
 star.Lens.pm_dec:
     initval: -13.595474606      # = -3.0 - theta_E/t_E (mas/yr; see above)
-
-# The lens bodies' radii and every star's teff/feh used to be pinned by hand
-# here.  They are deactivated automatically now (review 3.8.1): with no SED and
-# no evolutionary model nothing reads them, so they are not parameters of this
-# configuration at all.
-#
-# The SOURCE radii are the reason that had to change.  This file already said
-# they must be free -- see the note below -- but they were NOT: the old blanket
-# auto-pin fixed the radius of every microlensing-only source star, so
-# finite_source's rho was read off a radius nobody had chosen.  Measured here:
-# before, 56 free RVs and start logp 79356.588 with no star.radius among them;
-# after, 58 and 79339.520 with star.radius sampled.
-
-# Source radii are NOT fixed: rho (fit directly against the finite-source
-# lightcurve shape) is derived from radius via calc_rho(radius, distance,
-# theta_E), so floating radius lets the data's rho constraint propagate
-# through to a real physical posterior instead of being clamped at the
-# value back-solved from the seeded rho above.  The initval still comes
-# from that back-solve (via the relaxation engine), so the starting point
-# is well-informed (the whitening probe measures the step size);
-# only the hard fix is removed.
