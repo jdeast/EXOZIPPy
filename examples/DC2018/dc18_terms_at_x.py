@@ -121,8 +121,11 @@ def main():
     # Collapse each sampled element's cancelling pair -- `RV:<x>_raw` (the
     # prior on the raw coordinate) and `POT:logit_uniform_prior.<x>` (its
     # change of variables) -- into one term, as the 2026-09-22 note
-    # requires: each half reaches thousands of nats and their sum is the
-    # physics.  Everything else is left alone.
+    # requires: each half used to reach thousands of nats and their sum is
+    # the physics.  (Since review 1.2.9 a logit element's raw half is a
+    # constant, so the collapse only relabels it; kept so the split reads
+    # the same on either side of that change.)  Everything else is left
+    # alone.
     def collapse(parts):
         out = dict(parts)
         for k in list(parts):

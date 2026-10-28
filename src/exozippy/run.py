@@ -1523,8 +1523,9 @@ def _run_fit(config, gui, user_params=None):
                 # chains begin at `Model.initial_point()`, and
                 # `System.recenter_whitening_anchor` above made that the
                 # POLISHED start by construction: the logit anchor was
-                # re-centered onto it (free -- section C's correction cancels
-                # the raw N(0,1), so the anchor is pure parameterization) and
+                # re-centered onto it (free -- a logit raw coordinate is flat
+                # and its prior is section C's Jacobian, so the anchor is pure
+                # parameterization) and
                 # the Gaussian-path elements, whose center IS their prior
                 # mean and so may not move, were pushed through
                 # `Model.set_initval`.  1.3.6 proposed `initvals=` here

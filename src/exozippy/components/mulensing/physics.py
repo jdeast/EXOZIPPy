@@ -459,7 +459,8 @@ def clip_q(q):
       the DE polish and the seed polish) never once entered the branch.
     * If it *were* reached it could only do harm.  q is NaN only when an input
       is already NaN, i.e. the raw vector itself carries a NaN -- and that raw
-      variable's own N(0, 1) prior term already makes the total logp NaN, so
+      variable's own density term (NaN-propagating on every element, flat or
+      not: parameter.py's _raw_logp) already makes the total logp NaN, so
       the proposal is rejected whatever q does (verified: setting
       ``star.logmass_raw`` or ``planet.log_q_raw`` to NaN gives logp = nan).
       Substituting Q_MIN could therefore never rescue a sample; it only

@@ -319,13 +319,12 @@ def test_the_prior_terms_cancel_for_the_reflected_coordinates(
       symmetric, so `v -> -v` is a symmetry of every term.
 
     `tc` is deliberately NOT in this list, and the reason is worth pinning
-    rather than discovering: the partner's tc is half a period away, its raw
-    coordinate is scaled to the TIMING precision, and the excursion is ~1e5
-    raw units -- past `_RAW_CANCELLATION_CLIP`, where the logit-uniform
-    correction stops cancelling the raw N(0,1) by design.  So the FULL logp
-    of the two labels is not comparable, even though their physical density
-    is identical; that is an artifact of the sampled coordinate, and it is
-    also why the two labels are effectively disconnected for a single chain.
+    rather than discovering: the partner's tc is half a period away, at a
+    different q in its window, so its raw-space prior -- the logit Jacobian
+    log q(1-q), its raw density being flat -- differs by ~1 nat even though
+    the physical density (uniform) is identical.  That is an artifact of the
+    sampled coordinate.  (Before review 1.2.9 the excursion, ~1e5 raw units,
+    also tripped the raw-cancellation clip's wall, ~1e10 nats.)
     """
     system, model = astrometry_only
     point = model.initial_point()

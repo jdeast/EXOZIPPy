@@ -351,8 +351,7 @@ def _too_tight_model(init_scale, true_sigma=1.0):
 
     The mirror of the scenario above: there the preliminary scale was too
     loose (the probe hits its step FLOOR), here it is too tight, so the probe
-    must walk far out in raw units -- past parameter.py's raw-cancellation
-    clip, which is the wall review 1.2.1 is about.
+    must walk far out in raw units -- past the reach of any one round.
     """
     p = Parameter(
         label="toy.t",
@@ -375,10 +374,13 @@ def test_escalation_resolves_a_far_too_tight_preliminary_scale(caplog):
     Then the escalation resolves it -- a re-probe of the rescaled model lands
     near 1 -- and no "still unresolved" warning is emitted.
 
-    Before the fix the measured multiplier was exactly the raw-cancellation
-    clip (1e4): that wall manufactures a 0.5-nat contour the probe cannot
-    see past, it sat well INSIDE the escalation window, so no round ran, no
-    warning fired, and the model was left ~1e6 under-whitened.
+    Before review 1.2.1 the measured multiplier was exactly the
+    raw-cancellation clip (1e4): that wall manufactured a 0.5-nat contour
+    the probe could not see past, it sat well INSIDE the escalation window,
+    so no round ran, no warning fired, and the model was left ~1e6
+    under-whitened.  Since review 1.2.9 there is no wall at all, so this
+    element probes FLAT out to the round's reach (1e9), and the escalation
+    is driven by _flat_logit_is_clipped instead.
     """
     import logging
 
@@ -404,39 +406,71 @@ def test_escalation_resolves_a_far_too_tight_preliminary_scale(caplog):
     assert "still unresolved" not in caplog.text
 
 
-def test_probe_raises_the_raw_cancellation_clip_and_restores_it():
-    """Given the raw-cancellation clip is a sampler safety device,
-    When the whitening probe measures a too-tight element,
-    Then the clip is raised for the measurement and restored afterwards --
-    sampling must never run at the probe's value.
+def test_a_flat_logit_probe_is_booked_at_the_reach_and_escalates(
+    caplog, monkeypatch
+):
+    """Given a logit element too tight by more than one round's reach, so it
+    probes FLAT (no wall in raw space since review 1.2.9),
+    When apply_measured_whitening runs,
+    Then the first round books it AT the reach (_WHITEN_MAX_STEP) rather
+    than as a flat NaN that would keep the preliminary scale -- a logit
+    element cannot be flat, its own Jacobian prior sees to that -- and an
+    escalation round runs.
     """
-    from exozippy.components import parameter as parameter_mod
-    from exozippy.whitening import _PROBE_RAW_CLIP
+    import logging
+
+    from exozippy import whitening as wmod
 
     # Arrange
     model, p = _too_tight_model(1.0e-10)
     system = _StubSystem([p])
-    inner_logp = model.compile_logp()
-    seen = []
+    logp = model.compile_logp()
+    raw_start = model.initial_point()
+    first = {}
+    real = wmod.probe_scales
 
-    def logp(point):
-        seen.append(parameter_mod.get_raw_cancellation_clip())
-        return inner_logp(point)
+    def spy(*args, **kwargs):
+        out = real(*args, **kwargs)
+        first.setdefault("scales", out[1])
+        return out
 
-    before = parameter_mod.get_raw_cancellation_clip()
+    monkeypatch.setattr(wmod, "probe_scales", spy)
 
     # Act
-    apply_measured_whitening(system, model, model.initial_point(), logp)
+    with caplog.at_level(logging.WARNING, logger="exozippy.whitening"):
+        report = apply_measured_whitening(
+            system, model, raw_start, logp_fn=logp
+        )
 
-    # Assert
-    assert before == parameter_mod._RAW_CANCELLATION_CLIP
-    assert seen and set(seen) == {_PROBE_RAW_CLIP}
-    assert parameter_mod.get_raw_cancellation_clip() == before
+    # Assert: the round-one probe really was flat (so the booking fired),
+    # and what the escalation started from is the reach, not NaN.
+    assert np.isnan(np.asarray(first["scales"]["toy.t_raw"])[0])
+    assert "escalation round 1" in caplog.text
+    cumulative = float(np.asarray(report["multipliers"]["toy.t_raw"])[0])
+    assert cumulative > wmod._WHITEN_MAX_STEP
+
+
+def test_a_flat_non_logit_probe_stays_flat():
+    """Given an unbounded element with no sigma whose prior is its raw
+    N(0, 1) (the one place a flat probe can be real),
+    When the booking helper sees a NaN on it,
+    Then the NaN survives: only logit elements are booked at the reach.
+    """
+    from exozippy.whitening import _WHITEN_MAX_STEP, _flat_logit_is_clipped
+
+    out = _flat_logit_is_clipped(
+        np.array([np.nan, np.nan, 2.0]), np.array([True, False, True])
+    )
+
+    assert out[0] == _WHITEN_MAX_STEP
+    assert np.isnan(out[1])
+    assert out[2] == 2.0
 
 
 def test_escalation_iterates_past_two_rounds(caplog):
-    """Given a preliminary scale 19 orders of magnitude too tight -- past the
-    two rounds the escalation used to be hardcoded to (~6.5 orders each),
+    """Given a preliminary scale 28 orders of magnitude too tight -- past
+    two rounds of the probe's ~9-order reach (the escalation was once
+    hardcoded to two rounds),
     When apply_measured_whitening runs,
     Then it keeps escalating until nothing is clipped: THREE rounds run and
     the scale still resolves, so the reach is not a hardcoded number.
@@ -444,7 +478,7 @@ def test_escalation_iterates_past_two_rounds(caplog):
     import logging
 
     # Arrange
-    model, p = _too_tight_model(1.0e-19)
+    model, p = _too_tight_model(1.0e-28)
     system = _StubSystem([p])
     logp = model.compile_logp()
     raw_start = model.initial_point()

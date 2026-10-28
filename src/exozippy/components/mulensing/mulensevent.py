@@ -1584,8 +1584,9 @@ class MulensEvent(Component):
           never once entered the branch.
         * Where it could fire it could only do harm.  These five are NaN
           only when an input is already NaN, i.e. the raw vector itself
-          carries a NaN -- and that raw variable's own N(0, 1) prior term
-          already makes the total logp NaN, so the proposal is rejected
+          carries a NaN -- and that raw variable's own density term
+          (NaN-propagating on every element, flat or not: parameter.py's
+          _raw_logp) already makes the total logp NaN, so the proposal is rejected
           whatever this function returns (verified on all three events, for
           every sampled coordinate).  Substituting a "safe" value could
           never rescue a sample; it invented an entire event geometry --

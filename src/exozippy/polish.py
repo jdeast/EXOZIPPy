@@ -7,8 +7,8 @@ the contours are gradient-dominated and the measured scales come out
 arbitrarily tight -- on examples/ob140939 a start ~5900 nats low (2026-08,
 raw error bars underestimated; err_scale starting at 1.0) measured scales
 ~1000x too small, NUTS's mass matrix re-widened the raw posterior to sd ~5e3
-units, and 86% of draws diverged against parameter.py's
-_RAW_CANCELLATION_CLIP wall at |raw| = 1e4.  (The same example's four
+units, and 86% of draws diverged against the raw-cancellation clip's wall
+at |raw| = 1e4 (a wall since removed outright, review 1.2.9).  (The same example's four
 literature seeds start 565-3493 nats below their polished values today,
 2026-09-14.)  Polishing first fixes that at the source; the probe then
 measures curvature at a genuine optimum, the barrier steepness measurement
