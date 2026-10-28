@@ -534,38 +534,3 @@ def test_reported_penalty_matches_the_barrier_formula(logg, scale):
 
     # ASSERT
     assert f"{expected:.2f} nats" in message
-
-
-def test_gj1214_example_ships_the_softened_barrier():
-    """
-    Given the shipped gj1214 example, whose M dwarf starts at loggsed =
-    5.022 -- past NextGen's 5.0 logg ceiling,
-    Then its params file widens the loggsed barrier and says why.
-
-    Not a style check: with no M-dwarf-capable BC grid shipping, the
-    measured barrier would clamp this fit to the grid edge at a cost of
-    ~434 nats, and the repo owner's ruling is that a modestly extrapolated
-    bolometric correction beats refusing to fit -- provided the caveat is
-    written where the person running the example will see it.
-    """
-    # ARRANGE
-    params_file = (
-        Path(__file__).parent.parent
-        / "examples"
-        / "gj1214"
-        / "gj1214.params.yaml"
-    )
-    if not params_file.is_file():
-        pytest.skip("examples/gj1214 not present")
-    text = params_file.read_text()
-
-    # ACT
-    params = yaml.safe_load(text)
-
-    # ASSERT -- the softening itself
-    entry = params.get("star.A.loggsed")
-    assert entry is not None, "gj1214 no longer softens the loggsed barrier"
-    assert entry.get("bound_scale") == 25.0
-    # ...and the caveat, in the file, in the words that matter
-    assert "EXTRAPOLATED" in text
-    assert "NextGen" in text

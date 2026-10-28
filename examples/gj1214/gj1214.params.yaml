@@ -72,13 +72,3 @@ band.MIRILRS.q2:
 # start value of the appks prior, as a non-centered offset from its center in units of ks_err
 mann.A.ks_offset:
   initval: -0.14583661367844059
-
-# GJ 1214 is an M dwarf at logg = 5.022, past what was the NextGen BC
-# grid's logg 5.0 ceiling, so its bolometric corrections were EXTRAPOLATED
-# off the grid's edge (the SED warns by name and value whenever a star is
-# off the grid).  This widens the SED's soft loggsed barrier to half a
-# NextGen logg cell (transition width 0.25 dex); treat teffsed, radiussed
-# and fbolsed accordingly.  Numbers and history: README.md.
-star.A.loggsed:
-  bound_scale: 25.0
-

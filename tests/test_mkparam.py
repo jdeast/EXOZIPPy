@@ -372,8 +372,8 @@ def test_derived_parameter_excluded_from_output(tmp_path):
 def test_derived_parameter_bound_scale_survives_the_round_trip(tmp_path):
     """
     Given a params file whose DERIVED parameter carries only a bound_scale
-      (examples/gj1214's `star.A.loggsed: {bound_scale: 25.0}`, the one place
-      bound_scale is load-bearing today),
+      (examples/gj1214's `star.A.loggsed: {bound_scale: 25.0}`, shipped
+      until #508),
     When mkparam runs on a trace where loggsed is a Deterministic (no _raw),
     Then the entry is re-emitted with its bound_scale intact -- and with NO
       initval, because nothing invented a start value for it.
