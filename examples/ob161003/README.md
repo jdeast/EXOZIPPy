@@ -29,9 +29,20 @@ the paper.  This example exercises EXOZIPPy's NSNL pathway:
   finite-source coupling; unconstrained without SED data).
 
 Conventions: Jung et al. report alpha = 48.243 deg; MulensModel (EXOZIPPy's
-magnification backend) uses alpha_MM = 180 - alpha_paper (see the comment in
-ob161003.params.yaml, verified by a chi-squared scan over the discrete
-convention choices).
+magnification backend) uses alpha_MM = 180 - alpha_paper, verified by a
+chi-squared scan over {+/-alpha, 180 +/- alpha} x u_0 sign: 131.757 with
+u_0 > 0 gives chi2/N ~ 1.25, and every other combination is catastrophic.
+
+Proper motions: all four leaves of the mu_rel chain are seeded, because t_E
+is DERIVED (t_E = theta_E / mu_rel_geo) and a t_E seed alone leaves the
+relaxation engine a two-dimensional family of proper-motion splits to land
+on (examples/ob07224's README derives the same recipe in full).  Jung+2017's
+standard solution has no parallax, so the direction of mu_rel is
+unconstrained by the data; the seeds pin its magnitude, so the derived t_E
+starts on the published 28.931 d, and an arbitrary-but-stated axis (due
+south).  Before these seeds the engine chose the split itself, and its
+choice changed with the internal ordering of the relation set -- the start
+silently rotated phi_pi by ~90 deg and missed the t_E seed by 7%.
 
 Run with:
 

@@ -231,3 +231,65 @@ mapping error.
 
 RESULTS: (filled in when the fit lands -- posterior vs Table 2, and the
 lens masses under the IMF and galactic priors).
+
+## Details behind the parameter file
+
+These notes used to sit inline in `KMT-2021-BLG-1122L.params.yaml`.
+
+**t_0 and u_0 are translated, not copied.** Han's origin is the
+"effective position" of the M1-M2 pair (Fig. 4 caption; Di Stefano & Mao
+1996), the primary displaced by `q_2/((1+q_2) s_2)` toward M2, while
+EXOZIPPy's origin is the center of mass of all the lens bodies
+(conventions.md C13). The translation `D = COM - EFF` in the trajectory
+frame moves the closest approach by `t_0' = t_0 - D_tau t_E` and
+`u_0' = u_0 + D_u`; with this geometry that is +4.37 d and +0.012, and the
+optimum sits at `t_0 = 2459374.592`, `u_0 = 0.138`.
+
+**The companions are hard-linked to the primary.** Their distance, proper
+motion and rv are tied to the primary's with `sigma: 0` (never sampled).
+Otherwise the model samples a companion body's distance, pm and rv as free
+prior-only nuisances, and the first acceptance fit parked LensB at 5844 pc
+beside a primary at 174 pc. (An orbit group now makes these links
+automatically; this config has no orbit block, so they are written by
+hand.)
+
+**Proper motions.** The direction of `mu_rel` on the sky is unconstrained
+without a parallax measurement (the light curve sees it only relative to
+the lens axis, through alpha), so the lens's pm is placed 12.39 mas/yr
+east of a bulge-typical source pm.
+
+**Zeropoints.** The files are pySIS difference flux at the pipeline's
+fixed zp 28.0 (`prepare_data.py`), an instrumental scale per site and band.
+Han+2023 Sect. 4 calibrate through the red giant clump on pyDIA photometry
+(instrumental `(V-I, I)_RGC = (3.669, 18.025)` against intrinsic
+`(1.060, 14.377)` with `A_I = 3.3`); pySIS differs from pyDIA by an
+unknown constant and we have no field photometry for our own clump. So
+every zeropoint is centered on no offset and left wide (0.5 mag, JDE
+2026-10-11): the light curves pin the site-to-site offsets within a band,
+and theta_* comes from the V-I color plus the A_V prior, to roughly 25% --
+weaker than Han's CMD measurement, and honest about what we can calibrate.
+The prior is centered on `mu` 16.0 (I) / 19.0 (V) rather than 0 to work
+around a library issue: the dia reader rescales flux to units of the
+reference and records the offset `zp_ref = 28 - 2.5 log10(ref) =
+reference_mag`, but the SED tie (`zp = m_SED + 2.5 log10(f_source)`) does
+not apply it, so for a dia file the zeropoint parameter carries an extra
+`+reference_mag`. Centering the prior on `reference_mag` is exactly
+equivalent to "instrumental = Vega, +/- 0.5 mag". Revert to `mu` 0 when
+the tie subtracts `zp_ref`.
+
+**Flux and error-scale starts.** `q_source` (in units of each file's
+reference) and `err_scale` start at the optimum of the convention scan's
+winner (`scan_conventions_opt.py` task 13, light-curve term 9424). The
+flux bootstrap cannot run on a 3-body lens and falls back to
+`q_source = 0.95`, the sampler does not polish its start, and without
+these the start sits ~38,000 nats below the basin's optimum. Both are
+sampled.
+
+**Extinction.** Han+2023 Sect. 4: `A_I = 3.3` toward the field; through
+this fit's own Cousins-I BC grid (`A_I/A_V ~ 0.62` at this reddening) that
+is `A_V ~ 5.3`. It is a prior, not just a start (JDE 2026-10-11): a color
+alone cannot break the reddening degeneracy, and without it the first
+acceptance fit gave the source `A_V` 17-20. Width 0.3 mag: the
+clump-method `A_I` uncertainty plus the extinction-law conversion. The
+dereddened source is `(V-I, I)_0 = (0.892, 17.432)`, a K subgiant with
+`theta_* = 1.26 +/- 0.11 uas`.

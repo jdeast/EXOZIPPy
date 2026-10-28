@@ -13,8 +13,8 @@
 > `t_E = 172.999` (173.0), `theta_E = 0.86000` (0.86),
 > `|pi_E| = 0.209805` (0.209805), `xi_a = 0.19999` (0.200).
 >
-> Two earlier revisions were wrong, both recorded in full in the params
-> file because each is a trap a reader can walk into:
+> Two earlier revisions were wrong, both recorded here because each is a
+> trap a reader can walk into:
 >
 > 1. The first verified only the shift TRACK and the derived quantities,
 >    never the likelihood.  The C25 mapping and the xallarap projection
@@ -27,7 +27,7 @@
 >    inconsistent with the printed `theta_E = 0.86` by 1.5%, which dragged
 >    the derived `t_E` to 176.011 and `xi_a` to 0.19698 and cost +53.9
 >    chi2 (2113 rather than 2062) -- entirely parametric, not a code
->    error.  See the note at `star.L1.mass`.
+>    error.  See "The mass identity" below.
 >
 > The photometry here is the EWS quick-look file, not the re-calibrated
 > set the paper fit (see Data).
@@ -107,7 +107,7 @@ solution set this example seeds only ONE of).
 ## Starting values
 
 Seeded from Mroz+26 Table B.1 "Std: 2L1S" (the BIC-preferred model), with
-four traps recorded in full in the params file:
+four traps (the details are in "Details behind the parameter file" below):
 
 1. **The `xi_*` -> EXOZIPPy mapping** (C25, verified against
    MulensModel's implementation at the light-curve level -- the code the
@@ -131,5 +131,76 @@ four traps recorded in full in the params file:
 4. **The mass is NOT the printed median** -- `theta_E = kappa M_tot
    |pi_E|` leaves no distance freedom, and the paper's printed
    (`M_h`, `|pi_E|`, `theta_E`) triple does not satisfy it to 2 s.f.
-   The seed is the `M_h` that closes it.  Full derivation at
-   `star.L1.mass` in the params file.
+   The seed is the `M_h` that closes it (derivation below).
+
+### Details behind the parameter file
+
+These notes used to sit inline in `ob170114.params.yaml`.
+
+**`t_E` and `pi_E` are derived, not seeded.** Seeding them alongside the
+proper-motion and distance seeds over-determines the engine at equal
+rank: measured 2026-08-27, the reconciliation rotated `phi_pi` from 37.25
+to 2.5 deg and inflated `t_E` to 205 d, which through C25's
+`bigomega = phi_pi + xi_Omega + 180` corrupted the xallarap track. The
+mass/distance/pm seeds reproduce them as derived quantities instead.
+Measured at the built start (2026-09, after the mass reseed below):
+`t_E = 172.999` d against the printed 173.0, `|pi_E| = 0.209805` against
+0.209805, `pi_E_N/E = (0.16702, 0.12698)` against `(0.167, 0.127)`,
+`phi_pi = 37.244` deg against 37.252, `theta_E = 0.86000` mas against
+0.86, and `xi_a = 0.19999` against the printed 0.200. If a seed changes,
+re-measure and re-state these numbers rather than assuming "exactly".
+
+**`orbit.S.tc`.** `tp = 2457930.059` from `nu(t0par) = xi_u - xi_omega =
+28.8 deg` with `e = 0.615` (the C25 anomaly chain), seeded through the
+equivalent `tc = tp + M_c(e, omega) P/(2 pi) = 2458125.06`, the
+conjunction one period forward. An `orbit.S.tp: 2457930.059` seed solves
+the same tc (2458125.076) and builds.
+
+**The mass identity.** Combining `theta_E = sqrt(kappa M_tot pi_rel)` with
+`pi_E = pi_rel/theta_E` eliminates `pi_rel`:
+
+    theta_E = kappa * M_tot * |pi_E|,     kappa = 8.14385 mas/Msun
+
+so `M_tot` and `|pi_E|` alone determine `theta_E`; the lens distance only
+splits `pi_rel` between them once `M_tot` is set. `M_tot` is the total
+lens mass `M_h (1 + q)`, because a binary lens references
+`theta_E`/`t_E`/`rho`/`pi_E` to the total mass. Mroz+26's Table B.2
+triple (`M_h = 0.50`, `|pi_E| = 0.20980`, `theta_E = 0.86 mas`) does not
+satisfy the identity -- it gives `theta_E = 0.87312`, 1.5% high -- because
+these are independently quoted marginal medians of a correlated
+posterior, and a config needs one consistent point. It closes exactly at
+`M_h = [0.86 / (kappa * 0.209805)] / (1 + q) = 0.492544`, which is 0.50 to
+the two significant figures the paper prints. Seeding the rounded 0.50
+cost the start +199.6 chi2 through the derived `t_E` (176.011 rather than
+173.0) and +88.6 through the xallarap amplitude (`xi_a = 0.19698` rather
+than 0.200), partially cancelling to +53.9 -- entirely parametric: at
+equal parameters the built curve matches MulensModel to 0.3 chi2.
+
+With `M_h` set, `theta_E` is fixed, so `D_L`'s only job is to deliver
+`pi_rel = theta_E |pi_E| = 0.86 * 0.209805 = 0.180432 mas` against
+`D_S = 8540 pc`: `1000/D_L = pi_rel + 1000/D_S`, i.e. `D_L = 3361.03 pc`
+(B.2 prints `3.4 +/- 1.8 kpc`). The source mass is assumed 1.0 Msun (a
+typical bulge red giant; Std does not sample it), and the xallarap
+amplitude then requires the companion mass: `a_1 = xi_a theta_E D_S =
+1.469 au` with `P = 221.5 d` gives ~10.4 Msun (`K_RV,S1 ~ 44 km/s`, their
+Table B.2) -- a black-hole candidate if taken at face value, which is the
+tension the physical parameterization exists to interrogate.
+
+**The proper motions.** All four leaves are seeded because `t_E` and
+`pi_E` derive from them, and at this event's `pi_rel` the Gould (2004)
+helio->geo term (`pi_rel v_earth,perp ~ 1.1 mas/yr`) is comparable to
+`mu_rel` itself (1.82 mas/yr). The lens seed is `mu_rel,helio =
+mu_rel,geo(theta_E/t_E = 1.8157 mas/yr along phi_pi = 37.252 deg) +
+pi_rel v_earth,perp(t0_par) = (1.3409 N, 2.1688 E) mas/yr` on top of a
+typical bulge source pm; with the source pm also seeded, every leaf sits
+on its seed and `theta_E = sqrt(kappa M_tot pi_rel)` holds to machine
+precision. The helio->geo term is proportional to `pi_rel`, so these
+numbers move with the mass.
+
+**Fluxes.** Mroz+26 publish `f_S1 = 398`, `f_B = 230` in MulensModel's
+22-mag zeropoint system (baseline I = 15.005, `q_source = 0.634`), for
+their re-calibrated photometry (2018 reference images), not the EWS
+quick-look file shipped here (baseline ~15.07). The seeds are the linear
+flux solve against this file at the seeded geometry (0.6272, close to the
+published 0.634 as it should be); `err_scale` seeds at their fitted
+renormalization `k_I = 1.98`.

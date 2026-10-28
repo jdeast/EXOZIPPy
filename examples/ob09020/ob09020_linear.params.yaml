@@ -80,18 +80,7 @@ lens.L2.alpha:
 #       dalpha_dt = -gamma_perp = -2.3 rad/yr
 #                 = -2.3 * 180/pi = -131.78 deg/yr
 #
-# Both conversions were checked by measurement rather than trusted, because
-# each is silent if wrong -- every variant below still builds a perfectly
-# well-behaved light curve, just not this event's (measured at the earlier
-# "2 par. motion" seeds, gamma_perp = 2.78):
-#
-#     as written  (-159.28 deg/yr)   logp -127,419   <- best
-#     rates zeroed (static)          logp -238,715
-#     sign flipped (+159.28)         logp -400,108
-#     rad mistaken for deg (-2.78)   logp -241,877
-#
-# i.e. the sign, the unit and the s_0 factor are each confirmed, and the
-# linear rates are worth ~111,000 nats over a static model at this start.
+# Both conversions were checked by measurement (README).
 #
 # The A16 mirror flips (u_0, alpha, pi_E_perp, dalpha_dt) TOGETHER, so
 # dalpha_dt's sign is tied to u_0 being positive above -- one choice, not
@@ -115,8 +104,8 @@ star.Source.distance:
     initval: 8000.0           # pc
 
 # --- Proper motions (the leaves t_E and pi_E derive from) -----------------
-# Derived exactly as in the keplerian sibling (whose params file writes
-# out each step), at S11's t_E = 76.9 d and this file's q = 0.273:
+# Derived as in the keplerian sibling (README), at S11's t_E = 76.9 d and
+# this file's q = 0.273:
 #   M = 0.888 (1 + 0.273) = 1.130424 Msun, pi_rel = 1.213688 mas
 #   theta_E = 3.342637 mas, |pi_E| = 0.363093
 #   pi_E = (-0.331113, +0.149) (S11's pi_E,E; pi_E,N negative), phi_pi =

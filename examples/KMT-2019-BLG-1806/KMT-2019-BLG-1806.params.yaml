@@ -7,14 +7,6 @@
 # and is not seeded.  The coordinates, zeropoints and source extinction
 # are from the same paper and cited where they appear below.
 #
-# These replaced (2026-10-14) MMEXOFAST solution 0 of
-# KMT-2019-BLG-1806-r_exozippy_init.json, our own STATIC fit (no parallax)
-# to these files.  Its t_E = 118.2 d is a no-parallax timescale; the
-# physical model here always carries the parallax its masses and
-# distances imply, so once the start delivered that t_E exactly the data
-# preferred 122.3 d by 82.6 nats.  Measured start logp: Zang +45,541.9;
-# MMEXOFAST +45,420.9; MMEXOFAST without its t_E +45,425.9.
-#
 # Only initvals are used: published uncertainties are not mapped to sigma
 # (a Gaussian prior would double-count the data), and whitening scales are
 # measured from the data by EXOZIPPy at startup.
@@ -25,10 +17,8 @@ source.Source.t_0:
 source.Source.u_0:
     initval: 0.0257
 
-# t_E and pi_E are DERIVED here, from the stellar masses, distances and
-# proper motions: these seed the relaxation engine, which moves the lens
-# distance (to ~7 kpc, for |pi_E| = 0.083 at the default lens mass) and
-# the proper motions to deliver them.
+# t_E and pi_E are derived from the masses, distances and proper motions;
+# these seeds are delivered through them.
 mulensevent.t_E:
     initval: 134.1            # d
 mulensevent.pi_E_N:
@@ -40,17 +30,14 @@ lens.Companion.s:
     initval: 1.0339
 
 # alpha: Zang+2023's alpha = ours - 180 deg, u_0 kept: their Outer
-# 2.151 rad = 123.243 deg -> 303.243 = -56.757 deg here.  (The relaxation
-# engine propagates the initval to xalpha/yalpha.)
+# 2.151 rad = 123.243 deg -> 303.243 = -56.757 deg here.
 lens.Companion.alpha:
     initval: -56.757
 
-# rho is not seeded: it is derived from the source radius, which the
-# source-flux seed supplies (see star.Source.av below).
+# rho (an upper limit in Zang+2023) is not seeded: it derives from the
+# source radius, which the source-flux seed supplies.
 
-# q = M_companion / M_primary.  EXOZIPPy's relaxation engine propagates
-# this through the symbolic relation  q * M_primary = M_companion
-# to set the companion's mass initval automatically.
+# q = M_companion / M_primary.
 lens.Companion.q:
     initval: 1.9187e-05       # = 10**-4.717
 
@@ -69,8 +56,7 @@ star.Source.dec:
     initval: -29.41489
     sigma: 0
 
-# these shouldn't be fit for such models (on the to do list)
-# but as a temporary hack, we're just going to fix them at their arbitrary starting values
+# No spectrum: hold the source metallicity at its default.
 star.Source.feh:
     sigma: 0.0
 planet.Companion.radius:

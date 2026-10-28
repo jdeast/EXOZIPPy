@@ -1,21 +1,12 @@
 # OGLE-2009-BLG-020 / OGLE-2009-BLG-020L starting values.
-#
-# Every seed below is a printed value or is derived from printed values,
-# with the conversion written out beside it:
 #   Skowron et al. 2011, ApJ 738, 87 (S11): Table 1, "parallax + full
-#     orbit (with priors)" column -- the IOP version of record; the arXiv
-#     v1 posting prints different values (README) -- and Sec. 3.2's
+#     orbit (with priors)" column (IOP version of record), and Sec. 3.2's
 #     assumed source distance.
-#   Yee et al. 2016, ApJ 821, 121 (Y16): Table 7, the joint microlensing
-#     + RV fit (masses, D_L, q and the orbit).  Y16 print no light-curve
-#     parameters for that fit.
-#   Gaia DR3 4050356367410860160 (0.5" from the event): the lens proper
-#     motion.
-#
-# S11 Appendix A is EXOZIPPy's convention (conventions.md C17), so its
-# trajectory parameters transfer unchanged.  S11's printed t_E, theta_E
-# and pi_E are NOT seeded: in this model they are derived from the masses,
-# distances and proper motions (README, "Which values are seeded").
+#   Yee et al. 2016, ApJ 821, 121 (Y16): Table 7 (masses, D_L, q, orbit).
+#   Gaia DR3 4050356367410860160: the lens proper motion.
+# S11 Appendix A is EXOZIPPy's convention (conventions.md C17).  S11's t_E,
+# theta_E and pi_E are derived here, not seeded; every derivation is in
+# README.md ("Starting values").
 
 # Sky position (OGLE EWS).  Required: the OGLE file is HJD_UTC and the
 # HJD -> BJD_TDB conversion refuses placeholder coordinates.
@@ -54,33 +45,18 @@ lens.L2.q:
 star.L1.distance:
     initval: 747.0            # pc, Y16 D_L
 
-# S11 Sec. 3.2: "We assume the source to be in the Galactic Bulge at
-# Ds = 8 kpc, and thus the source parallax is pi_s = 0.125 mas" -- the
-# pi_S of Y16's Table 4 D_L = AU/(theta_E pi_E + pi_S).  An assumption, but
-# the papers' own.
+# S11 Sec. 3.2's assumed bulge source, pi_s = 0.125 mas.
 star.Source.distance:
     initval: 8000.0           # pc
 
 # --- Proper motions (the leaves t_E and pi_E derive from) -----------------
-# Derived, not printed.  From the block above:
-#   M = 0.888 (1 + 0.275) = 1.1322 Msun, pi_rel = 1/0.747 - 1/8 = 1.213688 mas
-#   theta_E = sqrt(kappa M pi_rel) = 3.345262 mas  (kappa = 8.143853)
-#   |pi_E| = pi_rel / theta_E = 0.362808
-# Direction: pi_E,E = +0.149 is S11's printed, well-measured component;
-# pi_E,N = -sqrt(|pi_E|^2 - 0.149^2) = -0.330800, NEGATIVE as in S11's most
-# probable region (Sec. 4.2.1: pi_E,N ~ -0.2, pi_E,E ~ +0.2).  S11's
-# printed pi_E,N = -0.022 is the median of a posterior S11 Sec. 5.1 splits
-# into pi_E,N > 0 and < 0 regions, not a point on either (README).
-#   phi_pi = atan2(pi_E,E, pi_E,N) = 155.7521 deg E of N
-# Magnitude: mu_geo = theta_E / t_E = 3.345262 / 76.9 d = 15.888905 mas/yr
-# (S11's printed t_E), so mu_geo (E, N) = (6.525341, -14.487140).  The
-# model's heliocentric relative motion adds pi_rel v_earth,perp(t0_par)
-# (S11 eq. A9; v_perp = (0.482048, 0.669449) au/yr at this event's t0_par,
-# MulensEvent.register_frame_constants): mu_helio = (7.110397, -13.674638).
-# The lens primary's pm is Gaia DR3 4050356367410860160 (G = 16.26, the
-# blend of lens and source at 0.5" -- the lens dominates; RUWE 3.4, as a
-# 276 d binary's photocenter would give), and the source's is the lens's
-# minus mu_helio.
+# Derived from the block above (README):
+#   M = 1.1322 Msun, pi_rel = 1.213688 mas, theta_E = 3.345262 mas,
+#   |pi_E| = 0.362808, pi_E = (-0.330800, +0.149), phi_pi = 155.7521 deg
+#   mu_geo = theta_E / t_E(S11, 76.9 d) = 15.888905 mas/yr
+#   mu_helio = mu_geo + pi_rel v_earth,perp(t0_par) = (7.110397, -13.674638)
+# Lens primary: Gaia DR3 pm (the 0.5" blend the lens dominates); the
+# source's is the lens's minus mu_helio.
 star.L1.pm_ra:
     initval: 4.389036         # mas/yr, Gaia DR3 pmra
 star.L1.pm_dec:
@@ -109,31 +85,18 @@ orbit.L.sesinw:
 orbit.L.cosi:
     initval: 0.635054         # i = 180 - 129.424 = 50.576 deg
 
-# Y16's Omega_node = -7.767 is in that same frame, and the mapping into
-# EXOZIPPy's sky frame is bigomega = PA(binary axis at t_0,kep) -
-# Omega_frame, with PA = phi_pi - alpha_0 (S11's alpha_0 = 189.08):
-#   bigomega = 155.7521 - 189.08 + 7.767 = -25.561 = 334.439 deg
-# (the earlier 340.755 is the same rule at the phi_pi = 162.07 deg the
-# engine used to derive).  The fit is extremely sharp in it -- +/-10 deg
-# costs >1e6 nats -- so do not round it.
+# Y16's Omega_node = -7.767 in that frame, mapped as
+#   bigomega = phi_pi - alpha_0 - Omega_Y16 = 155.7521 - 189.08 + 7.767
+# (S11's alpha_0 = 189.08).  +/-10 deg costs >1e6 nats: do not round it.
 orbit.L.bigomega:
     initval: 334.4391         # deg E of N
 
 # --- Per-instrument blending and error scaling ----------------------------
-# f_source and f_blend fit linearly against the model above, per
-# instrument; err_scale is the sqrt(chi2/N) that fit leaves.  The muFUN
-# files are raw instrumental magnitudes with an arbitrary per-site
-# zeropoint, so log_f_total cannot be defaulted.
+# Linear flux solve per instrument at the model above; err_scale is the
+# sqrt(chi2/N) it leaves (README).
 
-# A stricter ceiling on every instrument's err_scale than the default 100
-# (JDE, 2026-09-25).  Measured 2026-09-25: from these seeds the DE seed
-# polish bought +383 nats by inflating err_scale to 36 (OGLE) and 92
-# (Bronberg) while dropping the lens companion to ~1e-7 Msun -- a
-# point-lens basin the wide ceiling made cheaper than fixing the wings.
-# Ten leaves room for the real underestimates here (the OGLE out-of-event
-# baseline needs 3.6; the seed-start wing mismatch needs ~7) and takes the
-# collapsed basin off the table.  Broadcast to all nine instruments; the
-# per-instrument entries below refine the start only.
+# err_scale ceiling 10 (default 100) on all nine instruments: keeps the
+# fit out of the collapsed point-lens basin (README).
 mulensinstrument.err_scale:
     upper: 10.0
 mulensinstrument.OGLE.q_source:
@@ -198,8 +161,3 @@ mulensinstrument.VintageLane.log_f_total:
     initval: -6.75675
 mulensinstrument.VintageLane.err_scale:
     initval: 1.31
-
-# star.Source.radius is left free: with finite_source on, rho is read but
-# the radius is not separately identifiable.  Skowron measure theta_* =
-# 4.45 +/- 0.40 uas, an ANGLE; imposing it as a radius would feed the
-# assumed source distance back in as if it were measured.
