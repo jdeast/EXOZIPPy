@@ -53,18 +53,20 @@ THE CANONICAL PRIOR SET (examples/DC2018/README.md, "Architecture configs"):
                          sample), log_s uniform [-1, 1], alpha uniform;
                          rho <= 1 (soft barrier, bound_scale 0.01: ~440 nats
                          at rho = 1.01, i.e. hard in practice)
-  1L2S                   a second source star Source2 (distance, proper
-                         motion, av and feh hard-linked to Source's: one
-                         bound pair), its own t_0 / u_0 with Source's
-                         bounds; log_q_flux uniform [-3, 3] per band
-                         (fitlogqflux); rho <= 1 on both sources, as 2L1S
+  1L2S                   a second source star Source2, paired with Source
+                         by a `type: static` orbit (one bound pair: the
+                         orbit group ties distance, proper motion, rv and
+                         av; feh is hard-linked by hand), its own t_0 / u_0
+                         with Source's bounds; log_q_flux uniform [-3, 3]
+                         per band (fitlogqflux); rho <= 1 on both sources,
+                         as 2L1S
 
 WHAT CONFIG CANNOT MAKE IDENTICAL (and the README says so):
   * 1L2S has THREE star bodies, the others two.  The galactic model's
-    per-star density prior is unnormalized (galacticmodel.py), so the extra
-    star adds a term with no fixed normalization; with Source2's distance
-    linked to Source's it is a second density factor on D_s, not a pure
-    constant.  ln Z(1L2S) is offset from the others by that term.
+    per-star density prior is unnormalized (galacticmodel.py).  With
+    Source2's distance, proper motion and rv all tied to Source's by the
+    static orbit, Source2 joins Source's linked group and adds no kinematic
+    term (star.md, "Linked stars"); the extra star's SED/torres terms remain.
   * rho's prior differs between 1L1S_fs (soft 10) and 2L1S/1L2S (soft 1) by
     the instruction that set them; the barrier removes prior mass above the
     cap without renormalizing.
@@ -346,6 +348,17 @@ def arch_config(arch, cfg):
         )
         for entry in cfg["mulensinstrument"]:
             entry["fitlogqflux"] = True
+        # One bound pair that does not move: the static orbit ties Source2's
+        # distance, proper motion, rv and av to Source's
+        # (components/orbit/orbit.md, "type: static").
+        cfg["orbit"] = [
+            {
+                "name": "Sources",
+                "type": "static",
+                "primary": ["Source"],
+                "companion": ["Source2"],
+            }
+        ]
     return cfg
 
 
@@ -366,13 +379,10 @@ def arch_priors(arch, ev, shared):
     elif arch == "1L2S":
         p["star.Source2.ra"] = {"initval": ev.ra, "sigma": 0}
         p["star.Source2.dec"] = {"initval": ev.dec, "sigma": 0}
-        # One bound pair: same distance, space motion, line of sight and
-        # composition as Source.
-        for par in ("distance", "pm_ra", "pm_dec", "av", "feh"):
-            p["star.Source2.%s" % par] = {
-                "initval": "star.Source.%s" % par,
-                "sigma": 0,
-            }
+        # Distance, space motion and av come from the static orbit in
+        # arch_config; the orbit group does not tie the present-day [Fe/H],
+        # so the pair's composition is linked here.
+        p["star.Source2.feh"] = {"initval": "star.Source.feh", "sigma": 0}
         p["source.Source2.t_0"] = dict(shared["source.Source.t_0"])
         p["source.Source2.u_0"] = dict(shared["source.Source.u_0"])
         p["source.Source.rho"] = dict(rho_cap)
@@ -467,7 +477,7 @@ def shared_view(cfg, params, sed_text):
     only by output directory (prefix, parameter_file, sed.file) are replaced
     by what they hold."""
     c = copy.deepcopy(cfg)
-    for k in ("run", "prefix", "parameter_file", "lens", "planet"):
+    for k in ("run", "prefix", "parameter_file", "lens", "planet", "orbit"):
         c.pop(k, None)
     c["sed"] = sed_text
     c["star"] = [s for s in c["star"] if s.get("name") != "Source2"]

@@ -319,8 +319,9 @@ def test_arch_specific_priors(built):
 
 def test_static_source_orbit_leaves_t0_to_the_peak_finder(written):
     """
-    Given the 1L2S architecture with Source and Source2 paired by a
-    `type: static` orbit, and no t_0 start for Source (the window only),
+    Given the 1L2S architecture, whose generator pairs Source and Source2
+    with a `type: static` orbit (no hand links on distance, pm or av), and
+    no t_0 start for Source (the window only),
     When it prepares,
     Then Source's t_0 is still UNINFORMED when the peak finder asks, so the
     finder seeds it: it ends at the event's peak with data provenance.
@@ -339,17 +340,17 @@ def test_static_source_orbit_leaves_t0_to_the_peak_finder(written):
     with io.open(cfg["parameter_file"], encoding="utf-8") as fh:
         params = yaml.safe_load(fh)
     assert "initval" not in params["source.Source.t_0"]
-    cfg.setdefault(
-        "orbit",
-        [
-            {
-                "name": "Sources",
-                "type": "static",
-                "primary": ["Source"],
-                "companion": ["Source2"],
-            }
-        ],
-    )
+    # The generator pairs the sources with a static orbit, not hand links.
+    assert cfg["orbit"] == [
+        {
+            "name": "Sources",
+            "type": "static",
+            "primary": ["Source"],
+            "companion": ["Source2"],
+        }
+    ]
+    for par in ("distance", "pm_ra", "pm_dec", "av"):
+        assert "star.Source2.%s" % par not in params, par
     for k in ("run", "prefix", "parameter_file", "sampler"):
         cfg.pop(k, None)
     cwd = os.getcwd()

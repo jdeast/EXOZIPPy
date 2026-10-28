@@ -135,7 +135,7 @@ events (`dccv` in the answer key, 93 of 293) are refused unless `--allow-cv`;
 | `source.*.rho` | soft cap 1, `bound_scale: 0.01` (~440 nats at 1.01: hard in practice) | 2L1S, 1L2S |
 | `planet.Companion.log_q` | uniform [-6, 0] (the 83 stellar binaries are inside) | 2L1S |
 | `lens.Companion.log_s`, `alpha` | uniform [-1, 1]; alpha uniform (structural) | 2L1S |
-| `star.Source2` | distance, pm, av, feh hard-linked to Source (one bound pair); torres | 1L2S |
+| `star.Source2` | paired with Source by a `type: static` orbit (one bound pair: distance, pm, rv and av tied by the orbit group), feh hard-linked; torres | 1L2S |
 | `source.Source2.t_0`, `u_0` | Source's bounds | 1L2S |
 | `log_q_flux` | uniform [-3, 3] per band (`fitlogqflux: true`) | 1L2S |
 
@@ -148,11 +148,12 @@ prior.
 
 **What config cannot make identical** -- read these before quoting a ratio:
 
-- **1L2S has three star bodies, the others two.** The galactic model's
-  per-star density prior is unnormalized (`galacticmodel.py`), so Source2
-  adds a term with no fixed normalization; with its distance linked to
-  Source's it is a second density factor on `D_s`, not a pure constant.
-  `ln Z(1L2S)` is offset from the others by it. Not fixed here.
+- **1L2S has three star bodies, the others two.** Source2's distance,
+  proper motion and rv are tied to Source's by the static orbit, so it
+  joins Source's linked group and adds no galactic-model kinematic term
+  (`src/exozippy/components/star/star.md`, "Linked stars"); its own SED and
+  torres terms remain, and those have no counterpart in the other
+  architectures.
 - **rho's cap differs** between 1L1S_fs (soft 10) and 2L1S/1L2S (soft 1),
   by design; the barrier removes the prior mass above the cap without
   renormalizing, so that mass enters the ratio.
