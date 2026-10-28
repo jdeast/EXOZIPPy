@@ -317,6 +317,54 @@ def test_arch_specific_priors(built):
     assert np.allclose(np.asarray(built["1L1S_fs"].source.rho.upper), 10.0)
 
 
+def test_static_source_orbit_leaves_t0_to_the_peak_finder(written):
+    """
+    Given the 1L2S architecture with Source and Source2 paired by a
+    `type: static` orbit, and no t_0 start for Source (the window only),
+    When it prepares,
+    Then Source's t_0 is still UNINFORMED when the peak finder asks, so the
+    finder seeds it: it ends at the event's peak with data provenance.
+    The orbit's default eccentricity relations make the engine settle its
+    DEFAULT tier, and that settle used to clip every default seed into its
+    bounds -- t_0's 2460000 default landed on the window's upper edge and
+    reported "solved", the finder held it there as informed, and the build
+    refused the start (review 1.6.21; the root cause is pinned in
+    tests/test_ks_engine.py, test_a_settle_never_moves_a_seed_no_check_sees).
+    """
+    from exozippy.config import PRECEDENCE_DERIVED_DATA
+
+    path = written["1L2S"]
+    with io.open(path, encoding="utf-8") as fh:
+        cfg = yaml.safe_load(fh)
+    with io.open(cfg["parameter_file"], encoding="utf-8") as fh:
+        params = yaml.safe_load(fh)
+    assert "initval" not in params["source.Source.t_0"]
+    cfg.setdefault(
+        "orbit",
+        [
+            {
+                "name": "Sources",
+                "type": "static",
+                "primary": ["Source"],
+                "companion": ["Source2"],
+            }
+        ],
+    )
+    for k in ("run", "prefix", "parameter_file", "sampler"):
+        cfg.pop(k, None)
+    cwd = os.getcwd()
+    os.chdir(os.path.dirname(path))
+    try:
+        system = System(cfg, user_params=params)
+        system.prepare()
+    finally:
+        os.chdir(cwd)
+    cm = system.config_manager
+    assert cm._last_provenance["source.0.t_0"] == PRECEDENCE_DERIVED_DATA
+    assert cm.initval_source("source", "t_0", element=0) == "data"
+    assert abs(cm._last_resolved["source.0.t_0"] - T0) < 1.0
+
+
 def test_n_temps_accepts_auto(gen, tmp_path):
     """
     Given `--n-temps auto` (the sampler's own ladder sizing),
