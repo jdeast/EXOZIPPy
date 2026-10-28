@@ -4,11 +4,9 @@ star.feh:
     sigma: 0.08
     citation: high-resolution spectroscopy
 
-# the sigma is only necessary because we're not fiting an evolutionary model
-# it should be removed in a final run
+# A start value: the Torres relations constrain the mass.
 star.mass:
     initval: 0.92
-    sigma: 0.05
 
 # we can measure this from spectroscopy, but typically SED + transit is more direct
 # so we're just going to seed it at the spectroscopic value

@@ -10,11 +10,7 @@ star.A.feh:
     sigma: 0.08
     citation: high-resolution spectroscopy
 
-# the sigma is only necessary because we're not fiting an evolutionary model
-# it should be removed in a final run
-star.A.mass:
-    mu: 0.92
-    sigma: 0.05
+# The Torres relations constrain the mass; this is a start value.
 star.A.logmass:
     initval: -0.04173949
 

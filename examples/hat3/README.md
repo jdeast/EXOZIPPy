@@ -25,13 +25,12 @@ smoke-test run in `hat3.yaml` starts in the right place; the priors,
 bounds and citations are the example's own. The seed is one point, so
 the chains are scattered around it (`overdisperse: true`).
 
-**The mass prior.** Without an evolutionary model, `hat3_staronly` and
-`hat3_transitonly` put a Gaussian prior on the stellar mass (0.92 +/-
-0.05); it should come out of a final run that has another mass
-constraint. With the MIST tracks in the fit (`hat3_mist`,
-`hat3_mist_claret`) the mass is constrained by the tracks' radius, teff
-and age penalties, so the hand-supplied prior comes out and the mass is a
-start value only.
+**The mass.** Only `hat3_staronly` (SED alone, no mass relation) puts a
+Gaussian prior on the stellar mass (0.92 +/- 0.05). `hat3` and
+`hat3_transitonly` constrain it with the Torres relations, and
+`hat3_mist`/`hat3_mist_claret` with the MIST tracks' radius, teff and age
+penalties, so in those the mass is a start value only (the hand prior
+was removed from `hat3` and `hat3_transitonly` in #508).
 
 **MIST coordinates.** `star.A.initfeh` is the INITIAL (protostellar)
 metallicity -- the grid's third axis, distinct from `star.feh`, the
