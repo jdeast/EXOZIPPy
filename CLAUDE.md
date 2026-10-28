@@ -26,8 +26,8 @@ poetry run pytest
 poetry run pytest tests/test_config_healing.py::test_name -n0 -x
 
 # Run the fitter on an example
-cd examples/kelt4rvonly && poetry run exozippy kelt4.yaml
-cd examples/ob140939   && poetry run exozippy ob140939.yaml
+cd examples/kelt4    && poetry run exozippy kelt4_rvonly.yaml
+cd examples/ob140939 && poetry run exozippy ob140939.yaml
 
 # Dump the full repo for AI review (see scripts/dump_code.py for flags)
 poetry run python scripts/dump_code.py
