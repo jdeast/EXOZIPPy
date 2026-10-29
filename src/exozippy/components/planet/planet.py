@@ -680,7 +680,11 @@ class Planet(Component):
                     f"{self.prefix}.{i}.{key}",
                     f"{self.prefix}.{key}",
                 )
-                if user_entry(up, spelled) is not None
+                # A `unit:`-only entry is how the user READS the quantity,
+                # not a value for it, so it supersedes nothing (1.5.10's K
+                # twin: `planet.b.K: {unit: km/s}` used to drop the
+                # estimate as though the user had stated a K).
+                if set(user_entry(up, spelled) or ()) - {"unit"}
             ]
             if stated:
                 cm.supersede_hint(

@@ -49,7 +49,8 @@ ECLIPTIC_POLE_EQ = np.array([0.0, -np.sin(OBLIQUITY), np.cos(OBLIQUITY)])
 # What each shipped spacecraft physically is: its distance from the Earth
 # in AU, (min, max) over the file.  L2 is 1.5e6 km = 0.010 AU, with
 # Lissajous excursions; Spitzer and Kepler drift away in Earth-trailing
-# heliocentric orbits (Kepler was ~0.5 AU behind by K2's Campaign 9).
+# heliocentric orbits (Kepler was ~0.8 AU from the Earth during K2's
+# Campaign 9).
 SPACECRAFT_EARTH_DISTANCE_AU = {
     "gaia.eph": (0.005, 0.012),
     "roman_simulated_2018dc.eph": (0.0005, 0.025),
@@ -57,8 +58,9 @@ SPACECRAFT_EARTH_DISTANCE_AU = {
     "k2.eph": (0.1, 2.0),
 }
 # Orbit pole tolerance: Spitzer's heliocentric orbit is inclined ~1.1 deg
-# to the ecliptic; the L2 orbits follow the Earth's.
-POLE_TOLERANCE_DEG = {"spitzer.eph": 2.0}
+# to the ecliptic and Kepler's ~0.44 deg (measured from k2.eph); the L2
+# orbits follow the Earth's.
+POLE_TOLERANCE_DEG = {"spitzer.eph": 2.0, "k2.eph": 1.0}
 
 
 def _eph_files():
