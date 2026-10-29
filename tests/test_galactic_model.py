@@ -448,8 +448,9 @@ def test_chabrier_is_the_default_and_carries_the_truncation_normalizer():
     # ... so most of the delta from the original is the normalizer.
     assert log_z == pytest.approx(0.3539152164266602, rel=1e-9)
     assert imf == pytest.approx(-0.5488319618, rel=1e-9)
-    # untouched by the IMF change (baseline captured from master)
-    assert kinematic == 10.09330069291524
+    # untouched by the IMF change.  Re-pinned when positions and velocities
+    # moved into one frame (review 1.7.1): 10.09330069291524 before.
+    assert kinematic == 10.047284744610437
 
 
 def test_multiple_galacticmodel_blocks_raise():
@@ -677,7 +678,6 @@ def _reference_kinematic_lp(d_pc, pm_ra, pm_dec, rv_ms):
         DISK_VELOCITY_SIGMA_W,
         K_VEL_CONVERSION,
         SUN_GC_DISTANCE,
-        SUN_Z_OFFSET,
         THICK_DISK_LOCAL_NUMBER_DENSITY,
         THICK_DISK_ROTATION_VELOCITY,
         THICK_DISK_SCALE_HEIGHT,
@@ -690,21 +690,12 @@ def _reference_kinematic_lp(d_pc, pm_ra, pm_dec, rv_ms):
     def hinge(t):  # same smooth max(t, 0) as the model
         return 0.5 * (t + np.sqrt(t * t + 0.0025))
 
-    sc = SkyCoord(ra=_RA_RAD * u.rad, dec=_DEC_RAD * u.rad)
-    l_rad, b_rad = sc.galactic.l.rad, sc.galactic.b.rad
     d = max(d_pc, 1e-3) / 1e3  # kpc, same floor as the model
 
-    # Position in the model's own convention (Sun at x = +SUN_GC_DISTANCE,
-    # z tilted by bsun = z_sun/R0 so d=0 lands at z = +z_sun)
-    x = SUN_GC_DISTANCE - d * np.cos(l_rad) * np.cos(b_rad)
-    y = d * np.sin(l_rad) * np.cos(b_rad)
-    bsun = SUN_Z_OFFSET / SUN_GC_DISTANCE
-    z = d * np.sin(b_rad) * np.cos(bsun) + x * np.sin(bsun)
-    z_smooth = np.sqrt(z**2 + 1e-6)
-    r = np.sqrt(x**2 + y**2 + 1e-6)
-
-    # Velocity via astropy's exact transform in the component's frame.
-    # The model linearizes at d = 1 kpc, but the map is exactly linear in
+    # Position AND velocity via astropy's exact transform in the
+    # component's frame, then x mirrored into the model frame (genulens's
+    # orientation: Sun at x ~ +R0; physics.py module docstring).  The model
+    # linearizes at d = 1 kpc, but both maps are exactly affine in d and in
     # (K*pm*d, rv), so the two agree to float precision.
     gal = SkyCoord(
         ra=_RA_RAD * u.rad,
@@ -714,7 +705,12 @@ def _reference_kinematic_lp(d_pc, pm_ra, pm_dec, rv_ms):
         pm_dec=pm_dec * u.mas / u.yr,
         radial_velocity=(rv_ms / 1e3) * u.km / u.s,
     ).transform_to(GALACTOCENTRIC_FRAME)
-    v_x = gal.v_x.to_value(u.km / u.s)
+    x = -gal.x.to_value(u.kpc)
+    y = gal.y.to_value(u.kpc)
+    z = gal.z.to_value(u.kpc)
+    z_smooth = np.sqrt(z**2 + 1e-6)
+    r = np.sqrt(x**2 + y**2 + 1e-6)
+    v_x = -gal.v_x.to_value(u.km / u.s)
     v_y = gal.v_y.to_value(u.km / u.s)
     v_z = gal.v_z.to_value(u.km / u.s)
     v_r = v_y * (y / r) + v_x * (x / r)

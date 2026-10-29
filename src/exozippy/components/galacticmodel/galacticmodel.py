@@ -80,6 +80,7 @@ ANCHOR_PLACEHOLDER_DEC_DEG = 0.0
 from .physics import (  # noqa: E402
     GALACTOCENTRIC_FRAME,
     line_of_sight_basis,
+    polar_velocity,
 )
 from .physics import (  # noqa: E402
     galactic_xyz as _galactic_xyz_np,
@@ -461,17 +462,18 @@ def branch_log_number_densities(x, y, z, r, xp=pt):
     return log_dens_thin, log_dens_thick, log_dens_bulge
 
 
-def _log_total_number_density(d_pc, cosl_cosb, sinl_cosb, sinb):
+def _log_total_number_density(d_pc, sun_xyz, los_hat):
     """numpy log sum_b n_b (stars/pc^3) at distance(s) ``d_pc`` along the
-    sight line, with the graph's own 1 mpc clamp."""
+    sight line (``line_of_sight_basis(...)[2:]``), with the graph's own
+    1 mpc clamp."""
     d_kpc = np.maximum(np.asarray(d_pc, dtype=float), 1e-3) / 1e3
-    x, y, z = _galactic_xyz_np(d_kpc, cosl_cosb, sinl_cosb, sinb)
+    x, y, z = _galactic_xyz_np(d_kpc, sun_xyz, los_hat)
     r = np.sqrt(x**2 + y**2 + 1e-6)
     dens = branch_log_number_densities(x, y, z, r, xp=np)
     return np.logaddexp.reduce(np.stack(dens), axis=0)
 
 
-def log_position_norm(lower_pc, upper_pc, cosl_cosb, sinl_cosb, sinb):
+def log_position_norm(lower_pc, upper_pc, sun_xyz, los_hat):
     """log of int_lower^upper sum_b n_b(d) d^2 dd along the sight line.
 
     The number of stars per steradian in the cone out to ``upper`` -- the
@@ -485,10 +487,7 @@ def log_position_norm(lower_pc, upper_pc, cosl_cosb, sinl_cosb, sinb):
     lnd = np.linspace(
         np.log(float(lower_pc)), np.log(float(upper_pc)), _POSITION_QUAD_POINTS
     )
-    f = (
-        _log_total_number_density(np.exp(lnd), cosl_cosb, sinl_cosb, sinb)
-        + 3.0 * lnd
-    )
+    f = _log_total_number_density(np.exp(lnd), sun_xyz, los_hat) + 3.0 * lnd
     peak = float(np.max(f))
     return float(np.log(np.trapezoid(np.exp(f - peak), lnd)) + peak)
 
@@ -569,14 +568,14 @@ def _log_velocity_marginal(cols, c, s, xprime, vphi_mean, sigmas, m_rot, v0):
 
     The branch is a Gaussian in ``u = (v_r, v_phi, v_z)`` with mean
     ``(0, vphi_mean, 0)`` and covariance ``diag(sigmas^2)``, and
-    ``u = Q (v0 + M_rot x')`` with ``Q`` get_polar_velocity's map
+    ``u = Q (v0 + M_rot x')`` with ``Q`` physics.polar_velocity's map
     ``[[c, s, 0], [-s, c, 0], [0, 0, 1]]``.  ``c, s`` are built from the
     SMOOTHED radius (``r^2 = x^2 + y^2 + 1e-6``), so ``Q`` is a rotation
     times ``rho2 = c^2 + s^2`` on its first two rows, 1 - 1e-4 for a source
     0.1 kpc from the Galactic center -- not negligible against an exact
     normalization, so it is carried exactly: ``x' = B (u - Q v0)`` with
-    ``B = M_rot^T Q^-1`` (``M_rot`` IS a rotation), hence
-    ``x' ~ N(B (m - Q v0), B S B^T)`` and the marginal of any subset is
+    ``B = M_rot^T Q^-1`` (``M_rot`` is orthogonal, so its inverse is its
+    transpose), hence ``x' ~ N(B (m - Q v0), B S B^T)`` and the marginal of any subset is
     the matching sub-block.  The caller adds ``log |det Q| = log rho2``,
     which the full density (written in u) leaves out.  Written element by
     element for |cols| in {1, 2} -- the only sizes a CONDITIONAL needs (0
@@ -1004,20 +1003,16 @@ class GalacticModel(Component):
         # Shared with the start-value hints (physics.line_of_sight_basis):
         # the affine (pm_ra_cosdec, pm_dec, rv) -> galactocentric velocity map,
         # as one offset plus three unit-response columns.
-        (
-            m_rot_np,
-            v0_arr,
-            cosl_cosb_np,
-            sinl_cosb_np,
-            sinb_np,
-        ) = line_of_sight_basis(ra_rad, dec_rad)
+        # Positions come from the SAME transform (sun_xyz + d * los_hat), so
+        # the two can never be in different frames (review 1.7.1; the frame
+        # is documented in physics.py's module docstring).
+        m_rot_np, v0_arr, sun_xyz_np, los_hat_np = line_of_sight_basis(
+            ra_rad, dec_rad
+        )
 
         # Convert to tensors for graph injection
         M_rot = pt.as_tensor_variable(m_rot_np)  # (3, 3)
         v0 = pt.as_tensor_variable(v0_arr)  # (3,)
-        cosl_cosb = pt.as_tensor_variable(cosl_cosb_np)
-        sinl_cosb = pt.as_tensor_variable(sinl_cosb_np)
-        sinb = pt.as_tensor_variable(sinb_np)
 
         # 2. PyTensor Math Helpers
         def get_galactocentric_velocity(dist_kpc, pm_ra, pm_dec, rv_ms):
@@ -1033,14 +1028,7 @@ class GalacticModel(Component):
         def get_galactic_xyz(dist):
             # physics.galactic_xyz is pure arithmetic, so the same function
             # serves numpy scalars (the hints) and tensors (here).
-            return _galactic_xyz_np(dist, cosl_cosb, sinl_cosb, sinb)
-
-        def get_polar_velocity(x, y, r, v_x, v_y):
-            cos_phi = x / r  # unitless
-            sin_phi = y / r  # unitless
-            v_r = v_y * sin_phi + v_x * cos_phi
-            v_phi = v_y * cos_phi - v_x * sin_phi
-            return v_r, v_phi
+            return _galactic_xyz_np(dist, sun_xyz_np, los_hat_np)
 
         # match the IMF.  The key is validated in __init__, so every branch
         # here is a supported option.  BOTH are densities in the SAMPLED
@@ -1134,7 +1122,7 @@ class GalacticModel(Component):
             distance, stars.pm_ra.value, stars.pm_dec.value, stars.rv.value
         )  # km/s
         v_x, v_y, v_z = vel[:, 0], vel[:, 1], vel[:, 2]
-        v_r, v_phi = get_polar_velocity(x, y, r, v_x, v_y)
+        v_r, v_phi = polar_velocity(x, y, r, v_x, v_y)
 
         # Each mixture branch must carry its own normalization: constants
         # cancel within a single Potential but NOT across the logsumexp.
@@ -1154,9 +1142,11 @@ class GalacticModel(Component):
         # examples/ob140939 the swap gave the anti-rotation parallax
         # solution +5 nats and flipped the mode weights to 0.98/0.02 AGAINST
         # the Yee et al. 2015 proper-motion-preferred solution. Sign
-        # convention: v_phi as computed by get_polar_velocity is positive
-        # for co-rotation at every position (verified against astropy
-        # Galactocentric).  The thick disk's mean rotation (170 km/s) is the
+        # convention: v_phi as computed by polar_velocity is positive
+        # for co-rotation at every position, in the model frame (astropy's
+        # Galactocentric mirrored in x, positions and velocities alike;
+        # pinned to 1e-6 km/s against astropy by tests/
+        # test_galactic_frame.py).  The thick disk's mean rotation (170 km/s) is the
         # asymmetric drift; the bulge rotates cylindrically, Omega * r.
         log_dens = branch_log_number_densities(x, y, z, r)
         vphi_means = (
@@ -1183,8 +1173,8 @@ class GalacticModel(Component):
         # The velocity Gaussians are evaluated in km/s while the sampled
         # coordinates are (pm_ra, pm_dec, rv); the change of variables
         # v = M_rot @ (K*pm_ra*d, K*pm_dec*d, rv/1e3) + v0 needs
-        # |det dv/d(pm_ra, pm_dec, rv)| = (K*d)^2 * 1e-3 (M_rot is a pure
-        # rotation, det = 1; the constant 1e-3 from m/s -> km/s is
+        # |det dv/d(pm_ra, pm_dec, rv)| = (K*d)^2 * 1e-3 (M_rot is
+        # orthogonal, |det| = 1 -- det = -1 with the frame's x mirror; the constant 1e-3 from m/s -> km/s is
         # dropped here and reported by evidence_log_norm).  Without the
         # +2*log(d) the intended prior rho * d^2 * f(v) * (K*d)^2 was
         # applied as rho * d^2 * f(v), under-weighting large distances by
@@ -1241,7 +1231,7 @@ class GalacticModel(Component):
             stars,
             roots,
             vel_linked,
-            (cosl_cosb_np, sinl_cosb_np, sinb_np),
+            (sun_xyz_np, los_hat_np),
         )
         pm.Potential(f"{self.prefix}.kinematic_prior", kinematic_penalty)
 
@@ -1456,7 +1446,7 @@ class GalacticModel(Component):
         term is exact in the model.  Velocity bounds are treated as
         infinite (pm +/- 1e5 mas/yr is > 400 km/s beyond 1 pc).
         """
-        cosl_cosb, sinl_cosb, sinb = los
+        sun_xyz, los_hat = los
         bounds = _sampled_bounds(stars.distance)
         is_derived = getattr(stars.distance, "element_is_derived", None)
         links = getattr(stars.distance, "element_links", None) or {}
@@ -1493,13 +1483,13 @@ class GalacticModel(Component):
                     )
                     if (lo, hi) not in cache:
                         cache[(lo, hi)] = log_position_norm(
-                            lo, hi, cosl_cosb, sinl_cosb, sinb
+                            lo, hi, sun_xyz, los_hat
                         )
                     c = cache[(lo, hi)]
             else:
                 d0 = float(stars.distance.element_start(k))
                 c = float(
-                    _log_total_number_density(d0, cosl_cosb, sinl_cosb, sinb)
+                    _log_total_number_density(d0, sun_xyz, los_hat)
                 ) + 2.0 * np.log(max(d0, 1e-3))
             if k not in vel_linked:
                 c += 1.5 * _LOG_2PI - _LOG_KMS_PER_MS

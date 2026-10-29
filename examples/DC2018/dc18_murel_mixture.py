@@ -142,8 +142,8 @@ _SIG = np.array(
 
 def draw_pm(rng, dist_kpc, basis, comp):
     """Draw (pm_ra, pm_dec) mas/yr for stars of component `comp`."""
-    m_rot, v0, cl, sl, sb = basis
-    x, y, z = galactic_xyz(dist_kpc, cl, sl, sb)
+    m_rot, v0, sun_xyz, los_hat = basis
+    x, y, z = galactic_xyz(dist_kpc, sun_xyz, los_hat)
     r = np.hypot(x, y)
     centre = np.where(
         comp == 0,
