@@ -206,6 +206,22 @@ class Background(Component):
                             f"sampled in band {b!r})."
                         )
                 if hits:
+                    from ..mulensing.mulensinstrument import (
+                        dia_reference_is_solved,
+                        solved_dia_reference_message,
+                    )
+
+                    if dia_reference_is_solved(lc_cfgs[hits[0]]):
+                        # The tie derives this background from the light
+                        # curve's f_blend, which a solved pySIS reference
+                        # makes fictitious (review 2.2.22c).
+                        raise ValueError(
+                            f"{where} "
+                            + solved_dia_reference_message(
+                                lc_names[hits[0]],
+                                "the background's light-curve tie",
+                            )
+                        )
                     self._tie[self._flux_index[(i, b)]] = hits[0]
         self._lc_names = lc_names
 

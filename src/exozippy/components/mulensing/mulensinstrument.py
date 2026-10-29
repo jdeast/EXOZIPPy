@@ -64,6 +64,42 @@ def mag_to_flux(mag, mag_err):
     return flux, (np.log(10.0) / 2.5) * flux * np.maximum(mag_err, 0.0)
 
 
+def dia_reference_is_solved(entry):
+    """True for a ``data_format: dia`` light curve with NO explicit reference.
+
+    Its reference is then solved from the pySIS ``mag`` column, which is a
+    FIXED pipeline reference (20.0 mag at zp 28), not the star's baseline
+    (review 2.2.22c): ``f_source`` is unaffected, but ``f_blend`` and
+    ``q_source`` are relative to an arbitrary number.  The one predicate
+    every reader of a light curve's blend asks before trusting it --
+    ``sed_constrains_blend`` here, the unresolved background's light-curve
+    tie in ``background.py`` -- read from the raw config entry, so it is
+    usable before stage 1.
+    """
+    entry = entry or {}
+    return (
+        entry.get("data_format", "magnitude") == "dia"
+        and entry.get("reference_flux") is None
+        and entry.get("reference_mag") is None
+    )
+
+
+def solved_dia_reference_message(name, reader):
+    """The refusal for a blend ``reader`` on a solved-reference dia curve."""
+    return (
+        f"mulensinstrument {name!r}: {reader} reads this light curve's "
+        f"blend flux, but it is data_format: dia with no reference_flux or "
+        f"reference_mag, so its reference is solved from the pySIS mag "
+        f"column -- a FIXED pipeline reference (20.0 mag at zp 28), not the "
+        f"star's baseline. f_source is unaffected, but f_blend and q_source "
+        f"are relative to that arbitrary number, so the blend {reader} "
+        f"constrains would be fictitious. State a MEASURED baseline "
+        f"(reference_mag, with zp, or reference_flux in file units), e.g. "
+        f"from calibrated photometry of the target at baseline, or drop "
+        f"{reader}."
+    )
+
+
 class _BootstrapGeometry:
     """The flux bootstrap's reader of the event geometry (see
     ``MulensInstrument._probe_bootstrap_geometry``).
@@ -122,17 +158,41 @@ class MulensInstrument(Instrument):
     blend is at most as negative as the total flux -- and must not be
     widened to accommodate a difference curve.)
 
-    The missing piece is the reference flux, and a native pySIS file
-    carries it implicitly.  Its five columns are
-    ``time dflux dflux_err mag mag_err``, where ``mag`` is the TOTAL
-    brightness, so the two are related by
+    The missing piece is the reference flux.  A native pySIS file has five
+    columns, ``time dflux dflux_err mag mag_err``, related by
 
         mag = zp - 2.5*log10(ref - dflux)
 
-    which determines ``ref`` and ``zp`` exactly (verified on MulensModel's
-    native KB180003 set: ``ref = 1584.9`` at ``zp = 28.000`` for all three
-    sites, residual rms 2.8e-5 mag).  The total flux is then
-    ``F = ref - dflux``.  Note the subtraction: in the pySIS files seen
+    which determines ``ref`` and ``zp`` exactly (MulensModel's native
+    KB180003 set: ``ref = 1584.9`` at ``zp = 28.000`` for all three sites,
+    residual rms 2.8e-5 mag), and the reader uses ``F = ref - dflux``.
+
+    **That ``ref`` is NOT the star's baseline** (review 2.2.22c).  1584.9
+    is 20.0 mag at zp 28 -- a FIXED pipeline reference: KMT-2021-BLG-1122L
+    gives the same 1584.9 at every site and band to 3e-5 mag.  So a pySIS
+    ``mag`` column carries no baseline information, and the solved
+    reference imposes a ~20.0 mag total flux, and with it a blending
+    fraction.  What that does and does not touch:
+
+    - ``f_source`` -- the brightening's amplitude -- is unaffected, in any
+      reference.  So are the magnification, the geometry, and the SED tie
+      on the source (the zeropoint reads ``f_source`` only).
+    - ``f_blend``, ``q_source`` and the ``q_source <= 2`` bound are NOT
+      physical: they are relative to the arbitrary reference.  With
+      nothing reading the blend (``sed_constrains_blend`` off, no
+      background tie) that is harmless, and any reference safely above
+      the data is as good as the solved one.
+    - Anything that READS the blend needs a MEASURED reference
+      (``reference_flux``/``reference_mag``, e.g. from calibrated
+      photometry of the baseline): ``sed_constrains_blend: true`` on a dia
+      light curve, or an unresolved ``background`` tied to it, RAISES
+      without one, naming the light curve (``dia_reference_is_solved``).
+    - The same is true of a ``magnitude`` file written from pySIS's
+      ``mag`` column (its baseline is the same fixed 20.0 mag), but nothing
+      in such a file says where it came from, so that case is documented
+      (mulensing.md), not detected.
+
+    Note the subtraction in ``F = ref - dflux``: in the pySIS files seen
     here, ``dflux`` grows MORE NEGATIVE as the star brightens.  That is
     taken as the pipeline's convention on the strength of one independently
     sourced set (MulensModel's KB180003) -- corroboration, not a survey --
@@ -148,11 +208,11 @@ class MulensInstrument(Instrument):
     or lens mass derived from the source flux.  Supply the native file, or
     give ``reference_flux``/``reference_mag`` explicitly.
 
-    ``reference_flux`` (file units) or ``reference_mag`` (with ``zp``, or
-    with the file's own zeropoint once recovered) override the solved value
-    and let a three-column file be read.  The recovered ``zp`` is also what
-    ties this light curve's flux system to a magnitude, which is what an
-    ``sed:`` block needs.
+    ``reference_flux`` (file units) or ``reference_mag`` (with ``zp``,
+    default 28.0) override the solved value and let a three-column file be
+    read.  The flux is then in units of the reference, and
+    ``zp_ref = zp - 2.5*log10(ref)`` (``flux_system_zp``) is the magnitude
+    of unit flux, which the SED zeropoint tie subtracts (review 2.2.22a).
 
     ``f_source``/``f_blend``/``log_f_total`` are unchanged: they live in the
     file's own flux system, which for a magnitude file is the system in which
@@ -267,7 +327,13 @@ class MulensInstrument(Instrument):
                     "data_format: dia only. The difference-imaging reference "
                     "flux in the FILE's own flux units. Overrides the value "
                     "solved from the mag column, and lets a file without one "
-                    "be read. Total flux is reconstructed as ref - dflux."
+                    "be read. Total flux is reconstructed as ref - dflux. "
+                    "A pySIS mag column's reference is a FIXED 20.0 mag at "
+                    "zp 28, not the star's baseline, so f_blend and "
+                    "q_source are physical only with a MEASURED reference "
+                    "here -- required with sed_constrains_blend or a "
+                    "background tie; any reference above the data is fine "
+                    "otherwise."
                 ),
             },
             {
@@ -532,6 +598,18 @@ class MulensInstrument(Instrument):
                 # three-column file reads and a native file's mag columns
                 # are simply not selected.
                 has_ref = self._reference_flux_override(i) is not None
+                if (
+                    dia_reference_is_solved(self.config[i])
+                    and "sed" in system.active_components
+                    and self.config[i].get("sed_constrains_blend", False)
+                ):
+                    # The blend tie reads f_blend, which a solved pySIS
+                    # reference makes fictitious (review 2.2.22c).
+                    raise ValueError(
+                        solved_dia_reference_message(
+                            self.names[i], "sed_constrains_blend: true"
+                        )
+                    )
                 roles = ("time", "dflux", "err")
                 if not has_ref:
                     roles = roles + ("mag", "mag_err")
@@ -1067,6 +1145,10 @@ class MulensInstrument(Instrument):
         in magnitudes over the epochs with finite, usable values.  On
         MulensModel's native KB180003 set this returns ref = 1584.9 at
         zp = 28.000 for all three sites with a residual rms of 2.8e-5 mag.
+        That reference is pySIS's FIXED 20.0 mag, not the star's baseline
+        (review 2.2.22c, class docstring): f_source does not depend on it,
+        f_blend and q_source do, which is why a reader of the blend
+        requires an explicit one (``dia_reference_is_solved``).
 
         An explicit ``reference_flux``/``reference_mag`` short-circuits the
         solve; the zeropoint then comes from ``zp:`` (default 28.0, the
@@ -1131,7 +1213,10 @@ class MulensInstrument(Instrument):
         else:
             logger.info(
                 "[%s:%s] data_format: dia -- reference flux %.6g at "
-                "zp %.4f (residual rms %.3g mag); total flux = ref - dflux.",
+                "zp %.4f (residual rms %.3g mag); total flux = ref - dflux. "
+                "A solved pySIS reference is the pipeline's, not the "
+                "star's baseline: f_source is unaffected, f_blend and "
+                "q_source are relative to it.",
                 self.prefix,
                 label,
                 ref,

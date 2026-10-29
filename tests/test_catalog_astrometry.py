@@ -813,6 +813,21 @@ def test_background_flux_in_a_light_curve_band_is_derived(truth_files):
             True,
             "sed_constrains_blend: true",
         ),
+        # a dia light curve's solved reference is pySIS's fixed 20.0 mag,
+        # so its f_blend -- what the tie reads -- is fictitious (2.2.22c)
+        (
+            {"psf_stars": ["Lens"]},
+            lambda tmp: [
+                {
+                    "name": "OGLE",
+                    "file": str(tmp / "lc.dat"),
+                    "band": "I",
+                    "data_format": "dia",
+                }
+            ],
+            True,
+            "'OGLE'.*FIXED pipeline reference",
+        ),
     ],
 )
 def test_light_curve_tie_misconfigurations_raise(
