@@ -55,7 +55,15 @@ import shutil
 import sys
 from pathlib import Path
 
-MSUN_PER_MJUP = 1047.348644  # IAU nominal GMsun/GMjup
+from exozippy.config import unit_conversion
+
+# solMass -> jupiterMass, the SAME ratio the Parameter layer reads
+# planet.mass's jupiterMass with (astropy: the IAU 2015 Resolution B3
+# nominal GM_sun/GM_jup = 1.3271244e20 / 1.2668653e17 = 1047.5655).  It was
+# the hand-written 1047.348644, the IAU 2009 Sun/Jupiter-SYSTEM mass ratio,
+# so an imported EXOFASTv2 `mpsun` prior landed at 0.99979 x its mass
+# (review 1.9.13).
+MSUN_PER_MJUP = unit_conversion("solMass", "jupiterMass", "mpsun")
 RAD_TO_DEG = 180.0 / math.pi
 
 # ----------------------------------------------------------------------
