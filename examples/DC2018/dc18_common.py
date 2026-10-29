@@ -542,7 +542,498 @@ def sigma_pull(truth_val, fit_val, err_hi, err_lo, angle=False):
     return diff / abs(err)
 
 
-def compare_event(event, data_dir, results_csv, mmx_json=None, out_csv=None):
+# ---------------------------------------------------------------------------
+# Physical quantities: bias and coverage against the answer key (7.16.5)
+# ---------------------------------------------------------------------------
+#
+# The light-curve scoring above cannot see an error that lives DOWNSTREAM of
+# the light curve -- the galactic prior, the SED tie, extinction, a stellar
+# relation acting as a mass prior (2.6.37).  These rows score the physical
+# quantities directly, from the posterior DRAWS, as the truth's percentile in
+# the posterior (the probability integral transform, PIT): over many events a
+# calibrated posterior gives PITs uniform on [0, 1], and a one-directional
+# bias piles them at one end.
+#
+# WHAT THE KEY PROVIDES, and in which frame (master_file.txt +
+# wfirstColumnNumbers.txt; checked on all 30 sweep events, 2026-10-29):
+#   Ml       Msun     the HOST mass, not the total: Mp == q * Ml to 4e-6.
+#   Dl, Ds   kpc      distances.
+#   lmu_l, lmu_b, smu_l, smu_b   mas/yr   lens / source proper motions,
+#            GALACTIC, heliocentric.  murel == |lmu - smu| to 1e-5 relative,
+#            so the key's murel is the HELIOCENTRIC relative proper motion,
+#            the same quantity as our mulensevent.mu_rel_mag (C5, C7; NOT
+#            mu_rel_geo_mag).  The column label does not say whether mu_l
+#            carries cos(b); it is taken as mu_l* (the magnitude check passes
+#            either way, and at |b| < 2.1 deg on these events cos(b) > 0.999,
+#            so the direction is unaffected below 0.1 deg).
+#   Mp       Msun     the column header says Msun with an Earth-mass display
+#            factor; the value is Msun (Mp == q * Ml), converted to Mjup here.
+#   s, rE    -, AU    rE == thE * Dl exactly, so a_perp = s * rE is the
+#            PROJECTED separation in AU at the key's t_0 (the key's `a` column
+#            is the 3-D semimajor axis, NOT comparable: s * rE <= a always).
+# The key does NOT give the direction of mu_rel directly; it is rebuilt from
+# the four galactic components, rotated onto the local (E, N) axes at the
+# event, as the position angle EAST OF NORTH of the LENS relative to the
+# SOURCE (C2, C7).  Nothing is approximated silently: every one of these
+# checks is re-run per event by physical_truth and a failure is a note on
+# the row.
+#
+# Also found and NOT used here: the key's tE is not 365.25 * thE / murel (the
+# heliocentric timescale) -- they differ by up to 1.8% on these events -- so
+# the key's tE is in the simulator's own (observer-centric) frame, and the
+# heliocentric murel above is the right partner for our mu_rel_mag.
+
+# (key, unit, kind).  kind: "log" -> positive quantity, bias as log10 ratio;
+# "angle" -> circular, degrees.
+PHYSICAL = [
+    ("M_lens", "Msun", "log"),
+    ("D_L", "kpc", "log"),
+    ("D_S", "kpc", "log"),
+    ("mu_rel", "mas/yr", "log"),
+    ("phi_mu", "deg E of N", "angle"),
+    ("M_planet", "Mjup", "log"),
+    ("a_perp", "AU", "log"),
+]
+PHYSICAL_KEYS = [k for k, _, _ in PHYSICAL]
+PHYSICAL_KIND = {k: kind for k, _, kind in PHYSICAL}
+PHYSICAL_UNIT = {k: u for k, u, _ in PHYSICAL}
+
+MSUN_PER_MJUP = 9.5458e-4  # the IAU nominal ratio, as dc18_truth_table uses
+
+
+def galactic_pm_to_equatorial(mu_l, mu_b, ra_deg, dec_deg):
+    """(mu_l*, mu_b) [mas/yr] -> (mu_E, mu_N) = (mu_ra*, mu_dec) at (ra, dec).
+
+    The same rotation as star.physics.sgra_pm_equatorial (Poleski 2013), with
+    the same NGP constants, applied to an arbitrary galactic vector in numpy.
+    Pinned against astropy in tests/test_dc18_physical.py.
+    """
+    from exozippy.components.star.physics import NGP_DEC_RAD, NGP_RA_RAD
+
+    ra, dec = np.radians(ra_deg), np.radians(dec_deg)
+    d_ra = ra - NGP_RA_RAD
+    c1 = np.sin(NGP_DEC_RAD) * np.cos(dec) - np.cos(NGP_DEC_RAD) * np.sin(
+        dec
+    ) * np.cos(d_ra)
+    c2 = np.cos(NGP_DEC_RAD) * np.sin(d_ra)
+    cosb = np.hypot(c1, c2)
+    mu_e = (c1 * mu_l - c2 * mu_b) / cosb
+    mu_n = (c2 * mu_l + c1 * mu_b) / cosb
+    return mu_e, mu_n
+
+
+def physical_truth(data_dir, event):
+    """({key: truth value}, {key: [notes]}) for the PHYSICAL quantities.
+
+    Units are PHYSICAL_UNIT's.  The consistency checks described above the
+    PHYSICAL list are re-run here and a failure is reported as a note, never
+    patched over.
+    """
+    row, _ = load_master_row(data_dir, event)
+    g = lambda k: float(row[k])  # noqa: E731
+    notes = {k: [] for k in PHYSICAL_KEYS}
+    dmu_l = g("lmu_l") - g("smu_l")
+    dmu_b = g("lmu_b") - g("smu_b")
+    mu_hyp = float(np.hypot(dmu_l, dmu_b))
+    if abs(mu_hyp / g("murel") - 1.0) > 1e-3:
+        msg = (
+            f"key murel {g('murel'):.6g} != |lmu - smu| {mu_hyp:.6g}: the "
+            "key's frame is not the heliocentric lens-minus-source motion"
+        )
+        notes["mu_rel"].append(msg)
+        notes["phi_mu"].append(msg)
+    mu_e, mu_n = galactic_pm_to_equatorial(dmu_l, dmu_b, g("ra"), g("dec"))
+    mp_msun = g("Mp")
+    if abs(mp_msun / (g("q") * g("Ml")) - 1.0) > 1e-4:
+        notes["M_planet"].append(
+            f"key Mp {mp_msun:.6g} != q * Ml {g('q') * g('Ml'):.6g}: Ml may "
+            "not be the host mass"
+        )
+        notes["M_lens"].append("key Mp != q * Ml (see M_planet)")
+    if abs(g("rE") / (g("thE") * g("Dl")) - 1.0) > 1e-3:
+        notes["a_perp"].append(
+            f"key rE {g('rE'):.6g} != thE * Dl {g('thE') * g('Dl'):.6g}"
+        )
+    truth = {
+        "M_lens": g("Ml"),
+        "D_L": g("Dl"),
+        "D_S": g("Ds"),
+        "mu_rel": g("murel"),
+        "phi_mu": float(np.degrees(np.arctan2(mu_e, mu_n)) % 360.0),
+        "M_planet": mp_msun / MSUN_PER_MJUP,
+        "a_perp": g("s") * g("rE"),
+    }
+    return truth, notes
+
+
+def read_wrapup_header(summary_path):
+    """(burnin, chains_kept) from `<prefix>_summary.txt`'s first line, or None.
+
+    The trace on disk is the FULL T=1 trace; the pipeline's wrap-up then
+    drops a burn-in (samplers.convergence.find_burnin) and the chains that
+    never reached the good-likelihood region (good_chain_mask), and every
+    number in results.csv is computed on what is left.  The burn-in is read
+    back from this header rather than recomputed, so the PIT is taken on the
+    SAME draws the pipeline reported.
+    """
+    if summary_path is None or not Path(summary_path).exists():
+        return None
+    import re
+
+    with open(summary_path) as f:
+        first = f.readline()
+    m = re.search(
+        r"burn-in discarded:\s*(\d+)\s*draws.*chains kept:\s*(\d+)", first
+    )
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+# Burn-in assumed when the wrap-up never wrote its header (it died after the
+# trace was written): half the trace, the median of the 25 sweep30 headers.
+FALLBACK_BURNIN_FRAC = 0.5
+
+
+def physical_draws(trace_path, config_path=None, summary_path=None):
+    """Pooled T=1 posterior draws of the PHYSICAL quantities, from a trace.
+
+    Returns (draws, info): draws = {key: 1-D array, non-finite removed},
+    info = {"burnin", "n_chains", "n_chains_total", "n_draws_kept",
+    "provenance", "warnings"}.
+
+    Every mode is POOLED, weighted by occupancy (the stored draws): the
+    question is the whole posterior's calibration, not one mode's.  Which
+    star element is the Lens and the Source, and which lens element is the
+    companion, come from the run's own config when it is given (`star:` and
+    `lens:` block order), else the sweep layout (Lens 0, Source 1, companion
+    1).
+
+    a_perp = s * theta_E * D_L, per draw: theta_E [mas] times D_L [kpc] is
+    AU, and s is in Einstein radii of the TOTAL lens mass (C13), the same
+    theta_E -- so this is the projected separation the key's s * rE is.
+    """
+    import xarray as xr
+
+    from exozippy.samplers.convergence import good_chain_mask
+
+    warns = []
+    i_lens, i_src, i_comp = 0, 1, 1
+    if config_path is not None and Path(config_path).exists():
+        import yaml
+
+        with open(config_path) as f:
+            cfg = yaml.safe_load(f) or {}
+        names = [s.get("name") for s in cfg.get("star", []) or []]
+        if "Lens" in names and "Source" in names:
+            i_lens, i_src = names.index("Lens"), names.index("Source")
+        bodies = [str(b.get("body", "")) for b in cfg.get("lens", []) or []]
+        comp = [k for k, b in enumerate(bodies) if b.startswith("planet.")]
+        if comp:
+            i_comp = comp[0]
+
+    post = xr.open_dataset(trace_path, group="posterior")
+    stats = xr.open_dataset(trace_path, group="sample_stats")
+    try:
+        n_chain, n_draw = post.sizes["chain"], post.sizes["draw"]
+        lp = stats["lp"].values if "lp" in stats else None
+        hdr = read_wrapup_header(summary_path)
+        if lp is not None:
+            mask, _ = good_chain_mask(lp)
+        else:
+            mask = np.ones(n_chain, dtype=bool)
+            warns.append("no sample_stats lp: every chain kept")
+        if hdr is not None:
+            burnin, kept = hdr
+            prov = "trace, wrap-up's burn-in + chain filter"
+            if kept == n_chain:
+                mask = np.ones(n_chain, dtype=bool)
+            elif int(mask.sum()) != kept:
+                warns.append(
+                    f"good_chain_mask keeps {int(mask.sum())} chains, the "
+                    f"wrap-up kept {kept}: using good_chain_mask's"
+                )
+        else:
+            burnin = int(FALLBACK_BURNIN_FRAC * n_draw)
+            prov = (
+                "trace, NO WRAP-UP HEADER: burn-in "
+                f"{FALLBACK_BURNIN_FRAC:.0%} assumed, good_chain_mask"
+            )
+        idx = np.nonzero(mask)[0]
+
+        def take(name, elem=None):
+            if name not in post:
+                return None
+            a = post[name].isel(chain=idx, draw=slice(burnin, None)).values
+            if a.ndim == 3:
+                a = a[..., 0 if elem is None else elem]
+            return np.asarray(a, dtype=float).ravel()
+
+        def take_or_pow10(name, log_name, elem=None):
+            # Older traces (e.g. d228e190's static30) store only the log10
+            # coordinate of some derived quantities.
+            a = take(name, elem)
+            if a is None:
+                a = take(log_name, elem)
+                a = None if a is None else 10.0**a
+            return a
+
+        mass = take_or_pow10("star.mass", "star.logmass", i_lens)
+        dist_l = take("star.distance", i_lens)
+        dist_s = take("star.distance", i_src)
+        mu_e = take("mulensevent.mu_ra_rel")
+        mu_n = take("mulensevent.mu_dec_rel")
+        mu = take("mulensevent.mu_rel_mag")
+        if mu is None and mu_e is not None and mu_n is not None:
+            mu = np.hypot(mu_e, mu_n)
+        the = take_or_pow10("mulensevent.theta_E", "mulensevent.log_theta_E")
+        s = take_or_pow10("lens.s", "lens.log_s", i_comp)
+        mp = take("planet.mass")
+        draws = {
+            "M_lens": mass,
+            "D_L": None if dist_l is None else dist_l / 1000.0,
+            "D_S": None if dist_s is None else dist_s / 1000.0,
+            "mu_rel": mu,
+            "phi_mu": (
+                None
+                if mu_e is None or mu_n is None
+                else np.degrees(np.arctan2(mu_e, mu_n)) % 360.0
+            ),
+            "M_planet": mp,
+            "a_perp": (
+                None
+                if s is None or the is None or dist_l is None
+                else s * the * dist_l / 1000.0
+            ),
+        }
+        out = {}
+        for k, v in draws.items():
+            if v is None:
+                warns.append(f"{k}: not in trace")
+                continue
+            ok = np.isfinite(v)
+            if not ok.all():
+                warns.append(
+                    f"{k}: {int((~ok).sum())} of {ok.size} draws non-finite, "
+                    "dropped"
+                )
+            out[k] = v[ok]
+        info = {
+            "burnin": int(burnin),
+            "n_chains": int(len(idx)),
+            "n_chains_total": int(n_chain),
+            "n_draws_kept": int(max(n_draw - burnin, 0) * len(idx)),
+            "provenance": prov,
+            "warnings": warns,
+            "s_companion": (
+                None if s is None else float(np.median(s[np.isfinite(s)]))
+            ),
+        }
+        return out, info
+    finally:
+        post.close()
+        stats.close()
+
+
+def score_draws(draws, truth, kind="log"):
+    """Bias and coverage of one quantity: the truth's place in the draws.
+
+    Returns {"pit", "median", "lo68", "hi68", "lo95", "hi95", "bias",
+    "log10_ratio", "z", "in68", "in95", "n"}.
+
+    pit is the fraction of draws below the truth (ties count half): 0.5 is
+    the median, and near 0 (1) means the posterior sits ABOVE (BELOW) the
+    truth.  in68 / in95 are the central-interval coverages, i.e. pit in
+    [0.159, 0.841] / [0.025, 0.975].  z is (median - truth) over the
+    half-interval on the truth's side, the same one-sided sigma as
+    sigma_pull, with the opposite sign convention: z > 0 = posterior HIGH.
+
+    kind="angle" (degrees): the draws are unwrapped about their circular
+    mean first, so a posterior straddling 0/360 is one interval; pit, bias
+    and z are taken on the circle.
+    """
+    d = np.asarray(draws, dtype=float)
+    d = d[np.isfinite(d)]
+    if d.size == 0 or truth is None or not np.isfinite(truth):
+        return None
+    t = float(truth)
+    if kind == "angle":
+        r = np.radians(d)
+        c = float(np.degrees(np.arctan2(np.sin(r).mean(), np.cos(r).mean())))
+        d = c + wrap180(d - c)
+        t = c + float(wrap180(t - c))
+    pit = float((np.sum(d < t) + 0.5 * np.sum(d == t)) / d.size)
+    q = np.percentile(d, [2.5, 15.865, 50.0, 84.135, 97.5])
+    med = float(q[2])
+    half = (q[3] - med) if t >= med else (med - q[1])
+    out = {
+        "pit": pit,
+        "median": med,
+        "lo68": float(q[1]),
+        "hi68": float(q[3]),
+        "lo95": float(q[0]),
+        "hi95": float(q[4]),
+        "bias": med - t,
+        "log10_ratio": (
+            float(np.log10(med / t))
+            if kind == "log" and med > 0 and t > 0
+            else None
+        ),
+        "z": float((med - t) / half) if half > 0 else None,
+        "in68": bool(0.15865 <= pit <= 0.84135),
+        "in95": bool(0.025 <= pit <= 0.975),
+        "n": int(d.size),
+    }
+    if kind == "angle":
+        out["median"] = med % 360.0
+        out["lo68"], out["hi68"] = float(q[1]) % 360.0, float(q[3]) % 360.0
+        out["lo95"], out["hi95"] = float(q[0]) % 360.0, float(q[4]) % 360.0
+    return out
+
+
+def physical_rows(
+    event, data_dir, trace_path, config_path=None, summary_path=None
+):
+    """One row per PHYSICAL quantity for one event: truth, posterior, PIT.
+
+    Returns (rows, info) with info from physical_draws.  A row whose truth or
+    draws are missing is still returned, with pit None and a note, so a
+    MISSING quantity is visible in a table rather than silently dropped.
+    """
+    truth, tnotes = physical_truth(data_dir, event)
+    master, cls = load_master_row(data_dir, event)
+    key_s = float(master["s"])
+    draws, info = physical_draws(trace_path, config_path, summary_path)
+    rows = []
+    for k in PHYSICAL_KEYS:
+        notes = list(tnotes[k])
+        sc = (
+            score_draws(draws[k], truth[k], PHYSICAL_KIND[k])
+            if k in draws
+            else None
+        )
+        if sc is None:
+            notes.append("no posterior draws")
+        if k == "a_perp" and info.get("s_companion") is not None:
+            s_fit = info["s_companion"]
+            if (s_fit - 1.0) * (key_s - 1.0) < 0:
+                notes.append(
+                    f"fit s {s_fit:.3g} is on the other side of 1 from the "
+                    f"key's {key_s:.3g} (close/wide): a_perp scores the "
+                    "light-curve branch, not the physics"
+                )
+        row = {
+            "event": event,
+            "class": cls,
+            "param": k,
+            "unit": PHYSICAL_UNIT[k],
+            "truth": truth[k],
+        }
+        row.update(sc or {"pit": None})
+        row["note"] = "; ".join(notes)
+        rows.append(row)
+    return rows, info
+
+
+def ensemble_physical(rows):
+    """Per-quantity ensemble bias and coverage over many events' rows.
+
+    Returns {key: {"n", "mean_pit", "ks_d", "ks_p", "n_high", "sign_p",
+    "cov68", "cov95", "median_log10_ratio", "median_bias", "hist"}}.
+
+    n_high counts events whose posterior median is ABOVE the truth (pit <
+    0.5); sign_p is the two-sided binomial probability of a split at least
+    that lopsided from a fair coin, i.e. how one-directional the bias is.
+    ks_p tests the PITs against U(0, 1).  hist is the 10-bin PIT histogram.
+    """
+    from scipy import stats as st
+
+    out = {}
+    for k in PHYSICAL_KEYS:
+        rs = [r for r in rows if r["param"] == k and r.get("pit") is not None]
+        if not rs:
+            continue
+        pit = np.array([r["pit"] for r in rs])
+        n = pit.size
+        n_high = int(np.sum(pit < 0.5))
+        lr = [r["log10_ratio"] for r in rs if r.get("log10_ratio") is not None]
+        ks = st.kstest(pit, "uniform")
+        out[k] = {
+            "n": n,
+            "mean_pit": float(pit.mean()),
+            "ks_d": float(ks.statistic),
+            "ks_p": float(ks.pvalue),
+            "n_high": n_high,
+            "sign_p": float(st.binomtest(n_high, n, 0.5).pvalue),
+            "cov68": float(np.mean([r["in68"] for r in rs])),
+            "cov95": float(np.mean([r["in95"] for r in rs])),
+            "median_log10_ratio": float(np.median(lr)) if lr else None,
+            "median_bias": float(np.median([r["bias"] for r in rs])),
+            "hist": np.histogram(pit, bins=10, range=(0.0, 1.0))[0].tolist(),
+        }
+    return out
+
+
+def format_physical(rows):
+    """Human-readable per-event table of physical_rows()."""
+    hdr = (
+        f"{'quantity':<9} {'unit':<11} {'truth':>11} {'median':>11} "
+        f"{'68% interval':>25} {'PIT':>6} {'z':>7}  note"
+    )
+    lines = [hdr, "-" * len(hdr)]
+
+    def _n(x, fmt="{:.4g}"):
+        return fmt.format(x) if x is not None else "--"
+
+    for r in rows:
+        iv = (
+            f"[{_n(r.get('lo68'))}, {_n(r.get('hi68'))}]"
+            if r.get("pit") is not None
+            else "--"
+        )
+        lines.append(
+            f"{r['param']:<9} {r['unit']:<11} {_n(r['truth']):>11} "
+            f"{_n(r.get('median')):>11} {iv:>25} "
+            f"{_n(r.get('pit'), '{:.3f}'):>6} {_n(r.get('z'), '{:+.2f}'):>7}"
+            f"  {r.get('note', '')}"
+        )
+    return "\n".join(lines)
+
+
+def format_ensemble(ens, title="ENSEMBLE"):
+    """Human-readable table of ensemble_physical()."""
+    hdr = (
+        f"{'quantity':<9} {'N':>3} {'meanPIT':>8} {'KS D':>6} {'KS p':>8} "
+        f"{'hi/N':>6} {'sign p':>8} {'cov68':>6} {'cov95':>6} "
+        f"{'med log10(fit/true)':>20}  PIT hist (10 bins, 0->1)"
+    )
+    lines = [title, hdr, "-" * len(hdr)]
+    for k in PHYSICAL_KEYS:
+        if k not in ens:
+            continue
+        e = ens[k]
+        lr = e["median_log10_ratio"]
+        lines.append(
+            f"{k:<9} {e['n']:>3} {e['mean_pit']:>8.3f} {e['ks_d']:>6.3f} "
+            f"{e['ks_p']:>8.2g} {e['n_high']:>3}/{e['n']:<2} "
+            f"{e['sign_p']:>8.2g} {e['cov68']:>6.2f} {e['cov95']:>6.2f} "
+            f"{('%+.3f' % lr) if lr is not None else '--':>20}  "
+            f"{' '.join('%2d' % h for h in e['hist'])}"
+        )
+    lines.append(
+        "  hi/N = events whose posterior median is ABOVE the truth; sign p = "
+        "two-sided binomial p of that split; calibrated -> meanPIT 0.5, "
+        "cov68 0.68, cov95 0.95, flat histogram"
+    )
+    return "\n".join(lines)
+
+
+def compare_event(
+    event,
+    data_dir,
+    results_csv,
+    mmx_json=None,
+    out_csv=None,
+    trace_path="auto",
+):
     """Build the per-event truth/MMEXOFAST/EXOZIPPy comparison table.
 
     Returns a list of row dicts (one per parameter) and writes them as CSV
@@ -553,6 +1044,15 @@ def compare_event(event, data_dir, results_csv, mmx_json=None, out_csv=None):
     against the key's exact no-parallax mirror (mirror_branch_truth) and the
     u_0 and alpha rows' notes say so.  An orbit shorter than SHORT_PERIOD_YR
     flags the alpha row: the static fit cannot match the key's t_0 geometry.
+
+    PHYSICAL ROWS (7.16.5): when the run's trace is found -- trace_path
+    "auto" looks for `<prefix>_trace.nc` beside results_csv; None skips --
+    one row per PHYSICAL quantity is appended, param "phys.<key>", scored
+    from the posterior draws by physical_rows: `exozippy` is the median,
+    the errors the 68% interval, `exo_pull` the same (truth - fit) / sigma
+    as the light-curve rows, and `pit` the truth's percentile in the
+    posterior.  The draws are the pipeline's own (burn-in and chain filter
+    from `<prefix>_summary.txt`), every mode pooled.
     """
     truth, class_label = load_truth(data_dir, event)
     master, _ = load_master_row(data_dir, event)
@@ -632,6 +1132,39 @@ def compare_event(event, data_dir, results_csv, mmx_json=None, out_csv=None):
             }
         )
 
+    prefix = str(results_csv)
+    if prefix.endswith("_results.csv"):
+        prefix = prefix[: -len("_results.csv")]
+    if trace_path == "auto":
+        trace_path = prefix + "_trace.nc"
+    if trace_path is not None and Path(trace_path).exists():
+        prows, info = physical_rows(
+            event,
+            data_dir,
+            trace_path,
+            config_path=prefix + ".yaml",
+            summary_path=prefix + "_summary.txt",
+        )
+        for r in prows:
+            med = r.get("median")
+            note = r["note"]
+            if info["warnings"]:
+                note = "; ".join([note] + info["warnings"]).strip("; ")
+            rows.append(
+                {
+                    "event": event,
+                    "class": class_label,
+                    "param": "phys." + r["param"],
+                    "truth": r["truth"],
+                    "exozippy": med,
+                    "exo_err_hi": None if med is None else r["hi68"] - med,
+                    "exo_err_lo": None if med is None else med - r["lo68"],
+                    "exo_pull": None if r.get("z") is None else -r["z"],
+                    "pit": r.get("pit"),
+                    "note": note,
+                }
+            )
+
     if out_csv:
         keys = []
         for r in rows:
@@ -659,13 +1192,17 @@ def format_comparison(rows):
         return fmt.format(x) if x is not None else "--"
 
     for r in rows:
-        if r["param"] not in PARAMS:
+        phys = r["param"].startswith("phys.")
+        if r["param"] not in PARAMS and not phys:
             continue
         pull = r.get("exo_pull")
+        note = r.get("note", "")
+        if phys and r.get("pit") is not None:
+            note = f"PIT {r['pit']:.3f}" + (f"; {note}" if note else "")
         lines.append(
             f"{r['param']:<10} {_n(r.get('truth')):>16} "
             f"{_n(r.get('exozippy')):>16} {_n(r.get('exo_err_hi')):>12} "
             f"{_n(r.get('exo_err_lo')):>12} "
-            f"{_n(pull, '{:+.2f}'):>8}  {r.get('note', '')}"
+            f"{_n(pull, '{:+.2f}'):>8}  {note}"
         )
     return "\n".join(lines)
