@@ -270,9 +270,9 @@ def _independent_joint(d_pc, vels):
     """
     from scipy.stats import multivariate_normal
 
-    m_rot, v0, clcb, slcb, sb = line_of_sight_basis(_RA, _DEC)
+    m_rot, v0, sun_xyz, los_hat = line_of_sight_basis(_RA, _DEC)
     d_kpc = d_pc / 1e3
-    x, y, z = galactic_xyz(d_kpc, clcb, slcb, sb)
+    x, y, z = galactic_xyz(d_kpc, sun_xyz, los_hat)
     r = np.sqrt(x**2 + y**2 + 1e-6)
     dens = branch_log_number_densities(x, y, z, r, xp=np)
     out = []
@@ -347,12 +347,12 @@ def test_position_normalizer_matches_an_independent_quadrature():
 
     from exozippy.components.galacticmodel import galacticmodel as gm_mod
 
-    _, _, clcb, slcb, sb = line_of_sight_basis(_RA, _DEC)
-    got = log_position_norm(1e-3, 1e5, clcb, slcb, sb)
+    _, _, sun_xyz, los_hat = line_of_sight_basis(_RA, _DEC)
+    got = log_position_norm(1e-3, 1e5, sun_xyz, los_hat)
 
     def integrand(d):
         return float(
-            np.exp(_log_total_number_density(d, clcb, slcb, sb)) * d**2
+            np.exp(_log_total_number_density(d, sun_xyz, los_hat)) * d**2
         )
 
     edges = [1e-3, 100, 2000, 5000, 7000, 8000, 9000, 10000, 12000, 20000, 1e5]
@@ -365,7 +365,7 @@ def test_position_normalizer_matches_an_independent_quadrature():
     n0 = gm_mod._POSITION_QUAD_POINTS
     try:
         gm_mod._POSITION_QUAD_POINTS = 4 * n0
-        finer = log_position_norm(1e-3, 1e5, clcb, slcb, sb)
+        finer = log_position_norm(1e-3, 1e5, sun_xyz, los_hat)
     finally:
         gm_mod._POSITION_QUAD_POINTS = n0
     assert abs(finer - got) < 1e-9
@@ -378,9 +378,9 @@ def test_evidence_log_norm_counts_independent_positions():
     Then it is -n_root * (log Z_pos + 1.5 log 2pi - log 1e-3), with a
       distance-linked star adding nothing.
     """
-    _, _, clcb, slcb, sb = line_of_sight_basis(_RA, _DEC)
+    _, _, sun_xyz, los_hat = line_of_sight_basis(_RA, _DEC)
     per_root = (
-        log_position_norm(1e-3, 1e5, clcb, slcb, sb)
+        log_position_norm(1e-3, 1e5, sun_xyz, los_hat)
         + 1.5 * np.log(2 * np.pi)
         - np.log(1e-3)
     )

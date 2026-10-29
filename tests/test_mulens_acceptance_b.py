@@ -375,6 +375,32 @@ def _err_scale_renormalization(system):
     return float(total)
 
 
+def _two_frame_basis(ra_rad, dec_rad):
+    """The stage-0 recording's line-of-sight basis, rebuilt exactly: the
+    position from genulens's flat Dlb2xyz (Sun at x = +R0, origin at
+    (l, b) = (0, 0), z tilted by bsun = z_sun/R0) and the velocity in
+    astropy's UNMIRRORED Galactocentric frame -- the two-frame mix review
+    1.7.1 removed.  Both are affine in distance, so they fit the current
+    (M_rot, v0, sun_xyz, los_hat) signature; un-mirroring the current
+    basis's velocity half gives astropy's frame to the last bit."""
+    from astropy import units as u
+    from astropy.coordinates import SkyCoord
+
+    from exozippy.components.galacticmodel import physics
+    from exozippy.constants import SUN_GC_DISTANCE, SUN_Z_OFFSET
+
+    m_rot, v0, _sun, _los = physics.line_of_sight_basis(ra_rad, dec_rad)
+    gal = SkyCoord(ra=ra_rad * u.rad, dec=dec_rad * u.rad).galactic
+    cl_cb = np.cos(gal.l.rad) * np.cos(gal.b.rad)
+    sl_cb = np.sin(gal.l.rad) * np.cos(gal.b.rad)
+    sb = np.sin(gal.b.rad)
+    bsun = SUN_Z_OFFSET / SUN_GC_DISTANCE
+    sun = np.array([SUN_GC_DISTANCE, 0.0, SUN_GC_DISTANCE * np.sin(bsun)])
+    los = np.array([-cl_cb, sl_cb, sb * np.cos(bsun) - cl_cb * np.sin(bsun)])
+    mirror = physics.MODEL_FRAME_MIRROR
+    return mirror @ m_rot, mirror @ v0, sun, los
+
+
 @pytest.mark.slow
 def test_ob161003_collapse_reconciles_against_the_presplit_recording():
     """
@@ -418,6 +444,12 @@ def test_ob161003_collapse_reconciles_against_the_presplit_recording():
     # 2`, mulensing.md "VBM's limb-darkened finite source never stops after
     # one annulus"), which moves this data term by -7.5e-8 relative: the
     # recording ran VBM's default of 1, so the build does too.
+    # The galactic kinematic prior's frame is switched back the same way:
+    # review 1.7.1 put positions and velocities into ONE frame, which moves
+    # that potential at a matched start (+0.0175 nats here), so the
+    # recording is reconciled with its own two-frame basis and the 1.7.1
+    # motion is measured separately below.
+    import exozippy.components.galacticmodel.galacticmodel as galactic_mod
     import exozippy.components.mulensing.mulensevent as mulensevent_mod
     import exozippy.components.mulensing.op as op_mod
     import exozippy.ephemeris as ephemeris_mod
@@ -445,6 +477,9 @@ def test_ob161003_collapse_reconciles_against_the_presplit_recording():
         unittest.mock.patch.object(
             op_mod.VBMDirectMagOp, "_build_vbm", _recording_annuli
         ),
+        unittest.mock.patch.object(
+            galactic_mod, "line_of_sight_basis", _two_frame_basis
+        ),
     ):
         system, model = build(fixture, extra_params=_OB161003_PRESPLIT_PM)
         # ACT -- decompose at this model's own solved start (which the
@@ -467,6 +502,14 @@ def test_ob161003_collapse_reconciles_against_the_presplit_recording():
     assert 1e-9 < abs(data_shift) < 1e-4, (
         f"1.10.13's Earth placement moved the data term by {data_shift:.3e} "
         f"relative; expected a small, nonzero shift"
+    )
+    # ... and the 1.7.1 frame fix: a bounded, nonzero move of the kinematic
+    # prior alone at the same start (+0.0175 nats measured).
+    kin = "POT:galacticmodel.kinematic_prior"
+    frame_shift = parts_now[kin] - parts[kin]
+    assert 1e-6 < abs(frame_shift) < 1.0, (
+        f"the 1.7.1 frame fix moved {kin} by {frame_shift:+.3e} nats at "
+        f"the recording's start; expected a small, nonzero shift"
     )
     moved, appeared, vanished = compare(
         presplit["terms"], parts, rtol=COLLAPSE_RTOL
