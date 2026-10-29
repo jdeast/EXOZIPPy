@@ -694,6 +694,11 @@ mulensinstrument:
     description: >-
       Outlier-component scatter, in FLUX in the data file's own system
       (was magnitudes before the flux-likelihood change)
+  # log10 of the baseline flux in the file's own units.  [-100, 10] covers
+  # every sane flux system with decades to spare -- a magnitude file sits
+  # near -8 (F = 10**(-0.4 m); m = 30 is -12), counts up to ~1e9 near +9 --
+  # and uniform-in-log is scale-invariant, so this, not a bound on
+  # f_source/f_blend, is where the flux scale's prior lives (review 1.6.18).
   log_f_total:
     initval: -6
     init_scale: 3e-4
@@ -743,9 +748,20 @@ mulensinstrument:
     internal_unit: ""
     latex: "\\log{q_F}"
     description: "log10 binary source flux ratio"
+  # f_source and f_blend carry NO bounds (review 1.6.18, JDE 2026-10-28).
+  # They are derived, so a bound here would become a soft barrier, and it
+  # would be measured in the light curve's ARBITRARY flux units: ~1e-8 for a
+  # magnitude file (the f_source >= 0 barrier's turn-on width then dwarfed
+  # the source flux -- examples/ob140939 paid -1.386 nats for it), O(1e4)
+  # counts for difference imaging (an upper cap of 1000 then pushed the
+  # baseline down -- -10,995 nats on one MOA file).  Every physical limit
+  # they could express is already a unit-free limit on what IS sampled:
+  # f_source >= 0 is q_source >= 0, "the blend is no more negative than the
+  # total" is q_source <= 2, and log_f_total's uniform-in-log prior is
+  # scale-invariant.  Do not restore them; a user who wants a bound can
+  # still write one in the params file.  Absolute flux units (the SED
+  # zeropoint) are a separate question.
   f_source:
-    lower: 0.0
-    upper: 1000.0
     unit: ""
     internal_unit: ""
     latex: "f_s"
@@ -755,8 +771,6 @@ mulensinstrument:
         func_name: "calc_f_source"
         deps: [ "log_f_total", "q_source" ]
   f_blend:
-    lower: -1000.0
-    upper: 1000.0
     unit: ""
     internal_unit: ""
     latex: "f_b"
