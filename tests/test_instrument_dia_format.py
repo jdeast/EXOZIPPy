@@ -346,14 +346,15 @@ def _prepare_in(workdir, config, user_params):
 def test_blend_tie_on_a_solved_dia_reference_raises(tmp_path):
     """Given native pySIS dia files with NO explicit reference and
     sed_constrains_blend: true, when the system is prepared, then it raises
-    naming the light curve: the solved reference is pySIS's fixed 20.0 mag,
-    not the star's baseline, so the f_blend the tie constrains is
+    naming the light curve: the solved reference is a pipeline number
+    (pySIS's fixed 20.0 mag here), not the star's baseline, so the f_blend
+    the tie constrains is
     fictitious.  (f_source is unaffected, which is why the zeropoint tie
     alone stays legal.)"""
     config, params, workdir = _kmt_as_dia(
         tmp_path, {"sed_constrains_blend": True}
     )
-    with pytest.raises(ValueError, match="'KMTC04'.*FIXED pipeline reference"):
+    with pytest.raises(ValueError, match="'KMTC04'.*pipeline reference"):
         _prepare_in(workdir, config, params)
 
 
