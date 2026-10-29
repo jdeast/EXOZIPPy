@@ -697,15 +697,24 @@ def calc_f_blend(log_f_total, q_source):
 
 
 @register_physics
-def calc_zeropoint(m_source_pred, f_source):
+def calc_zeropoint(m_source_pred, f_source, flux_zp):
     """Photometric zeropoint of one light curve's own flux system.
 
-    ``zp = m_SED + 2.5*log10(f_source)`` -- the offset between the SED's
-    calibrated source magnitude and the instrumental one, which is what a
-    user's ``zeropoint`` Gaussian prior constrains (see
+    ``zp = m_SED - m_inst`` -- the offset between the SED's calibrated
+    source magnitude and the instrumental one, which is what a user's
+    ``zeropoint`` Gaussian prior constrains (see
     ``MulensInstrument._build_sed_flux_constraint``).  ``m_source_pred`` is
     already on the zeropoint's magnitude system (issue #313:
     ``MulensInstrument._predicted_mag_on_zp_system``).
+
+    The instrumental magnitude is ``m_inst = flux_zp - 2.5*log10(f_source)``,
+    where ``flux_zp`` is the magnitude of unit flux in the file's flux
+    system (``MulensInstrument.flux_system_zp``): 0 for a magnitude or flux
+    file (``F = 10**(-0.4 m)``), and the recovered ``zp_ref = zp -
+    2.5*log10(ref)`` for ``data_format: dia``, whose flux is in units of the
+    reference.  So a dia file and the equivalent magnitude file give the
+    same zeropoint (review 2.2.22a; until then a dia light curve's
+    zeropoint carried an extra ``+zp_ref``, e.g. +16 mag).
 
     The flux floor mirrors the one the hand-built node carried: f_source's
     own lower bound is 0, and log10(0) is -inf.
@@ -716,7 +725,9 @@ def calc_zeropoint(m_source_pred, f_source):
     onto the prior center -- which, once defaults.yaml stopped supplying a
     center (review 2.2.21), would have reported a number nobody stated.
     """
-    return m_source_pred + 2.5 * pt.log10(pt.maximum(f_source, 1e-30))
+    return (
+        m_source_pred + 2.5 * pt.log10(pt.maximum(f_source, 1e-30)) - flux_zp
+    )
 
 
 @register_physics

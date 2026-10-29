@@ -170,12 +170,12 @@ class MulensInstrument(Instrument):
     # Deps of the derived `zeropoint` that are injected as context nodes by
     # add_parameter below rather than resolved as manifest parameters, so
     # graph.py leaves them out of the build-order graph.
-    context_dep_names = frozenset({"m_source_pred"})
+    context_dep_names = frozenset({"m_source_pred", "flux_zp"})
 
     # ...built with one entry per light curve, so Component._element_expression
     # may slice it to the elements that have an SED prediction (the rest of
     # the zeropoint vector is INACTIVE -- see register_parameters).
-    aligned_context_deps = frozenset({"m_source_pred"})
+    aligned_context_deps = frozenset({"m_source_pred", "flux_zp"})
 
     def __init__(self, config, config_manager):
         super().__init__(config, config_manager)
@@ -195,6 +195,30 @@ class MulensInstrument(Instrument):
     @property
     def prefix(self):
         return "mulensinstrument"
+
+    @property
+    def flux_system_zp(self):
+        """Per light curve, the magnitude of unit flux in its file's flux system.
+
+        0 for a ``magnitude`` file (``F = 10**(-0.4 m)``) and for a ``flux``
+        file (whose own scale the zeropoint absorbs, as always), and the
+        recovered ``zp_ref = zp - 2.5*log10(ref)`` for ``data_format: dia``,
+        whose flux load_data puts in units of the reference.  The instrumental
+        magnitude of a flux ``f`` is ``flux_system_zp - 2.5*log10(f)``, which
+        is what the SED zeropoint tie, the blend tie and the source-flux
+        seeding compare with the SED (review 2.2.22a: until then all three
+        read ``-2.5*log10(f)`` and a dia light curve's zeropoint carried an
+        extra ``+zp_ref``).  Stage 1 (load_data) must have run.
+        """
+        return np.array(
+            [
+                self._dia_zp[name]
+                if self.config[i].get("data_format", "magnitude") == "dia"
+                else 0.0
+                for i, name in enumerate(self.names)
+            ],
+            dtype=float,
+        )
 
     @classmethod
     def config_schema(cls):
@@ -2130,8 +2154,13 @@ class MulensInstrument(Instrument):
             if f_src <= 0:
                 continue
             # On the BC grid's (Vega) system, which m_pred below is in.
+            # The instrumental magnitude is flux_zp - 2.5*log10(f_src)
+            # (flux_system_zp: nonzero for a dia file, review 2.2.22a).
             m_meas = (
-                zp_mu - 2.5 * np.log10(f_src) - float(self.zp_ab_minus_vega[i])
+                zp_mu
+                + float(self.flux_system_zp[i])
+                - 2.5 * np.log10(f_src)
+                - float(self.zp_ab_minus_vega[i])
             )
 
             # Predicted apparent mag of each locus row through the SED's
@@ -2837,7 +2866,10 @@ class MulensInstrument(Instrument):
                 self._predicted_mag_on_zp_system(source_indices, i, system)
             )
 
-        return {"m_source_pred": pt.stack(m_pred)}
+        return {
+            "m_source_pred": pt.stack(m_pred),
+            "flux_zp": pt.constant(self.flux_system_zp),
+        }
 
     def _build_sed_flux_constraint(self, model, system):
         """
@@ -2854,7 +2886,9 @@ class MulensInstrument(Instrument):
             m_SED = -2.5*log10(f_source) + zp
 
         zp is the DERIVED Parameter ``mulensinstrument.zeropoint``,
-        zp_i = m_SED + 2.5*log10(f_s,i) (physics.calc_zeropoint), with m_SED
+        zp_i = m_SED + 2.5*log10(f_s,i) - flux_zp_i (physics.calc_zeropoint;
+        ``flux_zp`` is ``flux_system_zp``, nonzero only for a dia file, whose
+        flux is in units of its reference -- review 2.2.22a), with m_SED
         on the light curve's zeropoint magnitude system (``magsys:``, issue
         #313), and the USER's Gaussian prior on it -- there is no default
         (review 2.2.21); without both mu and sigma there is no tie -- is
@@ -2922,9 +2956,14 @@ class MulensInstrument(Instrument):
             # blend BRIGHTER than the lens is absorbed by f_nb, a blend
             # FAINTER than the lens still costs -- "the blend must contain
             # at least the lens's light".
-            f_lens_inst = 10 ** (
-                -0.4 * (m_blend_pred - self.zeropoint.value[i])
-            )
+            # m_inst = flux_zp - 2.5*log10(f) (flux_system_zp): a dia file's
+            # flux is in units of its reference.  Added only where nonzero,
+            # so every other light curve's graph is unchanged.
+            m_inst_blend = m_blend_pred - self.zeropoint.value[i]
+            flux_zp = float(self.flux_system_zp[i])
+            if flux_zp:
+                m_inst_blend = m_inst_blend - flux_zp
+            f_lens_inst = 10 ** (-0.4 * m_inst_blend)
             f_pred = f_lens_inst + self.neighbor_flux.value[i]
             resid = 2.5 * pt.log10(pt.maximum(f_pred, 1e-30) / fb_i)
             pm.Potential(
