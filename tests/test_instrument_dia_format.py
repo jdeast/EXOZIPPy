@@ -17,6 +17,8 @@ to zero blending imposes a blending fraction, corrupting any theta_E or lens
 mass taken from the source flux).
 """
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -185,3 +187,204 @@ def test_a_reference_below_the_largest_dflux_is_refused(tmp_path):
     # Act / Assert
     with pytest.raises(ValueError, match="reference|solve"):
         inst._dia_reference(0, dflux=dflux, mag=mag)
+
+
+# ---------------------------------------------------------------------------
+# An explicit reference replaces the mag column (review 2.2.22b)
+# ---------------------------------------------------------------------------
+
+
+def _write_native_bjd(path):
+    """``_write_native`` with full BJD times (the fit's ephemeris needs a
+    real date), returned as the path."""
+    _write_native(path)
+    d = np.loadtxt(path)
+    d[:, 0] += 2450000.0
+    np.savetxt(path, d, fmt="%.8f")
+    return path
+
+
+def _prepare_pspl(tmp_path, entry):
+    """Stages 1-4 of a one-light-curve PSPL event reading ``entry``."""
+    import os
+
+    from exozippy.system import System
+
+    config = {
+        "star": [{"name": "Lens"}, {"name": "Source"}],
+        "mulensevent": [{"finite_source": False, "t0_par": 2458171.0}],
+        "lens": [{"body": "star.Lens"}],
+        "source": [{"body": "star.Source"}],
+        "mulensinstrument": [entry],
+    }
+    params = {
+        "source.Source.t_0": {"initval": 2458171.0},
+        "source.Source.u_0": {"initval": 0.1},
+        "mulensevent.t_E": {"initval": 1.0},
+    }
+    for nm in ("Lens", "Source"):
+        params[f"star.{nm}.ra"] = {"initval": 264.0, "sigma": 0}
+        params[f"star.{nm}.dec"] = {"initval": -27.0, "sigma": 0}
+    cwd = os.getcwd()
+    os.chdir(tmp_path)
+    try:
+        system = System(config, user_params=params)
+        system.prepare()
+    finally:
+        os.chdir(cwd)
+    return system
+
+
+def test_three_column_file_with_reference_mag_loads(tmp_path):
+    """Given a three-column difference file and reference_mag, when the
+    system is prepared, then it loads -- it used to raise "data file has 3
+    columns; got [3, 4]", because the roles and the default column spec
+    still named mag/mag_err -- and reads exactly what the native
+    five-column file with the same reference_mag reads."""
+    # Arrange
+    native = _write_native_bjd(tmp_path / "native.pysis")
+    stripped = tmp_path / "stripped.dat"
+    np.savetxt(stripped, np.loadtxt(native)[:, :3], fmt="%.8f")
+    entry = {"name": "KMTC14", "data_format": "dia", "reference_mag": 20.0}
+
+    # Act
+    three = _prepare_pspl(tmp_path, dict(entry, file="stripped.dat"))
+    five = _prepare_pspl(tmp_path, dict(entry, file="native.pysis"))
+
+    # Assert
+    a, b = three.mulensinstrument, five.mulensinstrument
+    assert a.column_specs[0] == {"time": 0, "dflux": 1, "err": 2}
+    assert b.column_specs[0] == {"time": 0, "dflux": 1, "err": 2}
+    np.testing.assert_array_equal(a.flux, b.flux)
+    np.testing.assert_array_equal(a.err, b.err)
+    assert a.flux_system_zp[0] == pytest.approx(20.0)
+
+
+def test_a_column_spec_naming_mag_with_an_explicit_reference_raises(
+    tmp_path,
+):
+    """Given an explicit reference AND a columns: map naming mag, when the
+    file is read, then it raises: the explicit reference replaces the mag
+    column, so the spec states something nothing reads."""
+    # Arrange
+    _write_native_bjd(tmp_path / "native.pysis")
+    entry = {
+        "name": "KMTC14",
+        "file": "native.pysis",
+        "data_format": "dia",
+        "reference_mag": 20.0,
+        "columns": {"time": 0, "dflux": 1, "err": 2, "mag": 3, "mag_err": 4},
+    }
+
+    # Act / Assert
+    with pytest.raises(ValueError, match="replaces the mag column"):
+        _prepare_pspl(tmp_path, entry)
+
+
+# ---------------------------------------------------------------------------
+# A solved pySIS reference is not the star's baseline (review 2.2.22c)
+# ---------------------------------------------------------------------------
+
+_KMT_DIR = Path(__file__).parent.parent / "examples" / "KMT-2019-BLG-1806"
+
+
+def _kmt_as_dia(tmp_path, entry_extra):
+    """KMT-2019-BLG-1806 (an SED block, three I curves) with every file
+    rewritten as a native pySIS dia file of the same photometry, each entry
+    updated with ``entry_extra``; returns (config, user_params, workdir)."""
+    import shutil
+
+    import yaml
+
+    if not _KMT_DIR.is_dir():
+        pytest.skip("KMT-2019-BLG-1806 example not present")
+    workdir = tmp_path / "KMT"
+    shutil.copytree(_KMT_DIR, workdir)
+    with open(workdir / "KMT-2019-BLG-1806.yaml") as f:
+        config = yaml.safe_load(f)
+    with open(workdir / config["parameter_file"]) as f:
+        user_params = yaml.safe_load(f)
+    for k in ("run", "prefix", "parameter_file", "sampler"):
+        config.pop(k, None)
+    for entry in config["mulensinstrument"]:
+        d = np.loadtxt(workdir / entry["file"])
+        f_native = 10 ** (-0.4 * (d[:, 1] - _ZP))
+        np.savetxt(
+            workdir / (entry["file"] + ".dia"),
+            np.column_stack(
+                [
+                    d[:, 0],
+                    _REF - f_native,
+                    np.log(10.0) / 2.5 * f_native * d[:, 2],
+                    d[:, 1],
+                    d[:, 2],
+                ]
+            ),
+            fmt="%.17g",
+        )
+        entry["file"] = entry["file"] + ".dia"
+        entry["data_format"] = "dia"
+        entry.update(entry_extra)
+    return config, user_params, workdir
+
+
+def _prepare_in(workdir, config, user_params):
+    import os
+
+    from exozippy.system import System
+
+    cwd = os.getcwd()
+    os.chdir(workdir)
+    try:
+        system = System(config, user_params=user_params)
+        system.prepare()
+    finally:
+        os.chdir(cwd)
+    return system
+
+
+def test_blend_tie_on_a_solved_dia_reference_raises(tmp_path):
+    """Given native pySIS dia files with NO explicit reference and
+    sed_constrains_blend: true, when the system is prepared, then it raises
+    naming the light curve: the solved reference is a pipeline number
+    (pySIS's fixed 20.0 mag here), not the star's baseline, so the f_blend
+    the tie constrains is
+    fictitious.  (f_source is unaffected, which is why the zeropoint tie
+    alone stays legal.)"""
+    config, params, workdir = _kmt_as_dia(
+        tmp_path, {"sed_constrains_blend": True}
+    )
+    with pytest.raises(ValueError, match="'KMTC04'.*pipeline reference"):
+        _prepare_in(workdir, config, params)
+
+
+@pytest.mark.slow
+def test_blend_tie_with_a_measured_reference_is_accepted(tmp_path):
+    """Given the same files with an explicit reference_mag (the user's
+    measured baseline), the blend tie is accepted and reads it."""
+    config, params, workdir = _kmt_as_dia(
+        tmp_path, {"sed_constrains_blend": True, "reference_mag": 20.0}
+    )
+    system = _prepare_in(workdir, config, params)
+    assert system.mulensinstrument.flux_system_zp == pytest.approx(
+        [20.0, 20.0, 20.0]
+    )
+
+
+def test_a_solved_dia_reference_with_no_sed_block_is_accepted(tmp_path):
+    """Rope, not gates: with no SED block sed_constrains_blend reads
+    nothing, and a solved reference only shifts the blend, which nothing
+    reads -- so the file loads."""
+    native = _write_native_bjd(tmp_path / "native.pysis")
+    system = _prepare_pspl(
+        tmp_path,
+        {
+            "name": "KMTC14",
+            "file": native.name,
+            "data_format": "dia",
+            "sed_constrains_blend": True,
+        },
+    )
+    assert system.mulensinstrument.flux_system_zp[0] == pytest.approx(
+        _ZP - 2.5 * np.log10(_REF), abs=1e-4
+    )

@@ -862,8 +862,9 @@ mulensinstrument:
     description: "photometric zeropoint"
     expressions:
       default:
-        # m_source_pred is a context node injected by
+        # m_source_pred and flux_zp are context nodes injected by
         # MulensInstrument.add_parameter (see context_dep_names); only
-        # f_source is a manifest dependency.
+        # f_source is a manifest dependency.  flux_zp is the magnitude of
+        # unit flux in the file's flux system (0, or a dia file's zp_ref).
         func_name: "calc_zeropoint"
-        deps: ["m_source_pred", "f_source"]
+        deps: ["m_source_pred", "f_source", "flux_zp"]

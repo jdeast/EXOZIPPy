@@ -83,15 +83,14 @@ star.Source.feh:
 
 # ---- photometric zeropoints -------------------------------------------
 # Not calibrated: pySIS difference flux at the pipeline's fixed zp 28.0, so
-# each zeropoint is wide (0.5 mag) and centered on the file's
-# reference_mag (I 16.0, V 19.0), not 0 -- a workaround for the SED tie not
-# subtracting a dia file's reference offset (README).
-mulensinstrument.KMTC14.zeropoint: {mu: 16.0, sigma: 0.5}
-mulensinstrument.KMTS14.zeropoint: {mu: 16.0, sigma: 0.5}
-mulensinstrument.KMTA14.zeropoint: {mu: 16.0, sigma: 0.5}
-mulensinstrument.KMTC14V.zeropoint: {mu: 19.0, sigma: 0.5}
-mulensinstrument.KMTS14V.zeropoint: {mu: 19.0, sigma: 0.5}
-mulensinstrument.KMTA14V.zeropoint: {mu: 19.0, sigma: 0.5}
+# each zeropoint is centered on no offset (instrumental = Vega) and wide
+# (0.5 mag; README, "Zeropoints").
+mulensinstrument.KMTC14.zeropoint: {mu: 0.0, sigma: 0.5}
+mulensinstrument.KMTS14.zeropoint: {mu: 0.0, sigma: 0.5}
+mulensinstrument.KMTA14.zeropoint: {mu: 0.0, sigma: 0.5}
+mulensinstrument.KMTC14V.zeropoint: {mu: 0.0, sigma: 0.5}
+mulensinstrument.KMTS14V.zeropoint: {mu: 0.0, sigma: 0.5}
+mulensinstrument.KMTA14V.zeropoint: {mu: 0.0, sigma: 0.5}
 
 # q_source and err_scale STARTS from the convention scan's optimum
 # (README).  The flux bootstrap cannot run on a 3-body lens.

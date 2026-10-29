@@ -20,7 +20,10 @@ reference 1584.9 is 20.0 mag at zp 28, a fixed pipeline reference rather
 than this star's baseline, so a magnitude file has a fictitious total flux
 (review 2.2.22).  Each instrument instead states an explicit
 `reference_mag` (I 16.0, V 19.0) above every epoch's flux; the reference
-only shifts the blend, which nothing reads.  Rows with `fwhm <= 0` (pySIS's
+only shifts the blend, which nothing reads.  These are NOT measured
+baselines, so `sed_constrains_blend` (or a background tie) must stay off
+here: the code takes an explicit reference as the user's measurement and
+cannot tell.  Rows with `fwhm <= 0` (pySIS's
 failed-PSF flag) are dropped: they included points 1-9 mag above baseline
 with small errors, one at 11.4 mag with sigma 0.16.
 
@@ -154,7 +157,7 @@ T_max 200, tune 5000, up to 20000 draws, hot chains stored), the direct
 VBM N-body Op (no gradient), finite source with a linear Cousins-I limb
 darkening law, NextGen SED on the source with the pure f_source constraint
 (empty `filters:` list, as in KMT-2019-BLG-1806), wide zeropoint priors
-(the pySIS magnitudes are instrumental; centered on `reference_mag`, see
+centered on no offset (the pySIS magnitudes are instrumental; see
 "Zeropoints" below).
 
 **The first launch hung** (job 15506216, 64 cores): the DE seed polish
@@ -272,15 +275,15 @@ every zeropoint is centered on no offset and left wide (0.5 mag, JDE
 2026-10-11): the light curves pin the site-to-site offsets within a band,
 and theta_* comes from the V-I color plus the A_V prior, to roughly 25% --
 weaker than Han's CMD measurement, and honest about what we can calibrate.
-The prior is centered on `mu` 16.0 (I) / 19.0 (V) rather than 0 to work
-around a library issue: the dia reader rescales flux to units of the
-reference and records the offset `zp_ref = 28 - 2.5 log10(ref) =
-reference_mag`, but the SED tie (`zp = m_SED + 2.5 log10(f_source)`) does
-not apply it, so for a dia file the zeropoint parameter carries an extra
-`+reference_mag`. Centering the prior on `reference_mag` is exactly
-equivalent to "instrumental = Vega, +/- 0.5 mag". Revert to `mu` 0 when
-the tie subtracts `zp_ref`. Still needed as of 2026-10-28: the reader
-records `zp_ref` in `MulensInstrument._dia_zp` and nothing reads it.
+The dia reader puts the flux in units of the reference and the SED tie
+subtracts the matching offset `zp_ref = 28 - 2.5 log10(ref) =
+reference_mag` itself (`MulensInstrument.flux_system_zp`), so `mu` is the
+calibration alone. Until that fix the tie ignored `zp_ref`, a dia
+zeropoint carried an extra `+reference_mag`, and this example centered the
+priors on 16.0 (I) / 19.0 (V) to compensate. The start logp is unchanged
+by the switch to `mu: 0` on the fixed code: the zeropoint and its prior
+center moved by the same 16 / 19 mag (table in the pull request that
+landed the fix).
 
 **Flux and error-scale starts.** `q_source` (in units of each file's
 reference) and `err_scale` start at the optimum of the convention scan's
