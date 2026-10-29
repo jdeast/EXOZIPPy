@@ -136,20 +136,14 @@ star.Source.feh:
 # curves pin the site-to-site offsets within a band, and theta_* comes from
 # the V-I colour plus the A_V prior below, to roughly 25% -- weaker than
 # Han's CMD measurement, and honest about what we can calibrate.
-#
-# WHY mu IS 16.0 / 19.0, NOT 0 (a library bug, worked around here): the dia
-# reader rescales flux to units of the reference and records the offset
-# zp_ref = 28 - 2.5*log10(ref) = reference_mag, but the SED tie
-# (zp = m_SED + 2.5*log10(f_source)) never applies it, so for a dia file
-# the zeropoint parameter carries an extra +reference_mag.  Centring the
-# prior on reference_mag is exactly equivalent to "instrumental = Vega,
-# +/- 0.5 mag".  Revert to mu 0 when the tie subtracts zp_ref.
-mulensinstrument.KMTC14.zeropoint: {mu: 16.0, sigma: 0.5}
-mulensinstrument.KMTS14.zeropoint: {mu: 16.0, sigma: 0.5}
-mulensinstrument.KMTA14.zeropoint: {mu: 16.0, sigma: 0.5}
-mulensinstrument.KMTC14V.zeropoint: {mu: 19.0, sigma: 0.5}
-mulensinstrument.KMTS14V.zeropoint: {mu: 19.0, sigma: 0.5}
-mulensinstrument.KMTA14V.zeropoint: {mu: 19.0, sigma: 0.5}
+# (The dia reader's reference offset zp_ref = reference_mag is applied by
+# the SED tie itself, so mu is the calibration alone.)
+mulensinstrument.KMTC14.zeropoint: {mu: 0.0, sigma: 0.5}
+mulensinstrument.KMTS14.zeropoint: {mu: 0.0, sigma: 0.5}
+mulensinstrument.KMTA14.zeropoint: {mu: 0.0, sigma: 0.5}
+mulensinstrument.KMTC14V.zeropoint: {mu: 0.0, sigma: 0.5}
+mulensinstrument.KMTS14V.zeropoint: {mu: 0.0, sigma: 0.5}
+mulensinstrument.KMTA14V.zeropoint: {mu: 0.0, sigma: 0.5}
 
 # Source-flux fraction (q_source, in units of each file's reference) and
 # error-scale STARTS, from the optimum of the convention scan's winner
