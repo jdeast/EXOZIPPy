@@ -110,6 +110,33 @@ def test_observed_minus_target_matches_the_kernel_at_all_three_events(
     # z(tp)'s, not tc's: on this orbit they differ by tens of seconds.
     assert abs(shifts["tp"] - shifts["tc"]) > 10.0 / 86400.0
 
+    # Exact, against the textbook closed form rather than the code's own
+    # kernel (review 7.16.1): the comparison above is to
+    # ltt.line_of_sight_kinematics, which nothing checks at e != 0, and the
+    # ranges admit a lost (1 - e^2)/(1 +/- e sin w), a dropped sin i or z
+    # read at the wrong anomaly.  The star's line-of-sight offset is
+    # r sin(omega + f) sin i with r = a (1 - e^2)/(1 + e cos f); primary
+    # transit is f = pi/2 - omega, the eclipse f = -pi/2 - omega, periastron
+    # f = 0.  The role factor (M1 - M2)/M is the one _exact_shift uses.
+    def scalar(node):
+        return float(_val(model, point, node)[0])
+
+    ecc, sinw = scalar(o.ecc.value), scalar(o.sinw.value)
+    sini = scalar(o.sini.value)
+    mass_factor = scalar(
+        (o.m_primary.value - o.m_companion.value) / o.m_total.value
+    )
+    scale = mass_factor * a_over_c * sini
+    closed_form = {
+        "tc": -scale * (1 - ecc**2) / (1 + ecc * sinw),
+        "ts": scale * (1 - ecc**2) / (1 - ecc * sinw),
+        "tp": -scale * (1 - ecc) * sinw,
+    }
+    assert ecc > 0.2 and sini < 0.999  # every term live
+    for key, want in closed_form.items():
+        # 1e-9 d: the kernel's Kepler-solve residual quoted above
+        assert shifts[key] == pytest.approx(want, abs=1e-9), key
+
 
 def test_the_kepler_epoch_descends_from_the_target_frame(tmp_path):
     """tp_target is calc_tp of tc_target, not of the sampled tc: the

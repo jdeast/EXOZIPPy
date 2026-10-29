@@ -2189,6 +2189,36 @@ def test_the_built_jacobian_clips_a_sentinel_derivative(defect_root):
     )
 
 
+@pytest.mark.parametrize(
+    "eep,frac",
+    [(300.0, 0.25), (454.0, 0.5)],
+)
+def test_the_built_jacobian_reads_the_tracks_own_derivative(
+    model_root, eep, frac
+):
+    """
+    Given the synthetic grid, whose dEEP_dage column is the same at every
+      mass and initfeh, 1e-9 (1 + 50 |frac - 0.5|) per year (conftest's
+      write_synthetic_mist_grid), and a star starting ON a grid EEP,
+    When the model's own eep_age_jacobian potential is evaluated,
+    Then it is -log of that tabulated derivative, to 1e-9 -- in the
+      interior of the clip, where the clip tests above say nothing.
+
+    test_slow_evolution_is_favored_over_fast scores a COPY of the formula,
+    and the two clip tests see only the clip values, so a built term that
+    read the wrong output column, the wrong star's row, or dage/dEEP for
+    dEEP/dage passed all three (review 7.16.1).  Both EEPs are checked so
+    the slow-beats-fast ordering is pinned by value, not by sign.
+    """
+    values, _ = _potentials_at_start(model_root, eep)
+
+    deep_dage = 1e-9 * (1.0 + 50.0 * abs(frac - 0.5))
+    assert DEEP_DAGE_MIN < deep_dage < DEEP_DAGE_MAX
+    assert float(values["evolutionarymodel.eep_age_jacobian"]) == (
+        pytest.approx(-np.log(deep_dage), rel=1e-9)
+    )
+
+
 def test_the_built_jacobian_clips_a_vanishing_derivative(defect_root):
     """
     Given a grid whose dEEP_dage is ~0 at EEP 605,

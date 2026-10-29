@@ -602,6 +602,87 @@ def test_a_real_kernel_prefers_correlated_data_over_white_noise():
     assert gp > white
 
 
+def _sho_closed_form(tau, sigma, w0, q):
+    """SHO autocovariance for Q > 1/2 (Foreman-Mackey+ 2017 eq. 23, with
+    sigma^2 = S0 w0 Q): sigma^2 exp(-w0 tau / 2Q) [cos(eta w0 tau) +
+    sin(eta w0 tau) / (2 eta Q)], eta = sqrt(1 - 1/(4 Q^2))."""
+    eta = np.sqrt(1.0 - 1.0 / (4.0 * q * q))
+    return (
+        sigma**2
+        * np.exp(-w0 * tau / (2.0 * q))
+        * (np.cos(eta * w0 * tau) + np.sin(eta * w0 * tau) / (2.0 * eta * q))
+    )
+
+
+def _rotation_closed_form(tau, sigma, period, q0, dq, f):
+    """celerite2's RotationTerm as its two SHO modes: Q1 = 1/2 + Q0 + dQ at
+    the period, Q2 = 1/2 + Q0 at half of it, variances sigma^2/(1+f) and
+    f sigma^2/(1+f) (celerite2 docs, terms.RotationTerm)."""
+    q1, q2 = 0.5 + q0 + dq, 0.5 + q0
+    w1 = 4 * np.pi * q1 / (period * np.sqrt(4 * q1 * q1 - 1))
+    w2 = 8 * np.pi * q2 / (period * np.sqrt(4 * q2 * q2 - 1))
+    return _sho_closed_form(
+        tau, sigma / np.sqrt(1 + f), w1, q1
+    ) + _sho_closed_form(tau, sigma * np.sqrt(f / (1 + f)), w2, q2)
+
+
+@needs_celerite2_pymc
+@pytest.mark.parametrize(
+    "kind,params",
+    [
+        (
+            "rotation",
+            {"sigma": 0.4, "period": 11.0, "Q0": 5.0, "dQ": 1.0, "f": 0.1},
+        ),
+        ("sho", {"sigma": 0.3, "rho": 6.0, "Q": 2.0}),
+    ],
+)
+def test_marginal_likelihood_equals_the_dense_gaussian_logp(kind, params):
+    """
+    Given a celerite2 kernel built through build_term and the marginal
+      likelihood wrapper,
+    When its logp is evaluated on correlated data with a non-zero mean,
+    Then it equals scipy's multivariate-normal logpdf with the covariance
+      written out in closed form in this file, K(|t_i - t_j|) + diag(yerr^2),
+      to 1e-9 relative.
+
+    test_a_real_kernel_prefers_correlated_data_over_white_noise above only
+    asserts gp > white, which an amplitude passed as a variance, yerr read
+    as a variance, a sign-flipped mean or mis-mapped Q0/dQ/f all pass
+    (review 7.16.1).
+    """
+    from scipy.stats import multivariate_normal
+
+    # Arrange
+    rng = np.random.default_rng(4)
+    t = np.sort(rng.uniform(0, 40, 50))
+    sigma = rng.uniform(0.04, 0.08, 50)
+    mu = 0.2 + 0.01 * t
+    y = mu + 0.4 * np.sin(2 * np.pi * t / 11.0) + rng.normal(0, sigma)
+    tau = np.abs(t[:, None] - t[None, :])
+    if kind == "rotation":
+        cov = _rotation_closed_form(
+            tau,
+            params["sigma"],
+            params["period"],
+            params["Q0"],
+            params["dQ"],
+            params["f"],
+        )
+    else:
+        cov = _sho_closed_form(
+            tau, params["sigma"], 2 * np.pi / params["rho"], params["Q"]
+        )
+    cov = cov + np.diag(sigma**2)
+
+    # Act
+    got = _celerite_logp(kind, params, t, y, mu, sigma)
+
+    # Assert
+    want = multivariate_normal(mean=mu, cov=cov).logpdf(y)
+    assert got == pytest.approx(want, rel=1e-9)
+
+
 @needs_celerite2_pymc
 def test_build_kernel_sums_the_requested_terms():
     """
