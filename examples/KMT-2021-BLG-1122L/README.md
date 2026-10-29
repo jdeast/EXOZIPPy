@@ -96,13 +96,14 @@ unphysical distances and error scales of 3-7.  `check_start.py` and
 
 All three bit, exactly as 7.6.4 predicted, and each cost one scan iteration:
 
-- **Companion slot 1 ignores `s:` and `alpha:`.**  The engine's
-  `s <-> log_s` and `alpha <-> (xalpha, yalpha)` relations exist for
-  companion slot 0 only, so `lens.LensC.s` / `lens.LensC.alpha` initvals
-  were accepted (no warning) and silently dropped: LensC started at the
-  defaults (s = 1, alpha = 0) and every scan combination gave the same
-  total.  LensC is seeded through its sampled coordinates `log_s`,
-  `xalpha`, `yalpha` instead.
+- **Companion slot 1 used to ignore `s:` and `alpha:`** (fixed by 8.6.13).
+  The engine's `s <-> log_s` and `alpha <-> (xalpha, yalpha)` relations
+  then existed for companion slot 0 only, so `lens.LensC.s` /
+  `lens.LensC.alpha` initvals were accepted (no warning) and silently
+  dropped: LensC started at the defaults (s = 1, alpha = 0) and every scan
+  combination gave the same total.  Every companion now has its own
+  relations (mulensing.md, "Three or more lens bodies"), so LensC is
+  seeded with `s:` (bounds included) and `alpha:` exactly like LensB.
 - **Explicit per-body masses are REQUIRED** (documented): q_2, q_3 are
   derived from `star.{Lens,LensB,LensC}.mass`, set so the derived ratios
   reproduce Table 2.
@@ -153,7 +154,8 @@ T_max 200, tune 5000, up to 20000 draws, hot chains stored), the direct
 VBM N-body Op (no gradient), finite source with a linear Cousins-I limb
 darkening law, NextGen SED on the source with the pure f_source constraint
 (empty `filters:` list, as in KMT-2019-BLG-1806), wide zeropoint priors
-(the pySIS magnitudes are instrumental).
+(the pySIS magnitudes are instrumental; centered on `reference_mag`, see
+"Zeropoints" below).
 
 **The first launch hung** (job 15506216, 64 cores): the DE seed polish
 stopped at "sweep 400/400 IN PROGRESS (60/64 proposals back)" with the
@@ -183,8 +185,8 @@ population is scored serially in the main process with no timeout (review
 second launch (job 15506222) spent 45 minutes there on one core before it
 was stopped.  The params file therefore bounds both separations to
 s in [0.4, 2.3] (published 1.386 and 1.601, both near the Einstein ring),
-which keeps every failing geometry out of the kernel; for LensC the bound
-goes on `log_s` directly (slot-1 relations are absent, 8.6.13).
+which keeps every failing geometry out of the kernel; the bound is written
+on `s:` for both companions and moved onto the sampled `log_s`.
 
 **The bounded launch hung too** (job 15506232), in the serial start
 scoring: "PTDE init rung 9" at 09:40 and nothing after, 95 minutes of one
@@ -245,13 +247,15 @@ frame moves the closest approach by `t_0' = t_0 - D_tau t_E` and
 `u_0' = u_0 + D_u`; with this geometry that is +4.37 d and +0.012, and the
 optimum sits at `t_0 = 2459374.592`, `u_0 = 0.138`.
 
-**The companions are hard-linked to the primary.** Their distance, proper
-motion and rv are tied to the primary's with `sigma: 0` (never sampled).
-Otherwise the model samples a companion body's distance, pm and rv as free
-prior-only nuisances, and the first acceptance fit parked LensB at 5844 pc
-beside a primary at 174 pc. (An orbit group now makes these links
-automatically; this config has no orbit block, so they are written by
-hand.)
+**The companions are tied to the primary by orbit groups.** Two
+`type: static` orbits in the config (`LB`: Lens <-> LensB, `LC`: Lens <->
+LensC; one per companion, as each lens companion's orbit is primary <->
+that companion) hard-link each companion's distance, proper motion, rv and
+av to the primary's (orbit.md, "type: static"). Untied, the model samples
+a companion body's distance, pm and rv as free prior-only nuisances, and
+the first acceptance fit parked LensB at 5844 pc beside a primary at
+174 pc. These links used to be written by hand in the params file; the
+orbit groups give a bit-identical start.
 
 **Proper motions.** The direction of `mu_rel` on the sky is unconstrained
 without a parallax measurement (the light curve sees it only relative to
@@ -275,7 +279,8 @@ reference_mag`, but the SED tie (`zp = m_SED + 2.5 log10(f_source)`) does
 not apply it, so for a dia file the zeropoint parameter carries an extra
 `+reference_mag`. Centering the prior on `reference_mag` is exactly
 equivalent to "instrumental = Vega, +/- 0.5 mag". Revert to `mu` 0 when
-the tie subtracts `zp_ref`.
+the tie subtracts `zp_ref`. Still needed as of 2026-10-28: the reader
+records `zp_ref` in `MulensInstrument._dia_zp` and nothing reads it.
 
 **Flux and error-scale starts.** `q_source` (in units of each file's
 reference) and `err_scale` start at the optimum of the convention scan's
