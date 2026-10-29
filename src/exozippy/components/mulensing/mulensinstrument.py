@@ -111,13 +111,17 @@ class _BootstrapGeometry:
     component hint or seed), else `default`.  `probed` is the
     ``ConfigManager.probe_start`` answer; asking for a path it does not hold
     is a KeyError -- a bookkeeping bug in the caller, not "unknown".
-    `has_companion` says whether ``lens.1`` exists (element 0 is the masked
-    primary), i.e. whether the lens.1.* geometry was probed at all.
+    `n_companions` is the event's number of companion lenses (element 0 is
+    the masked primary); `has_companion` says whether ``lens.1`` exists, i.e.
+    whether the lens.1.* geometry was probed at all.  Only lens.1 is ever
+    probed: the bootstrap's magnification is at most a BINARY lens, so with
+    more companions it is a proxy, and its warnings say so.
     """
 
-    def __init__(self, probed, has_companion):
+    def __init__(self, probed, n_companions):
         self.probed = probed
-        self.has_companion = has_companion
+        self.n_companions = int(n_companions)
+        self.has_companion = self.n_companions >= 1
 
     def __call__(self, path, default=None):
         ps = self.probed[path]
@@ -1071,7 +1075,7 @@ class MulensInstrument(Instrument):
             paths += ["lens.1.s", "lens.1.log_s", "lens.1.q", "lens.1.alpha"]
         return _BootstrapGeometry(
             self.config_manager.probe_start(paths),
-            has_companion=system.lens.n_companions >= 1,
+            n_companions=system.lens.n_companions,
         )
 
     # ------------------------------------------------------------------
@@ -1451,6 +1455,44 @@ class MulensInstrument(Instrument):
             return None
 
     @staticmethod
+    def _bootstrap_proxy_note(n_companions, binary):
+        """(model name, proxy note) for the bootstrap's magnification.
+
+        The bootstrap fits at most a BINARY lens without parallax or orbital
+        motion: the seeded lens.1 geometry when ``binary``
+        (``_binary_magnification_columns``), else a point lens
+        A(t_0, u_0, t_E).  That is the event's own lens only for a point
+        lens, or a binary whose lens.1 s/q/alpha were derivable at stage 1.
+        Otherwise -- a companion whose s/alpha only a keplerian orbit
+        produces (ob09020), or a second companion (a triple lens) -- it is a
+        PROXY with none of the missing companions' caustic features, and a
+        light curve dominated by them (an anomaly-only follow-up file) can
+        fail the fit with a correct seed (review 1.6.20).  The note says so,
+        in place of blaming the seed.  Using the seed's real magnification
+        instead would mean a stage-1 Kepler solve for s(t)/alpha(t) and the
+        triple-lens backend, i.e. the model build itself, for a start the
+        user can simply give.
+        """
+        model_name = "binary-lens (lens.1)" if binary else "point-lens"
+        n_used = 1 if binary else 0
+        if n_companions <= n_used:
+            return model_name, ""
+        if n_used:
+            omitted = (
+                f"{n_companions - 1} of its {n_companions} companion lenses"
+            )
+        elif n_companions > 1:
+            omitted = f"all {n_companions} of its companion lenses"
+        else:
+            omitted = "its companion lens"
+        return model_name, (
+            f"  This {model_name} magnification is only a proxy for this "
+            f"event's lens: it omits {omitted}, so on a light curve dominated "
+            f"by their caustic features (an anomaly-only file) it can fail "
+            f"with a correct seed, and says little about the seed."
+        )
+
+    @staticmethod
     def _baseline_flux_fallback(f):
         """A strictly positive flux scale for one file, however odd the data.
 
@@ -1485,6 +1527,37 @@ class MulensInstrument(Instrument):
             float(np.asarray(cfg[field], dtype=float).reshape(-1)[0])
             for field in ("initval", "lower", "upper")
         )
+
+    def _user_flux_starts(self, inst_idx):
+        """The user's seed-0 flux starts of light curve ``inst_idx``, when the
+        user wrote EVERY sampled one; else None.
+
+        The sampled flux coordinates are ``log_f_total`` and ``q_source``,
+        plus, with more than one source, the flux ratio in the coordinate
+        this file samples (``log_q_flux`` under ``fitlogqflux``, else
+        ``q_flux``).  A user ``initval`` -- a scalar, or a per-seed list,
+        whose length the seed assembly validates -- is the user's start at
+        every seed, so these entries outrank whatever the bootstrap would
+        compute at any seed.  Read-only on ``user_params`` (never written:
+        CLAUDE.md), under the index form ``standardize_param_names`` gives
+        every spelling.  Only the user's own entries count: a seed hint or a
+        link is not the user's start.  Returns ``{param: seed-0 value}`` in
+        user units (all four are dimensionless).
+        """
+        params = ["log_f_total", "q_source"]
+        if self._n_sources > 1:
+            log_qf = bool(self.config[inst_idx].get("fitlogqflux", False))
+            params.append("log_q_flux" if log_qf else "q_flux")
+        starts = {}
+        for param in params:
+            val = _raw_initval(
+                self.config_manager.user_params,
+                f"{self.prefix}.{inst_idx}.{param}",
+            )
+            if val is None:
+                return None
+            starts[param] = float(val)
+        return starts
 
     @staticmethod
     def _clip_q_source(q, lower, upper, what):
@@ -1548,6 +1621,12 @@ class MulensInstrument(Instrument):
         here clamps f_b at zero, and q_source is clipped only to its DECLARED
         bounds (``_q_source_declared``, read through ``resolve`` so a user
         bound counts too), never to an invented [0.05, 0.95].
+
+        When the user wrote every sampled flux start of this file --
+        ``log_f_total`` and ``q_source`` (and the flux ratio, with two
+        sources) -- the solve is skipped and those entries are returned
+        (``_user_flux_starts``, review 1.6.20): they outrank its answer at
+        every seed, and its warnings would ask for starts already given.
 
         If the user has specified f_source and/or f_blend in their params file,
         those values are respected (they are TOTALS over sources), for any
@@ -1646,6 +1725,29 @@ class MulensInstrument(Instrument):
             )
             return f_total, q_source, q_flux_fallback
 
+        user_starts = self._user_flux_starts(inst_idx)
+        if user_starts is not None:
+            # Every sampled flux start of this file is the user's, at every
+            # seed (review 1.6.20): the solve below would only produce
+            # numbers the user's entries outrank, and its warnings would ask
+            # for starts the user already gave.  Return those entries, so
+            # the flux scale every consumer reads (the amplitude caps, the
+            # source-star seed) is the start the model is built at.
+            logger.debug(
+                f"[{label}] flux bootstrap skipped: every flux start of this "
+                f"file is a user entry ({', '.join(sorted(user_starts))})."
+            )
+            log_q_flux = user_starts.get("log_q_flux")
+            return (
+                10.0 ** user_starts["log_f_total"],
+                user_starts["q_source"],
+                (
+                    10.0**log_q_flux
+                    if log_q_flux is not None
+                    else user_starts.get("q_flux", q_flux_fallback)
+                ),
+            )
+
         missing = [
             name
             for name, val in (("t_0", t0), ("u_0", u0), ("t_E", tE))
@@ -1671,6 +1773,9 @@ class MulensInstrument(Instrument):
         # source trajectories); fall back to PSPL columns.  Missing per-source
         # params (j > 0) degrade gracefully to the single-source estimate.
         A_cols = self._binary_magnification_columns(t, n_src, geometry, label)
+        model_name, proxy_note = self._bootstrap_proxy_note(
+            geometry.n_companions, binary=A_cols is not None
+        )
         if A_cols is None:
             A_cols = [
                 self._pspl_magnification(
@@ -1787,7 +1892,7 @@ class MulensInstrument(Instrument):
                 f"({f_total:.4g}) -- the data do not constrain the blend "
                 f"(no baseline coverage?).  Starting from the split with the "
                 f"blend held >= 0 instead; give f_blend for this file if you "
-                f"know it."
+                f"know it.{proxy_note}"
             )
             f_source_est, f_blend_est, q_flux_est = _decompose(
                 free_blend=False
@@ -1800,17 +1905,22 @@ class MulensInstrument(Instrument):
             # 2.6.23 -- this returned q_source 0.95 without a word).  No
             # positive source flux means the seeded magnification does not
             # describe this light curve.
+            verdict = (
+                proxy_note.strip()
+                if proxy_note
+                else "The seeded geometry probably does not describe this file."
+            )
             logger.warning(
-                f"[{label}] flux bootstrap: fitting the seeded magnification "
-                f"(t_0={t0!r}, u_0={u0!r}, t_E={tE!r}) to this light curve "
-                f"gives f_source = {f_source_est:.4g}, f_blend = "
+                f"[{label}] flux bootstrap: fitting the seeded {model_name} "
+                f"magnification (t_0={t0!r}, u_0={u0!r}, t_E={tE!r}) to this "
+                f"light curve gives f_source = {f_source_est:.4g}, f_blend = "
                 f"{f_blend_est:.4g} (total {f_total:.4g}); a usable split "
-                f"needs a positive source flux and a positive total.  The "
-                f"seeded geometry probably does not describe this file.  "
-                f"Starting from the data's baseline flux and q_source's "
-                f"configured start ({q_start:g}: your entry, else "
-                f"defaults.yaml) instead; check the seed or give "
-                f"f_source/f_blend for this file."
+                f"needs a positive source flux and a positive total.  "
+                f"{verdict}  Starting from the data's baseline flux and "
+                f"q_source's configured start ({q_start:g}: your entry, else "
+                f"defaults.yaml) instead; check the seed or give this file's "
+                f"flux starts (log_f_total and q_source, or f_source and "
+                f"f_blend), which skip this estimate."
             )
             return (
                 self._baseline_flux_fallback(f_obs),
