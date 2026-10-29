@@ -527,7 +527,26 @@ class MulensInstrument(Instrument):
                 # problem rather than surfacing as a column-selection
                 # IndexError.
                 self._require_dia_columns(i)
-                roles = ("time", "dflux", "err", "mag", "mag_err")
+                # An explicit reference_flux/reference_mag REPLACES the mag
+                # column (review 2.2.22b): the roles stop at the error, so a
+                # three-column file reads and a native file's mag columns
+                # are simply not selected.
+                has_ref = self._reference_flux_override(i) is not None
+                roles = ("time", "dflux", "err")
+                if not has_ref:
+                    roles = roles + ("mag", "mag_err")
+                spec = self.column_specs[i]
+                if has_ref and spec is not None:
+                    named = sorted({"mag", "mag_err"} & set(spec))
+                    if named:
+                        raise ValueError(
+                            f"[{self.prefix}:{self.names[i]}] columns: names "
+                            f"{named}, but reference_flux/reference_mag is "
+                            f"set, and the explicit reference replaces the "
+                            f"mag column (nothing reads it). Drop {named} "
+                            f"from columns:, or drop the explicit reference "
+                            f"to have it solved from the mag column."
+                        )
                 if self.column_specs[i] is None:
                     # A native pySIS file carries MORE than these five:
                     # KMT's is eight (`... fwhm sky secz`).  Without a
@@ -540,13 +559,7 @@ class MulensInstrument(Instrument):
                     # A user who genuinely wants to detrend against seeing
                     # or airmass can still say so with an explicit
                     # `columns:` including `detrend: [...]`.
-                    self.column_specs[i] = {
-                        "time": 0,
-                        "dflux": 1,
-                        "err": 2,
-                        "mag": 3,
-                        "mag_err": 4,
-                    }
+                    self.column_specs[i] = dict(zip(roles, range(len(roles))))
             else:
                 roles = ("time", "flux" if fmt == "flux" else "mag", "err")
             # Shared reader: columns:, mask:, time_* conversion, then sort
@@ -568,7 +581,9 @@ class MulensInstrument(Instrument):
                 ref, zp = self._dia_reference(
                     i,
                     dflux=f,
-                    mag=df.iloc[:, 3].values.astype(float),
+                    mag=None
+                    if has_ref
+                    else df.iloc[:, 3].values.astype(float),
                 )
                 # Total flux IN UNITS OF THE REFERENCE, not in raw counts.
                 # The reference is the natural unit of a difference image,

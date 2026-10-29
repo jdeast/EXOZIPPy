@@ -185,3 +185,95 @@ def test_a_reference_below_the_largest_dflux_is_refused(tmp_path):
     # Act / Assert
     with pytest.raises(ValueError, match="reference|solve"):
         inst._dia_reference(0, dflux=dflux, mag=mag)
+
+
+# ---------------------------------------------------------------------------
+# An explicit reference replaces the mag column (review 2.2.22b)
+# ---------------------------------------------------------------------------
+
+
+def _write_native_bjd(path):
+    """``_write_native`` with full BJD times (the fit's ephemeris needs a
+    real date), returned as the path."""
+    _write_native(path)
+    d = np.loadtxt(path)
+    d[:, 0] += 2450000.0
+    np.savetxt(path, d, fmt="%.8f")
+    return path
+
+
+def _prepare_pspl(tmp_path, entry):
+    """Stages 1-4 of a one-light-curve PSPL event reading ``entry``."""
+    import os
+
+    from exozippy.system import System
+
+    config = {
+        "star": [{"name": "Lens"}, {"name": "Source"}],
+        "mulensevent": [{"finite_source": False, "t0_par": 2458171.0}],
+        "lens": [{"body": "star.Lens"}],
+        "source": [{"body": "star.Source"}],
+        "mulensinstrument": [entry],
+    }
+    params = {
+        "source.Source.t_0": {"initval": 2458171.0},
+        "source.Source.u_0": {"initval": 0.1},
+        "mulensevent.t_E": {"initval": 1.0},
+    }
+    for nm in ("Lens", "Source"):
+        params[f"star.{nm}.ra"] = {"initval": 264.0, "sigma": 0}
+        params[f"star.{nm}.dec"] = {"initval": -27.0, "sigma": 0}
+    cwd = os.getcwd()
+    os.chdir(tmp_path)
+    try:
+        system = System(config, user_params=params)
+        system.prepare()
+    finally:
+        os.chdir(cwd)
+    return system
+
+
+def test_three_column_file_with_reference_mag_loads(tmp_path):
+    """Given a three-column difference file and reference_mag, when the
+    system is prepared, then it loads -- it used to raise "data file has 3
+    columns; got [3, 4]", because the roles and the default column spec
+    still named mag/mag_err -- and reads exactly what the native
+    five-column file with the same reference_mag reads."""
+    # Arrange
+    native = _write_native_bjd(tmp_path / "native.pysis")
+    stripped = tmp_path / "stripped.dat"
+    np.savetxt(stripped, np.loadtxt(native)[:, :3], fmt="%.8f")
+    entry = {"name": "KMTC14", "data_format": "dia", "reference_mag": 20.0}
+
+    # Act
+    three = _prepare_pspl(tmp_path, dict(entry, file="stripped.dat"))
+    five = _prepare_pspl(tmp_path, dict(entry, file="native.pysis"))
+
+    # Assert
+    a, b = three.mulensinstrument, five.mulensinstrument
+    assert a.column_specs[0] == {"time": 0, "dflux": 1, "err": 2}
+    assert b.column_specs[0] == {"time": 0, "dflux": 1, "err": 2}
+    np.testing.assert_array_equal(a.flux, b.flux)
+    np.testing.assert_array_equal(a.err, b.err)
+    assert a.flux_system_zp[0] == pytest.approx(20.0)
+
+
+def test_a_column_spec_naming_mag_with_an_explicit_reference_raises(
+    tmp_path,
+):
+    """Given an explicit reference AND a columns: map naming mag, when the
+    file is read, then it raises: the explicit reference replaces the mag
+    column, so the spec states something nothing reads."""
+    # Arrange
+    _write_native_bjd(tmp_path / "native.pysis")
+    entry = {
+        "name": "KMTC14",
+        "file": "native.pysis",
+        "data_format": "dia",
+        "reference_mag": 20.0,
+        "columns": {"time": 0, "dflux": 1, "err": 2, "mag": 3, "mag_err": 4},
+    }
+
+    # Act / Assert
+    with pytest.raises(ValueError, match="replaces the mag column"):
+        _prepare_pspl(tmp_path, entry)
