@@ -1146,6 +1146,16 @@ that run length cannot be told from wander by one run.
   answer: it had not sampled enough population correlation times to quote a
   converged weight.
 
+And one live run of a shipped example, `examples/kelt4/kelt4_rvonly.yaml`
+switched to `method: ptde` (30 chains, 8 rungs, tune 2000, seed 144,
+2026-10-29, cut at 10364 draws by the time budget): the old rule would have
+stopped at the 10312-draw check (max Rhat 1.008, min ESS 3639); the new one
+held every check from 6765 draws on, always on `planet.radius_raw` (z -4.4
+to -8.4, 0.2-0.4 sd per tail, n_eff 52-116). In an RV-only fit the planet
+radius is pure prior (uniform in R_P/R_*), and its population mean was
+still sliding down that prior. How much later it would have stopped was not
+measured.
+
 **Where it is reported.** Every live check logs it after Rhat/ESS
 (`PTDE convergence @ N draws: max_rhat=... min_ess=...  ensemble ...`), with
 the worst element, its z, p, change in posterior sd and n_eff. At wrap-up
