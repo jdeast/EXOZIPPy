@@ -228,6 +228,53 @@ def test_the_pad_is_the_mutual_hill_radius_not_the_sum_of_the_two_own_ones():
     assert r_mutual < own_pads
 
 
+def test_the_barrier_reads_each_orbits_own_eccentricity():
+    """
+    Given a pair on eccentric orbits with DIFFERENT eccentricities (e_b = 0.5,
+      e_c = 0.3) whose apsides overlap,
+    When the crossing potential is evaluated at the start,
+    Then it equals soft_lower_bound(a_c (1 - e_c) - a_b (1 + e_b) - r_mutual)
+      to 1e-6 -- the closed form of the test above, at e far from zero.
+
+    The exact test above sits at e ~ 0, and
+    test_multiplanet.py::test_crossing_bound_responds_to_eccentricity only
+    asserts that the barrier gets more negative, so e taken from the wrong
+    orbit or a missing (1 + e) passes both (review 7.16.1).
+    """
+    import pytensor.tensor as pt
+
+    from exozippy.potentials import soft_lower_bound
+
+    # Arrange
+    system, model = _system(
+        2, periods={"b": 10.0, "c": 30.0}, eccs={"b": 0.5, "c": 0.3}
+    )
+    planet = system.planet
+    a = np.atleast_1d(planet.a.initval) * np.ones(2)
+    m = np.atleast_1d(planet.mass.initval) * np.ones(2)
+    m_star = np.atleast_1d(system.star.mass.initval)[0]
+    ecc = np.atleast_1d(system.orbit.ecc.initval) * np.ones(2)
+    r_mutual = ((m[0] + m[1]) / (3.0 * m_star)) ** (1.0 / 3.0) * 0.5 * sum(a)
+
+    def barrier(gap):
+        return float(
+            soft_lower_bound(
+                pt.as_tensor_variable(gap - r_mutual), 0.0, scale=float(a[0])
+            ).eval()
+        )
+
+    # Act
+    measured = _penalty(model)
+
+    # Assert
+    assert ecc == pytest.approx([0.5, 0.3], abs=1e-6)
+    right = barrier(a[1] * (1.0 - ecc[1]) - a[0] * (1.0 + ecc[0]))
+    swapped = barrier(a[1] * (1.0 - ecc[0]) - a[0] * (1.0 + ecc[1]))
+    assert right < -1.0  # the pair really is penalized
+    assert measured == pytest.approx(right, rel=1e-6)
+    assert measured != pytest.approx(swapped, rel=1e-3)
+
+
 @pytest.mark.slow
 def test_min_hill_separation_tightens_the_threshold():
     """
@@ -241,7 +288,7 @@ def test_min_hill_separation_tightens_the_threshold():
     """
     # Arrange / Act
     _, relaxed = _system(2, periods={"b": 10.0, "c": 30.0})
-    _, strict = _system(
+    system, strict = _system(
         2,
         periods={"b": 10.0, "c": 30.0},
         c={"min_hill_separation": 10.0},
@@ -250,6 +297,36 @@ def test_min_hill_separation_tightens_the_threshold():
     # Assert
     assert _penalty(relaxed) == pytest.approx(0.0, abs=1e-9)
     assert _penalty(strict) < -1.0
+
+    # Exact (review 7.16.1): "< -1" passes k applied as k^(1/3), k on the
+    # own-pad form, or k from the wrong member.  Reconstruct the barrier as
+    # test_the_pad_is_the_mutual_hill_radius_not_the_sum_of_the_two_own_ones
+    # does, with the pad k = max(k_b, k_c) = 10 mutual Hill radii.
+    import pytensor.tensor as pt
+
+    from exozippy.potentials import soft_lower_bound
+
+    planet = system.planet
+    a = np.atleast_1d(planet.a.initval) * np.ones(2)
+    m = np.atleast_1d(planet.mass.initval) * np.ones(2)
+    m_star = np.atleast_1d(system.star.mass.initval)[0]
+    ecc = np.atleast_1d(system.orbit.ecc.initval) * np.ones(2)
+    gap = a[1] * (1.0 - ecc[1]) - a[0] * (1.0 + ecc[0])
+    r_mutual = ((m[0] + m[1]) / (3.0 * m_star)) ** (1.0 / 3.0) * 0.5 * sum(a)
+
+    def barrier(pad):
+        return float(
+            soft_lower_bound(
+                pt.as_tensor_variable(gap - pad), 0.0, scale=float(a[0])
+            ).eval()
+        )
+
+    assert _penalty(strict) == pytest.approx(
+        barrier(10.0 * r_mutual), rel=1e-6
+    )
+    assert _penalty(strict) != pytest.approx(
+        barrier(10.0 ** (1.0 / 3.0) * r_mutual), rel=1e-3
+    )
 
 
 def test_min_hill_separation_is_a_declared_config_key():

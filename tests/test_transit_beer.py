@@ -357,6 +357,38 @@ def test_calc_beam_from_k_scales_linearly_and_is_physically_sized():
     assert beam_ppm_2x == pytest.approx(2.0 * beam_ppm, rel=1e-9)
 
 
+def test_calc_beam_from_k_is_four_k_over_c_in_ppm():
+    """
+    Given K = 1800 m/s,
+    When calc_beam_from_K is evaluated,
+    Then it is exactly 4 K / c in ppm with c from astropy -- EXOFASTv2's
+      beaming coefficient (Loeb & Gaudi 2003's (3 - alpha) K / c at
+      alpha = -1), times 1e6.
+
+    The test above only brackets the answer in [1, 100] ppm, which a wrong
+    coefficient (1, 2 or 3 instead of 4) or a percent-level unit slip passes
+    (review 7.16.1).
+    """
+    from astropy import constants as const
+    from astropy import units as u
+
+    from exozippy.constants import SOLRAD_PER_DAY_TO_MPS
+
+    # Arrange
+    k_mps = 1800.0
+    k_sym = pt.dscalar("K")
+
+    # Act
+    beam_ppm = pytensor.function(
+        [k_sym], planet_physics.calc_beam_from_K(k_sym)
+    )(k_mps / SOLRAD_PER_DAY_TO_MPS)
+
+    # Assert
+    expected = 4.0 * k_mps / const.c.to(u.m / u.s).value * 1e6
+    assert beam_ppm == pytest.approx(expected, rel=1e-12)
+    assert expected == pytest.approx(24.017, abs=1e-3)
+
+
 # ---------------------------------------------------------------------------
 # Band manifest wiring: fitreflect / fitellip
 # ---------------------------------------------------------------------------

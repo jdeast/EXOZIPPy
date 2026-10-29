@@ -307,6 +307,81 @@ def test_espl_accuracy_against_direct_integration():
     assert abs(d_yoo[x == 1000.0][0]) > 1.0, d_yoo
 
 
+def _espl_quadratic_reference(u, rho, u1, u2):
+    """Quadratic-LD finite-source point-lens magnification by direct
+    integration, I(mu) = 1 - u1 (1 - mu) - u2 (1 - mu)^2.
+
+    Integrating by parts in the radius r = rho sin(phi), mu = cos(phi):
+    flux = I(limb) D(rho) + int_0^{pi/2} D(rho sin phi) dI/dmu sin(phi) dphi,
+    with D(a) the point-lens A integrated over a uniform disk of radius a
+    and dI/dmu = u1 + 2 u2 (1 - mu).  At u2 = 0 this is _espl_reference
+    term for term.  The normalization is the disk's total flux,
+    pi rho^2 (1 - u1/3 - u2/6).
+    """
+    pts = [np.arcsin(u / rho)] if u < rho else None
+    annuli = quad(
+        lambda phi: (
+            np.sin(phi)
+            * (u1 + 2.0 * u2 * (1.0 - np.cos(phi)))
+            * _disk_integral(u, rho * np.sin(phi))
+        ),
+        0.0,
+        np.pi / 2,
+        epsrel=1e-10,
+        limit=200,
+        points=pts,
+    )[0]
+    flux = (1.0 - u1 - u2) * _disk_integral(u, rho) + annuli
+    return flux / (np.pi * rho * rho * (1.0 - u1 / 3.0 - u2 / 6.0))
+
+
+def test_quadratic_espl_matches_direct_integration():
+    """
+    Given a quadratic-LD finite source on a single lens (rho = 0.01,
+      u1 = 0.40, u2 = 0.30) and a direct numerical integration of the
+      quadratic profile as the reference,
+    When VBM's ESPL is evaluated through the quadratic-LD Op,
+    Then it is within 0.25 mmag of the reference everywhere from u = 0.05 rho
+      to 6 rho -- the same bound the linear law meets above.
+
+    test_u2_changes_the_finite_source_curve only asserts that u2 MOVES the
+    curve, which any u2 convention does: a sign flip, VBM's a2 read in a
+    different parameterization, or a wrong normalization all pass it (review
+    7.16.1).  The non-vacuity check at the end asserts the u2 term is far
+    larger than the tolerance, so a u2 dropped altogether fails too.
+    """
+    # Arrange
+    rho, u1, u2 = 0.01, 0.40, 0.30
+    x = np.array([0.05, 0.3, 0.7, 0.95, 1.05, 1.3, 2.0, 3.0, 6.0])
+    u = x * rho
+    ref = np.array([_espl_quadratic_reference(ui, rho, u1, u2) for ui in u])
+    t0, te = 0.0, 20.0
+    u0 = u[0]
+    times = t0 + te * np.sqrt(np.maximum(u * u - u0 * u0, 0.0))
+    op = VBMDirectMagOp(
+        coords=COORDS,
+        n_companions=0,
+        use_rho=True,
+        bandpass="I",
+        quadratic_ld=True,
+    )
+
+    # Act
+    got = _run(op, [t0, u0, te, 0.0, 0.0, rho, u1, u2], times)
+    d_mmag = 2.5 * np.log10(got / ref) * 1000.0
+
+    # Assert
+    assert np.max(np.abs(d_mmag)) < 0.25, d_mmag
+    # the reference at u2 = 0 is the linear one, and the u2 term matters
+    lin = np.array([_espl_reference(ui, rho, u1) for ui in u])
+    np.testing.assert_allclose(
+        [_espl_quadratic_reference(ui, rho, u1, 0.0) for ui in u[:3]],
+        lin[:3],
+        rtol=1e-7,  # quadrature, epsrel 1e-10 per nested integral
+    )
+    assert np.max(np.abs(2.5 * np.log10(ref / lin) * 1000.0)) > 5.0
+
+
 def test_mulensmodel_window_ends_inside_the_dense_yoo04_table():
     """
     Given MulensModel's B0/B1 interpolation table
