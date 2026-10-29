@@ -78,6 +78,75 @@ def test_the_limb_moves_to_the_cliff_and_the_fit_ignores_it():
     np.testing.assert_allclose(fitted, (u1, u2), atol=0.03)
 
 
+def test_the_remap_matches_the_analytic_limb_and_the_radius_rescaling():
+    """
+    Given a quadratic law times a smooth logistic cliff
+      I(mu) = law(mu) / (1 + exp(-(mu - 0.08) / 0.004)), sampled on a fine
+      mu grid (step h ~ 5e-4) like a spherical PHOENIX profile,
+    When the quasi-spherical remap runs,
+    Then (a) the limb is the mu of steepest descent of the ANALYTIC profile
+      (its dI/dmu maximized by a bounded scalar solve on the closed-form
+      derivative), to within one grid step -- the resolution of a sampled
+      profile; (b) exactly the points at or above the limb are kept, with
+      their intensities untouched; and (c) every kept point obeys the
+      radius rescaling r' = r / r_limb of Claret, Hauschildt & Witte (2012),
+      written here in r rather than mu: sqrt(1 - mu'^2) * r_limb ==
+      sqrt(1 - mu^2), to 1e-12.
+
+    test_the_limb_moves_to_the_cliff_and_the_fit_ignores_it accepts any
+    limb in 0.05-0.11, a window ~100 grid steps wide here; a limb read one
+    feature off, or mu' built from mu / mu_limb instead of the radius,
+    passes it.
+    """
+    # ARRANGE
+    from scipy.optimize import minimize_scalar
+
+    u1, u2, mc, w = 0.4, 0.25, 0.08, 0.004
+    mu = np.linspace(0.02, 1.0, 1961)
+    h = mu[1] - mu[0]
+
+    def law(m):
+        return 1 - u1 * (1 - m) - u2 * (1 - m) ** 2
+
+    def dlaw(m):
+        return u1 + 2 * u2 * (1 - m)
+
+    def sig(m):
+        return 1.0 / (1.0 + np.exp(-(m - mc) / w))
+
+    def dprofile(m):
+        s = sig(m)
+        return dlaw(m) * s + law(m) * s * (1 - s) / w
+
+    profile = law(mu) * sig(mu)
+    profile = profile / profile[-1]
+    mu_star = minimize_scalar(
+        lambda m: -dprofile(m),
+        bounds=(mc - 5 * w, mc + 5 * w),
+        method="bounded",
+        options={"xatol": 1e-12},
+    ).x
+
+    # ACT
+    mu_p, p_p, limb = gen.remap_quasi_spherical(mu, profile)
+
+    # ASSERT -- (a) the limb
+    assert mu_star < gen.MU_LIMB_SEARCH_MAX
+    assert abs(limb - mu_star) <= h
+    # (b) the kept points
+    keep = mu >= limb
+    np.testing.assert_array_equal(p_p, profile[keep])
+    assert mu_p[0] == 0.0 and mu_p[-1] == 1.0
+    # (c) the radius rescaling, on every kept point
+    r_limb = np.sqrt(1.0 - limb**2)
+    np.testing.assert_allclose(
+        np.sqrt(1.0 - mu_p**2) * r_limb,
+        np.sqrt(1.0 - mu[keep] ** 2),
+        rtol=0,
+        atol=1e-12,
+    )
+
+
 def test_hole_filling_interpolates_the_intensities_along_teff():
     """
     Given band intensities at 5000 K and 5200 K on DIFFERENT mu grids and

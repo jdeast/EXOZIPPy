@@ -204,6 +204,167 @@ def test_wired_ltt_delay_matches_a_over_c_through_real_accessors(tmp_path):
     )
 
 
+# A companion massive enough that the occultation role factor is visible:
+# (M1 - M2)/M = 0.538 here, against M1/M = 0.769 (EXOFASTv2's emission
+# factor) and 1.0 (exoplanet's relative orbit).  At the 1e-9 mass ratio of
+# the test above the three agree to 1e-9 and abs() hides the sign.
+_MASSIVE_Q = 0.3
+
+
+def _exact_massive_companion_delays(m_star, m_comp, period, tc, tc_target):
+    """Independent reference for the two wired delays.
+
+    a from Kepler's third law (astropy G), c from astropy, the role factor
+    from the two component masses, and the retardation condition
+    c d = -F z_rel(t - d) solved by fixed-point iteration for the circular
+    edge-on orbit z_rel(T) = a cos(n (T - tc_target)) (+ = toward the
+    observer, the companion in front at conjunction).  Returns
+    (a [R_sun], F, c [R_sun/d], d_primary [d], d_secondary [d]).
+    """
+    import astropy.constants as ac
+    import astropy.units as au
+
+    c = ac.c.to(au.R_sun / au.day).value
+    gm = (ac.G * (m_star + m_comp) * au.M_sun).to(au.R_sun**3 / au.day**2)
+    a = float(np.cbrt(gm.value * period**2 / (4.0 * np.pi**2)))
+    factor = (m_star - m_comp) / (m_star + m_comp)
+    n = 2.0 * np.pi / period
+
+    def solve(t):
+        d = 0.0
+        for _ in range(50):
+            d = -factor * a * np.cos(n * ((t - tc_target) - d)) / c
+        return d
+
+    return a, factor, c, solve(tc), solve(tc + period / 2.0)
+
+
+@pytest.mark.slow
+def test_wired_occultation_delay_carries_the_mass_difference_factor(tmp_path):
+    """
+    Given the wiring system above with a 0.3 Msun companion (log_q pinned at
+      log10 0.3) instead of a 1e-9 one,
+    When the transit's own retarded_time call is captured and evaluated at
+      the rows at tc and tc + P/2,
+    Then each delay equals, SIGNED, the exact solution of
+      c d = -[(M1 - M2)/M] z_rel(t - d) with a from Kepler's third law
+      (astropy) -- d(tc) = -0.538 a/c, not -0.769 a/c (M1/M) or -a/c --,
+      the observed tc maps onto the orbit's tc_target, and the
+      primary-to-secondary offset equals the interval from the exact
+      two-body occultation condition (each body at its own retarded time,
+      test_ltt._exact_occultation_time).
+
+    Tolerances: 1e-7 relative on the delays -- NOT the 1e-16 the closed
+    form could reach: ltt.solve_delay's root (c/az)(sqrt(A^2 + B) - A)
+    cancels catastrophically at B ~ 1e-8 and loses ~3e-8 relative (see
+    the strict xfail test_solve_delay_root_is_free_of_cancellation below);
+    the three role factors differ by O(1), so this still separates them by
+    seven orders of magnitude.  2e-9 d on tc_target (the float64 resolution of t ~ 2.46e6 d);
+    1e-3 s on the two-body interval, the tolerance test_ltt.py carries for
+    the same first-order-in-a/c role factor.
+    """
+    from test_ltt import _exact_occultation_time
+
+    # Arrange
+    lc = _write_two_row_lc(tmp_path / "lc.dat")
+    params = _ltt_wiring_params()
+    params["planet.0.log_q"] = {"initval": np.log10(_MASSIVE_Q), "sigma": 0.0}
+    real_retarded_time = ltt.retarded_time
+    calls = []
+
+    def _spy(*args, **kwargs):
+        result = real_retarded_time(*args, **kwargs)
+        calls.append(result[1])
+        return result
+
+    # Act
+    with mock.patch(
+        "exozippy.components.transit.transit.ltt.retarded_time",
+        side_effect=_spy,
+    ):
+        system = System(_ltt_wiring_config(lc), user_params=params)
+        system.prepare()
+        model = system.build_model()
+    with model:
+        point = system.get_internal_point(model, system.get_raw_start(model))
+    # the first call is the likelihood's (stage 7 precedes the plotters)
+    delay = _eval_at_point(calls[0], model, point)
+    d_primary, d_secondary = float(delay[0, 0, 0]), float(delay[1, 0, 0])
+    m_star = float(_eval_at_point(system.star.mass.value[0], model, point))
+    m_comp = float(_eval_at_point(system.planet.mass.value[0], model, point))
+    period = float(_eval_at_point(system.orbit.period.value[0], model, point))
+    tc = float(_eval_at_point(system.orbit.tc.value[0], model, point))
+    tc_target = float(
+        _eval_at_point(system.orbit.tc_target.value[0], model, point)
+    )
+
+    # Assert
+    assert m_comp / m_star == pytest.approx(_MASSIVE_Q, rel=1e-12)
+    a, factor, c, d_p_ref, d_s_ref = _exact_massive_companion_delays(
+        m_star, m_comp, period, tc, tc_target
+    )
+    assert d_primary == pytest.approx(d_p_ref, rel=1e-7)
+    assert d_secondary == pytest.approx(d_s_ref, rel=1e-7)
+    assert tc - d_primary == pytest.approx(tc_target, abs=2e-9)
+    # teeth: the other two factors are hundreds of seconds away
+    for wrong in (m_star / (m_star + m_comp), 1.0):
+        assert abs(d_primary + wrong * a / c) * 86400.0 > 100.0
+
+    f_primary = m_star / (m_star + m_comp)
+    t_transit = _exact_occultation_time(-period / 4, f_primary, a, period, c)
+    t_eclipse = _exact_occultation_time(+period / 4, f_primary, a, period, c)
+    exact_offset = (t_eclipse - t_transit) - period / 2.0
+    assert (d_secondary - d_primary) * 86400.0 == pytest.approx(
+        exact_offset * 86400.0, abs=1e-3
+    )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "ltt.solve_delay computes its small root as (c/az)(sqrt(A^2+B) - A), "
+        "which cancels catastrophically when B = 2 az (z0 - z)/c^2 ~ 1e-8: "
+        "measured 3.1e-8 / 3.8e-8 relative (1.1e-10 / 1.3e-10 d, ~10 us) "
+        "at the two conjunctions of a 1 AU, 0.3 Msun-companion orbit. The "
+        "algebraically equal (c/az) B / (sqrt(A^2+B) + A) is exact to 1e-16."
+    ),
+)
+def test_solve_delay_root_is_free_of_cancellation():
+    """
+    Given the line-of-sight kinematics of the massive-companion wiring
+      test at its two conjunction rows (circular, edge-on, P = 365.25 d,
+      a = 234.68 R_sun, occultation factor 0.538),
+    When ltt.solve_delay returns the small root of
+      0.5 az d^2 + (c - vz) d + (z - z0) = 0,
+    Then it equals that root evaluated in 40-digit mpmath to 1e-13
+      relative -- the float64 floor of a well-conditioned root.
+
+    A pure-function pin on the precision loss that sets the 1e-7 tolerance
+    of the two massive-companion wiring tests (here and in test_rm_ltt.py).
+    """
+    import mpmath
+
+    # Arrange
+    c = C_LIGHT_RSUN_PER_DAY
+    factor, a = (1.0 - 0.3) / 1.3, 234.6816094227646
+    n = 2.0 * np.pi / 365.25
+    phase = n * np.array([-0.0033940739740563, 182.625 - 0.0033940739740563])
+    z = -factor * a * np.cos(phase)
+    vz = factor * a * n * np.sin(phase)
+    az = factor * a * n * n * np.cos(phase)
+
+    # Act
+    got = np.asarray(ltt.solve_delay(z, vz, az, 0.0, c).eval(), dtype=float)
+
+    # Assert
+    mpmath.mp.dps = 40
+    for gi, zi, vi, ai in zip(got, z, vz, az):
+        A = 1 - mpmath.mpf(vi) / c
+        B = 2 * mpmath.mpf(ai) * (0 - mpmath.mpf(zi)) / mpmath.mpf(c) ** 2
+        ref = (mpmath.mpf(c) / ai) * (mpmath.sqrt(A * A + B) - A)
+        assert abs(gi - float(ref)) <= 1e-13 * abs(float(ref)), (gi, ref)
+
+
 def test_ltt_off_matches_pre_ltt_structure(tmp_path):
     """
     Given the same system, but with light_travel_time: False set on the

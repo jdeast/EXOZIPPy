@@ -13,6 +13,7 @@ Found while doing review 8.8.8(c), which asks for exactly that entry on
 """
 
 import numpy as np
+import pytensor.tensor as pt
 import pytest
 
 from exozippy.system import System
@@ -111,3 +112,65 @@ def test_an_active_per_element_bound_still_bites():
         **{"orbit.b.period": {"initval": 5.0, "lower": 500.0}}
     )
     assert bound_logp < free_logp - 1.0
+
+
+def _closed_form_lower(val, threshold, scale):
+    """``potentials.soft_lower_bound`` (softness 0.01) written out:
+    log(sigmoid((val - threshold) * 4.4 / (0.01 * scale))), in the stable
+    spelling -logaddexp(0, -z).  Past the 700-nat clip the shipped form
+    adds the remainder back linearly, which -logaddexp(0, -z) equals to
+    float precision there (log sigmoid(z) = z + log1p(exp(z)))."""
+    z = (val - threshold) * 4.4 / (0.01 * scale)
+    return -np.logaddexp(0.0, -z)
+
+
+@pytest.mark.slow
+def test_an_active_per_element_bound_penalizes_exactly_its_own_element():
+    """
+    Given `lower: 500` on orbit b's period only, which BOTH orbits' starts
+      (5 and 50 days) would violate,
+    When the built low_bound.orbit.period potential is evaluated at the
+      start,
+    Then it equals the closed-form soft lower bound of element b's period
+      alone, with the barrier scale the build holds, to rel 1e-9 -- and
+      differs from both the element-c-only and the both-elements sums.
+
+    test_an_active_per_element_bound_still_bites only asks for a logp drop
+    > 1 nat, which a bound applied to the wrong element (or to both) also
+    produces, because c violates 500 too.
+    """
+    # ARRANGE
+    params = dict(_BASE)
+    params["orbit.b.period"] = {"initval": 5.0, "lower": 500.0}
+    system = System(dict(_CONFIG), params)
+    system.prepare()
+    model = system.build_model()
+    point = model.initial_point()
+    period = system.orbit.period
+    scale = np.asarray(
+        period.export_whitening()["barrier_scales"], dtype=float
+    )
+    names = list(system.orbit.names)
+    ib, ic = names.index("b"), names.index("c")
+    pot = [p for p in model.potentials if p.name == "low_bound.orbit.period"]
+    assert len(pot) == 1, [p.name for p in model.potentials]
+
+    # ACT
+    fn = model.compile_fn(
+        model.replace_rvs_by_values([pot[0], pt.flatten(period.value)]),
+        inputs=model.value_vars,
+        on_unused_input="ignore",
+    )
+    built, periods = fn(point)
+    built = float(built)
+    periods = np.atleast_1d(np.asarray(periods, dtype=float))
+
+    # ASSERT
+    assert periods[ib] == pytest.approx(5.0, rel=1e-9)
+    assert periods[ic] == pytest.approx(50.0, rel=1e-9)
+    own = _closed_form_lower(periods[ib], 500.0, scale[ib])
+    wrong = _closed_form_lower(periods[ic], 500.0, scale[ic])
+    assert own < -1.0 and wrong < -1.0  # both would bite: c is a real decoy
+    assert built == pytest.approx(own, rel=1e-9)
+    assert built != pytest.approx(wrong, rel=1e-3)
+    assert built != pytest.approx(own + wrong, rel=1e-3)

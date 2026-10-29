@@ -302,6 +302,72 @@ def test_barrier_grows_as_the_fit_leaves_the_grid(hat3_star_only):
     assert off_grid[-1] < -1.0
 
 
+def _closed_form_barrier(logg, lower, upper, scale):
+    """Both loggsed barriers summed, from the log-sigmoid written out here.
+
+    ``potentials.soft_lower_bound`` / ``soft_upper_bound`` with softness
+    0.01 are log(sigmoid((val - lower) * k)) and log(sigmoid((upper - val)
+    * k)), k = 4.4 / (0.01 * scale); log(sigmoid(z)) = -logaddexp(0, -z)
+    is the numerically stable spelling of the same function.
+    """
+    k = 4.4 / (0.01 * scale)
+    return float(
+        np.sum(-np.logaddexp(0.0, -(logg - lower) * k))
+        + np.sum(-np.logaddexp(0.0, -(upper - logg) * k))
+    )
+
+
+def test_the_built_barrier_equals_the_closed_form_soft_bound(hat3_star_only):
+    """
+    Given the hat3 star-only example and the sweep of radiussed raw offsets
+      that carries star.loggsed from on the grid to well past its ceiling,
+    When the built low_bound/up_bound.star.loggsed potentials are evaluated
+      at each point,
+    Then their sum equals the closed-form log-sigmoid barrier of the
+      loggsed value the model computes there, with the grid's own lower /
+      upper and the barrier scale the build holds, to rel 1e-9.
+
+    test_barrier_grows_as_the_fit_leaves_the_grid only checks the penalty
+    is monotone and below -1 off the grid; a barrier on the wrong edge, at
+    the wrong steepness (scale vs 1/scale, softness dropped) or fed a
+    second logg expression rather than loggsed's own node would pass that.
+    """
+    # ARRANGE
+    system, model, point = hat3_star_only
+    loggsed = system.star.loggsed
+    lower = np.atleast_1d(np.asarray(loggsed.lower, dtype=float))
+    upper = np.atleast_1d(np.asarray(loggsed.upper, dtype=float))
+    scale = np.asarray(
+        loggsed.export_whitening()["barrier_scales"], dtype=float
+    )
+    key = _radiussed_key(point)
+    offsets = [0.0, -40.0, -60.0, -80.0, -200.0]
+
+    # ACT
+    loggs, built, expected = [], [], []
+    for off in offsets:
+        moved = _shifted(point, key, off)
+        logg = _loggsed_value(system, model, moved)
+        loggs.append(float(logg.max()))
+        built.append(_barrier_value(model, moved))
+        expected.append(_closed_form_barrier(logg, lower, upper, scale))
+
+    # ASSERT -- the sweep exercises both regimes
+    assert loggs[0] < upper.max() < loggs[-1], loggs
+    assert expected[-1] < -1.0
+    off_grid = [
+        (b, e) for lg, b, e in zip(loggs, built, expected) if lg > upper.max()
+    ]
+    assert len(off_grid) >= 2, loggs
+    for b, e in off_grid:
+        assert b == pytest.approx(e, rel=1e-9)
+    # On the grid both are tiny; compare absolutely (the log-sigmoid there is
+    # ~exp(-k * distance), far below any relative statement's meaning).
+    for lg, b, e in zip(loggs, built, expected):
+        if lg < upper.max():
+            assert abs(b - e) <= 1e-12 + 1e-9 * abs(e)
+
+
 @pytest.mark.slow
 def test_gradient_is_finite_on_and_off_grid(hat3_star_only):
     """

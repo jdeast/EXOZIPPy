@@ -202,7 +202,10 @@ def _write_lc(path, t0=2459634.3, n=120, half_width=0.2):
     return str(path)
 
 
-def _config(lc_file, fitthermal):
+def _config(lc_file, fitthermal, light_travel_time=True):
+    transit = {"name": "inst0", "file": lc_file, "band": "TESS"}
+    if not light_travel_time:
+        transit["light_travel_time"] = False
     return {
         "star": [{"name": "A", "mist": False}],
         "planet": [{"name": "b"}],
@@ -215,7 +218,7 @@ def _config(lc_file, fitthermal):
                 "fitthermal": fitthermal,
             }
         ],
-        "transit": [{"name": "inst0", "file": lc_file, "band": "TESS"}],
+        "transit": [transit],
     }
 
 
@@ -309,12 +312,20 @@ def thermal_on_full_orbit(tmp_path_factory):
     """Same setup as thermal_on_system, but the light curve brackets
     primary transit, secondary eclipse, and a far/plateau phase, so the
     *actual likelihood* mu (not just the plotting path) can be checked at
-    each landmark."""
+    each landmark.
+
+    Light-travel time is OFF here so the exact closed-form reference in
+    test_thermal_light_curve_matches_the_closed_form_exofast_tran_model
+    can phase everything from tc: with no file retarding the orbit,
+    tc_target == tc exactly (orbit.md, "Gating"), and the geometry, the
+    eclipse and the phase terms share one time base.  The LTT wiring is
+    pinned in tests/test_transit_ltt.py."""
     d = tmp_path_factory.mktemp("transit_thermal_full_orbit")
     centers = [_TC, _TC + _PERIOD / 2.0, _TC + _PERIOD * 0.3]
     lc = _write_lc_landmarks(d / "lc.dat", centers)
     system = System(
-        _config(lc, fitthermal=True), user_params=_params(_THERMAL_PPM)
+        _config(lc, fitthermal=True, light_travel_time=False),
+        user_params=_params(_THERMAL_PPM),
     )
     system.prepare()
     model = system.build_model()
@@ -379,6 +390,213 @@ def test_build_likelihood_mu_shows_eclipse_dip_and_transit_dip(
     assert mu_far == pytest.approx(baseline + _THERMAL_PPM * 1e-6, abs=1e-6)
     assert mu_secondary == pytest.approx(baseline, abs=1e-6)
     assert mu_primary < baseline
+
+
+# ---------------------------------------------------------------------------
+# Exact reference: exofast_tran.pro's light curve, written out in closed
+# form and integrated independently of exoplanet-core (review 7.16.1).
+# Shared with tests/test_transit_beer.py.
+# ---------------------------------------------------------------------------
+
+
+def _ref_ld_transit_flux(z, p, u1, u2):
+    """Quadratic-limb-darkened flux of a star (radius 1) behind an opaque
+    disk of radius p at center separation z, by direct 1-D integration.
+
+    Each annulus of radius r loses the arc of it that lies inside the
+    planet's disk, 2 arccos((r^2 + z^2 - p^2) / (2 r z)) radians, weighted
+    by I(r) = 1 - u1 (1 - mu) - u2 (1 - mu)^2; the total is
+    pi (1 - u1/3 - u2/6).  No Mandel-Agol / Agol (2020) algebra is shared
+    with exoplanet-core, which is what the model uses.
+    """
+    from scipy.integrate import quad
+
+    if z >= 1.0 + p:
+        return 1.0
+
+    def intensity(r):
+        mu = np.sqrt(max(0.0, 1.0 - r * r))
+        return 1.0 - u1 * (1.0 - mu) - u2 * (1.0 - mu) ** 2
+
+    def arc(r):
+        if r <= 0.0:
+            return 0.0
+        if z == 0.0:
+            return 2.0 * np.pi if r < p else 0.0
+        c = (r * r + z * z - p * p) / (2.0 * r * z)
+        if c <= -1.0:
+            return 2.0 * np.pi
+        if c >= 1.0:
+            return 0.0
+        return 2.0 * np.arccos(c)
+
+    lo, hi = max(0.0, z - p), min(1.0, z + p)
+    kinks = [k for k in (abs(p - z),) if lo < k < hi]
+    blocked, _ = quad(
+        lambda r: intensity(r) * r * arc(r),
+        lo,
+        hi,
+        points=kinks or None,
+        epsabs=1e-15,
+        epsrel=1e-13,
+        limit=500,
+    )
+    return 1.0 - blocked / (np.pi * (1.0 - u1 / 3.0 - u2 / 6.0))
+
+
+def _ref_planet_visible(z, p):
+    """Visible fraction of a UNIFORM planetary disk (radius p) behind the
+    star (radius 1) at center separation z: one minus the textbook
+    circle-circle lens area over pi p^2."""
+    if z >= 1.0 + p:
+        return 1.0
+    if z <= 1.0 - p:
+        return 0.0
+    a1 = p * p * np.arccos((z * z + p * p - 1.0) / (2.0 * z * p))
+    a2 = np.arccos((z * z + 1.0 - p * p) / (2.0 * z))
+    a3 = 0.5 * np.sqrt(
+        (-z + p + 1.0) * (z + p - 1.0) * (z - p + 1.0) * (z + p + 1.0)
+    )
+    return 1.0 - (a1 + a2 - a3) / (np.pi * p * p)
+
+
+def _ref_exofast_tran(
+    t,
+    tc,
+    period,
+    ar,
+    cosi,
+    p,
+    u1,
+    u2,
+    baseline,
+    thermal=0.0,
+    reflect=0.0,
+    ellipsoidal=0.0,
+):
+    """exofast_tran.pro for a CIRCULAR orbit, in its own order (EXOFASTv2
+    lines 97-145): transit flux, + thermal * planetvisible, - reflect/2
+    (cos(phase) - 1) * planetvisible, then * (1 - ellipsoidal cos(2 phase)),
+    then * f0.  Sky separation z = (a/R*) sqrt(sin^2 phase + cos^2 i
+    cos^2 phase); the planet is in front of the star where cos(phase) > 0.
+    Amplitudes in ppm.
+    """
+    t = np.asarray(t, dtype=float)
+    phase = 2.0 * np.pi * (t - tc) / period
+    z = ar * np.sqrt(np.sin(phase) ** 2 + cosi**2 * np.cos(phase) ** 2)
+    front = np.cos(phase) > 0.0
+    out = np.empty_like(t)
+    for k in range(t.size):
+        flux = _ref_ld_transit_flux(z[k], p, u1, u2) if front[k] else 1.0
+        visible = 1.0 if front[k] else _ref_planet_visible(z[k], p)
+        flux += 1e-6 * thermal * visible
+        flux -= 1e-6 * reflect / 2.0 * (np.cos(phase[k]) - 1.0) * visible
+        flux *= 1.0 - 1e-6 * ellipsoidal * np.cos(2.0 * phase[k])
+        out[k] = baseline * flux
+    return out
+
+
+def _model_values(system, model, point):
+    """The internal values the light curve is built from, at ``point``
+    (the same givens _likelihood_mu uses)."""
+    s = system
+    nodes = {
+        "tc": s.orbit.tc.value[0],
+        "period": s.orbit.period.value[0],
+        "ar": s.planet.ar.value[0],
+        "cosi": s.orbit.cosi.value[0],
+        "ecc": s.orbit.ecc.value[0],
+        "p": s.planet.p.value[0],
+        "u1": s.band.u1.value[0],
+        "u2": s.band.u2.value[0],
+        "baseline": s.transit.baseline.value[0],
+    }
+    fn = pytensor.function(
+        [],
+        [pt.as_tensor_variable(v) for v in nodes.values()],
+        givens=[
+            (v, np.asarray(point[v.name]))
+            for v in model.free_RVs
+            if v.name in point
+        ],
+        on_unused_input="ignore",
+        mode="FAST_COMPILE",
+    )
+    return {k: float(v) for k, v in zip(nodes, fn())}
+
+
+def _phase_curve_times(tc, period, ar, p):
+    """Times through a whole orbit, dense across both conjunctions and
+    their contact points, so the transit's limb-darkened ingress and the
+    eclipse's partial phases are both sampled."""
+    half = np.arcsin(min(1.0, (1.0 + p) / ar)) * period / (2.0 * np.pi)
+    grids = [np.linspace(tc - 0.5 * period, tc + 0.5 * period, 61)]
+    for center in (tc, tc + 0.5 * period):
+        grids.append(np.linspace(center - 1.3 * half, center + 1.3 * half, 81))
+    return np.sort(np.concatenate(grids))
+
+
+def test_thermal_light_curve_matches_the_closed_form_exofast_tran_model(
+    thermal_on_full_orbit,
+):
+    """
+    Given fitthermal on (5000 ppm, fixed) on a circular orbit with light-
+    travel time off,
+    When the likelihood mu (at the data) and the plotting light curve (on a
+    dense grid through both conjunctions) are evaluated,
+    Then both equal exofast_tran.pro's model written out in closed form --
+    transit flux + 1e-6 thermal planetvisible, times the baseline -- with
+    the transit flux and planetvisible integrated independently of
+    exoplanet-core, to 1e-10 (quadrature and float precision).
+
+    The margin tests above only check signs at primary transit (flux <
+    baseline): a thermal term that was double-counted, gated off, or gated
+    by the transit's own flux there, or a primary dip shallower than the
+    real Mandel-Agol depth, all pass them.  At mid-transit this pins
+    mu = baseline * (F_transit + 1e-6 thermal) exactly.
+    """
+    # Arrange
+    system, model, point, _centers = thermal_on_full_orbit
+    v = _model_values(system, model, point)
+    assert v["ecc"] == 0.0  # the closed form below is the circular one
+    times = _phase_curve_times(v["tc"], v["period"], v["ar"], v["p"])
+    ref_kwargs = {
+        k: v[k]
+        for k in ("tc", "period", "ar", "cosi", "p", "u1", "u2", "baseline")
+    }
+
+    # Act
+    mu = _likelihood_mu(system, model, point)
+    curve = _flux_at(system, point, times)
+
+    # Assert
+    np.testing.assert_allclose(
+        mu,
+        _ref_exofast_tran(
+            system.transit.time, thermal=_THERMAL_PPM, **ref_kwargs
+        ),
+        rtol=0,
+        atol=1e-10,
+    )
+    np.testing.assert_allclose(
+        curve,
+        _ref_exofast_tran(times, thermal=_THERMAL_PPM, **ref_kwargs),
+        rtol=0,
+        atol=1e-10,
+    )
+    # Non-vacuity: the grid really holds a primary transit point with the
+    # thermal term on top of it, and a partially eclipsed point.
+    i_tc = _nearest_index(times, v["tc"])
+    assert times[i_tc] == pytest.approx(v["tc"], abs=1e-8)
+    assert curve[i_tc] < v["baseline"]
+    phase = 2 * np.pi * (times - v["tc"]) / v["period"]
+    z = v["ar"] * np.hypot(np.sin(phase), v["cosi"] * np.cos(phase))
+    vis = [
+        _ref_planet_visible(zz, v["p"])
+        for zz, ph in zip(z, phase)
+        if np.cos(ph) < 0
+    ]
+    assert any(0.05 < x < 0.95 for x in vis)
 
 
 def test_thermal_pinned_is_not_a_free_parameter(thermal_off_system):
