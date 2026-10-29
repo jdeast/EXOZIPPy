@@ -17,8 +17,6 @@ mirrored (``physics.MODEL_FRAME_MIRROR``) into genulens's orientation, for
 positions and velocities alike -- see the physics.py module docstring.
 """
 
-import logging
-
 import astropy.units as u
 import numpy as np
 import pymc as pm
@@ -44,8 +42,6 @@ from exozippy.constants import (
     SUN_GC_DISTANCE,
     SUN_Z_OFFSET,
 )
-
-logging.getLogger("exozippy").setLevel(logging.ERROR)
 
 KMS = u.km / u.s
 MASYR = u.mas / u.yr
