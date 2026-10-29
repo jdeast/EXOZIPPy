@@ -1022,3 +1022,147 @@ exactly why the numbers are printed for a human. `warn_if_starts_underdispersed`
 still runs on an `overdisperse: false` population and will usually fire: that is
 correct, since Rhat is compromised either way, and it is measurement rather than
 contradiction. Tests: `tests/test_overdisperse_declaration.py`.
+
+## The early stop also requires a stationary ensemble mean (1.4.4)
+
+`min_ess` / `max_rhat` stop a PTDE run early (both loops, through
+`_common._check_convergence` -> `convergence.converged_on_tail`), and with
+both unset nothing below runs: the schedule is not even built. Rhat and ESS
+alone were not enough to stop on. Rhat compares the chains WITH EACH OTHER,
+and a differential-evolution population is not a set of independent chains:
+every proposal is built from the other members, so the population moves
+along a curved ridge as one body and the between-chain variance stays ~0
+the whole way. Measured on ob140939 (sync ptde, 24 rungs, 34 chains): the
+stop fired at 3995 of 50000 draws with max Rhat 1.009 and the burn-in at
+65% while the median lens distance was still climbing 2426 -> 2840 pc
+between the halves of the tail, and no T=1 draw had beaten the polished
+start. The full-length runs put the lens at 4.5-4.7 kpc (absolute-pm
+prior) and 3.3-3.6 kpc (the frame-correct one); the early-stopped run
+reported 2.8 kpc and 0.25 Msun with every convergence line green.
+
+**The test (`convergence.ensemble_drift`).** For lp and every sampled
+element, take the chain average `m_t = mean_c x[c, t]` over the good chains
+and the same last-half tail Rhat reads, block-average it to at most 2000
+points, fit a straight line, and divide the slope by its Monte Carlo error:
+the OLS error with the residual variance inflated by the residuals'
+integrated autocorrelation time (Geyer, `outputs.autocorr.iact`). An element
+is FLAGGED when its p-value is under `DRIFT_FAMILY_ALPHA / K` (1%,
+Bonferroni over the K elements) AND its fitted change across the tail is
+over `DRIFT_MIN_SD` (0.1) of its pooled posterior sd. It is UNRESOLVED when
+the detrended ensemble mean holds fewer than `_DRIFT_MIN_NEFF` (20)
+effectively independent points. The stop needs nothing flagged and nothing
+unresolved, on top of the Rhat/ESS thresholds.
+
+Why each piece, so none is "simplified" back out:
+
+- **The ensemble mean, not the chains.** The whole population is ONE Markov
+  chain (the same argument as the mode weights, `outputs/outputs.md`,
+  "Mode-weight errors: the population, not the chains"). On the ob140939
+  traces each chain decorrelates in 5-10 draws while the ensemble mean's
+  IACT is 300-4000 draws, so per-chain ESS overstates the population's by
+  1-2 orders of magnitude, and a shared drift moves every chain mean
+  together.
+- **A regression on the detrended series, not two window means.** Comparing
+  the means of the last two quarters against the windows' own spread or
+  IACT is circular: on a series that is still moving, the move inflates both,
+  and a steady ramp scores ~2-3 sigma however large it is. (The lp
+  `check_equilibration` at wrap-up dodges the same trap with lag-1
+  differences.) Comparing against the spread of the DRAWS instead ignores
+  the autocorrelation and false-alarms on every DE run.
+- **Every element, in raw coordinates.** z is dimensionless, so no whitening
+  is needed to compare elements, and picking "the leading physical
+  parameters" would need component knowledge the sampler must not have.
+  Bonferroni is conservative for correlated elements (a ridge moves
+  several at once), which errs toward stopping; the z threshold grows only
+  like sqrt(2 ln K).
+- **Two small-sample corrections and a resolution floor.** On a window a few
+  tens of IACTs long, Geyer's truncation underestimates the IACT (at a true
+  n/tau = 5 it reports n/tau ~ 12) and detrending removes low-frequency
+  power, so z**2 averages `1 + 12 / (n_eff - 7.5)` instead of 1 (fitted on
+  stationary AR(1), n/tau = 5..100); z is divided by its square root, and
+  the reference is a Student t with `n_eff - 2` degrees of freedom. Below
+  `n_eff` = 20 no correction is trustworthy, so the element is unresolved,
+  which also catches a CURVED drift (its curvature stays in the residuals
+  and inflates their IACT, hiding the slope).
+- **The 0.1 sd floor.** Without it the test's power grows without bound with
+  the run length, and a long run would be held for a statistically real but
+  immaterial wander.
+
+**Calibration** (`tests/test_ensemble_drift.py` pins the shapes):
+
+Per-element false-alarm rate on stationary AR(1) at a nominal 1%, 1000
+series per row, by window length in units of the true IACT. "Admitted" is
+the rate among series with `n_eff >= 20`; the rest are unresolved, which
+holds the run rather than passing it:
+
+| n / tau | normal reference, no correction | corrected + t, admitted | unresolved |
+|---|---|---|---|
+| 5 | 14% | 17-22% | 88-89% |
+| 10 | 8% | 6-7% | 62-68% |
+| 20 | 4% | 1.6-2.0% | 15-18% |
+| 50 | 1.7-2.0% | 1.3-1.5% | 0 |
+| 100 | 1.1-1.4% | 1.1-1.3% | 0 |
+| 300 | 1.3-1.7% | 0.6-1.1% | 0 |
+
+A two-timescale series (half its variance at tau, half at tau/50) gives the
+same picture: 1.4-2.6% admitted at n/tau >= 20, 1.0-1.6% at >= 50.
+
+Whole check (34 chains, 17 elements + lp), family-wise at a nominal 1%:
+2.5% (5/200 seeds) for a DE-like population whose ensemble mean has an
+IACT of 200 and a window of 8000 draws, 3.0% (6/200) for independent chains
+with IACT 100 over the same window, 1% (1/100) for the DE-like one over
+30000, 0/400 for the independent one over 20000 (where the 0.1 sd floor
+binds). A false alarm costs one check interval, ~11% more draws.
+
+Run through the live check schedule with `min_ess: 1000, max_rhat: 1.01`
+(20 seeds each): independent chains stop at the SAME check as before
+(median 26616 draws, ratio 1.00 on every seed); the DE-like population stops
+at a median of 8816 draws against 7934 before (median ratio 1.06, worst
+1.69), every seed stopping. A population translating at constant speed
+(24 chains, 6 elements) at 1 posterior sd per 12000 draws -- which the old
+rule stopped at 4439-6089 draws -- is never stopped by 12000, |z| ~ 15; at
+1 sd per 16000 it is held in 2 of 3 seeds, and at 1 sd per 24000 or slower
+it stops with 0.13-0.18 sd of drift across the tail, |z| ~ 2-3. That is the
+detection floor: a drift below the population's own Monte Carlo noise at
+that run length cannot be told from wander by one run.
+
+**Replays of the two ob140939 traces still on disk** (34 chains; the
+20261006 traces of the measurement above were not kept):
+
+- `ptde_async`, the absolute-pm prior (2026-09-15, early stop off): the
+  median lens distance climbs 2452 -> 4287 pc over the 50000 draws and lp
+  rises 6 nats. Rhat never reached 1.01 there, so the old rule never stopped
+  it either; the drift test holds it at every check, flagging it at every
+  check from 2123 draws on but one (unresolved there), the
+  lens distance at up to z = +14 and 0.4-0.9 sd per tail.
+- `ptde` sync, the frame-correct prior (2026-10-24, early stop off): the old
+  rule would have stopped at 2621 draws. The new one never stops within the
+  50000: every check flags 1-10 elements at 0.1-0.5 sd per tail, z 4-13, or
+  finds several unresolved (n_eff 9-11). The movers are `source.u_0` -- the
+  u0 > 0 occupancy wanders 0.24 -> 0.15 across the run -- and `q_source`,
+  whose ensemble mean has an IACT of ~4000 draws. That is the population
+  wander outputs.md describes for the mode weights (their quoted error rose
+  0.003 -> 0.020 once it was counted), so holding the run is the honest
+  answer: it had not sampled enough population correlation times to quote a
+  converged weight.
+
+**Where it is reported.** Every live check logs it after Rhat/ESS
+(`PTDE convergence @ N draws: max_rhat=... min_ess=...  ensemble ...`), with
+the worst element, its z, p, change in posterior sd and n_eff. At wrap-up
+`convergence.analyze_idata` runs the same test on the retained draws'
+SAMPLED coordinates (`*_raw`: finite on every accepted draw, where a derived
+value may be NaN on a draw the mode pass has yet to label) for every
+sampler, sets `converged` False when it fails, and `log_convergence` prints
+`ENSEMBLE MEAN NOT STATIONARY` as a WARNING; `<prefix>_summary.txt` carries
+the same line in its header, and the modeling draft a sentence saying the
+test was made and whether it passed.
+
+**Rope, not gates.** The test changes only WHEN the early stop fires. It
+never kills a run or discards draws; a run it holds simply continues to its
+`draws` budget or `maxtime`, and the wrap-up reports the drift. Per sampler:
+`ptde` and `ptde_async` are the only callers of `converged_on_tail` (the
+early stop); `nuts`/`numpyro`/`blackjax`/`nutpie`, `demc`/`demcz` and
+`nested` have no early stop, so only the wrap-up report applies to them
+(for independent chains the ensemble mean is just a less noisy view of each
+chain's own trend, and the test is valid there too). Tests:
+`tests/test_ensemble_drift.py`, `tests/test_convergence.py`.

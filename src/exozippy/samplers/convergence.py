@@ -157,6 +157,280 @@ def _thin_stride(n_draws):
     return max(1, n_draws // _STAT_DRAW_BUDGET)
 
 
+# --- Ensemble-mean drift (review 1.4.4) -----------------------------------
+#
+# Rhat compares chains with each other, so it is blind to a drift that every
+# chain makes TOGETHER.  In a differential-evolution population that is the
+# normal way to be unconverged: every proposal is built from the other
+# chains, so the population translates along a curved ridge as one body and
+# the between-chain variance stays ~0 the whole way.  Measured on ob140939
+# (sync ptde, 24 rungs): the min_ess/max_rhat early stop fired at 3995 of
+# 50000 draws with max Rhat 1.009 while the median lens distance was still
+# climbing 2426 -> 2840 pc; full-length runs put it at 3.3-4.7 kpc.
+#
+# The test asks the question Rhat cannot: is the ENSEMBLE MEAN of each
+# sampled element, and of lp, stationary across the tail?  See
+# :func:`ensemble_drift` for the statistic and samplers.md, "The early stop
+# also requires a stationary ensemble mean", for the calibration.
+
+# Family-wise false-alarm rate of ONE drift check, Bonferroni-split over the
+# elements tested.  A false alarm costs one more check interval (~11% more
+# draws, _convergence_check_schedule) during a live run, and a spurious
+# "NOT CONVERGED" line at wrap-up; 1% keeps both rare while the drifts this
+# exists for sit far above the threshold (ob140939: |z| ~ 10-40).
+DRIFT_FAMILY_ALPHA = 0.01
+
+# Practical-significance floor: a drift smaller than this many posterior
+# standard deviations across the whole tail is not reported as one.  Without
+# it the test's power grows without bound with the run length, and a long
+# run would be held for a statistically real but immaterial wander (a tenth
+# of a sigma moves no reported median by more than its own rounding).
+DRIFT_MIN_SD = 0.1
+
+# The ensemble-mean series is block-averaged to at most this many points
+# before the regression and the IACT.  Block means keep every draw's
+# information (the series mean and the fitted slope are unchanged), and the
+# IACT of the block-mean series is the right inflation factor for ITS mean
+# (outputs/autocorr.py) -- this only bounds the cost of a check.
+_DRIFT_SERIES_BUDGET = 2000
+
+# Fewer block means than this cannot carry a slope and an IACT.
+_DRIFT_MIN_POINTS = 16
+
+# A series with fewer effectively independent points than this (n / tau of
+# its detrended ensemble mean) is UNRESOLVED: its IACT, and so its z, cannot
+# be trusted (per-test false alarms of 5-20% at a nominal 1% below it), so
+# it does not count as stationary.  Above it the calibrated test is within
+# 1-2.6% at a nominal 1% (samplers.md).
+_DRIFT_MIN_NEFF = 20.0
+
+# Small-sample inflation of z**2 on a short window: 1 + SCALE/(n_eff -
+# OFFSET), fitted to stationary AR(1) at n/tau = 5..100 (see _drift_one).
+_DRIFT_BIAS_SCALE = 12.0
+_DRIFT_BIAS_OFFSET = 7.5
+
+
+def _block_mean_series(m, budget=_DRIFT_SERIES_BUDGET):
+    """Average a 1-D series into <= ``budget`` contiguous blocks.
+
+    Any remainder is dropped from the START of the series, so the latest
+    draws -- the ones a stop decision is about -- are always kept.
+    """
+    n = m.shape[0]
+    b = max(1, -(-n // budget))  # ceil(n / budget)
+    k = n // b
+    return m[n - k * b :].reshape(k, b, *m.shape[1:]).mean(axis=1)
+
+
+def _drift_one(series):
+    """Slope test on one ensemble-mean series.
+
+    Returns ``(z, drift, p, n_eff)``.  ``drift`` is the fitted linear change
+    of the series across its whole length and ``z`` the slope over its
+    Monte Carlo standard error: the OLS error with the residual variance
+    inflated by the residuals' integrated autocorrelation time ``tau``
+    (Geyer, ``outputs.autocorr.iact``) -- the long-run (spectral density at
+    zero) variance of the noise, which is the large-sample variance of a
+    regression slope on a smooth regressor under serially correlated noise.
+    ``n_eff = n / tau`` is the number of effectively independent points.
+
+    Two small-sample corrections, both calibrated on stationary AR(1) and on
+    a two-timescale mixture (samplers.md has the table).  On a window only a
+    few tens of ``tau`` long, Geyer's truncation underestimates ``tau`` (at
+    a true n/tau = 5 it reports ~12) and detrending removes low-frequency
+    power, so ``z**2`` averages ``1 + 12 / (n_eff - 7.5)`` rather than 1;
+    ``z`` is divided by the square root of that.  And the reference
+    distribution is a Student t with ``n_eff - 2`` degrees of freedom, not
+    a normal, for the heavy tail of a ratio with a noisy denominator.
+    Neither correction is trusted below ``_DRIFT_MIN_NEFF``: the caller
+    treats such a series as UNRESOLVED (stationarity not shown), never as
+    stationary.
+    """
+    from scipy.stats import t as student_t
+
+    from exozippy.outputs.autocorr import iact
+
+    n = series.shape[0]
+    t = np.arange(n, dtype=float)
+    t -= t.mean()
+    sxx = float((t * t).sum())
+    y = series - series.mean()
+    beta = float((t * y).sum() / sxx)
+    resid = y - beta * t
+    var_r = float(resid.var())
+    drift = beta * (n - 1)
+    if var_r == 0.0:
+        # An exact straight line: the slope is known without error.
+        if drift == 0.0:
+            return 0.0, drift, 1.0, float(n)
+        return float(np.sign(drift) * np.inf), drift, 0.0, float(n)
+    tau = iact(resid)
+    n_eff = n / tau
+    z = beta / np.sqrt(var_r * tau / sxx)
+    if n_eff > _DRIFT_BIAS_OFFSET:
+        z /= np.sqrt(1.0 + _DRIFT_BIAS_SCALE / (n_eff - _DRIFT_BIAS_OFFSET))
+    p = 2.0 * student_t.sf(abs(z), max(n_eff - 2.0, 1.0))
+    return float(z), drift, float(p), float(n_eff)
+
+
+def ensemble_drift(
+    posterior,
+    lp=None,
+    var_names=None,
+    family_alpha=DRIFT_FAMILY_ALPHA,
+    min_drift_sd=DRIFT_MIN_SD,
+):
+    """Is the ENSEMBLE MEAN of every element, and of lp, stationary?
+
+    The input is the window to judge (already trimmed to good chains and to
+    the tail): ``posterior`` maps var name -> ndarray (n_chains, n_draws,
+    *shape), ``lp`` is (n_chains, n_draws) or None.
+
+    WHY THE ENSEMBLE MEAN.  A population sampler is ONE Markov chain whose
+    state is the whole population (outputs.md, "Mode-weight errors: the
+    population, not the chains"); a collective drift is invisible to Rhat
+    (no between-chain spread) and to per-chain ESS (the drift is shared), but
+    it is the first thing the chain-average ``m_t = mean_c x_{c,t}`` shows.
+    For independent chains (NUTS) the same series is merely a less noisy
+    view of each chain's own trend, so the test is valid there too.
+
+    THE STATISTIC.  For each scalar element: block-average ``m_t`` to at most
+    ``_DRIFT_SERIES_BUDGET`` points, fit a straight line, and divide the
+    slope by its Monte Carlo error -- the OLS error with the residual
+    variance inflated by the residuals' IACT (:func:`_drift_one`).  Two
+    simpler choices were rejected:
+
+    * a difference of two window means against the windows' own spread (or
+      their own IACT) is CIRCULAR: on a series that is still moving, the
+      move inflates both the spread and the IACT, so a steady ramp scores
+      only ~2-3 sigma however large it is.  Detrending first, as the
+      regression does, measures the noise with the trend removed;
+    * comparing against the spread of the DRAWS (not of the mean) ignores
+      autocorrelation and false-alarms on every DE run, whose population
+      mean has an IACT of hundreds of draws.
+
+    Every element is tested, in whatever coordinates the trace holds (raw
+    draws live, physical at wrap-up) -- ``z`` is dimensionless, so no
+    whitening is needed to compare them, and naming "the leading physical
+    parameters" would need component knowledge this module must not have.
+    Elements whose draws are all identical cannot drift and are skipped.
+    The tests are Bonferroni-split at ``family_alpha``; Bonferroni is
+    conservative for correlated elements (a ridge moves several at once),
+    which errs toward stopping, and the z threshold only grows like
+    sqrt(2 ln K) with the number of elements K.
+
+    An element is FLAGGED when its p-value is below ``family_alpha / K``
+    AND its drift across the window exceeds ``min_drift_sd`` posterior
+    standard deviations (the pooled sd of its draws in the window).  An
+    element is UNRESOLVED when its detrended ensemble mean holds fewer than
+    ``_DRIFT_MIN_NEFF`` effectively independent points: the window is too
+    short, in units of the POPULATION's correlation time, to show anything.
+    A curved drift lands here too (its curvature stays in the residuals and
+    inflates their IACT), which is why unresolved never counts as
+    stationary.
+
+    Returns a dict:
+
+        stationary   : bool, nothing flagged and nothing unresolved
+        n_tests      : int, elements tested (lp included)
+        alpha_each   : float, the per-element p threshold
+        n_points     : int, block means per series
+        flagged      : list of (name, z, drift_sd, p, n_eff), smallest p first
+        unresolved   : the same tuples, for n_eff < _DRIFT_MIN_NEFF
+        worst        : the smallest-p tuple tested
+    """
+    var_names = var_names or default_var_names(posterior)
+    series = []  # (name, block-mean series, pooled sd)
+
+    def _add(name, draws):
+        # draws: (n_chains, n_draws)
+        sd = float(np.std(draws))
+        if not np.isfinite(sd):
+            # A stored T=1 draw is a state the sampler accepted; a
+            # non-finite one is an upstream bug, not a drift.
+            raise ValueError(
+                f"ensemble_drift: {name} holds non-finite draws in the "
+                f"window being judged"
+            )
+        if sd == 0.0:
+            return
+        series.append((name, _block_mean_series(draws.mean(axis=0)), sd))
+
+    if lp is not None:
+        _add("lp", np.asarray(lp, dtype=float))
+    for v in var_names:
+        a = np.asarray(posterior[v], dtype=float)
+        flat = a.reshape(a.shape[0], a.shape[1], -1)
+        for j in range(flat.shape[2]):
+            label = v if flat.shape[2] == 1 else f"{v}[{j}]"
+            _add(label, flat[:, :, j])
+
+    n_tests = len(series)
+    out = {
+        "stationary": True,
+        "n_tests": n_tests,
+        "alpha_each": family_alpha / max(n_tests, 1),
+        "n_points": int(series[0][1].shape[0]) if series else 0,
+        "flagged": [],
+        "unresolved": [],
+        "worst": None,
+    }
+    if not series:
+        # Every element (and lp) is constant over the window: nothing can
+        # have drifted.
+        return out
+    if out["n_points"] < _DRIFT_MIN_POINTS:
+        # Too short to carry a slope and an IACT: stationarity has not been
+        # SHOWN, and the caller must not stop on its absence.
+        out["stationary"] = False
+        return out
+
+    results = []
+    for name, m, sd in series:
+        z, drift, p, n_eff = _drift_one(m)
+        results.append((name, z, float(drift / sd), p, n_eff))
+    results.sort(key=lambda r: (r[3], -abs(r[1])))
+    out["worst"] = results[0]
+    out["flagged"] = [
+        r
+        for r in results
+        if r[3] < out["alpha_each"] and abs(r[2]) > min_drift_sd
+    ]
+    flagged = {r[0] for r in out["flagged"]}
+    out["unresolved"] = [
+        r for r in results if r[4] < _DRIFT_MIN_NEFF and r[0] not in flagged
+    ]
+    out["stationary"] = not out["flagged"] and not out["unresolved"]
+    return out
+
+
+def format_drift(drift):
+    """One-line description of an :func:`ensemble_drift` result for a log."""
+    if drift is None:
+        return "ensemble drift not judged"
+    if drift["worst"] is None:
+        if drift["n_tests"] == 0:
+            return "ensemble drift: every element constant"
+        return "ensemble drift not judged (too few draws)"
+    k = drift["n_tests"]
+    if drift["flagged"]:
+        head = f"ensemble DRIFTING ({len(drift['flagged'])}/{k} elements)"
+        name, z, dsd, p, n_eff = drift["flagged"][0]
+    elif drift["unresolved"]:
+        head = (
+            f"ensemble drift UNRESOLVED ({len(drift['unresolved'])}/{k} "
+            f"elements under {_DRIFT_MIN_NEFF:.0f} independent means)"
+        )
+        name, z, dsd, p, n_eff = min(drift["unresolved"], key=lambda r: r[4])
+    else:
+        head = f"ensemble stationary ({k} elements)"
+        name, z, dsd, p, n_eff = drift["worst"]
+    return (
+        f"{head}: worst {name} z={z:+.1f} p={p:.2g} (p<{drift['alpha_each']:.2g}"
+        f" flags), {dsd:+.2f} sd across the tail, n_eff={n_eff:.0f}"
+    )
+
+
 def converged_on_tail(
     posterior, lp, min_ess, max_rhat, tail_frac=0.5, var_names=None
 ):
@@ -165,17 +439,22 @@ def converged_on_tail(
     Used for the live auto-stop decision so the full burn-in scan
     (:func:`find_burnin`) runs only once, at wrap-up. A fixed, generous trim
     is conservative: if the true transient is longer than the trim, the tail
-    stays contaminated and we keep sampling, so this never stops early on an
-    unequilibrated run -- it only ever stops a little late. Stuck chains are
-    dropped first (see :func:`good_chain_mask`).
+    stays contaminated and we keep sampling. Stuck chains are dropped first
+    (see :func:`good_chain_mask`).
+
+    Rhat/ESS are necessary but not sufficient: a population that drifts as
+    one body keeps Rhat ~1 the whole way (review 1.4.4), so the tail must
+    ALSO show a stationary ensemble mean (:func:`ensemble_drift`, on the
+    same good chains and the same tail, lp included).
 
     ``posterior`` maps var name -> ndarray (n_chains, n_draws, *shape);
     ``lp`` is (n_chains, n_draws) or None. Returns
-    (converged, max_rhat, min_ess); NaN stats when it could not be judged.
+    (converged, max_rhat, min_ess, drift); NaN stats and a None drift when
+    it could not be judged.
     """
     var_names = var_names or default_var_names(posterior)
     if not var_names:
-        return False, float("nan"), float("nan")
+        return False, float("nan"), float("nan"), None
     any_arr = posterior[var_names[0]]
     n_chains, n_draws = any_arr.shape[0], any_arr.shape[1]
 
@@ -184,19 +463,28 @@ def converged_on_tail(
         mask, _ = good_chain_mask(lp)
         good_idx = np.nonzero(mask)[0]
     if len(good_idx) < 2 or n_draws < 2 * _MIN_DRAWS_PER_CHAIN:
-        return False, float("nan"), float("nan")
+        return False, float("nan"), float("nan"), None
 
     burnin = int((1.0 - tail_frac) * n_draws)
     thin = _thin_stride(n_draws - burnin)
     sub = {v: posterior[v][good_idx][:, burnin::thin] for v in var_names}
     stat = _rhat_ess(sub)
     if stat is None:
-        return False, float("nan"), float("nan")
+        return False, float("nan"), float("nan"), None
     rhat, ess, _, _ = stat
-    converged = (max_rhat is None or rhat <= max_rhat) and (
-        min_ess is None or ess >= min_ess
+    # The drift test reads the UNTHINNED tail: it block-averages instead,
+    # which keeps every draw's information in the ensemble mean.
+    drift = ensemble_drift(
+        {v: posterior[v][good_idx][:, burnin:] for v in var_names},
+        None if lp is None else np.asarray(lp)[good_idx][:, burnin:],
+        var_names=var_names,
     )
-    return converged, rhat, ess
+    converged = (
+        (max_rhat is None or rhat <= max_rhat)
+        and (min_ess is None or ess >= min_ess)
+        and drift["stationary"]
+    )
+    return converged, rhat, ess, drift
 
 
 def find_burnin(posterior, lp=None, var_names=None):
@@ -399,6 +687,33 @@ def analyze_idata(
         diag["converged"] = False
 
     good_idx = np.nonzero(diag["good_mask"])[0]
+
+    # 1.4.4: the same ensemble-mean drift test the live early stop applies,
+    # on the retained draws, so a run that ran to its draw budget (or was
+    # sampled with the early stop off, or by another sampler) is told when
+    # its population was still moving.  It reads the SAMPLED coordinates
+    # (``*_raw``), as the live check does: they are finite on every draw the
+    # sampler accepted, while a derived physical value may be NaN on a draw
+    # the mode pass has yet to label invalid.
+    diag["drift"] = None
+    if len(good_idx) >= 2 and diag["n_draws"] - diag["burnin"] >= (
+        2 * _MIN_DRAWS_PER_CHAIN
+    ):
+        b = diag["burnin"]
+        drift_names = [
+            v
+            for v in posterior.data_vars
+            if v.endswith("_raw") and v not in set(exclude)
+        ] or var_names
+        drift = ensemble_drift(
+            {v: posterior[v].values[good_idx][:, b:] for v in drift_names},
+            None if lp is None else np.asarray(lp)[good_idx][:, b:],
+            var_names=drift_names,
+        )
+        diag["drift"] = drift
+        if not drift["stationary"]:
+            diag["converged"] = False
+
     trimmed = trim_groups(idata, good_idx, diag["burnin"])
     return trimmed, diag
 
@@ -500,6 +815,21 @@ def log_convergence(diag, log=logger):
             summary,
         )
         return
+    drift = diag.get("drift")
+    if drift is not None and not drift["stationary"]:
+        log.warning(
+            "ENSEMBLE MEAN NOT STATIONARY -- %s.  The chains move together, "
+            "so Rhat (which compares chains) cannot see it: the population "
+            "is still drifting or has not been sampled for enough of its own "
+            "correlation times.  %s.  Remedy: a longer run; the reported "
+            "medians of the drifting elements describe where the population "
+            "WAS (review 1.4.4).",
+            format_drift(drift),
+            summary,
+        )
+        return
+    if drift is not None:
+        summary += "; " + format_drift(drift)
     if diag.get("converged", False):
         log.info("Convergence OK: %s", summary)
     else:
