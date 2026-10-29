@@ -9,7 +9,12 @@ coordinate time.
 This directory contains ephemeris files to compute the observer trajectory (microlensing parallax, astrometry parallax factors, etc.; see src/exozippy/ephemeris.py). New ephemerides can be generated in the appropriate format using the get_ephemeris tool in this directory. This is how the existing ones were generated:
 
 python get_ephemeris.py --id -79 --out "spitzer.eph" --start "2013-06-01" --stop "2018-12-31" --step="1d" 
-python get_ephemeris.py --id -163 --out "k2.eph" --start "2016-04-01" --stop "2016-07-31" --step="1h" 
+python get_ephemeris.py --id -227 --out "k2.eph" --start "2016-04-01" --stop "2016-07-31" --step="1h" 
+
+k2.eph is Kepler (NAIF -227), K2 Campaign 9 (the microlensing campaign), ~0.8 AU from
+the Earth. Before 2026-10-29 it was generated from id -163, which is WISE (a low-Earth
+orbiter), so a `k2` observer carried no satellite parallax; check the target name Horizons
+returns when adding a file.
 
 See here for a list of IDs:
 https://naif.jpl.nasa.gov/pub/naif/toolkit_docs/C/req/naif_ids.html

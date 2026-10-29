@@ -60,12 +60,6 @@ SPACECRAFT_EARTH_DISTANCE_AU = {
 # to the ecliptic; the L2 orbits follow the Earth's.
 POLE_TOLERANCE_DEG = {"spitzer.eph": 2.0}
 
-_K2_REASON = (
-    "k2.eph was generated from JPL Horizons id -163, which is WISE (an "
-    "Earth-orbiting satellite, ~6700 km from the geocenter in the file), "
-    "not Kepler/K2 (NAIF -227); review 1.10.14"
-)
-
 
 def _eph_files():
     names = sorted(
@@ -103,18 +97,7 @@ def test_spacecraft_orbit_pole_is_the_ecliptic_pole_in_equatorial_axes(name):
     assert np.degrees(np.arccos(pole[2])) > 20.0
 
 
-@pytest.mark.parametrize(
-    "name",
-    [
-        pytest.param(
-            n,
-            marks=pytest.mark.xfail(strict=True, reason=_K2_REASON)
-            if n == "k2.eph"
-            else (),
-        )
-        for n in _eph_files()
-    ],
-)
+@pytest.mark.parametrize("name", _eph_files())
 def test_spacecraft_distance_from_earth_is_what_the_spacecraft_is(name):
     """
     Given a shipped spacecraft ephemeris and astropy's barycentric Earth,
@@ -129,6 +112,39 @@ def test_spacecraft_distance_from_earth_is_what_the_spacecraft_is(name):
 
     lo, hi = SPACECRAFT_EARTH_DISTANCE_AU[name]
     assert dist.min() > lo and dist.max() < hi, (dist.min(), dist.max())
+
+
+# JPL Horizons geocentric state of Kepler at JD_TDB 2457523.5
+# (2016-05-15 00:00 TDB, mid K2 Campaign 9), ICRF equatorial AU, captured
+# 2026-10-29 with
+#   Horizons(id="-227", location="500@399",
+#            epochs=[2457523.5]).vectors(refplane="earth")
+# which returns targetname "Kepler (spacecraft) (-227)".  The same query
+# with id="-163" returns "WISE (spacecraft) (-163)", the id k2.eph was
+# once generated from (review 1.10.14).
+K2_EPOCH_JD_TDB = 2457523.5
+K2_GEOCENTRIC_AU = np.array(
+    [-0.4195137392825806, 0.622120342532367, 0.2745212053444134]
+)
+
+
+def test_k2_ephemeris_is_kepler_at_a_horizons_epoch():
+    """
+    Given k2.eph and Kepler's geocentric position from JPL Horizons at a
+      mid-Campaign-9 epoch (captured above, query recorded),
+    When the file is interpolated there and astropy's barycentric Earth is
+      subtracted,
+    Then the geocentric vector is Horizons' to < 1e-6 AU (150 km) -- the
+      file is Kepler/K2 in the equatorial frame, ~0.8 AU from the Earth,
+      not WISE (~4.5e-5 AU) and not an ecliptic-frame Kepler.
+    """
+    sc = get_observer_position(
+        np.array([K2_EPOCH_JD_TDB]), observer_location="k2"
+    )[0]
+    earth = get_observer_position(
+        np.array([K2_EPOCH_JD_TDB]), observer_location="earth"
+    )[0]
+    np.testing.assert_allclose(sc - earth, K2_GEOCENTRIC_AU, rtol=0, atol=1e-6)
 
 
 @pytest.mark.parametrize("name", _eph_files())
