@@ -2159,13 +2159,19 @@ class Orbit(Component):
             if dt.size <= order or np.ptp(dt) == 0.0:
                 continue  # too few epochs to say anything: keep the default
             coeffs = np.polyfit(dt, resid, order)  # highest power first
+            # The fit is in m/s per day (and per day**2): stated, so a user
+            # `unit:` on the rates cannot rescale it (review 1.5.10).
             self.config_manager.add_hint(
-                f"{self.prefix}.{o}.gammadot", float(coeffs[-2])
+                f"{self.prefix}.{o}.gammadot",
+                float(coeffs[-2]),
+                unit="m/(s d)",
             )
             if order == 2:
                 # polyfit's coefficient of dt**2 is HALF the derivative.
                 self.config_manager.add_hint(
-                    f"{self.prefix}.{o}.gammaddot", float(2.0 * coeffs[0])
+                    f"{self.prefix}.{o}.gammaddot",
+                    float(2.0 * coeffs[0]),
+                    unit="m/(s d2)",
                 )
 
     def _taylor_manifest(self, consumers):

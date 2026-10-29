@@ -191,7 +191,11 @@ class RVInstrument(Instrument):
         # optional GP / robust-likelihood hooks.  self.err ends up in
         # solRad/d while the GP amplitude and out_scale are declared in m/s,
         # hence user_factor.
-        blocks.finalize("rv", user_factor=(u.solRad / u.d).to(u.m / u.s))
+        blocks.finalize(
+            "rv",
+            user_factor=(u.solRad / u.d).to(u.m / u.s),
+            hint_unit="m/s",
+        )
 
         self.k_init = self._estimate_k_init()
 
@@ -484,7 +488,11 @@ class RVInstrument(Instrument):
                 if hasattr(gamma_arr[i], "item")
                 else float(gamma_arr[i])
             )
-            self.config_manager.add_hint(f"{self.prefix}.{i}.gamma", val)
+            # gamma_init is the file mean in m/s (load_data): say so, or a
+            # user `unit: km/s` on gamma reads it 1000x off (review 1.5.10).
+            self.config_manager.add_hint(
+                f"{self.prefix}.{i}.gamma", val, unit="m/s"
+            )
 
         # gamma is FREE: it is the sampled per-instrument RV offset, and
         # rvinstrument/defaults.yaml has carried no expressions: block for it

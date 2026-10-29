@@ -442,6 +442,7 @@ class Lens(Component):
                         f"lens.{elem}.alpha",
                         alpha_deg,
                         rank=PRECEDENCE_DEFAULT,
+                        unit="deg",
                     )
 
             # q's mass dependencies are typed by the companion components.

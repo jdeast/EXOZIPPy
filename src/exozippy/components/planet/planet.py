@@ -700,7 +700,8 @@ class Planet(Component):
                     "or planet.log_q to start from the RV amplitude."
                 )
                 continue
-            cm.add_hint(f"{self.prefix}.{i}.K", k_ms)
+            # k_ms is in m/s whatever unit the user reads K in (1.5.10).
+            cm.add_hint(f"{self.prefix}.{i}.K", k_ms, unit="m/s")
 
     def _resolve_mass_parameterization(self, system):
         """Pick the sampled mass coordinate (stage 3, topology known).
