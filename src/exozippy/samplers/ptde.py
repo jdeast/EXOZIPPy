@@ -1849,12 +1849,15 @@ def ptde_sample(
                 and _next_check is not None
                 and actual_draws >= _next_check
             ):
-                converged, rhat_val, ess_val = _common._check_convergence(
-                    stored_raw, actual_draws, min_ess, max_rhat, stored_lp
+                converged, rhat_val, ess_val, drift = (
+                    _common._check_convergence(
+                        stored_raw, actual_draws, min_ess, max_rhat, stored_lp
+                    )
                 )
                 logger.info(
                     f"PTDE convergence @ {actual_draws} draws: "
-                    f"max_rhat={rhat_val:.4f}  min_ess={ess_val:.1f}"
+                    f"max_rhat={rhat_val:.4f}  min_ess={ess_val:.1f}  "
+                    f"{convergence.format_drift(drift)}"
                 )
                 # GUI progress hook: fires at each geometric check, so overhead
                 # stays bounded. Passes the live T=1 draw buffers by reference

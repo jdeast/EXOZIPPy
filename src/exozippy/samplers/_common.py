@@ -2494,19 +2494,23 @@ def _check_convergence(stored_raw, n_draws, min_ess, max_rhat, stored_lp=None):
     longer poison the Rhat/ESS the stop decision reads -- the reason a run
     with a slow, likelihood-flat degenerate direction otherwise never
     auto-stops. Rank Rhat/bulk-ESS are transform-invariant, so computing on
-    the raw draws matches the physical report. The precise (ESS-maximizing)
-    burn-in is found once at wrap-up by convergence.find_burnin; here we only
-    need the cheap pass/fail. See samplers/convergence.py.
+    the raw draws matches the physical report. The tail must also show a
+    stationary ENSEMBLE MEAN (convergence.ensemble_drift, review 1.4.4): a
+    DE population drifting as one body keeps Rhat ~1. The precise
+    (ESS-maximizing) burn-in is found once at wrap-up by
+    convergence.find_burnin; here we only need the cheap pass/fail. See
+    samplers/convergence.py.
 
-    Returns (converged, max_rhat_val, min_ess_val). None thresholds are
-    treated as "no limit" for that statistic.
+    Returns (converged, max_rhat_val, min_ess_val, drift). None thresholds
+    are treated as "no limit" for that statistic; ``drift`` is the
+    ensemble_drift dict, or None when the tail could not be judged.
     """
     posterior = {key: arr[:, :n_draws] for key, arr in stored_raw.items()}
     lp = stored_lp[:, :n_draws] if stored_lp is not None else None
     try:
         return convergence.converged_on_tail(posterior, lp, min_ess, max_rhat)
     except Exception:
-        return False, float("nan"), float("nan")
+        return False, float("nan"), float("nan"), None
 
 
 def validate_shared_ptde_args(swap_schedule, de_mode_hop, label):

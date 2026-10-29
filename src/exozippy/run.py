@@ -2718,6 +2718,30 @@ def _add_wrapup_prose(system, diag, mode_report, cap_findings=None):
             key="run.convergence",
             rank=20,
         )
+        drift = diag.get("drift")
+        if drift is not None and drift["n_tests"]:
+            # Rhat compares chains, so it cannot see a population that moves
+            # as one body (review 1.4.4); say that the ensemble mean was
+            # tested too, and what the test found.
+            prose.add(
+                "Because the chains of a population sampler can drift "
+                "together, which leaves the Gelman--Rubin statistic near "
+                "unity, we also tested the chain-averaged value of each of "
+                f"the {drift['n_tests']} sampled quantities, the "
+                "log-posterior included, for a linear trend across the "
+                "retained draws, against its autocorrelation-corrected "
+                "error at a family-wise false-alarm rate of "
+                f"{100 * convergence.DRIFT_FAMILY_ALPHA:g}\\%; "
+                + (
+                    "none drifted."
+                    if drift["stationary"]
+                    else "the test FAILED, so the reported values may "
+                    "still be moving with the population."
+                ),
+                section="convergence",
+                key="run.drift",
+                rank=25,
+            )
     if cap_findings:
         # Instance names are data: escape them.  Idempotent by key, so a
         # re-report with no finding leaves the sentence out (regenerate,
@@ -2811,6 +2835,10 @@ def _format_summary(idata, diag, system=None, exclude=()):
             f"[{hit['lower']:.4g}, {hit['upper']:.4g}] -- {what}; the "
             f"reported interval is cut off there, not measured"
         )
+    drift = diag.get("drift")
+    if drift is not None:
+        flag = "" if drift["stationary"] else "WARNING: "
+        header.append(f"# {flag}{convergence.format_drift(drift)}")
     if not diag.get("converged", False):
         header.append(
             f"# WARNING: convergence NOT reached -- max Rhat={diag['max_rhat']:.3f} "

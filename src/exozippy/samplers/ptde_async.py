@@ -74,7 +74,7 @@ import time
 
 import numpy as np
 
-from exozippy.samplers import _common
+from exozippy.samplers import _common, convergence
 from exozippy.samplers._common import (
     DE_JITTER,
     LpPlausibilityGuard,
@@ -623,12 +623,13 @@ def ptde_async_sample(
             and int(per_chain_draws.min()) >= _next_check[0]
         ):
             n_check = int(per_chain_draws.min())
-            converged, rhat_val, ess_val = _common._check_convergence(
+            converged, rhat_val, ess_val, drift = _common._check_convergence(
                 stored_raw, n_check, min_ess, max_rhat, stored_lp
             )
             logger.info(
                 f"PTDE-async convergence @ min {n_check} draws/chain: "
-                f"max_rhat={rhat_val:.4f}  min_ess={ess_val:.1f}"
+                f"max_rhat={rhat_val:.4f}  min_ess={ess_val:.1f}  "
+                f"{convergence.format_drift(drift)}"
             )
             # GUI progress hook (bounded: fires once per geometric check).
             # Passes the live T=1 draw buffers by reference for snapshotting.
