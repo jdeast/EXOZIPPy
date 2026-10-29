@@ -28,11 +28,12 @@ from exozippy.components.orbit.bodies import (
 )
 from exozippy.components.parameterization import mode_manifest
 from exozippy.config import PRECEDENCE_DEFAULT, user_entry
+from exozippy.constants import DAYS_PER_YEAR
 from exozippy.outputs.prose import get_collector
 from exozippy.potentials import soft_upper_bound
 
 from .bodies import body_entries, derive_body_names, resolve_orbit_ref
-from .physics import _Q_NAN_ADVICE, Q_MAX, Q_MIN
+from .physics import _Q_NAN_ADVICE, Q_MAX, Q_MIN, S_MERGE
 
 logger = logging.getLogger(__name__)
 
@@ -649,6 +650,89 @@ class Lens(Component):
                 "relying on the clip."
             )
 
+    def _seed_starts(self, system, par):
+        """``par``'s internal-unit start vector at every seed: seed 0 its
+        resolved initval, seed k > 0 the relaxation engine's seed-k
+        solution (``config_manager.seed_resolved``), with the elements a
+        seed does not touch at seed 0's value -- exactly how
+        ``System.get_raw_starts`` builds the seeds the sampler starts from.
+        """
+        base = np.atleast_1d(np.asarray(par.initval, dtype=float)).ravel()
+        out = [base]
+        for resolved in (self.config_manager.seed_resolved or [])[1:]:
+            vals = system._seed_initvals_for(par, resolved)
+            out.append(base if vals is None else vals)
+        return out
+
+    def _warn_linear_separation_collapse(self, system, linear):
+        """Stage 7: warn (rope, not a gate) when a LINEAR orbit's separation
+        s(t) = s_0 + ds_dt (t - t0_par) falls below ``S_MERGE`` -- through
+        zero, typically -- inside the light curve's span, at any seed's
+        start (review 1.6.22).
+
+        A first-order orbit is an expansion about t0_par; a projected
+        separation is not linear through zero, so where the line reaches
+        it the approximation has broken down.  The magnification stays
+        well defined there (op.py merges the pair into one lens, exact as
+        s -> 0), but those epochs see a lens the orbit does not describe.
+        OGLE-2013-BLG-0341's close seeds (Gould et al. 2014) carry
+        s_0 ~ 0.19 and ds_dt ~ 0.14-0.49 /yr across a 3.6-year light curve,
+        so s(t) crosses zero 0.4-1.3 yr before t0_par.  ONE warning per
+        build, naming every (companion, seed) it applies to.  Not a
+        keplerian orbit's concern: its projected separation is physical
+        and may pass near zero, where the merge is simply right.
+        """
+        inst = getattr(system, "mulensinstrument", None)
+        if not linear or inst is None:
+            return
+        t = np.asarray(inst.time, dtype=float)
+        t0_par = float(system.mulensevent.t0_par[0])
+        dt_yr = (t - t0_par) / DAYS_PER_YEAR
+        s_seeds = self._seed_starts(system, self.s)
+        rate_seeds = self._seed_starts(system, system.orbit.ds_dt)
+        primary = self._body_label(system, 0)
+        lines = []
+        for elem in linear:
+            o = self.companion_orbit_idx[elem - 1]
+            for k, (s_k, r_k) in enumerate(zip(s_seeds, rate_seeds)):
+                s0, rate = float(s_k[elem]), float(r_k[o])
+                low = s0 + rate * dt_yr < S_MERGE
+                if not np.any(low):
+                    continue
+                t_zero = t0_par - s0 / rate * DAYS_PER_YEAR if rate else np.nan
+                cross = (
+                    f", through zero at BJD {t_zero:.1f}"
+                    if t.min() <= t_zero <= t.max()
+                    else ""
+                )
+                lines.append(
+                    f"  {self._body_label(system, elem)} (lens.{self.names[elem]}) "
+                    f"on orbit '{system.orbit.names[o]}', seed {k}: s_0 = "
+                    f"{s0:.4g} at t0_par = {t0_par:.2f}, ds_dt = {rate:.4g} "
+                    f"/yr -> s(t) < {S_MERGE:g} at {int(low.sum())} of "
+                    f"{t.size} epochs, BJD {t[low].min():.1f} to "
+                    f"{t[low].max():.1f}{cross}"
+                )
+        if lines:
+            logger.warning(
+                "lens: a LINEAR (Taylor) orbit drives a companion onto the "
+                f"primary {primary} inside the data span:\n"
+                + "\n".join(lines)
+                + "\nA first-order orbit is an expansion about t0_par and a "
+                "projected separation is not linear through zero, so the "
+                "approximation has broken down at those epochs.  They are "
+                "evaluated with the pair merged into one lens of the summed "
+                "mass (exact as s -> 0), which is a lens the orbit does not "
+                "describe.  The physical alternative is a keplerian orbit "
+                "(type: keplerian); otherwise check that the seed's rate is "
+                "meant to apply across the whole light curve."
+            )
+
+    def _body_label(self, system, elem):
+        """``<type>.<name>`` of lens element ``elem``'s body, for messages."""
+        t, idx = self.bodies[elem]
+        return f"{t}.{getattr(system, t).names[int(idx)]}"
+
     def build_likelihood(self, model, system):
         """Stage 7: start-value validation, and the bound-orbit rope for a
         linear-orbital-motion companion.  The EVENT potentials (event rate,
@@ -661,6 +745,7 @@ class Lens(Component):
         linear = [
             j + 1 for j, m in enumerate(self.companion_motion) if m == "linear"
         ]
+        self._warn_linear_separation_collapse(system, linear)
         if linear:
             # The bound-orbit rope for the linear rates (C24; Skowron A19):
             # ONE LENS ORBIT, ONE BOUND (review 8.6.18) -- so one bound per

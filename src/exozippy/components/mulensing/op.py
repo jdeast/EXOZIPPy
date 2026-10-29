@@ -16,6 +16,7 @@ from .physics import (
     _MM_NAN_ADVICE,
     RHO_FLOOR,
     S_FLOOR,
+    S_MERGE,
     T_E_FLOOR,
     clip_q_value,
     floor_u_0_value,
@@ -28,6 +29,63 @@ from .physics import (
 # that owns the MulensModel import, so patch it here, before any Op can build
 # an mm.Model.  See exozippy/compat/mulensmodel_method_order.py.
 patch_mulensmodel_method_order()
+
+
+def _companion_offset(s, alpha_rad):
+    """Companion position relative to the primary in the trajectory frame,
+    ``s (cos alpha, -sin alpha)`` (C15).  A separation at or below zero --
+    a linear orbit's s(t) carried through zero -- puts the companion ON the
+    primary, where the merge (``close_lens_groups``) takes it: the C24
+    linear mode defines s(t) only as a separation, and reflecting it to the
+    far side would be a convention no one has stated."""
+    s = max(s, 0.0)
+    return (s * np.cos(alpha_rad), -s * np.sin(alpha_rad))
+
+
+def close_lens_groups(pos):
+    """Groups of lenses closer than ``S_MERGE`` (single linkage), as index
+    lists ordered by their first member, or None when no two lenses are
+    that close -- so a caller with nothing to merge keeps its own path, and
+    its numbers, unchanged.  ``pos`` is (n_lens, 2) in Einstein radii."""
+    n = len(pos)
+    root = list(range(n))
+
+    def find(i):
+        while root[i] != i:
+            i = root[i]
+        return i
+
+    lim = S_MERGE * S_MERGE
+    close = False
+    for i in range(n):
+        for j in range(i + 1, n):
+            dx = pos[j][0] - pos[i][0]
+            dy = pos[j][1] - pos[i][1]
+            if dx * dx + dy * dy < lim:
+                close = True
+                a, b = find(i), find(j)
+                if a != b:
+                    root[max(a, b)] = min(a, b)
+    if not close:
+        return None
+    groups = {}
+    for i in range(n):
+        groups.setdefault(find(i), []).append(i)
+    return [groups[k] for k in sorted(groups)]
+
+
+def merge_lens_groups(pos, m, groups):
+    """Each group of ``close_lens_groups`` as ONE lens: the summed mass at
+    the group's center of mass.  Exact in the limit of zero separation, and
+    the error at S_MERGE is the pair's quadrupole (physics.S_MERGE).
+    Returns ``(pos, m)`` of the merged lenses, in group order (the
+    primary's group first); the total mass, hence the Einstein radius, and
+    the center of mass are unchanged."""
+    pos = np.asarray(pos, dtype=float)
+    m = np.asarray(m, dtype=float)
+    m_g = np.array([m[g].sum() for g in groups])
+    pos_g = np.array([m[g] @ pos[g] / m[g].sum() for g in groups])
+    return pos_g, m_g
 
 
 def _clear_mm_satellite_cache():
@@ -734,41 +792,7 @@ class VBMDirectMagOp(Op):
         astro = self.astrometry
 
         if self.n_companions == 0:
-            # Single lens.  u is rotation-invariant, so the trajectory frame
-            # needs no alpha and (x, y) may arrive unrotated.
-            u = np.sqrt(x * x + y * y)
-            if not self.use_rho:
-                # Paczynski in closed form -- cheaper and more accurate than a
-                # VBM call, and the only reachable point-source single-lens Op
-                # case is a forced `use_op: true` (the symbolic path otherwise
-                # owns it, and stays differentiable).
-                u2sq = u * u
-                A = (u2sq + 2.0) / np.sqrt(u2sq * (u2sq + 4.0))
-                if not astro:
-                    return A
-                # The centroid's distance from the lens, closed form (C30);
-                # projected radially below.
-                c_rad = u * (u2sq + 3.0) / (u2sq + 2.0)
-            else:
-                # ESPLMag2 is table-backed and internally short-circuits to
-                # the point source far from the lens, so this needs no
-                # far-field guard of the kind the binary branch below does
-                # (VBM's hardcoded safedist bug is in BinaryMag2, not here).
-                if not astro:
-                    return np.array(
-                        [vbm.ESPLMag2(float(ui), rho) for ui in u.tolist()]
-                    )
-                A = np.empty_like(u)
-                c_rad = np.empty_like(u)
-                for i, ui in enumerate(u.tolist()):
-                    A[i] = vbm.ESPLMag2(float(ui), rho)
-                    # astrox1 ONLY: a scalar-u call leaves astrox2 stale
-                    # (class docstring).  Disk-integrated, limb-darkened.
-                    c_rad[i] = vbm.astrox1
-            # Radial projection along lens -> source; at u == 0 exactly the
-            # centroid is the lens (symmetric images), so the ratio is 0.
-            ratio = np.divide(c_rad, u, out=np.zeros_like(u), where=u > 0.0)
-            return A, ratio * x, ratio * y
+            return self._single_lens(x, y, rho)
 
         if self.n_companions == 1:
             s, q, _ = companions[0]
@@ -777,6 +801,26 @@ class VBMDirectMagOp(Op):
             # into the general layout; broadcast_to is a view, so the
             # static case pays nothing and computes identically).
             s_arr = np.broadcast_to(np.asarray(s, dtype=float), np.shape(x))
+            merged = s_arr < S_MERGE
+            if np.any(merged):
+                # The pair IS one lens there (S_MERGE, physics.py): the
+                # summed mass at the pair's center of mass, which is this
+                # frame's origin.  The other epochs take the binary path
+                # below unchanged, through the same call.
+                return self._merge_epochs(
+                    merged,
+                    lambda xm, ym: self._single_lens(xm, ym, rho),
+                    lambda keep: self._magnify(
+                        [(s_arr[keep], q, None)],
+                        x[keep],
+                        y[keep],
+                        rho,
+                        u1,
+                        u2,
+                    ),
+                    x,
+                    y,
+                )
             mag2, mag0 = vbm.BinaryMag2, vbm.BinaryMag0
             if not self.use_rho:
                 # Point source (user's finite_source: False): Mag2's
@@ -850,8 +894,15 @@ class VBMDirectMagOp(Op):
         pos = np.zeros((self.n_companions + 1, 2))
         for j, (s, q, alpha_rad) in enumerate(companions):
             m[j + 1] = q * m[0]
-            pos[j + 1] = (s * np.cos(alpha_rad), -s * np.sin(alpha_rad))
+            pos[j + 1] = _companion_offset(s, alpha_rad)
         pos -= m @ pos
+        groups = close_lens_groups(pos)
+        if groups is not None:
+            # A pair closer than S_MERGE is one lens (physics.py); the
+            # geometry is static, so every epoch sees the same merge.
+            return self._magnify_geometry(
+                *merge_lens_groups(pos, m, groups), x, y, rho
+            )
         vbm.SetLensGeometry(np.column_stack([pos, m]).ravel().tolist())
         mag2, mag0 = vbm.MultiMag2, vbm.MultiMag0
         if not self.use_rho:
@@ -888,9 +939,12 @@ class VBMDirectMagOp(Op):
         center of mass with the static mass fractions ``m``), rebuilt and
         handed to SetLensGeometry at every epoch, because any companion's
         (s, alpha) may change between epochs.  The far-field guard is the
-        static path's, per epoch.  Returns what ``_magnify`` returns: A, or
-        ``(A, cx, cy)`` with astrometry -- the centroid read right after
-        each call, before the next geometry overwrites VBM's state.
+        static path's, per epoch.  An epoch at which two lenses are closer
+        than S_MERGE is evaluated on the MERGED geometry instead
+        (``_magnify_geometry``; a linear orbit's s(t) may cross zero inside
+        the data span, review 1.6.22).  Returns what ``_magnify`` returns:
+        A, or ``(A, cx, cy)`` with astrometry -- the centroid read right
+        after each call, before the next geometry overwrites VBM's state.
         """
         vbm = self._vbm
         shape = np.shape(x)
@@ -913,12 +967,23 @@ class VBMDirectMagOp(Op):
         for i in range(n):
             pos[0] = 0.0
             for j in range(self.n_companions):
-                s_ij = float(S[j][i])
-                a_ij = float(AL[j][i])
-                pos[j + 1] = (s_ij * np.cos(a_ij), -s_ij * np.sin(a_ij))
+                pos[j + 1] = _companion_offset(float(S[j][i]), float(AL[j][i]))
             p_com = pos - m @ pos
-            vbm.SetLensGeometry(np.column_stack([p_com, m]).ravel().tolist())
             xi, yi = xs[i], ys[i]
+            groups = close_lens_groups(p_com)
+            if groups is not None:
+                out = self._magnify_geometry(
+                    *merge_lens_groups(p_com, m, groups),
+                    np.array([xi]),
+                    np.array([yi]),
+                    rho,
+                )
+                if self.astrometry:
+                    A[i], cx[i], cy[i] = out[0][0], out[1][0], out[2][0]
+                else:
+                    A[i] = out[0]
+                continue
+            vbm.SetLensGeometry(np.column_stack([p_com, m]).ravel().tolist())
             if not self.use_rho:
                 A[i] = vbm.MultiMag0(xi, yi)
             else:
@@ -939,6 +1004,141 @@ class VBMDirectMagOp(Op):
         if not self.astrometry:
             return A
         return A, cx, cy
+
+    def _single_lens(self, x, y, rho):
+        """Single-lens magnification at source positions (x, y) relative to
+        the lens: Paczynski in closed form for a point source, VBM's
+        ESPLMag2 for a finite one.  Returns A, or ``(A, cx, cy)`` with
+        astrometry (the centroid in the frame (x, y) are given in, i.e.
+        relative to the lens).  The n_companions == 0 Op, and every merged
+        geometry that collapses to one lens (``_magnify_geometry``)."""
+        vbm = self._vbm
+        astro = self.astrometry
+        # u is rotation-invariant, so the trajectory frame needs no alpha
+        # and (x, y) may arrive unrotated.
+        u = np.sqrt(x * x + y * y)
+        if not self.use_rho:
+            # Paczynski in closed form -- cheaper and more accurate than a
+            # VBM call, and the only reachable point-source single-lens Op
+            # case is a forced `use_op: true` (the symbolic path otherwise
+            # owns it, and stays differentiable).
+            u2sq = u * u
+            A = (u2sq + 2.0) / np.sqrt(u2sq * (u2sq + 4.0))
+            if not astro:
+                return A
+            # The centroid's distance from the lens, closed form (C30);
+            # projected radially below.
+            c_rad = u * (u2sq + 3.0) / (u2sq + 2.0)
+        else:
+            # ESPLMag2 is table-backed and internally short-circuits to
+            # the point source far from the lens, so this needs no
+            # far-field guard of the kind the binary branch does
+            # (VBM's hardcoded safedist bug is in BinaryMag2, not here).
+            if not astro:
+                return np.array(
+                    [vbm.ESPLMag2(float(ui), rho) for ui in u.tolist()]
+                )
+            A = np.empty_like(u)
+            c_rad = np.empty_like(u)
+            for i, ui in enumerate(u.tolist()):
+                A[i] = vbm.ESPLMag2(float(ui), rho)
+                # astrox1 ONLY: a scalar-u call leaves astrox2 stale
+                # (class docstring).  Disk-integrated, limb-darkened.
+                c_rad[i] = vbm.astrox1
+        # Radial projection along lens -> source; at u == 0 exactly the
+        # centroid is the lens (symmetric images), so the ratio is 0.
+        ratio = np.divide(c_rad, u, out=np.zeros_like(u), where=u > 0.0)
+        return A, ratio * x, ratio * y
+
+    def _merge_epochs(self, merged, merged_fn, keep_fn, x, y):
+        """Assemble a binary light curve whose pair is merged at the epochs
+        ``merged`` (``merged_fn(x[merged], y[merged])``) and a binary at the
+        rest (``keep_fn(~merged)``), in the output arity of ``_magnify``."""
+        keep = ~merged
+        n = int(np.size(x))
+        if not self.astrometry:
+            A = np.empty(n)
+            A[merged] = merged_fn(x[merged], y[merged])
+            if np.any(keep):
+                A[keep] = keep_fn(keep)
+            return A
+        A, cx, cy = np.empty(n), np.empty(n), np.empty(n)
+        A[merged], cx[merged], cy[merged] = merged_fn(x[merged], y[merged])
+        if np.any(keep):
+            A[keep], cx[keep], cy[keep] = keep_fn(keep)
+        return A, cx, cy
+
+    def _magnify_geometry(self, pos, m, x, y, rho):
+        """Magnification of a MERGED lens geometry (``merge_lens_groups``):
+        lens positions ``pos`` (n, 2) in the trajectory frame, mass
+        fractions ``m`` summing to 1, source at (x, y).  One lens is
+        ``_single_lens`` about its position; two are VBM's binary
+        (BinaryMag2/BinaryMag0) in its own frame -- center of mass at the
+        origin, the first lens at ``(-s q/(1+q), 0)``, the second at
+        ``(s/(1+q), 0)``, ``q = m_2/m_1`` -- with the far-field guard of
+        the binary branch; three or more go to MultiMag2/MultiMag0 on the
+        instance's method.  Returns A, or ``(A, cx, cy)`` with astrometry,
+        the centroid rotated back into the frame (x, y) are given in.
+        """
+        vbm = self._vbm
+        astro = self.astrometry
+        n_lens = len(m)
+        if n_lens == 1:
+            out = self._single_lens(x - pos[0, 0], y - pos[0, 1], rho)
+            if not astro:
+                return out
+            A, cx, cy = out
+            return A, cx + pos[0, 0], cy + pos[0, 1]
+        if n_lens == 2:
+            d = pos[1] - pos[0]
+            s = float(np.hypot(d[0], d[1]))
+            ex, ey = d / s
+            q = float(m[1] / m[0])
+            com = (m[0] * pos[0] + m[1] * pos[1]) / (m[0] + m[1])
+            rx, ry = x - com[0], y - com[1]
+            bx = rx * ex + ry * ey
+            by = -rx * ey + ry * ex
+            if self.use_rho:
+                r_inf = s + 1.0 / s + 2.0
+                far = (bx * bx + by * by) > (r_inf + 2.0 * rho) ** 2
+            else:
+                far = np.ones(np.shape(bx), dtype=bool)
+            calls = [
+                (
+                    (vbm.BinaryMag0, (s, q, bxi, byi))
+                    if isfar
+                    else (vbm.BinaryMag2, (s, q, bxi, byi, rho))
+                )
+                for bxi, byi, isfar in zip(
+                    bx.tolist(), by.tolist(), far.tolist()
+                )
+            ]
+            if not astro:
+                return np.array([fn(*args) for fn, args in calls])
+            A, ax, ay = self._collect(calls)
+            return (
+                A,
+                com[0] + ax * ex - ay * ey,
+                com[1] + ax * ey + ay * ex,
+            )
+        vbm.SetLensGeometry(np.column_stack([pos, m]).ravel().tolist())
+        if self.use_rho:
+            sep = np.hypot(*(pos[1:] - pos[0]).T)
+            r_inf = float(np.max(sep + 1.0 / sep)) + 2.0
+            far = (x * x + y * y) > (r_inf + 2.0 * rho) ** 2
+        else:
+            far = np.ones(np.shape(x), dtype=bool)
+        calls = [
+            (
+                (vbm.MultiMag0, (xi, yi))
+                if isfar
+                else (vbm.MultiMag2, (xi, yi, rho))
+            )
+            for xi, yi, isfar in zip(x.tolist(), y.tolist(), far.tolist())
+        ]
+        if not astro:
+            return np.array([fn(*args) for fn, args in calls])
+        return self._collect(calls)
 
     def _collect(self, calls):
         """Run one VBM call per epoch and read the astrox pair after EACH
@@ -1111,7 +1311,9 @@ class VBMDirectMagOp(Op):
         for j in range(self.n_companions):
             companions.append(
                 (
-                    float(max(float(p[idx]), S_FLOOR)),
+                    # No floor: a separation below S_MERGE is a merged
+                    # pair (_magnify), not a clamped one.
+                    float(p[idx]),
                     clip_q_value(p[idx + 1], f"lens.{j + 1}.q"),
                     float(np.radians(float(p[idx + 2]))),
                 )
@@ -1131,9 +1333,11 @@ class VBMDirectMagOp(Op):
         if series is not None:
             # Per-epoch geometry supersedes the scalar s_0/alpha_0 entries
             # (which remain the t0_par anchors), row j for companion j.
-            # Same S_FLOOR as the scalar path; alpha arrives in degrees,
-            # like every alpha here.
-            s_t = np.maximum(np.asarray(series[0], dtype=float), S_FLOOR)
+            # Unfloored, like the scalar path: a linear s(t) may cross zero
+            # inside the data span, and every epoch below S_MERGE (zero and
+            # negative included) is the merged pair (_magnify; review
+            # 1.6.22).  alpha arrives in degrees, like every alpha here.
+            s_t = np.asarray(series[0], dtype=float)
             alpha_t = np.radians(np.asarray(series[1], dtype=float))
             for j in range(self.n_companions):
                 companions[j] = (s_t[j], companions[j][1], alpha_t[j])
