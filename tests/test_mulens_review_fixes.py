@@ -914,7 +914,7 @@ def test_lens_backend_defaults_to_vbm_direct_and_validates():
         _make_event(event=[{"backend": "nope"}], **binary)
 
 
-def _geometry(values, n_src=1, has_companion=False):
+def _geometry(values, n_src=1, n_companions=0):
     """A flux-bootstrap geometry reader whose informed starts are `values`
     (user units, at user rank) and every other probed path not derivable --
     what ``MulensInstrument._probe_bootstrap_geometry`` hands the bootstrap."""
@@ -925,7 +925,7 @@ def _geometry(values, n_src=1, has_companion=False):
     ]
     for j in range(n_src):
         paths += [f"source.{j}.t_0", f"source.{j}.u_0", f"source.{j}.rho"]
-    if has_companion:
+    if n_companions:
         paths += ["lens.1.s", "lens.1.log_s", "lens.1.q", "lens.1.alpha"]
     unknown = set(values) - set(paths)
     assert not unknown, f"not a probed path: {unknown}"
@@ -937,7 +937,7 @@ def _geometry(values, n_src=1, has_companion=False):
         )
         for p in paths
     }
-    return _BootstrapGeometry(probed, has_companion=has_companion)
+    return _BootstrapGeometry(probed, n_companions=n_companions)
 
 
 class _FluxBootstrapConfigManager(_DummyConfigManager):
@@ -1264,6 +1264,150 @@ def _make_2s_inst(f_blend=0.4, f_src=(0.6, 0.2), n=400):
 
     flux = f_src[0] * pspl(t0a, u0) + f_src[1] * pspl(t0b, 0.15) + f_blend
     return inst, t, flux, np.zeros((n, 3))
+
+
+def _user_flux(inst, **entries):
+    """Write params-file flux entries for light curve 0 (index form)."""
+    for param, val in entries.items():
+        inst.config_manager.user_params[f"mulensinstrument.0.{param}"] = {
+            "initval": val
+        }
+
+
+@pytest.mark.parametrize(
+    "entries",
+    [
+        {"log_f_total": 0.1, "q_source": 0.4},
+        # Per-seed lists: the user's start at EVERY seed; seed 0 is returned.
+        {"log_f_total": [0.1, 0.3], "q_source": [0.4, 0.6]},
+    ],
+    ids=["scalar", "per_seed_list"],
+)
+def test_bootstrap_skips_a_file_whose_flux_starts_the_user_gave(
+    caplog, entries
+):
+    """
+    Given a 1L1S light curve the seeded magnification cannot describe (it
+      DIMS at the peak, so the bootstrap warns "f_source = 0" on it), whose
+      log_f_total and q_source the params file gives,
+    When the flux bootstrap runs,
+    Then it emits no warning and returns the user's seed-0 starts: those
+      entries outrank its answer at every seed, and its warnings asked the
+      user for starts already given (review 1.6.20; ob09020's six
+      unfiltered follow-up files).
+    """
+    # Arrange
+    inst, t, flux, xyz = _pspl_inst(f_source=-0.3, f_blend=1.0)
+    _user_flux(inst, **entries)
+
+    # Act
+    with caplog.at_level("DEBUG"):
+        f_total, q_source, q_flux = inst._estimate_flux_components(
+            t, flux, xyz, 0.0, 0.0, 0, inst.geometry
+        )
+
+    # Assert
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+    assert "flux bootstrap skipped" in caplog.text
+    assert (f_total, q_source, q_flux) == (10.0**0.1, 0.4, 1.0)
+
+
+@pytest.mark.parametrize(
+    "entries",
+    [{}, {"q_source": 0.4}, {"log_f_total": 0.1}],
+    ids=["none", "q_source_only", "log_f_total_only"],
+)
+def test_bootstrap_still_runs_and_warns_without_every_user_flux_start(
+    caplog, entries
+):
+    """
+    Given the same light curve with no flux starts, or only one of
+      log_f_total and q_source,
+    When the flux bootstrap runs,
+    Then it still solves and still warns that no positive source flux
+      survives -- a partial entry leaves a start for it to supply.
+    """
+    # Arrange
+    inst, t, flux, xyz = _pspl_inst(f_source=-0.3, f_blend=1.0)
+    _user_flux(inst, **entries)
+
+    # Act
+    with caplog.at_level("DEBUG"):
+        inst._estimate_flux_components(
+            t, flux, xyz, 0.0, 0.0, 0, inst.geometry
+        )
+
+    # Assert
+    assert (
+        "[synthetic] flux bootstrap: fitting the seeded point-lens"
+        in caplog.text
+    )
+    assert "f_source = 0" in caplog.text
+    assert "flux bootstrap skipped" not in caplog.text
+
+
+def test_two_source_bootstrap_needs_the_flux_ratio_too_to_skip():
+    """
+    Given a two-source light curve whose log_f_total and q_source the user
+      gives,
+    When the flux bootstrap runs without, then with, a user q_flux,
+    Then the first still solves (its q_flux is the bootstrap's estimate,
+      f_s2/f_s1 = 1/3) and the second returns the user's starts: with two
+      sources the flux ratio is one of the file's sampled flux starts.
+    """
+    # Arrange
+    inst, t, flux, xyz = _make_2s_inst(f_blend=0.4, f_src=(0.6, 0.2))
+    _user_flux(inst, log_f_total=0.1, q_source=0.4)
+
+    # Act
+    _f, _q, q_flux_boot = inst._estimate_flux_components(
+        t, flux, xyz, 0.0, 0.0, 0, inst.geometry
+    )
+    _user_flux(inst, q_flux=0.7)
+    user = inst._estimate_flux_components(
+        t, flux, xyz, 0.0, 0.0, 0, inst.geometry
+    )
+
+    # Assert
+    assert q_flux_boot == pytest.approx(0.2 / 0.6, rel=1e-4)
+    assert user == (10.0**0.1, 0.4, 0.7)
+
+
+@pytest.mark.parametrize("n_companions", [0, 1, 2])
+def test_no_source_flux_warning_names_a_point_lens_proxy(caplog, n_companions):
+    """
+    Given the light curve that dims at the peak, and an event with 0, 1 or 2
+      companion lenses whose geometry the bootstrap cannot read (an s/alpha
+      only a keplerian orbit produces, as in ob09020),
+    When the flux bootstrap fits its point-lens columns,
+    Then for a point-lens event the warning still blames the seed, and with
+      companions it says the point lens is a PROXY that omits them, so
+      "f_source = 0" says little about the seed (review 1.6.20).
+    """
+    # Arrange
+    inst, t, flux, xyz = _pspl_inst(f_source=-0.3, f_blend=1.0)
+    geometry = _geometry(
+        {
+            "source.0.t_0": 2458554.89,
+            "source.0.u_0": 0.143,
+            "mulensevent.0.t_E": 18.17,
+        },
+        n_companions=n_companions,
+    )
+    proxy = n_companions > 0
+
+    # Act
+    with caplog.at_level("WARNING"):
+        inst._estimate_flux_components(t, flux, xyz, 0.0, 0.0, 0, geometry)
+
+    # Assert
+    assert "f_source = 0" in caplog.text
+    assert ("only a proxy" in caplog.text) is proxy
+    assert ("probably does not describe this file" in caplog.text) is (
+        not proxy
+    )
+    if n_companions == 2:
+        assert "all 2 of its companion lenses" in caplog.text
 
 
 def test_multisource_bootstrap_honors_a_user_f_blend():
