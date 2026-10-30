@@ -752,6 +752,24 @@ def polish_seed_starts(
         def _beat():
             live = _live()
             if not live:
+                # The DRAIN: every seed has stopped (cap, rate or the
+                # deadline -- which ends seeds, never calls) and the loop is
+                # waiting on what is still in flight.  Say so, every
+                # interval: this tail held OGLE-2013-BLG-0341's polish ~1 h
+                # past its budget and logged nothing for 10.75 h (review
+                # 2.6.35).
+                if in_flight:
+                    oldest = time.monotonic() - min(
+                        t0 for (_, _, _, t0) in in_flight.values()
+                    )
+                    note = (
+                        f"each is written off at "
+                        f"eval_timeout={float(eval_timeout):.0f}s."
+                        if eval_timeout is not None
+                        else "no eval_timeout is set, so the polish waits "
+                        "for every one of them."
+                    )
+                    monitor.heartbeat(draining=(len(in_flight), oldest, note))
                 return
             done_sweeps = min(states[s]["n_done"] for s in live)
             _heartbeat(
