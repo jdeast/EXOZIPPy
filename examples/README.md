@@ -57,6 +57,7 @@ the way it is) lives in the example's README.
 | `ob161003` | OGLE-2016-BLG-1003 | A binary source and a binary lens (2S2L): two sources with their own trajectories share one lens system. |
 | `kb180087_obj3` | KMT-2018-BLG-0087 | A binary-lens point-source (2L1S) fit with two competing solutions as per-seed starts. |
 | `KMT-2019-BLG-1806` | KMT-2019-BLG-1806 / OGLE-2019-BLG-1250 | A 2L1S planetary event with parallax, a finite source and a source SED tied to the light curves through calibrated zeropoints (Zang et al. 2023). |
+| `MOA-2008-BLG-379` | MOA-2008-BLG-379 | An image-constrained 2L1S planetary fit (Bennett et al. 2024): Keck AO and Hubble imaging taken 5-10 years later resolve the lens from the source, and the lens-source separation (`astrometryinstrument` `mode: lensrel`), the lens and source magnitudes (SED rows) and the OGLE zeropoint tie are fit jointly with the public OGLE + MOA light curves, the galactic model and MIST on both stars, over the four close/wide x u_0 seeds. |
 | `KMT-2021-BLG-1122L` | KMT-2021-BLG-1122L | A triple lens (3L1S): the validation example for three or more lens bodies, I + V difference-flux photometry. |
 | `ogle0383` | A KMTNet 2L1S event | A binary-lens finite-source fit with linear limb darkening on six KMTNet light curves. |
 | `ob09020` | OGLE-2009-BLG-020 | A binary lens whose orbit is also measured by RVs: the companion's Keplerian orbit drives s(t), alpha(t) (`ob09020.yaml`, joint light curve + RV), and the linear orbital-motion alternative (`ob09020_linear`). Work in progress. |

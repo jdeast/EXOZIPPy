@@ -1,0 +1,111 @@
+# MOA-2008-BLG-379: an IMAGE-CONSTRAINED planetary microlensing fit.
+#
+# The light curve (OGLE I + V, MOA-II red; NASA Exoplanet Archive) is fit
+# jointly with what Keck AO and Hubble imaging saw ten and five years
+# later, when the lens had moved ~58 mas off its source:
+#   - the lens-minus-source separation at two Keck epochs (lensrel), which
+#     fixes mu_rel and with t_E fixes theta_E;
+#   - the lens's Ks and I magnitudes, the source's I magnitude and the
+#     combined lens+source I magnitude (SED rows);
+#   - the galactic model (density, kinematics, mass function) on both stars;
+#   - MIST evolutionary tracks on both stars.
+# Following Bennett et al. (2024, AJ 168, 15).  Data provenance, every
+# number's source, the conventions and the gaps are in README.md.
+run:
+  name: "MOA-2008-BLG-379"
+
+prefix: "fitresults/MOA-2008-BLG-379"
+
+# system architecture:
+#   star.Lens      = planet host, lens body 0 (the resolved "star 1")
+#   planet.Planet  = lens body 1
+#   star.Source    = the source ("star 2")
+star:
+  - name: "Lens"
+  - name: "Source"
+
+planet:
+  - name: "Planet"
+
+lens:
+  - body: star.Lens
+  - body: planet.Planet
+
+source:
+  - body: star.Source
+
+mulensevent:
+  - finite_source: True
+    # Bennett+2024's t_fix = HJD' 4688 (their parallax reference epoch).
+    t0_par: 2454688.0
+
+galacticmodel:
+  - name: "MOA-2008-BLG-379"
+    anchor_idx: 1              # anchor on the source (star.Source)
+
+# MIST tracks on both stars (constrain: all four, the default).
+evolutionarymodel:
+  - star: "Lens"
+  - star: "Source"
+
+band:
+  - name: "I"
+    # OGLE-III I is calibrated onto (and close to) Cousins I; the Hubble
+    # F814W magnitudes in the .sed file are calibrated to OGLE-III I too.
+    filter: "Generic/Cousins.I"
+    ld_law: "linear"
+  - name: "V"
+    filter: "Generic/Johnson.V"
+    ld_law: "linear"
+  - name: "MOA_R"
+    # MOA-red (~630-1000 nm) has no BC column; Cousins R stands in for the
+    # limb darkening only.  Its light curve is NOT tied to the SED.
+    filter: "Generic/Cousins.R"
+    ld_law: "linear"
+
+sed:
+  file: "MOA-2008-BLG-379.sed.yaml"
+
+mulensinstrument:
+  - name: "OGLE_I"
+    file: "OGLE_I.dat"
+    time_frame: "hjd"
+    time_scale: "utc"
+    band: "I"
+    magsys: Vega  # OGLE-III calibrated I (zeropoint stated in the params file)
+    reference: true
+  - name: "OGLE_V"
+    file: "OGLE_V.dat"
+    time_frame: "hjd"
+    time_scale: "utc"
+    band: "V"
+  - name: "MOA"
+    file: "MOA_R.dat"
+    time_frame: "hjd"
+    time_scale: "utc"
+    band: "MOA_R"
+
+astrometryinstrument:
+  - name: "Keck"
+    file: "keck_lensrel.dat"
+    mode: "lensrel"
+    observer_location: "earth"
+    # The light curve that anchors the geocentric frame (t0_par) and the
+    # limb darkening of the source's centroid shift; the pair is resolved,
+    # so no blend dilution applies.
+    photometry: "OGLE_I"
+
+parameter_file: "MOA-2008-BLG-379.params.yaml"
+
+# A cluster-sized run: ~740 model evaluations per step at ~0.45 s each
+# (README, "Cost").  Not yet run to convergence.
+sampler:
+  method: ptde
+  n_temps: 8
+  T_max: 200
+  tune: 0
+  draws: 20000
+  cores: 8
+  recompute_trace: True
+  # The seeds are the published solutions, not posterior draws: polish them.
+  seed_polish: "on"
