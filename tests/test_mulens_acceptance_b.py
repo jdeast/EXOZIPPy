@@ -409,6 +409,20 @@ def _two_frame_basis(ra_rad, dec_rad):
     return mirror @ m_rot, mirror @ v0, sun, los
 
 
+def _pre_k21_bar_log_profile(x, y, z, r, xp=np):
+    """The bar density the presplit recording ran with (before review
+    1.7.3): a plain ellipsoid exp(-r_s/2), axes (1.590, 0.424, 0.424) kpc at
+    25 deg, Gaussian cylindrical cutoff beyond 2.632 kpc (width 0.5), with
+    central number density 3.60 (patched alongside)."""
+    from exozippy.components.galacticmodel.physics import hinge
+
+    c, s_ = np.cos(np.radians(25.0)), np.sin(np.radians(25.0))
+    xb = x * c + y * s_
+    yb = -x * s_ + y * c
+    rs = xp.sqrt((xb / 1.590) ** 2 + (yb / 0.424) ** 2 + (z / 0.424) ** 2)
+    return -0.5 * rs - 0.5 * (hinge(r - 2.632, xp) / 0.5) ** 2
+
+
 @pytest.mark.slow
 def _imf_as_present_day(cfg):
     """The presplit recording predates the present-day mass function
@@ -464,7 +478,9 @@ def test_ob161003_collapse_reconciles_against_the_presplit_recording():
     # review 1.7.1 put positions and velocities into ONE frame, which moves
     # that potential at a matched start (+0.0175 nats here), so the
     # recording is reconciled with its own two-frame basis and the 1.7.1
-    # motion is measured separately below.
+    # motion is measured separately below.  Likewise review 1.7.3's K21
+    # bar (galacticmodel.md, "The bar density"): the recording's ellipsoid
+    # is patched back in.
     import exozippy.components.galacticmodel.galacticmodel as galactic_mod
     import exozippy.components.mulensing.mulensevent as mulensevent_mod
     import exozippy.components.mulensing.op as op_mod
@@ -495,6 +511,12 @@ def test_ob161003_collapse_reconciles_against_the_presplit_recording():
         ),
         unittest.mock.patch.object(
             galactic_mod, "line_of_sight_basis", _two_frame_basis
+        ),
+        unittest.mock.patch.object(
+            galactic_mod, "bar_log_profile", _pre_k21_bar_log_profile
+        ),
+        unittest.mock.patch.object(
+            galactic_mod, "BULGE_CENTRAL_NUMBER_DENSITY", 3.60
         ),
     ):
         system, model = build(
@@ -527,11 +549,12 @@ def test_ob161003_collapse_reconciles_against_the_presplit_recording():
         f"1.10.13's Earth placement moved the data term by {data_shift:.3e} "
         f"relative; expected a small, nonzero shift"
     )
-    # ... and the 1.7.1 frame fix: a bounded, nonzero move of the kinematic
-    # prior alone at the same start (+0.0175 nats measured).
+    # ... and the 1.7.1 frame fix plus the 1.7.3 K21 bar: a bounded,
+    # nonzero move of the kinematic prior alone at the same start (+0.0175
+    # nats measured for the frame; +1.092 for frame and bar together).
     kin = "POT:galacticmodel.kinematic_prior"
     frame_shift = parts_now[kin] - parts[kin]
-    assert 1e-6 < abs(frame_shift) < 1.0, (
+    assert 1e-6 < abs(frame_shift) < 2.0, (
         f"the 1.7.1 frame fix moved {kin} by {frame_shift:+.3e} nats at "
         f"the recording's start; expected a small, nonzero shift"
     )

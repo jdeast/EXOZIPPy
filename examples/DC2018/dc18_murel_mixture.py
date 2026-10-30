@@ -53,24 +53,20 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent.parent / "src"))
 import dc18_common as C  # noqa: E402
 
+from exozippy.components.galacticmodel.galacticmodel import (  # noqa: E402
+    branch_log_number_densities,
+)
 from exozippy.components.galacticmodel.physics import (  # noqa: E402
     galactic_xyz,
     line_of_sight_basis,
 )
 from exozippy.constants import (  # noqa: E402
-    BULGE_BAR_ANGLE,
-    BULGE_CENTRAL_NUMBER_DENSITY,
-    BULGE_DENSITY_X_0,
-    BULGE_DENSITY_Y_0,
-    BULGE_DENSITY_Z_0,
     BULGE_RC,
-    BULGE_RC_WIDTH,
     BULGE_ROTATION_ANGULAR_VELOCITY,
     BULGE_VELOCITY_SIGMA_1,
     BULGE_VELOCITY_SIGMA_2,
     BULGE_VELOCITY_SIGMA_3,
     DISK_LOCAL_NUMBER_DENSITY,
-    DISK_RDBREAK,
     DISK_ROTATION_VELOCITY,
     DISK_SCALE_HEIGHT,
     DISK_SCALE_LENGTH,
@@ -79,48 +75,18 @@ from exozippy.constants import (  # noqa: E402
     DISK_VELOCITY_SIGMA_W,
     K_VEL_CONVERSION,
     SUN_GC_DISTANCE,
-    THICK_DISK_LOCAL_NUMBER_DENSITY,
     THICK_DISK_ROTATION_VELOCITY,
-    THICK_DISK_SCALE_HEIGHT,
-    THICK_DISK_SCALE_LENGTH,
     THICK_DISK_VELOCITY_SIGMA_U,
     THICK_DISK_VELOCITY_SIGMA_V,
     THICK_DISK_VELOCITY_SIGMA_W,
 )
 
 
-def _hinge(t):
-    return 0.5 * (t + np.sqrt(t * t + 0.0025))
-
-
 def branch_log_density(x, y, z):
-    """log number density of each branch, transcribed from the likelihood."""
-    r = np.hypot(x, y)
-    z_smooth = np.sqrt(z**2 + 1e-6)
-    r_beyond_sun = SUN_GC_DISTANCE - DISK_RDBREAK
-    thin = (
-        np.log(DISK_LOCAL_NUMBER_DENSITY)
-        - (_hinge(r - DISK_RDBREAK) - r_beyond_sun) / DISK_SCALE_LENGTH
-        - z_smooth / DISK_SCALE_HEIGHT
-    )
-    thick = (
-        np.log(THICK_DISK_LOCAL_NUMBER_DENSITY)
-        - (_hinge(r - DISK_RDBREAK) - r_beyond_sun) / THICK_DISK_SCALE_LENGTH
-        - z_smooth / THICK_DISK_SCALE_HEIGHT
-    )
-    x_bar = x * np.cos(BULGE_BAR_ANGLE) + y * np.sin(BULGE_BAR_ANGLE)
-    y_bar = -x * np.sin(BULGE_BAR_ANGLE) + y * np.cos(BULGE_BAR_ANGLE)
-    r_b = np.sqrt(
-        (x_bar / BULGE_DENSITY_X_0) ** 2
-        + (y_bar / BULGE_DENSITY_Y_0) ** 2
-        + (z / BULGE_DENSITY_Z_0) ** 2
-    )
-    bulge = (
-        np.log(BULGE_CENTRAL_NUMBER_DENSITY)
-        - 0.5 * r_b
-        - 0.5 * (_hinge(r - BULGE_RC) / BULGE_RC_WIDTH) ** 2
-    )
-    return np.stack([thin, thick, bulge], axis=-1)
+    """log number density of each branch: the likelihood's own function
+    (it was transcribed here until the bar changed in review 1.7.3)."""
+    r = np.sqrt(x**2 + y**2 + 1e-6)
+    return np.stack(branch_log_number_densities(x, y, z, r, xp=np), axis=-1)
 
 
 _SIG = np.array(

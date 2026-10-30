@@ -104,16 +104,34 @@ DAYS_PER_YEAR = 365.25
 SIGMA_1 = math.erf(1.0 / math.sqrt(2.0))
 
 # --- 5. BULGE CONSTANTS ---
-BULGE_BAR_ANGLE = np.radians(25.0)  # bar axis relative to Sun direction
-BULGE_DENSITY_X_0 = 1.590  # in kpc, bulge density axis X in kpc from Zhu+17
-BULGE_DENSITY_Y_0 = 0.424  # in kpc, bulge density axis Y in kpc from Zhu+17
-BULGE_DENSITY_Z_0 = 0.424  # in kpc, bulge density axis Z in kpc from Zhu+17
+# Bar density: Koshimoto, Baba & Bennett 2021's E+E_X model (their best
+# fit; genulens model/parameters.hpp defaults DensityParameters, model 5 +
+# add_x 5), review 1.7.3.  physics.bar_log_profile is the formula.  Until
+# 2026-10 the bar was a plain ellipsoid exp(-r_s/2) with "Zhu+17" axes
+# (1.590, 0.424, 0.424) kpc at 25 deg -- an e-folding length of 3.2 kpc
+# along the bar, against K21's ~0.9 kpc boxy main bar -- which put
+# microlensing sources ~0.9 kpc too far (D_S median 9.6 vs genulens 8.7 kpc
+# at Baade's window).
+BULGE_BAR_ANGLE = np.radians(27.0)  # bar axis vs the Sun-GC line (thetaD)
+BULGE_DENSITY_X_0 = 0.930623146993329  # kpc, main bar x0
+BULGE_DENSITY_Y_0 = 0.370784386649364  # kpc, main bar y0
+BULGE_DENSITY_Z_0 = 0.239547516030578  # kpc, main bar z0
+BULGE_DENSITY_C1 = 1.20011972384328  # boxiness in (x, y)
+BULGE_DENSITY_C2 = 4.09326795684828  # boxiness of (R_s, z)
+# X-shape: two exp(-r_s) lobes sheared by +/- B_ZX * z in x_bar.
+BULGE_X_X_0 = 0.278027059842233  # kpc
+BULGE_X_Y_0 = 0.176318528789193  # kpc
+BULGE_X_Z_0 = 0.286791941602401  # kpc
+BULGE_X_C1 = 1.3087131258784
+BULGE_X_C2 = 2.21745322869032
+BULGE_X_B_ZX = 1.37774815817195  # x shear per unit z
+BULGE_X_FRACTION = 1.43975636704683  # f_X, amplitude of each lobe vs main bar
+BULGE_X_RC = 1.30163829617294  # kpc, the X-shape's own cylindrical cutoff
 BULGE_GAMMA = -2.0  # see Koshimoto and Bennett 2020 Sec. 3.4
 # Outer cylindrical cutoff of the bar (genulens: Rc, srob).  Beyond
 # R = BULGE_RC the bar density is multiplied by a Gaussian of width
-# BULGE_RC_WIDTH in R -- without it the shallow exp(-r_s/2) profile
-# leaks bulge stars all the way to the Sun (0.9% of central at R0).
-BULGE_RC = 2.632  # in kpc, Koshimoto+ 2021 E-model Rc (genulens rc)
+# BULGE_RC_WIDTH in R (the X-shape's beyond BULGE_X_RC).
+BULGE_RC = 2.63178535429573  # in kpc, Koshimoto+ 2021 E+E_X Rc (genulens rc)
 BULGE_RC_WIDTH = 0.5  # in kpc (genulens srob)
 BULGE_VELOCITY_SIGMA_1 = (
     120.0  # in km/s, basedon on Koshimoto & Bennett 2020 tab. 1
@@ -233,14 +251,18 @@ SUN_GALCEN_V = (10.0, 243.0, 7.0)  # in km/s
 DISK_LOCAL_NUMBER_DENSITY = 0.1633
 # Thick disk local: n0MSd[7].
 THICK_DISK_LOCAL_NUMBER_DENSITY = 7.91e-3
-# Bar central: derived with genulens's VVV-box budget applied to OUR bar
-# profile (exp(-r_s/2), Zhu+17 axes, BULGE_RC cutoff):
+# Bar central (of the MAIN bar; physics.bar_log_profile is 0 there and the
+# X-shape adds its own lobes on top): derived with genulens's VVV-box
+# budget applied to the bar profile (K21 E+E_X with its cutoffs, as
+# physics.bar_log_profile writes it):
 #   rho0b = (frho0b * M_VVV(P17) - M_disk_in_box) / int_box(profile)
-#         = (0.839015 * 1.32e10 - 1.312e9) / 9.307e9 pc^3
-#         = 1.049 Msun/pc^3   (Portail+ 2017 box |xb|<2.2,|yb|<1.4,|z|<1.2)
+#         = (0.839015 * 1.32e10 - 1.312e9) / 2.3409e9 pc^3
+#         = 4.170 Msun/pc^3   (Portail+ 2017 box |xb|<2.2,|yb|<1.4,|z|<1.2)
 #   n0   = rho0b * fb_MS * m2nb_MS = rho0b * (1.62/2.07) / 0.227943
-# Pinned by tests/test_galactic_model.py, which recomputes the integral.
-BULGE_CENTRAL_NUMBER_DENSITY = 3.60
+# (3.60 with the pre-1.7.3 exp(-r_s/2) ellipsoid, whose box integral was
+# 9.307e9 pc^3.)  Pinned by tests/test_galactic_model.py, which recomputes
+# the integral.
+BULGE_CENTRAL_NUMBER_DENSITY = 14.32
 
 # IAU 2015, Resolution B2 zero point values
 LSUN = 1 * u.Lsun

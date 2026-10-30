@@ -19,20 +19,25 @@ Measured at the recording (N = 20000 here, 40000 genulens events; the test
 uses fewer draws and a fixed seed, so it is deterministic):
 
     sight line   quantity  KS     median EXOZIPPy / genulens
-    ob140939     D_L       0.106  6.17 / 6.41 kpc
-                 mu_rel    0.014  5.90 / 5.86 mas/yr
-                 t_E       0.035  18.6 / 19.9 d
-    Baade        D_L       0.207  6.54 / 7.17 kpc
-                 mu_rel    0.065  5.73 / 6.18 mas/yr
-                 t_E       0.086  18.2 / 15.4 d
+    ob140939     D_L       0.086  6.59 / 6.41 kpc
+                 mu_rel    0.032  5.65 / 5.86 mas/yr
+                 t_E       0.049  18.0 / 19.9 d
+    Baade        D_L       0.045  7.22 / 7.17 kpc
+                 mu_rel    0.116  5.40 / 6.18 mas/yr
+                 t_E       0.026  16.3 / 15.4 d
 
-The D_L gap (EXOZIPPy puts fewer lenses in the near disk and more in front
-of the bar's far side) is the largest and predates review 1.7.1, whose fix
-moved these numbers by less than their noise.  The bounds sit ~1.5-2x
-above the values this test's own draws give (ob140939 0.104/0.012/0.041,
-Baade 0.211/0.075/0.077 for D_L/mu_rel/t_E).  Measured sensitivity: making
-every branch counter-rotate gives mu_rel KS 0.41/0.38, dropping rotation
-altogether 0.106 on ob140939 -- both fail.
+(20000 draws; this test's own 8000 give 0.084/0.033/0.052 and
+0.035/0.116/0.027.)  Review 1.7.3 replaced the plain-ellipsoid bar with
+K21's E+E_X bar (galacticmodel.md, "The bar density"): the Baade D_L KS fell
+from 0.207 to 0.035-0.045 and t_E from 0.086 to 0.027, while the Baade
+mu_rel KS ROSE from 0.065 to 0.116 -- with the lenses and sources now where
+genulens puts them, the bar's KINEMATICS (ours: constant dispersions and
+solid-body rotation; K21: position-dependent dispersions and streaming
+along the bar) is the remaining gap, the old density's spread having partly
+hidden it.  Open (review 1.7.3).  The bounds sit ~1.4-2x above the values
+this test's own draws give.  Measured sensitivity: making every branch
+counter-rotate gives mu_rel KS 0.41/0.38, dropping rotation altogether
+0.106 on ob140939 -- both fail.
 """
 
 import json
@@ -52,8 +57,8 @@ FIXTURE = os.path.join(os.path.dirname(__file__), "fixtures", "genulens.json")
 
 #: KS bounds per sight line and quantity (measured values: module docstring).
 KS_BOUND = {
-    "ob140939": {"D_L": 0.16, "mu_rel": 0.04, "t_E": 0.07},
-    "baade": {"D_L": 0.28, "mu_rel": 0.11, "t_E": 0.14},
+    "ob140939": {"D_L": 0.13, "mu_rel": 0.06, "t_E": 0.09},
+    "baade": {"D_L": 0.08, "mu_rel": 0.16, "t_E": 0.06},
 }
 
 
