@@ -118,6 +118,10 @@ class _BootstrapGeometry:
     more companions it is a proxy, and its warnings say so.
     """
 
+    #: Read at their START value whether informed or not: the model has a
+    #: parallax at whatever pi_E it starts at (review 8.6.23).
+    START_PATHS = ("mulensevent.0.pi_E_N", "mulensevent.0.pi_E_E")
+
     def __init__(self, probed, n_companions):
         self.probed = probed
         self.n_companions = int(n_companions)
@@ -125,6 +129,15 @@ class _BootstrapGeometry:
 
     def __call__(self, path, default=None):
         ps = self.probed[path]
+        if path in self.START_PATHS:
+            if not ps.derivable:
+                raise RuntimeError(
+                    f"flux bootstrap: {path} has no start the relaxation "
+                    f"engine can reach ({ps.source}); every microlensing "
+                    f"model has one, so the event's symbol map or frame "
+                    f"constants are missing."
+                )
+            return ps.user_value
         return ps.user_value if ps.informed else default
 
 
@@ -743,16 +756,29 @@ class MulensInstrument(Instrument):
             self._event.geocentric_frame()
         )
         # ... and handed to the relaxation engine BEFORE the probe below:
-        # its t_E and pi_E relations are geocentric (review 8.6.23), so the
-        # geometry the bootstrap reads is the one the model will start at.
+        # its t_E and pi_E relations are geocentric (review 8.6.23).
         self._event.register_frame_constants(system)
+        # So are the event's kinematic start hints (body distances and
+        # masses, the galactic-model proper motions), which until 2026-10
+        # arrived only at stage 3: the probe then solved pi_E on the
+        # defaults.yaml distances and masses, and the geocentric relation
+        # made that a parallax ~150x the model's start (DC2018-069, review
+        # 8.6.23).  AFTER the peak finder, deliberately: a t_E these hints
+        # imply through the relations must not count as an informed t_E the
+        # finder holds instead of fitting.
+        self._event.register_kinematic_hints(system)
 
         # The event geometry the bootstrap below reads, as the relaxation
         # engine would start it given everything known NOW (user entries, the
         # peak finder's seed 0, hints so far) -- one probe for every file.
-        # See _probe_bootstrap_geometry.  It runs after t0_par is final and
-        # the frame constants are in (above); nothing it reads moved there.
+        # See _probe_bootstrap_geometry.  This is only the best stage 1 can
+        # know: hints pushed at stage 3 (a planet's mass, the stellar
+        # relations, the source star this very bootstrap seeds) can still
+        # move the start, so reread_after_starts compares it with the solved
+        # start after stage 4 and re-runs the bootstrap there if it moved.
         geometry = self._probe_bootstrap_geometry(system)
+        self._bootstrap_geometry = geometry
+        self._bootstrap_inputs = []
 
         # Median absolute position per instrument (used by MulensEvent to
         # detect satellite parallax when sizing the logmass scale)
@@ -766,6 +792,9 @@ class MulensInstrument(Instrument):
 
             xyz_delta = self._abs_to_delta(t, xyz_abs)
 
+            # Kept for reread_after_starts, which re-runs the bootstrap at
+            # the SOLVED geometry when the start solve moved it.
+            self._bootstrap_inputs.append((t, f, xyz_delta, ra_rad, dec_rad))
             f_total, q_source, q_flux = self._estimate_flux_components(
                 t, f, xyz_delta, ra_rad, dec_rad, i, geometry
             )
@@ -1054,16 +1083,25 @@ class MulensInstrument(Instrument):
 
         Uninformed is not the same as "use the default": a defaults.yaml
         ``t_0`` or ``u_0`` describes no event, so a bootstrap built on it
-        would be a confident wrong answer.  The pi_E default (0, 0) is what
-        the bootstrap has always assumed without parallax information, so
-        the pi_E reads keep it; every other quantity comes back None and the
-        consumers say what is missing.
+        would be a confident wrong answer, so those come back None and the
+        consumers say what is missing.  pi_E is different: the model has a
+        parallax at whatever pi_E it starts at, informed or not, so the
+        bootstrap reads pi_E's START value (``_BootstrapGeometry``,
+        START_PATHS).  It used to read an uninformed pi_E as (0, 0), which
+        is not where the model starts.
 
         One probe per ``load_data`` (the probe is a full engine solve; see
         ``ConfigManager.probe_start`` on why it is not cached).  A companion
         lens's geometry is probed only when the lens HAS a companion
         (``lens.1`` -- element 0 is the masked primary).
         """
+        return _BootstrapGeometry(
+            self.config_manager.probe_start(self._bootstrap_paths(system)),
+            n_companions=system.lens.n_companions,
+        )
+
+    def _bootstrap_paths(self, system):
+        """The event-geometry paths the flux bootstrap reads."""
         paths = [
             "mulensevent.0.t_E",
             "mulensevent.0.pi_E_N",
@@ -1073,10 +1111,88 @@ class MulensInstrument(Instrument):
             paths += [f"source.{j}.t_0", f"source.{j}.u_0", f"source.{j}.rho"]
         if system.lens.n_companions >= 1:
             paths += ["lens.1.s", "lens.1.log_s", "lens.1.q", "lens.1.alpha"]
-        return _BootstrapGeometry(
-            self.config_manager.probe_start(paths),
+        return paths
+
+    @staticmethod
+    def _geometry_moved(read, solved):
+        """The paths whose bootstrap reading differs between two geometries.
+
+        Compared as the bootstrap SEES them (``_BootstrapGeometry.__call__``),
+        to a relative 1e-6: the stage-1 probe and the stage-4 solve are two
+        runs of the same engine, whose numerical solves agree only to their
+        convergence tolerance (~1e-8 measured on DC2018-069), and a
+        difference that small moves no flux split.
+        """
+        moved = []
+        for p in read.probed:
+            a, b = read(p), solved(p)
+            if (a is None) != (b is None):
+                moved.append(p)
+            elif a is not None and not np.isclose(
+                float(a), float(b), rtol=1e-6, atol=0.0
+            ):
+                moved.append(p)
+        return moved
+
+    def reread_after_starts(self, system):
+        """After stage 4: re-run the flux bootstrap if the start moved.
+
+        The bootstrap fits each file's flux split to magnification columns
+        built from the event geometry, and its q_source / log_f_total / f_source
+        hints (and the source star they seed) must describe the geometry the
+        model STARTS at.  At stage 1 the probe can only see what is known
+        then; a hint pushed at stage 3 (a planet's mass, the stellar
+        relations, the source star this bootstrap itself seeds) can still
+        move the solved start.  On DC2018-069 (fitpirel/fitthetae/fitmurel,
+        no pi_E entry) the stage-1 probe read pi_E = (-1.46, -4.10) against
+        a start of ~(0.03, 0.02) -- the bootstrap then fit point-lens
+        columns with a parallax hundreds of times the start's and W149's
+        q_source came out 0.48 instead of 0.32 (review 8.6.23, the #455
+        regression).  So this compares the geometry the bootstrap read with
+        the seed-0 start the engine solved (``ConfigManager.solved_start``)
+        and, where any path moved, re-runs the bootstrap at the solved
+        geometry and returns the message that makes ``System.prepare``
+        run stages 3 and 4 once more with the new hints.  Asked again after
+        that pass, a geometry that still moved means the flux split and the
+        geometry depend on each other through the hints; System raises
+        rather than iterate.
+        """
+        solved = _BootstrapGeometry(
+            self.config_manager.solved_start(self._bootstrap_paths(system)),
             n_companions=system.lens.n_companions,
         )
+        moved = self._geometry_moved(self._bootstrap_geometry, solved)
+        if not moved:
+            return []
+        read = self._bootstrap_geometry
+
+        def fmt(g, p):
+            v = g(p)
+            return "uninformed" if v is None else f"{float(v):.9g}"
+
+        what = ", ".join(
+            f"{p} {fmt(read, p)} -> {fmt(solved, p)}" for p in moved
+        )
+        self.fs_init, self.q_source_init, self.q_flux_init = [], [], []
+        for i, (t, f, xyz_delta, ra_rad, dec_rad) in enumerate(
+            self._bootstrap_inputs
+        ):
+            f_total, q_source, q_flux = self._estimate_flux_components(
+                t, f, xyz_delta, ra_rad, dec_rad, i, solved
+            )
+            self.fs_init.append(f_total)
+            self.q_source_init.append(q_source)
+            self.q_flux_init.append(q_flux)
+        self._bootstrap_geometry = solved
+        return [
+            (
+                f"[{self.prefix}] the flux bootstrap read the event geometry "
+                f"at stage 1 and the start solve moved it ({what}); the "
+                f"bootstrap was re-run at the solved start.",
+                [f"{self.prefix}.{i}.q_source" for i in range(self.n_elements)]
+                + moved,
+            )
+        ]
 
     # ------------------------------------------------------------------
     # data_format: dia -- native difference imaging
@@ -1275,8 +1391,8 @@ class MulensInstrument(Instrument):
         if t0 is None or u0 is None or tE is None:
             return
 
-        pi_E_N = geometry("mulensevent.0.pi_E_N", 0.0)
-        pi_E_E = geometry("mulensevent.0.pi_E_E", 0.0)
+        pi_E_N = geometry("mulensevent.0.pi_E_N")
+        pi_E_E = geometry("mulensevent.0.pi_E_E")
 
         delta_e, delta_n = observer_sky_offset(xyz_delta, ra_rad, dec_rad)
         A_traj = self._pspl_magnification(
@@ -1678,8 +1794,8 @@ class MulensInstrument(Instrument):
         t0 = geometry("source.0.t_0")
         u0 = geometry("source.0.u_0")
         tE = geometry("mulensevent.0.t_E")
-        pi_E_N = geometry("mulensevent.0.pi_E_N", 0.0)
-        pi_E_E = geometry("mulensevent.0.pi_E_E", 0.0)
+        pi_E_N = geometry("mulensevent.0.pi_E_N")
+        pi_E_E = geometry("mulensevent.0.pi_E_E")
 
         f_source_user = _get_flux("f_source")
         f_blend_user = _get_flux("f_blend")

@@ -410,6 +410,26 @@ class Component(ABC):
         """
         return []
 
+    def reread_after_starts(self, system):
+        """After stage 4: redo an estimate that read a start too early.
+
+        A data-derived estimate that needs a START (MulensInstrument's flux
+        bootstrap needs the event geometry) runs at stage 1 on
+        ``ConfigManager.probe_start``, which sees only the hints pushed so
+        far; a stage-3 hint can still move the start.  Such a component
+        overrides this to compare what it read with
+        ``ConfigManager.solved_start``, recompute the estimate at the solved
+        start where they differ, and return one ``(message, param_paths)``
+        per recomputation.  ``System.prepare`` then runs stages 3 and 4 once
+        more (shared with ``revise_after_starts``), logs each message at
+        INFO and records it as a solve diagnostic -- and asks AGAIN: a
+        component that still finds its reading moved raises there, because
+        its estimate and the start depend on each other.  It must return
+        ``[]`` when what it read agrees with the solved start.  The default
+        reads nothing.
+        """
+        return []
+
     def epochs_constraining(self, system, orbit):
         """Stage 3: the observation epochs this component's data put on an
         orbit, and how much each tells about its conjunction time.

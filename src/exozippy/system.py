@@ -402,7 +402,17 @@ class System(Component):
             for comp in self.active_components.values()
             for rev in comp.revise_after_starts(self)
         ]
-        if self.topology_revisions:
+        # And the estimates a component made at stage 1 from a start it could
+        # only PROBE (Component.reread_after_starts; today MulensInstrument's
+        # flux bootstrap, which reads the event geometry -- review 8.6.23):
+        # recomputed at the solved start where it moved, and the same one
+        # extra pass of stages 3 and 4 picks them up.
+        start_rereads = [
+            rr
+            for comp in self.active_components.values()
+            for rr in comp.reread_after_starts(self)
+        ]
+        if self.topology_revisions or start_rereads:
             self.config_manager.restore_solve_inputs(solve_inputs)
             for comp in self.active_components.values():
                 comp.register_parameters(self)
@@ -410,6 +420,24 @@ class System(Component):
             self._adopt_element_owners()
             self.config_manager.set_engine_roles(self._engine_roles())
             self.config_manager.finalize_user_params()
+            # Asked again: an estimate the extra pass moved once more depends
+            # on the start it seeds.  One pass is the contract; raise rather
+            # than iterate to a fixed point nobody has shown exists.
+            unsettled = [
+                rr
+                for comp in self.active_components.values()
+                for rr in comp.reread_after_starts(self)
+            ]
+            if unsettled:
+                raise RuntimeError(
+                    "A stage-1 estimate still disagrees with the solved start "
+                    "after it was recomputed there once, so the estimate and "
+                    "the start it seeds depend on each other: "
+                    + "; ".join(m for m, _ in unsettled)
+                )
+            for message, paths in start_rereads:
+                logger.info(message)
+                self.config_manager.record_diagnostic("info", message, paths)
             for message, paths in self.topology_revisions:
                 logger.warning(
                     f"TOPOLOGY REVISED after the start solve: {message}"

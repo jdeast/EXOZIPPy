@@ -4141,6 +4141,48 @@ class ConfigManager:
             )
         return out
 
+    def solved_start(self, paths):
+        """The seed-0 start the LAST ``finalize_user_params`` solved for each
+        of `paths`, with its provenance -- ``probe_start``'s answer after
+        stage 4, in the same ``{path: ProbedStart}`` shape.
+
+        For a reader that had to read a start early (``probe_start``) and
+        must check it against the one the model starts at
+        (``Component.reread_after_starts``).  Seed 0 is solved last, so the
+        engine's last-solve record is seed 0's.  A path the solve did not
+        reach comes back ``"not derivable"``, as from ``probe_start``.
+
+        Raises:
+            RuntimeError: no solve has run yet.
+            ValueError: a path is not canonical index form.
+        """
+        if not self._last_resolved:
+            raise RuntimeError(
+                "solved_start: finalize_user_params has not run; use "
+                "probe_start before stage 4."
+            )
+        out = {}
+        for p in paths:
+            parts = p.split(".")
+            if len(parts) != 3 or not parts[1].isdigit():
+                raise ValueError(
+                    f"solved_start: '{p}' is not a canonical index-form path "
+                    f"(<component>.<index>.<param>)."
+                )
+            if p not in self._last_resolved:
+                out[p] = ProbedStart(p, None, None, None, "not derivable")
+                continue
+            val = float(self._last_resolved[p])
+            rank = self._last_provenance[p]
+            out[p] = ProbedStart(
+                p,
+                val,
+                self.from_internal(p, val),
+                rank,
+                self._provenance_label(rank),
+            )
+        return out
+
     def from_internal(self, path, value):
         """Convert an INTERNAL-unit value of `path` to its USER unit.
 
