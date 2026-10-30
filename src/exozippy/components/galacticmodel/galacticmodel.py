@@ -1,3 +1,25 @@
+"""
+Galactic prior: a mixture of the thin disk, thick disk and bulge/bar,
+enforcing the density and kinematics of the Galaxy.
+
+Provenance: this component derives from genulens (Koshimoto, Baba & Bennett
+2021, ApJ 917, 78, "K21"; https://github.com/nkoshimoto/genulens).  Cite
+K21 when you use it.  The model below is a simplified version of K21's;
+the fidelity notes say where it departs.
+
+Fidelity notes (vs genulens, reviewed 2026-08): the thin disk collapses
+genulens's 7 age bins into one exponential layer with its B14disk-mode
+(Bennett et al. 2014) kinematics instead of the Shu DF; the bar keeps a
+plain-ellipsoid exp(-r_s/2) profile (not the K21 super-ellipsoid + X-shape)
+but carries genulens's outer cylindrical cutoff and VVV-box-budget
+normalization; NSD, stellar halo, and the bar's spatial sigma gradients /
+streaming motion are omitted.  All three branch weights are genulens's
+NUMBER-density channel on one absolute scale, so the logsumexp mixture
+weight is physical.  The event-rate selection factor (theta_E * mu_rel) is
+deliberately NOT here -- it lives in the lens component, so this prior
+stays microlensing-agnostic.
+"""
+
 import logging
 
 import numpy as np
@@ -46,26 +68,6 @@ from exozippy.constants import (
     THICK_DISK_VELOCITY_SIGMA_V,
     THICK_DISK_VELOCITY_SIGMA_W,
 )
-
-"""
-This class implements a mixture model of the thin disk, thick disk, and
-bulge/bar, enforcing the kinematics and density of the galaxy.
-It's a simplified version of the model defined in https://ui.adsabs.harvard.edu/abs/2021ApJ...917...78K/abstract.
-and codified here https://github.com/nkoshimoto/genulens
-This class distills genulens's core functionality into a component for EXOZIPPy
-
-Fidelity notes (vs genulens, reviewed 2026-08): the thin disk collapses
-genulens's 7 age bins into one exponential layer with its B14disk-mode
-(Bennett et al. 2014) kinematics instead of the Shu DF; the bar keeps a
-plain-ellipsoid exp(-r_s/2) profile (not the K21 super-ellipsoid + X-shape)
-but carries genulens's outer cylindrical cutoff and VVV-box-budget
-normalization; NSD, stellar halo, and the bar's spatial sigma gradients /
-streaming motion are omitted.  All three branch weights are genulens's
-NUMBER-density channel on one absolute scale, so the logsumexp mixture
-weight is physical.  The event-rate selection factor (theta_E * mu_rel) is
-deliberately NOT here -- it lives in the lens component, so this prior
-stays microlensing-agnostic.
-"""
 
 logger = logging.getLogger(__name__)
 
@@ -628,6 +630,10 @@ def _log_velocity_marginal(cols, c, s, xprime, vphi_mean, sigmas, m_rot, v0):
 
 
 class GalacticModel(Component):
+    """The Galactic prior on a line of sight, derived from genulens
+    (Koshimoto, Baba & Bennett 2021, ApJ 917, 78).  Cite K21 when you use
+    it; see the module docstring for where it departs from genulens."""
+
     # The only mass function implemented below.  ``IMF:`` is validated
     # against this in __init__ rather than silently ignored: the key selected
     # KROUPA_IMF_SLOPE / SALPETER_IMF_SLOPE for a power-law prior that had
