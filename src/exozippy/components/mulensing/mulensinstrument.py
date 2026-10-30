@@ -676,12 +676,12 @@ class MulensInstrument(Instrument):
                 # Total flux IN UNITS OF THE REFERENCE, not in raw counts.
                 # The reference is the natural unit of a difference image,
                 # and the absolute scale is arbitrary anyway without an
-                # `sed:` block to tie f_source to a magnitude -- while raw
-                # pySIS counts (f_source ~ 1.8e4 on OGLE-2016-BLG-1045) sit
-                # far outside f_source's [0, 1000] default, whose soft
-                # bound would then dominate the logp.  Dividing by `ref`
-                # puts the baseline at ~1, which is the scale those
-                # defaults were written for.  RATIOS ARE UNCHANGED, so
+                # `sed:` block to tie f_source to a magnitude.  (This was
+                # also once needed because raw pySIS counts, f_source ~ 1.8e4
+                # on OGLE-2016-BLG-1045, sat outside a [0, 1000] f_source
+                # bound; f_source/f_blend carry no bounds since review
+                # 1.6.18, so the fit is unit-free either way.)  Dividing by
+                # `ref` puts the baseline at ~1.  RATIOS ARE UNCHANGED, so
                 # q_source and the blending are unaffected; only the unit
                 # moves.  The zeropoint that recovers the absolute scale is
                 # kept in _dia_zp (zp_ref below), so nothing is lost:
@@ -1616,8 +1616,8 @@ class MulensInstrument(Instrument):
 
         A NEGATIVE BLEND IS FIRST CLASS (review 2.6.23): difference imaging
         and over-subtracted crowded fields produce one, the flux likelihood
-        models it, and defaults.yaml bounds f_blend to [-1000, 1000] and
-        q_source to [0, 2] (q_source > 1 IS a negative blend).  So nothing
+        models it, and defaults.yaml bounds q_source to [0, 2] (q_source > 1
+        IS a negative blend; f_blend itself is unbounded, review 1.6.18).  So nothing
         here clamps f_b at zero, and q_source is clipped only to its DECLARED
         bounds (``_q_source_declared``, read through ``resolve`` so a user
         bound counts too), never to an invented [0.05, 0.95].

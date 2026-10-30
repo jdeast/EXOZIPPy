@@ -1,6 +1,6 @@
 {
  "config": "examples/DC2018_128/DC2018_128_hpc.yaml",
- "n_terms": 67,
+ "n_terms": 63,
  "params": "examples/DC2018_128/DC2018_128.params.yaml",
  "platform": {
   "blas": "scipy-openblas",
@@ -86,8 +86,6 @@
   "POT:low_bound.mulensevent.pi_rel": -9.85967654375977e-305,
   "POT:low_bound.mulensevent.t_E": -2.0428508048680014e-94,
   "POT:low_bound.mulensevent.theta_E": -9.85967654375977e-305,
-  "POT:low_bound.mulensinstrument.f_blend": -9.85967654375977e-305,
-  "POT:low_bound.mulensinstrument.f_source": -0.10093405584280739,
   "POT:low_bound.planet.mass": -9.85967654375977e-305,
   "POT:mulensevent.event_rate_prior": 0.16933858385642186,
   "POT:mulensevent.mu_rel_singularity": -9.85967654375977e-305,
@@ -105,8 +103,6 @@
   "POT:up_bound.mulensevent.mu_rel_mag": -9.85967654375977e-305,
   "POT:up_bound.mulensevent.pi_rel": -9.85967654375977e-305,
   "POT:up_bound.mulensevent.theta_E": -9.85967654375977e-305,
-  "POT:up_bound.mulensinstrument.f_blend": -9.85967654375977e-305,
-  "POT:up_bound.mulensinstrument.f_source": -9.85967654375977e-305,
   "POT:up_bound.planet.mass": -9.85967654375977e-305,
   "RV:lens.log_s_raw": -0.9189385332046727,
   "RV:lens.xalpha_raw": -0.9189385332046727,
@@ -124,5 +120,5 @@
   "RV:star.pm_ra_raw": -1.8378770664093453,
   "RV:star.rv_raw": -1.8378770664093453
  },
- "total_logp": 3375.08563015605
+ "total_logp": 3375.186564211893
 }
