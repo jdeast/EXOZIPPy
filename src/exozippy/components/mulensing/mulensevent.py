@@ -1048,6 +1048,8 @@ class MulensEvent(Component):
             self.config_manager.add_scale_hint(f"star.{s_idx}.rv", 1e5)
             self._seed_expected_pm(pm_expected, s_idx, "bulge", 8000.0, system)
 
+        self._declare_companion_mass_backed(system)
+
         # Companion lens bodies (everything beyond the primary)
         for l2_type, l2_idx in self.lens_bodies[1:]:
             if l2_type == "star":
@@ -1059,6 +1061,61 @@ class MulensEvent(Component):
                 self.config_manager.add_scale_hint(
                     f"star.{l2_idx}.distance", 5.0
                 )
+
+    def _declare_companion_mass_backed(self, system):
+        """The light curve backs each COMPANION's mass ratio (review 8.6.42).
+
+        A companion's q is a shape parameter of the light curve (the caustic
+        size and position), measured independently of the event's physical
+        scale, which is what t_E, theta_E, pi_rel and the total lens mass
+        describe.  So its sampled mass coordinate -- a planet's log_q (or
+        its linear mass / msini where the entry asks for that), a stellar
+        companion's logmass -- is declared LIKELIHOOD_BACKED: an unseeded
+        (defaults.yaml) start decides above the distance guesses and every
+        other default, and an event-level discrepancy is absorbed by the
+        event chain (the lens distance, under the KS order) instead.
+
+        Without it, a 2L1S config with t_E (and rho) seeded and q unseeded
+        left log_q the ONLY DEFAULT-tier seed upstream of theta_E^2 = kappa
+        M_tot pi_rel; that tier's settle drove it to a bound (log_q = 1,
+        q = 10, after the geocentric relations of #455; -9 before) and the
+        escalation of review 1.1.11 then HELD it there while the higher
+        tiers absorbed the rest -- ~1e6 nats of start logp on DC2018 sweep
+        configs, and event 131 refused to build (log_q start 1.197).  A user
+        value or a data hint (the peak finder's or the grid's log_q, at
+        DERIVED_DATA) is untouched: only seeds below the backed level move.
+        """
+        from ..planet.planet import (
+            lens_companion_samples_log_q,
+            parse_mass_flags,
+        )
+
+        cm = self.config_manager
+        planet = getattr(system, "planet", None)
+        for c_type, c_idx in self.lens_bodies[1:]:
+            if c_type == "star":
+                cm.declare_likelihood_backed(f"star.{c_idx}.logmass")
+                continue
+            if c_type != "planet":
+                raise ValueError(
+                    f"mulensevent: lens companion '{c_type}.{c_idx}' is "
+                    "neither a star nor a planet, so its mass coordinate is "
+                    "unknown."
+                )
+            if planet is None:
+                raise RuntimeError(
+                    f"mulensevent: lens companion planet.{c_idx} names a "
+                    "planet, but the system has no planet component."
+                )
+            entry = planet.config[c_idx]
+            where = f"planet.{planet.names[c_idx]}"
+            if lens_companion_samples_log_q(entry, where):
+                coord = "log_q"
+            elif parse_mass_flags(entry, where)["fitmsini"]:
+                coord = "msini"
+            else:
+                coord = "mass"
+            cm.declare_likelihood_backed(f"planet.{c_idx}.{coord}")
 
     def _galactic_pm_expectations(self, system):
         """Line of sight for the galactic-model proper-motion seeds.

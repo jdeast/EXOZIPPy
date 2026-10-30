@@ -169,10 +169,13 @@ def test_a_user_t_E_without_t_0_is_held_and_t_0_u_0_are_found(tmp_path):
     Then the finder pushes t_0 and u_0 only, and t_E keeps the user value.
 
     Until the engine escalated (review 1.1.11) this started at t_E 42.5 d:
-    log_q's default sits on its -9 bound, so at DEFAULT the companion mass
-    was the only absorber of mlens_total = M_star + M_planet, could not go
-    negative, and the relation was left violated.  Now the residual goes to
-    the lens distance (MULENS_LENS_DISTANCE), the next tier up.
+    at DEFAULT the companion's log_q was the only absorber of mlens_total =
+    M_star + M_planet, was driven to its -9 bound, and the relation was left
+    violated.  Escalation then sent the residual to the lens distance -- but
+    HELD log_q on that bound.  Since review 8.6.42 the companion's log_q is
+    LIKELIHOOD_BACKED, decides above the distance guesses and keeps its -3
+    default, and the lens distance absorbs t_E at its own tier, with no
+    escalation needed.
     """
     t_E = 17.0
     cm = _prepare(tmp_path, {"mulensevent.t_E": {"initval": t_E}})
@@ -187,7 +190,10 @@ def test_a_user_t_E_without_t_0_is_held_and_t_0_u_0_are_found(tmp_path):
     assert probed.source == "user"
     # the stage-4 solve itself holds it, with nothing left violated
     assert not [d for d in cm.diagnostics if d.get("kind") == "unsettled"]
-    assert cm._last_keep_report["escalated"]
+    assert cm._last_resolved["planet.0.log_q"] == pytest.approx(-3.0)
+    moved = {m: tier for m, _a, _x, tier in cm._last_keep_report["moved"]}
+    assert "planet.0.log_q" not in moved
+    assert moved.get("star.0.distance") == "MULENS_LENS_DISTANCE (25)"
 
 
 def test_all_three_given_runs_nothing(tmp_path):
