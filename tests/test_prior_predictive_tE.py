@@ -41,8 +41,19 @@ test below).  Kinematics are not the cause (mu_rel KS vs genulens 0.06).
 A smaller second piece is geometric (sources ~0.9 kpc farther than
 genulens's); it is what is left on BLG505 after the mass swap.
 
-When the lens mass function is fixed, the xfail turns into an XPASS and
-fails strictly: update the test then, do not widen the tolerance.
+THE MASS FUNCTION IS FIXED (review 1.7.2, now the default: the
+galacticmodel's present-day mass function -- MIST turnoff, white dwarfs,
+neutron stars and black holes per population).  Measured 2026-10-30 (4 x
+2500 NUTS draws): t_E = 8.2 / 22.4 / 57.7 d, M_L 0.091 / 0.422 / 0.887 Msun.
+The median and q90 now agree within tolerance, but q10 does NOT (|ln
+ratio| 0.66 against 0.55): the prior still has too few short events, the
+geometric piece above (review 1.7.3), which no mass function can fix.  So
+the xfail stays strict and now names q10; when 1.7.3 is fixed it turns
+into an XPASS and fails strictly: update the test then, do not widen the
+tolerance.  With present_day on, the lens mass is no longer independent
+of position (each population has its own present-day mass function), so
+the genulens mass swap below is an approximation rather than exact; it is
+kept as the localization it was.
 """
 
 import importlib
@@ -112,9 +123,10 @@ def _tolerances(pp, model_te, ess):
 
 @pytest.mark.xfail(
     strict=True,
-    reason="review 7.16.3: the lens mass function is the IMF applied as a "
-    "present-day mass function (33% of rate-weighted lenses > 1 Msun), so "
-    "the prior's t_E median is ~52% longer than OGLE's toward Baade's window",
+    reason="review 1.7.3: with the present-day lens mass function (1.7.2) "
+    "the median and q90 of t_E agree with OGLE toward Baade's window, but "
+    "q10 is still ~2x long (8.2 vs 4.2 d) -- too few short events, the "
+    "source/lens geometry, not the mass function",
 )
 def test_prior_tE_matches_ogle_baade_window(pp, baade_draws):
     """

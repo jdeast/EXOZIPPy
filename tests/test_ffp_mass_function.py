@@ -81,7 +81,12 @@ class _MockSystem:
 
 def _imf_potential(star, imf=None):
     """Numeric value of the galacticmodel.imf_prior potential for a star."""
-    cfg = [{}] if imf is None else [{"IMF": imf}]
+    # present_day: false: these tests pin the IMF/FFP potential itself.
+    cfg = (
+        [{"present_day": False}]
+        if imf is None
+        else [{"IMF": imf, "present_day": False}]
+    )
     gm = GalacticModel(cfg, _DummyConfigManager())
     with pm.Model() as model:
         gm.build_likelihood(model, _MockSystem(star))
@@ -382,9 +387,9 @@ def test_ffp_gradient_is_finite():
 
     # Act
     with pm.Model() as model:
-        GalacticModel([{}], _DummyConfigManager()).build_likelihood(
-            model, _MockSystem(star)
-        )
+        GalacticModel(
+            [{"present_day": False}], _DummyConfigManager()
+        ).build_likelihood(model, _MockSystem(star))
     node = model.named_vars["galacticmodel.imf_prior"]
     grad = pt.grad(node, x).eval({x: -3.0})
 
@@ -512,7 +517,7 @@ def _logmass_lower(blocks, imf=None, user_params=None):
     system.config_manager = star.config_manager
     if imf is not None:
         system.galacticmodel = GalacticModel(
-            [{"IMF": imf}], star.config_manager
+            [{"IMF": imf, "present_day": False}], star.config_manager
         )
     star.register_parameters(system)
     with pm.Model() as model:
@@ -553,7 +558,9 @@ def test_ffp_warns_that_the_lower_bound_is_a_modeling_choice(caplog):
     star = _star([{"name": "Lens", "mass_function": "ffp"}])
     system = _DummySystem()
     system.config_manager = star.config_manager
-    system.galacticmodel = GalacticModel([{}], star.config_manager)
+    system.galacticmodel = GalacticModel(
+        [{"present_day": False}], star.config_manager
+    )
 
     # Act
     with caplog.at_level(logging.WARNING):
@@ -585,7 +592,9 @@ def test_no_bound_warning_when_the_user_already_set_lower(caplog):
     )
     system = _DummySystem()
     system.config_manager = star.config_manager
-    system.galacticmodel = GalacticModel([{}], star.config_manager)
+    system.galacticmodel = GalacticModel(
+        [{"present_day": False}], star.config_manager
+    )
 
     # Act
     with caplog.at_level(logging.WARNING):
@@ -664,7 +673,7 @@ def test_end_to_end_mixed_system_builds_with_the_right_prior_on_each_star():
             {"name": "Lens", "mass_function": "ffp"},
             {"name": "Source"},
         ],
-        "galacticmodel": [{"name": "gm"}],
+        "galacticmodel": [{"name": "gm", "present_day": False}],
     }
     user_params = {
         "star.Lens.ra": {"initval": 270.0, "sigma": 0},

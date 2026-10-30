@@ -77,6 +77,8 @@ ANCHOR_PLACEHOLDER_DEC_DEG = 0.0
 # The frame, the line-of-sight basis and the position transform live in
 # physics.py (the numpy layer) so the start-value hints in
 # mulensing/lens.py use exactly the code this likelihood uses.
+from .pdmf import GRID_DEX as PDMF_GRID_DEX  # noqa: E402
+from .pdmf import PresentDayMassFunction, interp_table  # noqa: E402
 from .physics import (  # noqa: E402
     GALACTOCENTRIC_FRAME,
     line_of_sight_basis,
@@ -462,18 +464,21 @@ def branch_log_number_densities(x, y, z, r, xp=pt):
     return log_dens_thin, log_dens_thick, log_dens_bulge
 
 
-def _log_total_number_density(d_pc, sun_xyz, los_hat):
+def _log_total_number_density(d_pc, sun_xyz, los_hat, offsets=None):
     """numpy log sum_b n_b (stars/pc^3) at distance(s) ``d_pc`` along the
     sight line (``line_of_sight_basis(...)[2:]``), with the graph's own
-    1 mpc clamp."""
+    1 mpc clamp.  ``offsets`` (one per branch, present_day's object-density
+    offsets) are added to the branch log densities."""
     d_kpc = np.maximum(np.asarray(d_pc, dtype=float), 1e-3) / 1e3
     x, y, z = _galactic_xyz_np(d_kpc, sun_xyz, los_hat)
     r = np.sqrt(x**2 + y**2 + 1e-6)
     dens = branch_log_number_densities(x, y, z, r, xp=np)
+    if offsets is not None:
+        dens = [d + o for d, o in zip(dens, offsets)]
     return np.logaddexp.reduce(np.stack(dens), axis=0)
 
 
-def log_position_norm(lower_pc, upper_pc, sun_xyz, los_hat):
+def log_position_norm(lower_pc, upper_pc, sun_xyz, los_hat, offsets=None):
     """log of int_lower^upper sum_b n_b(d) d^2 dd along the sight line.
 
     The number of stars per steradian in the cone out to ``upper`` -- the
@@ -487,7 +492,10 @@ def log_position_norm(lower_pc, upper_pc, sun_xyz, los_hat):
     lnd = np.linspace(
         np.log(float(lower_pc)), np.log(float(upper_pc)), _POSITION_QUAD_POINTS
     )
-    f = _log_total_number_density(np.exp(lnd), sun_xyz, los_hat) + 3.0 * lnd
+    f = (
+        _log_total_number_density(np.exp(lnd), sun_xyz, los_hat, offsets)
+        + 3.0 * lnd
+    )
     peak = float(np.max(f))
     return float(np.log(np.trapezoid(np.exp(f - peak), lnd)) + peak)
 
@@ -656,6 +664,17 @@ class GalacticModel(Component):
             )
         self.imf = imf
         self.anchor_idx = self.config[0].get("anchor_idx", 0)
+        # Present-day mass function (review 1.7.2): an independent toggle,
+        # orthogonal to the IMF choice (it evolves whichever IMF is
+        # selected).  A boolean, never a string: "false" in YAML quotes
+        # would otherwise be truthy.
+        present_day = self.config[0].get("present_day", True)
+        if not isinstance(present_day, bool):
+            raise ValueError(
+                f"galacticmodel present_day must be true or false, got "
+                f"{present_day!r}."
+            )
+        self.present_day = present_day
 
     @property
     def prefix(self):
@@ -681,6 +700,28 @@ class GalacticModel(Component):
                     "'mass_function: ffp' (the free-floating-planet mass "
                     "function), which is how an FFP lens and a stellar source "
                     "get different mass priors in the same fit."
+                ),
+            },
+            {
+                "key": "present_day",
+                "kind": "option",
+                "accepts": [True, False],
+                "required": False,
+                "doc": (
+                    "Evolve the IMF to a PRESENT-DAY mass function per "
+                    "Galactic population (default true; false keeps the "
+                    "IMF as the present-day mass function, for regression "
+                    "comparison): stars above "
+                    "their population's MIST turnoff become white dwarfs "
+                    "(Kalirai+2008), neutron stars or black holes "
+                    "(Raithel+2018), with the age marginalized over each "
+                    "population's age distribution (Koshimoto+2021: thin "
+                    "disk 0-10 Gyr, thick disk 12 Gyr, bulge 9 +/- 1 Gyr), "
+                    "and the mass prior moves inside the thin/thick/bulge "
+                    "mixture.  Applies to every star on the stellar IMF "
+                    "(not to 'mass_function: ffp' stars).  Remnants are "
+                    "DARK in the mass prior only: a lens's light still "
+                    "comes from its stellar relation (review 8.10.7)."
                 ),
             },
             {
@@ -712,7 +753,88 @@ class GalacticModel(Component):
     # parameter.PriorContribution.
     # ------------------------------------------------------------------
 
-    def _declare_mass_prior(self, stars, ffp_mask):
+    # ------------------------------------------------------------------
+    # Present-day mass function (review 1.7.2; pdmf.py holds the physics).
+    # ------------------------------------------------------------------
+
+    def _pdmf_mask(self, stars, ffp_mask):
+        """Which stars take the present-day mass function: every star on
+        the stellar IMF when ``present_day: true``, none otherwise."""
+        n_star = int(np.atleast_1d(stars.logmass.initval).size)
+        if not self.present_day:
+            return np.zeros(n_star, dtype=bool)
+        if ffp_mask.size:
+            return ~ffp_mask
+        return np.ones(n_star, dtype=bool)
+
+    def _log_imf_np(self):
+        """The selected IMF's numpy log density in x = log10 M (the PDMF
+        evolves whichever IMF ``IMF:`` chose)."""
+        if self.imf == "salpeter":
+            k = SALPETER_IMF_SLOPE + 1.0
+            return lambda x: k * np.log(10.0) * x
+        return lambda x: chabrier_logmass_logp(x, param=None, xp=np)
+
+    def _build_pdmf(self, stars):
+        bounds = _sampled_bounds(stars.logmass)
+        if bounds is None:
+            raise ValueError(
+                f"[{self.prefix}] present_day: true needs finite "
+                f"star.logmass lower/upper bounds to normalize the "
+                f"present-day mass function; none could be read."
+            )
+        n_star = int(np.atleast_1d(stars.logmass.initval).size)
+        lower = np.broadcast_to(np.atleast_1d(bounds[0]), (n_star,))
+        upper = np.broadcast_to(np.atleast_1d(bounds[1]), (n_star,))
+        return PresentDayMassFunction(self._log_imf_np(), lower, upper)
+
+    def _pdmf_offsets(self, pdmf_mask):
+        """Per branch, per star: -log F_lum,b on PDMF stars, 0 elsewhere."""
+        w = pdmf_mask.astype(float)
+        return [-w * self._pdmf.log_lum_frac[b] for b in range(len(BRANCHES))]
+
+    def _pdmf_branch_terms(self, stars, pdmf_mask):
+        """(mass_terms, dens_offsets), one per-star vector per branch.
+
+        ``mass_terms[b]`` is log phi_b(logmass) normalized over each star's
+        own support (a numpy table interpolated linearly in the graph),
+        times the 0/1 PDMF mask -- arithmetic, so a non-PDMF star's entry
+        is exactly 0 with a zero gradient (the table is finite everywhere,
+        so 0 * finite cannot poison anything).
+        """
+        pd = self._pdmf
+        w = pdmf_mask.astype(float)
+        x = stars.logmass.value
+        mass_terms = []
+        for b in range(len(BRANCHES)):
+            log_phi = interp_table(pd.log_table[b], pd.x0, PDMF_GRID_DEX, x)
+            mass_terms.append(w * (log_phi - pd.log_norm[b]))
+        return mass_terms, self._pdmf_offsets(pdmf_mask)
+
+    def _add_remnant_probability(self, stars, branch_logp, pdmf_mask):
+        """``galacticmodel.p_remnant``: per PDMF star (in star order), the
+        probability that it is a dark remnant (WD/NS/BH) rather than a
+        luminous star, given its mass, position and velocity: the branch
+        responsibilities times each branch's dark fraction at its mass.  A
+        Deterministic for reporting; it does not enter the logp.  For a
+        star in a linked group the responsibilities are its own terms', an
+        approximation to the group's shared population."""
+        idx = np.nonzero(pdmf_mask)[0]
+        pd = self._pdmf
+        stacked = pt.stack(branch_logp)[:, idx]
+        resp = pt.exp(stacked - pm.math.logsumexp(stacked, axis=0))
+        x = stars.logmass.value[idx]
+        dark = pt.stack(
+            [
+                interp_table(pd.dark_frac[b], pd.x0, PDMF_GRID_DEX, x)
+                for b in range(len(BRANCHES))
+            ]
+        )
+        pm.Deterministic(
+            f"{self.prefix}.p_remnant", pt.sum(resp * dark, axis=0)
+        )
+
+    def _declare_mass_prior(self, stars, ffp_mask, pdmf_mask=None):
         """Describe the imf_prior potential, per star.
 
         Two descriptions, because the potential really is two densities: the
@@ -739,6 +861,17 @@ class GalacticModel(Component):
             )
             imf_text = "Chabrier (2003) IMF in log10 M (lognormal + m^-1.3)"
 
+        if pdmf_mask is not None and pdmf_mask.any():
+            imf_latex = (
+                imf_latex.replace(" in $\\log_{10} M$", "")
+                + r" evolved to a present-day mass function per Galactic "
+                r"population (MIST turnoff; WD/NS/BH remnants)"
+            )
+            imf_text = (
+                imf_text.replace(" in log10 M", "")
+                + " evolved to a present-day mass function per Galactic "
+                "population (MIST turnoff; WD/NS/BH remnants)"
+            )
         imf_elements = np.nonzero(~ffp_mask)[0] if ffp_mask.size else None
         if imf_elements is None or len(imf_elements):
             logmass.add_prior_contribution(
@@ -763,7 +896,7 @@ class GalacticModel(Component):
                 supersedes_bounds=True,
             )
 
-    def _add_mass_prior_prose(self, system, stars, ffp_mask):
+    def _add_mass_prior_prose(self, system, stars, ffp_mask, pdmf_mask=None):
         """Modeling-draft sentences for the imf_prior potential.
 
         Mirrors ``_declare_mass_prior``'s per-star split: the stellar IMF
@@ -815,6 +948,26 @@ class GalacticModel(Component):
                 f"sampled log-mass support.",
                 section="priors",
                 key=f"{self.prefix}.imf",
+                rank=10,
+            )
+        if imf_names and pdmf_mask is not None and pdmf_mask.any():
+            prose.add(
+                r"We evolved it to a present-day mass function separately "
+                r"for each Galactic population, following "
+                r"\citet{Koshimoto:2021} and \citet{Lam:2020}: stars above "
+                r"the main-sequence turnoff, taken from the MIST lifetimes "
+                r"\citep{Dotter:2016,Choi:2016}, became white dwarfs with "
+                r"the initial-final mass relation of \citet{Kalirai:2008} "
+                r"or neutron stars and black holes following "
+                r"\citet{Raithel:2018}, with the age marginalized over "
+                r"each population's age distribution (thin disk 0--10\,Gyr, "
+                r"thick disk 12\,Gyr, bulge $9 \pm 1$\,Gyr).  The mass "
+                r"prior therefore enters inside the thin-disk, thick-disk "
+                r"and bulge mixture of the Galactic model.  Remnants are "
+                r"dark in the mass prior only; the light of each star still "
+                r"follows its stellar relation.",
+                section="priors",
+                key=f"{self.prefix}.pdmf",
                 rank=10,
             )
         if imf_names and self.imf != "salpeter":
@@ -1106,10 +1259,22 @@ class GalacticModel(Component):
                 + (1.0 - w) * imf_logp
             )
 
+        # Present-day mass function (review 1.7.2): the stars it covers take
+        # their mass prior INSIDE the population mixture below (it depends
+        # on the population), so they leave this potential.  With
+        # present_day: false this block is skipped and the potential is the
+        # pre-1.7.2 expression (bit-identical start logp on every shipped
+        # example).
+        pdmf_mask = self._pdmf_mask(stars, ffp_mask)
+        self._pdmf = None
+        if pdmf_mask.any():
+            self._pdmf = self._build_pdmf(stars)
+            imf_logp = (1.0 - pdmf_mask.astype(float)) * imf_logp
+
         pm.Potential(f"{self.prefix}.imf_prior", pt.sum(imf_logp))
 
-        self._declare_mass_prior(stars, ffp_mask)
-        self._add_mass_prior_prose(system, stars, ffp_mask)
+        self._declare_mass_prior(stars, ffp_mask, pdmf_mask)
+        self._add_mass_prior_prose(system, stars, ffp_mask, pdmf_mask)
         ######
 
         # even though non-physical values will be rejected
@@ -1164,9 +1329,25 @@ class GalacticModel(Component):
                 + (-0.5 / s3**2) * v_z**2
             )
             log_sig.append(np.log(s1 * s2 * s3))
+        mass_terms = None
+        if self._pdmf is not None:
+            # Per branch: the star's PDMF term (normalized over its own
+            # logmass support) and the object-density offset -log F_lum,b
+            # (the density anchors count LUMINOUS stars, genulens's n0MS;
+            # with remnants in the mass function the branch's objects are
+            # n_b / F_lum,b).  Zero on stars the PDMF does not cover.
+            # Every term is a finite table interpolation: no branch
+            # selection, no where (CLAUDE.md).
+            mass_terms, dens_offsets = self._pdmf_branch_terms(
+                stars, pdmf_mask
+            )
+            log_dens = [d + off for d, off in zip(log_dens, dens_offsets)]
         branch_logp = [
             dens + lv - ls for dens, lv, ls in zip(log_dens, log_vel, log_sig)
         ]
+        if mass_terms is not None:
+            branch_logp = [bl + mt for bl, mt in zip(branch_logp, mass_terms)]
+            self._add_remnant_probability(stars, branch_logp, pdmf_mask)
 
         volume_element = 2.0 * pt.log(distance * 1000.0)
 
@@ -1225,6 +1406,7 @@ class GalacticModel(Component):
                 vel_linked,
                 m_rot_np,
                 v0_arr,
+                mass_terms=mass_terms,
             )
 
         self._evidence_log_norm = self._kinematic_evidence_log_norm(
@@ -1232,6 +1414,9 @@ class GalacticModel(Component):
             roots,
             vel_linked,
             (sun_xyz_np, los_hat_np),
+            dens_offsets=(
+                None if self._pdmf is None else self._pdmf_offsets(pdmf_mask)
+            ),
         )
         pm.Potential(f"{self.prefix}.kinematic_prior", kinematic_penalty)
 
@@ -1317,6 +1502,7 @@ class GalacticModel(Component):
         vel_linked,
         m_rot_np,
         v0_arr,
+        mass_terms=None,
     ):
         """The kinematic prior with linked stars grouped onto one position.
 
@@ -1410,6 +1596,13 @@ class GalacticModel(Component):
                 V[b] = pt.set_subtensor(V[b][k], cond)
             J = pt.set_subtensor(J[k], 0.0)
 
+        # The present-day mass term is each star's own (a member has a mass
+        # of its own even when its whole velocity is linked), added after
+        # the velocity terms are set.  The object-density offset is already
+        # in log_dens, which only the ROOT's row reads below.
+        if mass_terms is not None:
+            V = [v + mt for v, mt in zip(V, mass_terms)]
+
         # W[g, k] = 1 when star k belongs to group g (its root's row).
         W = np.zeros((len(roots), n_star))
         for k in range(n_star):
@@ -1425,7 +1618,9 @@ class GalacticModel(Component):
             + pt.sum(J)
         )
 
-    def _kinematic_evidence_log_norm(self, stars, roots, vel_linked, los):
+    def _kinematic_evidence_log_norm(
+        self, stars, roots, vel_linked, los, dens_offsets=None
+    ):
         """The constant to ADD to a log evidence for the kinematic prior to
         be a normalized density (outputs/evidence's sign convention: the
         bridge integrates exp(model logp), and lnZ_norm = lnZ + this).
@@ -1445,6 +1640,12 @@ class GalacticModel(Component):
         velocity mixture is then normalized).  A member owes nothing: its
         term is exact in the model.  Velocity bounds are treated as
         infinite (pm +/- 1e5 mas/yr is > 400 km/s beyond 1 pc).
+
+        ``dens_offsets`` (present_day only): per branch, per star, the
+        object-density offset ``-log F_lum,b`` the model adds to a PDMF
+        root's branch density; the position normalizer integrates the same
+        offset densities, so the mixture over (position, mass) stays a
+        normalized density.
         """
         sun_xyz, los_hat = los
         bounds = _sampled_bounds(stars.distance)
@@ -1459,6 +1660,11 @@ class GalacticModel(Component):
         total = 0.0
         cache = {}
         for k in roots:
+            offs = (
+                None
+                if dens_offsets is None
+                else tuple(float(o[k]) for o in dens_offsets)
+            )
             sampled = stars.distance.element_is_sampled(k) or bool(
                 is_derived(k) if callable(is_derived) else False
             )
@@ -1481,15 +1687,17 @@ class GalacticModel(Component):
                             min(k, np.size(bounds[1]) - 1)
                         ]
                     )
-                    if (lo, hi) not in cache:
-                        cache[(lo, hi)] = log_position_norm(
-                            lo, hi, sun_xyz, los_hat
+                    if (lo, hi, offs) not in cache:
+                        cache[(lo, hi, offs)] = log_position_norm(
+                            lo, hi, sun_xyz, los_hat, offsets=offs
                         )
-                    c = cache[(lo, hi)]
+                    c = cache[(lo, hi, offs)]
             else:
                 d0 = float(stars.distance.element_start(k))
                 c = float(
-                    _log_total_number_density(d0, sun_xyz, los_hat)
+                    _log_total_number_density(
+                        d0, sun_xyz, los_hat, offsets=offs
+                    )
                 ) + 2.0 * np.log(max(d0, 1e-3))
             if k not in vel_linked:
                 c += 1.5 * _LOG_2PI - _LOG_KMS_PER_MS
