@@ -12,6 +12,8 @@ bilinearly in log Z.
     python scripts/make_koshimoto21_tables.py
 """
 
+import argparse
+
 import numpy as np
 
 from exozippy.components.galacticmodel import koshimoto21 as k21
@@ -21,6 +23,7 @@ Z_GRID = np.arange(0.0, 4000.0 + 1.0, 100.0)  # pc, |z|
 
 
 def main():
+    argparse.ArgumentParser(description=__doc__.split("\n\n")[0]).parse_args()
     log_norm = k21.shu_log_norm_grid(R_GRID, Z_GRID)
     np.savez_compressed(
         k21.SHU_NORM_FILE, r=R_GRID, z=Z_GRID, log_norm=log_norm
