@@ -1,0 +1,110 @@
+# MOA-2008-BLG-379, Bennett et al. 2024, AJ 168, 15 (arXiv:2311.00627).
+#
+# The initval lists are per-seed starts, one per degenerate solution of
+# the paper's Table "Best Fit Model Parameters with mu_rel,H and Magnitude
+# Constraints", in this order:
+#   seed 0: their (u_0 < 0, s > 1)  chi2 1290.01  (their best fit)
+#   seed 1: their (u_0 < 0, s < 1)  chi2 1291.94
+#   seed 2: their (u_0 > 0, s > 1)  chi2 1290.07
+#   seed 3: their (u_0 > 0, s < 1)  chi2 1292.24
+# The (u_0, alpha) mapping onto C15 is MEASURED, not assumed (README,
+# "Conventions"): the trajectory origin is the lens center of mass, and
+# their (u_0, alpha) is our (-u_0, alpha).
+#
+# Only initvals for the light-curve geometry: published uncertainties are
+# not mapped to sigma (that would double-count the data).
+
+# Event coordinates (Bennett+2024, the event section); the lens position is a
+# bookkeeping pin (no absolute astrometry measures it).
+star.Lens.ra:
+    initval: 269.706000           # 17:58:49.44
+    sigma: 0
+star.Lens.dec:
+    initval: -30.196931           # -30:11:48.95
+    sigma: 0
+star.Source.ra:
+    initval: 269.706000
+    sigma: 0
+star.Source.dec:
+    initval: -30.196931
+    sigma: 0
+
+# ---- trajectory (seeds) ---------------------------------------------
+# t_0: their HJD' (UTC) + 2450000, converted to BJD_TDB (+62.8 s).
+source.Source.t_0:
+    initval: [2454687.87493, 2454687.89603, 2454687.87463, 2454687.89593]
+source.Source.u_0:
+    initval: [0.0055301, 0.0047088, -0.0055000, -0.0047275]
+# alpha: their radians in degrees, sign kept (-1.13131, -1.13442,
+# 1.13111, 1.13417 rad).
+lens.Planet.alpha:
+    initval: [-64.819, -64.997, 64.808, 64.983]
+lens.Planet.s:
+    initval: [1.08670, 0.92651, 1.08847, 0.92706]
+lens.Planet.q:
+    initval: [5.3139e-03, 5.2320e-03, 5.2687e-03, 5.2398e-03]
+
+# ---- the physical chain ---------------------------------------------
+# t_E, pi_E and rho are DERIVED from the masses, distances, proper motions
+# and the source radius, so the published solution is delivered through
+# them (Table "Measurement of Planetary System Parameters"): M_host =
+# 0.434, D_L = 3.44 kpc, D_S = 7.77 kpc give theta_E = 0.758 mas,
+# |pi_E| = 0.214 and t_E = 54.9 d against their 0.754, 0.21 and 55.8.
+star.Lens.mass:
+    initval: 0.434
+# An M1 dwarf's radius and Teff at that mass (starts only; MIST decides).
+star.Lens.radius:
+    initval: 0.42
+star.Lens.teff:
+    initval: 3650.0
+star.Lens.distance:
+    initval: 3440.0
+star.Source.distance:
+    initval: 7770.0
+# Source proper motion: a start at Sgr A*'s reflex motion (-3.16, -5.59)
+# mas/yr (Reid & Brunthaler 2020), the bulge mean; the galactic model
+# constrains it.  Lens = source + their mu_rel,H = (E 5.430, N 1.926).
+star.Source.pm_ra:
+    initval: -3.16
+star.Source.pm_dec:
+    initval: -5.59
+star.Lens.pm_ra:
+    initval: 2.27
+star.Lens.pm_dec:
+    initval: -3.664
+# A bulge K dwarf: I_S,0 = 19.76 at D_S = 7.8 kpc is M_I ~ 5.3.  Starts
+# only; MIST and the SED decide.
+star.Source.mass:
+    initval: 0.80
+
+# ---- calibration and extinction -------------------------------------
+# The archive's OGLE I magnitudes are on the calibrated OGLE-III scale
+# (the light curve's source flux at the published solution is I_S = 21.61,
+# against Hubble's 21.557 +/- 0.149), so flux = 10**(-0.4 I): zeropoint 0.
+# sigma 0.05: the calibration of OGLE difference-imaging photometry.
+mulensinstrument.OGLE_I.zeropoint:
+    mu: 0.0
+    sigma: 0.05
+    citation: Suzuki:2014
+
+# Source extinction from the red clump: Bennett+2024 Sec. "Interstellar
+# Extinction", I_rcg = 16.225 +/- 0.050 against I_rcg,0 = 14.425, so
+# A_I = 1.800 +/- 0.050, which is A_V = 3.006 +/- 0.083 through this fit's
+# own extinction law (README: the law is R_V = 3.1, the bulge's is not).
+star.Source.av:
+    mu: 3.006
+    sigma: 0.083
+    initval: 3.006
+    citation: Bennett:2024
+
+# Lens extinction: Bennett+2024 Eq. for A_L, a dust layer of scale height
+# h_dust = 0.10 kpc (Drimmel & Spergel 2001) at b = -3.1129 deg
+# (sin|b| = 0.054304): A_L = A_S (1 - exp(-D_L sin|b| / h)) /
+# (1 - exp(-D_S sin|b| / h)), distances in pc.  A hard link.
+star.Lens.av:
+    initval: "star.Source.av * (1 - exp(-star.Lens.distance * 0.054304 / 100.0)) / (1 - exp(-star.Source.distance * 0.054304 / 100.0))"
+    sigma: 0
+
+# A planet radius means nothing to a lens.
+planet.Planet.radius:
+    sigma: 0
