@@ -354,6 +354,14 @@ def test_ob161003_event_potentials_are_scalar_and_single():
 # re-normalization in the presplit reconciliation below.
 _ERR_SCALE_PRESPLIT_BOUNDS = (1e-6, 1e6)
 
+# The four soft-bound potentials the stage-0 recording carries on the derived
+# f_source/f_blend and the current model does not (review 1.6.18).
+_F_BOUND_TERMS = {
+    f"POT:{side}_bound.mulensinstrument.{name}"
+    for side in ("low", "up")
+    for name in ("f_source", "f_blend")
+}
+
 
 def _err_scale_renormalization(system):
     """Sum over err_scale elements of log(q(1-q)) at the CURRENT bounds
@@ -526,7 +534,15 @@ def test_ob161003_collapse_reconciles_against_the_presplit_recording():
     )
 
     assert not appeared, f"terms appeared: {sorted(appeared)}"
-    assert not vanished, f"terms vanished: {sorted(vanished)}"
+    # The f_source/f_blend soft bounds were REMOVED after this recording
+    # (review 1.6.18: a derived-bound barrier in the file's arbitrary flux
+    # units; the unit-free limits are q_source's), so exactly their four
+    # potentials vanish -- no more, no fewer.  The recording keeps them,
+    # untouched, as the rule for that file says.
+    assert set(vanished) == _F_BOUND_TERMS, (
+        f"terms vanished: {sorted(vanished)}; expected exactly the removed "
+        f"f_source/f_blend bounds {sorted(_F_BOUND_TERMS)}"
+    )
 
     # ONE PRIOR HAS MOVED SINCE THE STAGE-0 RECORDING, AND IT RECONCILES
     # ANALYTICALLY TOO (review 8.2.2): mulensinstrument.err_scale's bounds

@@ -147,6 +147,20 @@ term, by the tests at the bottom of test_mulens_acceptance_b.py.
 Most of the gate is marked slow: each case builds a full System and compiles
 PyTensor graphs.  Two fast, deterministic PSPL examples run unmarked so the
 instrument itself is exercised on every suite run.
+
+All fourteen fixtures had their f_source/f_blend potentials removed when
+those bounds were (review 1.6.18; mulensing/mulensing.md, "f_source and
+f_blend carry NO bounds").  The edit was surgical -- the four terms
+`low_bound`/`up_bound.mulensinstrument.f_source`/`f_blend` deleted,
+`n_terms` and `total_logp` adjusted, every stored start and every other
+recorded value untouched -- and the replay holds the result to the strict
+tier, which is the proof that nothing else moved.  The removed values were
+~1e-304 except `low_bound...f_source`, which was log(1/2) per
+magnitude-format light curve: ob09020 -6.2383, ob07224 and ob161003
+-4.8520, OGLE_0383LD -4.1589, the three KMT-2019-BLG-1806 configs -2.0794,
+ob08092 and ob170114 -0.6931, the three DC2018_128 configs -0.1009, and
+ob140939/ob140939_today ~1e-304 (flux files).  The start logp rises by
+exactly that term on each.
 """
 
 import glob
