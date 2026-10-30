@@ -42,18 +42,11 @@ _OLD_LITERALS = {
             ),
         },
     ),
-    "mist_eep_grids": (
-        21893308,
-        {
-            "afe_p0_vvcrit0.0.grid.parquet": (
-                127992558,
-                "30545e0087ddd7dd79e87f294f4d8d58",
-            ),
-        },
-    ),
     # nextgen_bc_tables was re-versioned on 2026-10-20 (logg 5.5 plane,
-    # record 23522276), so its migrated literals no longer describe it;
-    # the live-record test covers it like every other record.
+    # record 23522276), and mist_eep_grids on 2026-10-30 (the present-day
+    # star_mass column, record 23802906), so their migrated literals no
+    # longer describe them; the live-record test covers them like every
+    # other record.
 }
 
 
@@ -86,7 +79,10 @@ def test_the_consumers_read_their_pins_from_the_registry():
     assert make_bc._MODEL_DATA == {
         "NextGen": zenodo_assets.assets("nextgen_spectra")
     }
-    assert eep_grid._EEP_GRID_ASSETS == zenodo_assets.assets("mist_eep_grids")
+    # the grids only: the record's MANIFEST.txt is not fetched
+    assert eep_grid._EEP_GRID_ASSETS == zenodo_assets.assets(
+        "mist_eep_grids", ["afe_p0_vvcrit0.0.grid.parquet"]
+    )
 
     bc = zenodo_assets.record("nextgen_bc_tables")
     assert bc_tables.ZENODO_RECORD == bc.record_id
