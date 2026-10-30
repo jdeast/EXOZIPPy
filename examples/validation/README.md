@@ -84,3 +84,64 @@ step sizes for the transit realization whose `planet.b` mixed at ESS ~8.
 Summary statistics alone cannot distinguish a disconnected posterior from a
 badly conditioned ridge from geometry the sampler cannot follow, and those
 want different fixes.
+
+## prior_predictive_tE.py -- prior-predictive t_E check (review 7.16.3)
+
+Samples the microlensing prior ALONE (lens + source + `galacticmodel`, no
+light curve) for a bulge sight line and stores the quantiles of t_E, D_L,
+D_S, mu_rel and M_L, for comparison with survey-measured,
+efficiency-corrected t_E distributions and with genulens.  A frame, sign,
+kinematics, IMF or density error shifts t_E, so this checks the whole prior
+end to end.  The script's docstring says exactly how the existing model
+event-rate weights the draws (`kinematic_prior` + `imf_prior` +
+`event_rate_prior` + `source_behind_lens`; nothing is added here) and the
+two known model differences from a survey (no source luminosity function,
+no remnant lenses).
+
+Sight lines: Baade's window (1.0, -3.9) -> Mroz 2019 field BLG513; the
+OGLE-2014-BLG-0939 field (6.648, +3.611) -> BLG630, which contains that
+event; and BLG505 (b = -2.39, Mroz 2017) and BLG521 (b = -5.11, Mroz 2019),
+which with BLG513 make a b sequence at l ~ 1.1.
+
+```bash
+# EXOZIPPy prior (Slurm only; maxtime is a graceful wall-clock stop)
+PYTHONPATH=<repo>/src python prior_predictive_tE.py sample \
+    --sightline baade --out-dir <scratch> --maxtime 3000
+# survey references (numpy only), from a download of
+# https://ftp.astrouw.edu.pl/ogle/ogle4/microlensing_maps/
+python prior_predictive_tE.py mroz --mroz2019-dir <download>
+# genulens (built from github.com/nkoshimoto/genulens)
+python prior_predictive_tE.py genulens --genulens <path>/genulens \
+    --out-dir <scratch> --nsimu 1e6 --commit <sha>
+python prior_predictive_tE.py compare --exozippy-dir <scratch>
+```
+
+`prior_predictive_tE_refs/` holds the stored references:
+
+- `mroz2017_edt4_counts.dat`, `mroz2017_edt5_eff.dat` -- Mroz et al. 2017
+  (Nature 548, 183; arXiv:1707.07634) Extended Data Tables 4 and 5:
+  events and detection efficiency per high-cadence field (BLG500, 501,
+  504, 505, 506, 511, 512, 534, 611) in 25 bins of log t_E, 2010-2015.
+  The paper's Figs. 1/2 are the all-field observed/corrected histograms;
+  there is no per-event list, so per-field distributions are binned.
+- `mroz2019_table3_<field>.dat` -- Mroz et al. 2019 (ApJS 244, 29) Table 3
+  rows (best-fit t_E and the inverse-efficiency weight) for the reference
+  fields.  Reconstructing each field's efficiency-corrected mean t_E from
+  Table 3 reproduces the paper's Table 7 `t_E_mean` to 0.001 +/- 0.011
+  of its quoted error over the 64 fields with >= 30 events (using
+  `tE_best`; `tE_med` does not), so the weighting is the paper's.
+- `mroz_tE_reference.json` -- per-field efficiency-corrected t_E
+  quantiles and means for every field of both papers, with Table 7's mean.
+- `genulens_reference.json`, `genulens_<sightline>_<variant>_resampled.dat`
+  -- genulens wtj-weighted quantiles and 2000 weight-resampled draws per
+  sight line, for two configurations: `matched` (gammaDs 2, REMNANT 0: as
+  close to the EXOZIPPy prior as genulens's switches allow) and `survey`
+  (default gammaDs 0.5 ~ I_s < 21 sources, REMNANT 1).
+
+EXOZIPPy's own draws are NOT committed: they depend on the code under
+test.  `compare` writes the Part B table (t_E q10/q50/q90 with the
+reference's bootstrap errors, KS against Mroz, D_L / D_S / mu_rel / M_L
+against genulens, and the mass-swap decomposition) to `comparison.json`
+next to the draws.  `--lens-logmass-upper` is the localization switch for
+the lens mass function.  The slow test `tests/test_prior_predictive_tE.py`
+runs the Baade's-window comparison end to end and states its tolerance.
