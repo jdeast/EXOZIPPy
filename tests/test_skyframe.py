@@ -16,10 +16,14 @@ Two layers:
 """
 
 import numpy as np
+import pymc as pm
 import pytensor
 import pytensor.tensor as pt
 import pytest
 
+from conftest import _DummySystem
+from exozippy.components.orbit.orbit import Orbit
+from exozippy.config import ConfigManager
 from exozippy.skyframe import (
     observer_sky_offset,
     parallax_factors,
@@ -370,6 +374,204 @@ def test_primary_transit_puts_the_planet_in_front():
     assert z_s > 0.0, "star must be the farther body at primary transit"
     r = (1 - e**2) / (1 + e * np.sin(om))  # calc_b's r at conjunction
     np.testing.assert_allclose(np.hypot(n_s, e_s), r * abs(np.cos(inc)))
+
+
+# --------------------------------------------------------------------------
+# the same claims on the PRODUCTION path
+#
+# The two tests above evaluate a transcription of orbit.py's closed form, so
+# an edit to Orbit.state_vectors / get_radial_velocity / calc_tp would leave
+# them green.  These compile the real Orbit component and hold its output to
+# the textbook Euler construction (_euler_orbit), with the periastron time
+# derived here from the primary-transit anomaly f = pi/2 - omega_* -- not
+# read from the model.
+# --------------------------------------------------------------------------
+
+_TC_PROD = 2450000.0
+
+# (P, e, inc, omega_*, bigomega): _ORB, an eccentric cos i < 0 case, and a
+# near-circular one.
+_PROD_CASES = [
+    (_ORB["P"], _ORB["e"], _ORB["inc"], _ORB["om"], _ORB["bigom"]),
+    (11.3, 0.6, np.radians(120.0), np.radians(-100.0), np.radians(300.0)),
+    (11.3, 0.02, np.radians(89.0), np.radians(200.0), np.radians(10.0)),
+]
+_PROD_IDS = ["orb", "e0.6_cosi_neg", "e0.02"]
+
+
+@pytest.fixture(scope="module")
+def production_orbit_functions():
+    """Compile the real Orbit's state_vectors and get_radial_velocity.
+
+    Given a standalone Orbit with bigomega in its manifest (an astrometry
+    consumer in the topology), the functions take the orbit's free inputs
+    plus (t, a_scale) or (t, K).
+    """
+    system = _DummySystem()
+    system.config = {"astrometryinstrument": []}
+    user_params = {
+        "orbit.0.logP": {"initval": np.log10(_ORB["P"])},
+        "orbit.0.tc": {"initval": _TC_PROD},
+        "orbit.0.secosw": {"initval": 0.1},
+        "orbit.0.sesinw": {"initval": 0.1},
+    }
+    with pytensor.config.change_flags(mode="FAST_COMPILE"):
+        orbit = Orbit([{"name": "test"}], ConfigManager(user_params))
+        with pm.Model():
+            orbit.register_parameters(system=system)
+            for name in orbit.manifest:
+                orbit.add_parameter(
+                    model=pm.modelcontext(None), param_name=name, system=system
+                )
+            t_var = pt.vector("t")
+            a_var = pt.vector("a_scale")
+            k_var = pt.vector("K")
+            omap = np.array([0])
+            star = orbit.state_vectors(t_var, a_var, omap)
+            rel = orbit.state_vectors(t_var, a_var, omap, relative=True)
+            rv = orbit.get_radial_velocity(t_var, k_var, omap)
+            inputs = [
+                orbit.logP.value,
+                orbit.tc.value,
+                orbit.secosw.value,
+                orbit.sesinw.value,
+                orbit.cosi.value,
+                orbit.xbigomega.value,
+                orbit.ybigomega.value,
+            ]
+            state_fn = pytensor.function(
+                inputs + [t_var, a_var],
+                list(star) + list(rel),
+                on_unused_input="ignore",
+            )
+            rv_fn = pytensor.function(
+                inputs + [t_var, k_var], rv, on_unused_input="ignore"
+            )
+    return state_fn, rv_fn
+
+
+def _production_inputs(P, e, inc, om, bigom):
+    return [
+        np.array([np.log10(P)]),
+        np.array([_TC_PROD]),
+        np.array([np.sqrt(e) * np.cos(om)]),
+        np.array([np.sqrt(e) * np.sin(om)]),
+        np.array([np.cos(inc)]),
+        np.array([np.cos(bigom)]),
+        np.array([np.sin(bigom)]),
+    ]
+
+
+def _tp_from_primary_transit(P, e, om):
+    """Periastron time, relative to tc, from f = pi/2 - omega_* at tc."""
+    f_tr = np.pi / 2 - om
+    ecc_anom = 2 * np.arctan2(
+        np.sqrt(1 - e) * np.sin(f_tr / 2), np.sqrt(1 + e) * np.cos(f_tr / 2)
+    )
+    return -(ecc_anom - e * np.sin(ecc_anom)) * P / (2 * np.pi)
+
+
+def _euler_velocity(t_rel, h=1e-3, **orb):
+    """d(N, E, Z)/dt of _euler_orbit by the 5-point central stencil
+    (truncation ~h^4, far below the asserted tolerance)."""
+
+    def at(dt):
+        return _euler_orbit(t_rel + dt, **orb)[0]
+
+    return (-at(2 * h) + 8 * at(h) - 8 * at(-h) + at(-2 * h)) / (12 * h)
+
+
+@pytest.mark.parametrize("case", _PROD_CASES, ids=_PROD_IDS)
+def test_production_state_and_rv_match_the_euler_construction(
+    case, production_orbit_functions
+):
+    """
+    Given the real Orbit component compiled from (logP, tc, sqrt(e) pair,
+      cos i, bigomega), and the textbook Euler-angle orbit with its
+      periastron placed independently from f = pi/2 - omega_* at tc,
+    When Orbit.state_vectors and Orbit.get_radial_velocity are evaluated
+      over a full period,
+    Then the production (N, E, Z) equal the construction's, the production
+      (VN, VE, VZ) equal its numerical time derivative, and the RV with
+      K = n a sin i / sqrt(1 - e^2) equals dZ/dt -- positive = receding,
+      on the production path, not a transcription of it.
+
+    Tolerance 1e-9 of a = 1 (and of the velocity scale n a): the floor is
+    the float64 resolution of t ~ 2.45e6 d (~5e-10 d of phase).  A sign, an
+    omega_* <-> omega_p swap or a tc -> tp branch off by anything but a whole
+    period is O(1).
+    """
+    # Arrange
+    P, e, inc, om, bigom = case
+    state_fn, rv_fn = production_orbit_functions
+    t_rel = np.linspace(0.0, P, 401)  # days after tc
+    t = _TC_PROD + t_rel
+    orb = dict(
+        P=P, e=e, inc=inc, om=om, bigom=bigom,
+        tp=_tp_from_primary_transit(P, e, om),
+    )  # fmt: skip
+    (n_ref, e_ref, z_ref), _ = _euler_orbit(t_rel, **orb)
+    vn_ref, ve_ref, vz_ref = _euler_velocity(t_rel, **orb)
+    vscale = 2 * np.pi / P
+    k_unit = vscale * np.sin(inc) / np.sqrt(1 - e**2)
+
+    # Act
+    vals = _production_inputs(P, e, inc, om, bigom)
+    X, Y, Z, VX, VY, VZ = state_fn(*vals, t, np.array([1.0]))[:6]
+    rv = np.asarray(rv_fn(*vals, t, np.array([k_unit])))
+
+    # Assert
+    tol = 1e-9
+    for got, want, scale in (
+        (X, n_ref, 1.0),
+        (Y, e_ref, 1.0),
+        (Z, z_ref, 1.0),
+        (VX, vn_ref, vscale),
+        (VY, ve_ref, vscale),
+        (VZ, vz_ref, vscale),
+        (rv, vz_ref, vscale),
+    ):
+        np.testing.assert_allclose(got[:, 0], want, rtol=0, atol=tol * scale)
+
+
+@pytest.mark.parametrize("case", _PROD_CASES, ids=_PROD_IDS)
+def test_production_primary_transit_puts_the_planet_in_front(
+    case, production_orbit_functions
+):
+    """
+    Given the real Orbit component evaluated at its own tc (the
+      primary-transit time it was given),
+    When state_vectors is evaluated there for the primary (omega_*) and for
+      the companion relative to it (omega_* + pi),
+    Then the star is the FARTHER body, at exactly Z = a r sin i with
+      r = (1 - e^2)/(1 + e sin omega_*); the companion is in front at
+      Z_rel = -a r sin i; and the sky separation is a r |cos i| -- calc_b's
+      closed form with ar = a.
+
+    Exact to the float64 phase floor (1e-9 of a).  A Z-axis flip, or
+    calc_tp's branch landing tc on the secondary eclipse, is O(1).
+    """
+    # Arrange
+    P, e, inc, om, bigom = case
+    state_fn, _ = production_orbit_functions
+    r = (1 - e**2) / (1 + e * np.sin(om))
+
+    # Act
+    out = state_fn(
+        *_production_inputs(P, e, inc, om, bigom),
+        np.array([_TC_PROD]),
+        np.array([1.0]),
+    )
+    x_s, y_s, z_s = (float(v[0, 0]) for v in out[:3])
+    x_r, y_r, z_r = (float(v[0, 0]) for v in out[6:9])
+
+    # Assert
+    assert z_s > 0.0, "the star must be the farther body at primary transit"
+    np.testing.assert_allclose(z_s, r * np.sin(inc), rtol=0, atol=1e-9)
+    np.testing.assert_allclose(z_r, -r * np.sin(inc), rtol=0, atol=1e-9)
+    sep = r * abs(np.cos(inc))
+    np.testing.assert_allclose(np.hypot(x_s, y_s), sep, rtol=0, atol=1e-9)
+    np.testing.assert_allclose(np.hypot(x_r, y_r), sep, rtol=0, atol=1e-9)
 
 
 @pytest.mark.slow

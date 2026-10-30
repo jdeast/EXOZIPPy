@@ -65,25 +65,86 @@ def _planet_lens_system(tmp_path):
     return system
 
 
-def test_a_planet_companion_moves_on_a_linear_lens_orbit(tmp_path):
-    system = _planet_lens_system(tmp_path)
+@pytest.fixture(scope="module")
+def planet_lens(tmp_path_factory):
+    """The planetary lens on a linear orbit, prepared and built once."""
+    system = _planet_lens_system(tmp_path_factory.mktemp("planet_lens"))
+    model = system.build_model()
+    return system, model
+
+
+def _geometry_at_start(system, model, times):
+    """(S, ALPHA_DEG) of every companion at the model's raw start."""
+    S, A = system.mulensevent._companion_geometry_series(times, system)
+    start = system.get_raw_start(model)
+    fn = pytensor.function(
+        model.value_vars,
+        model.replace_rvs_by_values([S, A]),
+        on_unused_input="ignore",
+    )
+    return fn(*[start[v.name] for v in model.value_vars])
+
+
+def test_a_planet_companion_moves_on_a_linear_lens_orbit(planet_lens):
+    system, model = planet_lens
     assert system.lens.companion_motion == ["linear"]
     # no Keplerian geometry: nothing to derive it from
     assert not system.planet.keplerian_geometry(system)
     for name in ("p", "a", "ar", "K", "teq", "t14"):
         assert name not in system.planet.manifest, name
-    model = system.build_model()
     times = np.linspace(_T0_PAR - 30.0, _T0_PAR + 30.0, 21)
-    S, _ = system.mulensevent._companion_geometry_series(times, system)
-    start = system.get_raw_start(model)
-    fn = pytensor.function(
-        model.value_vars,
-        model.replace_rvs_by_values([S]),
-        on_unused_input="ignore",
-    )
-    (S,) = fn(*[start[v.name] for v in model.value_vars])
+    S, _ = _geometry_at_start(system, model, times)
     assert np.ptp(S[0]) > 1e-4
     assert np.isfinite(model.compile_logp()(model.initial_point()))
+
+
+def test_the_planet_companion_track_matches_mulensmodel_linear_motion(
+    planet_lens,
+):
+    """
+    Given the planetary lens companion on a linear orbit, started at the
+      user's s = 1.1, alpha = 120 deg, ds_dt = 0.1 /yr and dalpha_dt =
+      30 deg/yr with t0_par = _T0_PAR,
+    When the built model's per-epoch companion geometry is evaluated at the
+      start over +/- 400 d (more than a year either side of t0_par),
+    Then s(t) and alpha(t) equal MulensModel's ModelParameters.get_s /
+      get_alpha for the SAME user numbers with t_0_kep = t0_par, to float
+      precision.
+
+    The reference is MulensModel's linear lens-motion branch (C18/C24: the
+    rates map onto MulensModel's ds_dt / dalpha_dt by identity).  The user
+    inputs are fed to MulensModel directly -- nothing is read back from the
+    model -- so a rate unit slip (per day vs per year, rad vs deg), a
+    flipped dalpha_dt sign, an anchor other than t0_par, or a start that
+    does not reproduce the user's s/alpha all fail here.  The stellar
+    companion path is pinned at the Op level in
+    test_lens_orbital_motion.py; this is the planet-companion path through
+    the System (lens.b on orbit L).
+    """
+    import MulensModel
+
+    system, model = planet_lens
+    times = np.linspace(_T0_PAR - 400.0, _T0_PAR + 400.0, 41)
+
+    S, A = _geometry_at_start(system, model, times)
+
+    mm = MulensModel.ModelParameters(
+        {
+            "t_0": _T0_PAR,
+            "u_0": 0.06,
+            "t_E": 60.0,
+            "s": 1.1,
+            "q": 3e-3,
+            "alpha": 120.0,
+            "ds_dt": 0.1,
+            "dalpha_dt": 30.0,
+            "t_0_kep": _T0_PAR,
+        }
+    )
+    np.testing.assert_allclose(S[0], mm.get_s(times), rtol=0, atol=1e-12)
+    np.testing.assert_allclose(A[0], mm.get_alpha(times), rtol=0, atol=1e-9)
+    # Non-vacuity: over the span the rates move both by a lot.
+    assert np.ptp(S[0]) > 0.2 and np.ptp(A[0]) > 60.0
 
 
 # ---------------------------------------------------------------------------

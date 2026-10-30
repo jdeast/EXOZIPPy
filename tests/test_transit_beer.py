@@ -25,6 +25,11 @@ import numpy as np
 import pytensor
 import pytensor.tensor as pt
 import pytest
+from test_transit_thermal import (
+    _model_values,
+    _phase_curve_times,
+    _ref_exofast_tran,
+)
 
 from conftest import _DummyConfigManager
 from exozippy.components.band.band import Band
@@ -560,7 +565,19 @@ def _beer_config(lc_file):
                 "fitellip": True,
             }
         ],
-        "transit": [{"name": "inst0", "file": lc_file, "band": "TESS"}],
+        # Light-travel time off: with no file retarding the orbit,
+        # tc_target == tc exactly, so the closed-form reference in
+        # test_beer_light_curve_matches_the_closed_form_exofast_tran_model
+        # phases the geometry and every phase term from tc (the LTT role
+        # factors per term are pinned in tests/test_transit_ltt.py).
+        "transit": [
+            {
+                "name": "inst0",
+                "file": lc_file,
+                "band": "TESS",
+                "light_travel_time": False,
+            }
+        ],
     }
 
 
@@ -656,6 +673,73 @@ def test_ellipsoidal_survives_secondary_eclipse_thermal_and_reflect_dont(
     # And thermal/reflect's own contribution is negligible there (the
     # eclipse is close to total for this system's geometry):
     assert mu_far - mu_secondary > 0.5 * ((_THERMAL_PPM + _REFLECT_PPM) * 1e-6)
+
+
+def _flux_at(system, point, times):
+    """The plotting light curve at arbitrary times (same evaluator as
+    tests/test_transit_thermal.py's helper)."""
+    transit = system.transit
+    param_values = transit._point_to_plot_params(point, system)
+    full, _ = transit._lc_at_times(
+        param_values, 0, np.asarray(times, dtype=float)
+    )
+    return full
+
+
+def test_beer_light_curve_matches_the_closed_form_exofast_tran_model(
+    beer_system,
+):
+    """
+    Given thermal (5000 ppm), reflection (2000 ppm) and ellipsoidal
+    (300 ppm) all on one band, on a circular orbit with light-travel time
+    off,
+    When the likelihood mu (at the data) and the plotting light curve (on a
+    dense grid through both conjunctions and their contact points) are
+    evaluated,
+    Then both equal exofast_tran.pro's model in its own order -- transit
+    flux, + thermal planetvisible, - reflect/2 (cos(phase) - 1)
+    planetvisible, then times (1 - ellipsoidal cos(2 phase)), then times
+    the baseline -- with the transit flux and planetvisible integrated
+    independently of exoplanet-core, to 1e-10.
+
+    The margin test above checks signs and a > 0.5x drop only: a reflect
+    term on the wrong phase origin, ellipsoidal ADDED instead of
+    multiplied (off by 300 ppm x the transit depth, ~1e-6, in transit),
+    ellipsoidal gated by planetvisible, or thermal/reflect left un-gated
+    during a PARTIAL eclipse all pass it.
+    """
+    # Arrange
+    system, model, point, _centers = beer_system
+    v = _model_values(system, model, point)
+    assert v["ecc"] == 0.0  # the closed form is the circular one
+    times = _phase_curve_times(v["tc"], v["period"], v["ar"], v["p"])
+    ref_kwargs = {
+        k: v[k]
+        for k in ("tc", "period", "ar", "cosi", "p", "u1", "u2", "baseline")
+    }
+    amplitudes = {
+        "thermal": _THERMAL_PPM,
+        "reflect": _REFLECT_PPM,
+        "ellipsoidal": _ELLIP_PPM,
+    }
+
+    # Act
+    mu = _likelihood_mu(system, model, point)
+    curve = _flux_at(system, point, times)
+
+    # Assert
+    np.testing.assert_allclose(
+        mu,
+        _ref_exofast_tran(system.transit.time, **amplitudes, **ref_kwargs),
+        rtol=0,
+        atol=1e-10,
+    )
+    np.testing.assert_allclose(
+        curve,
+        _ref_exofast_tran(times, **amplitudes, **ref_kwargs),
+        rtol=0,
+        atol=1e-10,
+    )
 
 
 def test_reflect_ellip_beam_are_exactly_zero_by_default(tmp_path_factory):
