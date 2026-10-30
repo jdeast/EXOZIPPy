@@ -864,7 +864,16 @@ def _de_engine(
         pool = None
         if n_proc > 1:
             _common.set_worker_globals(logp_fn)
-            pool = mp.Pool(processes=n_proc)
+            # FORK, explicitly -- the same context _common.create_pool and
+            # recycle_pool use.  The workers inherit the compiled logp
+            # through set_worker_globals; under the platform default (spawn
+            # on macOS, forkserver from Python 3.14 on Linux) they never
+            # see it, every evaluation raises "'NoneType' object is not
+            # callable" and is scored -inf, and the polish silently does
+            # nothing (found by PR #536's CI: "seed 0 lp -inf -> nan").
+            pool = mp.get_context("fork").Pool(
+                processes=n_proc, initializer=_common._worker_init
+            )
             logger.info(
                 f"Seed polish: DE engine on {n_proc} worker process(es), "
                 f"proposals pooled across all {n_seeds} seed(s), "

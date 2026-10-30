@@ -416,12 +416,20 @@ def test_a_polish_call_past_eval_timeout_is_written_off_and_the_seed_stops(
     monkeypatch, caplog
 ):
     """
-    Given the DE polish on 2 workers, a 1 s polish budget, and an objective
-      whose 20th call sleeps 120 s (the OGLE-2013-BLG-0341 straggler),
+    Given the DE polish on 2 workers, a polish budget that runs out at the
+      end of the first sweep (set from the monitor, not a clock), and an
+      objective whose 10th call -- the second of the first sweep, after the
+      8-member opening batch -- sleeps 120 s (the OGLE-2013-BLG-0341
+      straggler),
     When polish_raw_starts runs with eval_timeout=3 s,
-    Then it returns within a bound (not after 120 s), the hung call is
-      written off with an ERROR, the seed is "stopped on timeout", and the
-      drain after the seed stopped logged "draining N in-flight".
+    Then the other 7 slots complete sweep 1, the driver stops the seed "on
+      timeout" with the hung call still in flight -- so the drain is
+      guaranteed, not a race -- the drain logs "draining N in-flight", the
+      hung call is written off with an ERROR, and it all returns within a
+      bound (not after 120 s).  The polish really ran: the dlp is finite.
+      (On macOS / Python 3.14 the pool used to start by spawn / forkserver,
+      its workers never saw the logp, every call scored -inf and the seed
+      came back "lp -inf -> nan" -- the dlp check pins that.)
     """
     # ARRANGE
     global _CALLS
@@ -435,11 +443,17 @@ def test_a_polish_call_past_eval_timeout_is_written_off_and_the_seed_stops(
             kw["progress_interval_s"] = 1e-9  # every beat writes a line
             super().__init__(*a, **kw)
 
+        def step(self, s, best_lp):
+            # The budget runs out exactly at the end of sweep 1: no clock
+            # race decides whether the hung call is still in flight.
+            self.deadline = time.monotonic() - 1.0
+            return super().step(s, best_lp)
+
     monkeypatch.setattr(polish_mod, "PolishMonitor", _Chatty)
     with pm.Model() as model:
         x = pm.Flat("x")
         pm.Potential("like", _NoGradSquare()(x))
-    logp = _HangOnce(model.compile_logp(), k=20)
+    logp = _HangOnce(model.compile_logp(), k=10)
     stops = []
 
     # ACT
@@ -452,7 +466,7 @@ def test_a_polish_call_past_eval_timeout_is_written_off_and_the_seed_stops(
             logp_fn=logp,
             cores=2,
             eval_timeout=3.0,
-            deadline=time.monotonic() + 1.0,
+            deadline=time.monotonic() + 3600.0,
             budget_s=1.0,
             stops_out=stops,
         )
@@ -464,7 +478,9 @@ def test_a_polish_call_past_eval_timeout_is_written_off_and_the_seed_stops(
     assert stops[0][0] == STOP_TIMEOUT
     assert "exceeded eval_timeout=3s" in caplog.text
     assert "draining" in caplog.text and "in-flight" in caplog.text
-    assert np.isfinite(polished[0]["x"]).all() and dlps[0] >= 0.0
+    assert np.isfinite(polished[0]["x"]).all()
+    assert np.isfinite(dlps[0]) and dlps[0] >= 0.0
+    assert "raised" not in caplog.text  # workers saw the compiled logp
 
 
 def test_run_forwards_eval_timeout_to_every_untimed_stage():
