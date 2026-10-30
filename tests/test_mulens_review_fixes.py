@@ -929,14 +929,31 @@ def _geometry(values, n_src=1, n_companions=0):
         paths += ["lens.1.s", "lens.1.log_s", "lens.1.q", "lens.1.alpha"]
     unknown = set(values) - set(paths)
     assert not unknown, f"not a probed path: {unknown}"
-    probed = {
-        p: (
-            ProbedStart(p, values[p], values[p], 100, "user")
-            if p in values
-            else ProbedStart(p, None, None, None, "not derivable")
-        )
-        for p in paths
+    # Every microlensing model has a pi_E start, and the bootstrap reads it
+    # informed or not (_BootstrapGeometry.START_PATHS): a defaults-rank zero
+    # unless the test gives one.
+    values = {
+        "mulensevent.0.pi_E_N": None,
+        "mulensevent.0.pi_E_E": None,
+        **values,
     }
+    probed = {
+        p: ProbedStart(p, 0.0, 0.0, 20, "default")
+        for p in ("mulensevent.0.pi_E_N", "mulensevent.0.pi_E_E")
+        if values[p] is None
+    }
+    values = {p: v for p, v in values.items() if v is not None}
+    probed.update(
+        {
+            p: (
+                ProbedStart(p, values[p], values[p], 100, "user")
+                if p in values
+                else ProbedStart(p, None, None, None, "not derivable")
+            )
+            for p in paths
+            if p not in probed
+        }
+    )
     return _BootstrapGeometry(probed, n_companions=n_companions)
 
 

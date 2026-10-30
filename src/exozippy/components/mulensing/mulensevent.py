@@ -951,6 +951,59 @@ class MulensEvent(Component):
                     "deps": ["mlens_total", "pi_rel"],
                 }
 
+        # The event's kinematic start hints (distances, masses, the
+        # galactic-model proper motions).  MulensInstrument already pushed
+        # them at stage 1, before its flux bootstrap probed the geometry;
+        # re-pushed here (same numbers) so a fit with no microlensing data
+        # has them too.  See register_kinematic_hints.
+        self.register_kinematic_hints(system)
+        l_type, l_idx = self._primary_lens()
+
+        # Tighten lens logmass scale when satellite parallax is available
+        if hasattr(system, "mulensinstrument") and hasattr(
+            system.mulensinstrument, "inst_ref_pos"
+        ):
+            ref_pos = system.mulensinstrument.inst_ref_pos
+            max_sep = max(
+                (
+                    float(np.linalg.norm(ref_pos[ii] - ref_pos[jj]))
+                    for ii in range(len(ref_pos))
+                    for jj in range(ii + 1, len(ref_pos))
+                ),
+                default=0.0,
+            )
+            if max_sep > 0.5:
+                scale = 0.0005
+            elif max_sep > 1e-5:
+                scale = 0.00075
+            else:
+                scale = None
+            if scale is not None:
+                self.config_manager.add_scale_hint(
+                    f"star.{l_idx}.logmass", scale
+                )
+
+    def register_kinematic_hints(self, system):
+        """Push the event's kinematic START hints: the body stars'
+        distances and masses and the galactic-model proper motions.
+
+        These, with the frame constants (register_frame_constants), are
+        what the relaxation engine solves pi_E, theta_E, pi_rel and mu_rel
+        from when no entry states them.  The flux bootstrap reads that
+        geometry at stage 1 (MulensInstrument._probe_bootstrap_geometry),
+        so MulensInstrument.load_data calls this BEFORE its probe; until
+        2026-10 the hints arrived only at stage 3, the probe solved the
+        event on the defaults.yaml 10 pc distances and unit masses instead
+        (DC2018-069: theta_E 35 mas, pi_rel 154 mas, a lens at 4.3 pc), and
+        the geocentric pi_E relation (review 8.6.23, #455) turned that into
+        pi_E = (-1.46, -4.10) against a model start of ~(0.03, 0.02) --
+        150x the parallax in the bootstrap's point-lens columns.  Every
+        number here is a constant or comes from the line of sight and the
+        user's own entries, so stage 1 already knows it; register_parameters
+        calls this again (identical values) for a fit without microlensing
+        data.  Scale hints that need the observer positions (the satellite
+        logmass scale) stay at stage 3.
+        """
         # Expected proper motions from the galactic model, for the seeds
         # below.  None when the line of sight is not known yet, in which
         # case the pm hints are simply skipped.
@@ -1005,30 +1058,6 @@ class MulensEvent(Component):
                 )
                 self.config_manager.add_scale_hint(
                     f"star.{l2_idx}.distance", 5.0
-                )
-
-        # Tighten lens logmass scale when satellite parallax is available
-        if hasattr(system, "mulensinstrument") and hasattr(
-            system.mulensinstrument, "inst_ref_pos"
-        ):
-            ref_pos = system.mulensinstrument.inst_ref_pos
-            max_sep = max(
-                (
-                    float(np.linalg.norm(ref_pos[ii] - ref_pos[jj]))
-                    for ii in range(len(ref_pos))
-                    for jj in range(ii + 1, len(ref_pos))
-                ),
-                default=0.0,
-            )
-            if max_sep > 0.5:
-                scale = 0.0005
-            elif max_sep > 1e-5:
-                scale = 0.00075
-            else:
-                scale = None
-            if scale is not None:
-                self.config_manager.add_scale_hint(
-                    f"star.{l_idx}.logmass", scale
                 )
 
     def _galactic_pm_expectations(self, system):
