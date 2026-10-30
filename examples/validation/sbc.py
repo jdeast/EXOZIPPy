@@ -148,7 +148,9 @@ def earth_skowron_deviations(t, t0_par):
     from astropy.time import Time
 
     def posvel(tt):
-        p, v = get_body_barycentric_posvel("earth", Time(tt, format="jd", scale="tdb"))
+        p, v = get_body_barycentric_posvel(
+            "earth", Time(tt, format="jd", scale="tdb")
+        )
         return (
             np.atleast_2d(p.xyz.to("au").value.T),
             np.atleast_2d(v.xyz.to("au/d").value.T),
@@ -167,7 +169,11 @@ def pspl_parallax_mag(t, t0, u0, tE, piEN, piEE, ra, dec, t0_par):
     xyz = earth_skowron_deviations(t, t0_par)
     x, y, z = xyz[:, 0], xyz[:, 1], xyz[:, 2]
     de = -x * np.sin(ra) + y * np.cos(ra)
-    dn = -x * np.cos(ra) * np.sin(dec) - y * np.sin(ra) * np.sin(dec) + z * np.cos(dec)
+    dn = (
+        -x * np.cos(ra) * np.sin(dec)
+        - y * np.sin(ra) * np.sin(dec)
+        + z * np.cos(dec)
+    )
     tau = (t - t0) / tE - dn * piEN - de * piEE
     beta = u0 + dn * piEE - de * piEN
     u2 = tau**2 + beta**2
@@ -589,7 +595,11 @@ class MulensSpec(Spec):
             "star.Lens.dec": {"initval": self.dec_deg, "sigma": 0},
             "star.Source.ra": {"initval": self.ra_deg, "sigma": 0},
             "star.Source.dec": {"initval": self.dec_deg, "sigma": 0},
-            "source.Source.t_0": {"initval": T0, "lower": T0 - 5.0, "upper": T0 + 5.0},
+            "source.Source.t_0": {
+                "initval": T0,
+                "lower": T0 - 5.0,
+                "upper": T0 + 5.0,
+            },
             # u_0 > 0: +/- u_0 are (nearly, with parallax) the same event,
             # and a chain started at the truth would see only one of them.
             "source.Source.u_0": {"initval": 0.3, "lower": 0.01, "upper": 1.0},
@@ -626,7 +636,11 @@ class MulensSpec(Spec):
         fs = truth["mulensinstrument.f_source"][0]
         fb = truth["mulensinstrument.f_blend"][0]
         mean = fs * A + fb
-        sigma = self.err * truth["mulensinstrument.err_scale"][0] * np.ones_like(self.t)
+        sigma = (
+            self.err
+            * truth["mulensinstrument.err_scale"][0]
+            * np.ones_like(self.t)
+        )
         return mean, sigma, mean + sigma * rng.standard_normal(self.t.size)
 
 
@@ -1288,7 +1302,9 @@ def cmd_analyze(args):
     # the prior draws, passed a std > 0 test, and ranked 0 in every
     # replicate.  Drop such quantities, and break genuine ties at random.
     def spread(k):
-        vals = [r["quantities"][k]["truth"] for r in usable if k in r["quantities"]]
+        vals = [
+            r["quantities"][k]["truth"] for r in usable if k in r["quantities"]
+        ]
         scale = max(np.max(np.abs(vals)), 1e-300)
         return np.ptp(vals) / scale
 
@@ -1305,7 +1321,11 @@ def cmd_analyze(args):
 
     def ranks(sel):
         return {
-            k: [rank_of(r["quantities"][k]) for r in sel if k in r["quantities"]]
+            k: [
+                rank_of(r["quantities"][k])
+                for r in sel
+                if k in r["quantities"]
+            ]
             for k in names
         }
 
