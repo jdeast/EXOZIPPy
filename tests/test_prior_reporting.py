@@ -78,7 +78,9 @@ def _run_galacticmodel(star_config, gm_config=None):
 
     gm = GalacticModel(config["galacticmodel"], star.config_manager)
     with pm.Model() as model:
-        gm.build_likelihood(model, types.SimpleNamespace(star=star))
+        gm.build_likelihood(
+            model, types.SimpleNamespace(star=star, active_components={})
+        )
     return star
 
 

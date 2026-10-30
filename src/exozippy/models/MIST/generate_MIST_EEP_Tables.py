@@ -183,9 +183,12 @@ def _add_or_grab_solar_values_to_MIST_yaml(
 
 def _pad_or_trim_df(df, target_length=807):
 
-    # EEP 808 = low mass stars enter the thermally pulsating asymptotic giant branch (TPAGB)
-    # mass loss becomes significant
-    # invalidating the assumption that the current mass is equal to the initial mass
+    # EEP 808 = low mass stars enter the thermally pulsating asymptotic giant
+    # branch (TPAGB); end of core carbon burning for massive stars. The grid
+    # stops at 807. Mass loss before that is NOT zero (it reaches 3-9% in the
+    # red clump of a <= 1.5 solMass star and ~30% for a 20 solMass red
+    # supergiant), which is why every row carries MIST's present-day
+    # `star_mass` beside the initial `mass` (_add_star_mass_col).
 
     nrows = len(df)
     if nrows == target_length:
@@ -210,6 +213,41 @@ def _add_mass_col(df, new_df):
 
     nrows = len(df)
     new_df["mass"] = np.full(nrows, df.attrs["meta"]["initial_mass"])
+    return
+
+
+def _add_star_mass_col(df, new_df):
+    """MIST's PRESENT-DAY mass (solMass) at every row.
+
+    ``mass`` is the track's INITIAL mass (the header's ``initial_mass``, one
+    value per track); ``star_mass`` is what the star weighs at that EEP after
+    its winds. A padded row repeats the track's last row, like every other
+    column. Consumers read the present-day mass from here; see the loader,
+    components/evolutionarymodel/mist_grid.py.
+    """
+    new_df["star_mass"] = df["star_mass"].to_numpy(dtype=float)
+    return
+
+
+def _add_final_mass_cols(raw_df, new_df):
+    """Per-track constants from the UNTRIMMED track's last row.
+
+    ``final_star_mass`` is ``star_mass`` at the end of the raw MIST track,
+    which runs past the grid's EEP 807 cut: for a low/intermediate-mass star
+    it is the white dwarf MIST ends on (MIST's own initial-final mass
+    relation), for a massive star the mass at the end of core carbon
+    burning. ``final_EEP`` is that row's EEP (the raw track's length), so a
+    reader can tell which: in MIST v2.5 it is a primary EEP -- 1721 the end
+    of the white dwarf cooling sequence, 808 the end of core carbon burning,
+    and 202-707 a track MIST stopped early (the lowest masses, or a helium
+    flash). Both repeat on every row of the track (parquet's dictionary
+    encoding makes that nearly free).
+    """
+    nrows = len(new_df)
+    new_df["final_star_mass"] = np.full(
+        nrows, float(raw_df["star_mass"].to_numpy()[-1])
+    )
+    new_df["final_EEP"] = np.full(nrows, len(raw_df), dtype=np.int64)
     return
 
 
@@ -303,8 +341,16 @@ def _add_age_and_here_be_dragons_col(df, new_df):
         problematic_indices = np.arange(len(age)) >= first_invalid_feh_index
 
     else:
-        # only want to include *added* duplicated ages, not the original age that was duplicated
-        problematic_indices = age > repeated_vals
+        # only want to include *added* duplicated ages, not the original age
+        # that was duplicated. Against the LARGEST repeated value: an
+        # element-wise `age > repeated_vals` raised on any track with more
+        # than one repeated age (0.55 solMass at [Fe/H] = -1.5). The
+        # published grid came from an earlier revision of this function and
+        # flags such tails a few rows differently (10 of 2854 tracks, all
+        # inside an unresolved-age tail, which mist_grid's
+        # _flag_from_first_unresolved_age re-flags at load anyway); see the
+        # README's "Rebuilding" note on why the published columns are kept.
+        problematic_indices = age > repeated_vals.max()
 
     # mark the problematic indices in the "here_be_dragons" column
     here_be_dragons[problematic_indices] = 1 + np.arange(
@@ -337,6 +383,11 @@ def generate_new_df(df, target_length=807):
         "age_mist",
         "dEEP_dage",
         "here_be_dragons",
+        # Appended after the original eleven so a reader of the older grid's
+        # columns sees them in the same positions.
+        "star_mass",
+        "final_star_mass",
+        "final_EEP",
     ]
 
     new_df = pd.DataFrame(columns=columns)
@@ -354,6 +405,8 @@ def generate_new_df(df, target_length=807):
     _add_astroseismic_cols(pad_or_trim_df, new_df)
     _add_age_and_here_be_dragons_col(pad_or_trim_df, new_df)
     _add_deep_dage_col(new_df)
+    _add_star_mass_col(pad_or_trim_df, new_df)
+    _add_final_mass_cols(df, new_df)
 
     return new_df
 

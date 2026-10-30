@@ -101,6 +101,8 @@ class _Stars:
 class _Sys:
     def __init__(self, stars):
         self.star = stars
+        # No component models a star's mass loss (Component.initial_logmass).
+        self.active_components = {}
 
 
 def _kin(stars):

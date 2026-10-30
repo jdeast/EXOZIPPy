@@ -45,7 +45,14 @@ EEP_GRID_DIR = current_dir / "MISTv2.5" / "EEPs"
 # The record id, sizes and md5s live in utilities/zenodo_assets.py with every
 # other Zenodo pin (review 4.9.2). They pin the content, so a re-uploaded or
 # truncated file is caught rather than silently used.
-_EEP_GRID_ASSETS = zenodo_assets.assets("mist_eep_grids")
+#
+# Only the grids: the record also carries the publish script's MANIFEST.txt,
+# which no reader opens (models/Claret/claret_tables.py's precedent).
+_EEP_GRID_ASSETS = {
+    name: meta
+    for name, meta in zenodo_assets.assets("mist_eep_grids").items()
+    if name.endswith(".grid.parquet")
+}
 
 
 def eep_grid_filename(alpha: float = 0.0, vvcrit: float = 0.0) -> str:
