@@ -21,6 +21,7 @@ a grid republish:
     PYTHONPATH=src python scripts/make_mist_lifetimes.py
 """
 
+import argparse
 from pathlib import Path
 
 import numpy as np
@@ -38,7 +39,22 @@ OUT = (
 )
 
 
-def main():
+def main(argv=None):
+    ap = argparse.ArgumentParser(
+        description=(
+            "Tabulate MIST v2.5 lifetimes (age at the last EEP) per initial "
+            "mass and [Fe/H] for the galacticmodel's present-day mass "
+            "function (review 1.7.2)."
+        )
+    )
+    ap.add_argument(
+        "--out",
+        type=Path,
+        default=OUT,
+        help=f"output CSV (default: {OUT.relative_to(OUT.parents[4])})",
+    )
+    args = ap.parse_args(argv)
+    out = args.out
     path = grid_path()
     t = pq.read_table(
         str(path), columns=["mass", "EEP", "initfeh", "age_mist"]
@@ -57,7 +73,7 @@ def main():
     header = "mass," + ",".join(f"log10_life_gyr_feh{f:+.2f}" for f in fehs)
     body = np.column_stack([masses, table])
     np.savetxt(
-        OUT,
+        out,
         body,
         delimiter=",",
         fmt="%.6g",
@@ -69,7 +85,7 @@ def main():
         ),
         comments="# ",
     )
-    print(f"wrote {OUT} ({masses.size} masses x {len(fehs)} [Fe/H])")
+    print(f"wrote {out} ({masses.size} masses x {len(fehs)} [Fe/H])")
 
 
 if __name__ == "__main__":
