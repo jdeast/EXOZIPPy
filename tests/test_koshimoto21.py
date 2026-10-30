@@ -74,3 +74,164 @@ def test_component_shapes_match_calc_rho_each(points):
                 )
                 n_checked += 1
     assert n_checked > 500
+
+
+def test_number_densities_match_genulens(points):
+    """n0[i] rhos[i] (all objects: genulens's lens density) and n0MS[i]
+    rhos[i] (main sequence: its source density), every component but the
+    NSD, against the driver's ``n`` and ``nMS``."""
+    for name, s in _sight_lines(points):
+        c = s["constants"]
+        np.testing.assert_allclose(k21.N0[:8], c["n0d"], rtol=RTOL)
+        np.testing.assert_allclose(k21.N0_MS[:8], c["n0MSd"], rtol=RTOL)
+        np.testing.assert_allclose(
+            [k21.N0[8], k21.N0[10]], [c["n0b"], c["n0SH"]], rtol=RTOL
+        )
+        np.testing.assert_allclose(
+            [k21.N0_MS[8], k21.N0_MS[10]], [c["n0MSb"], c["n0MSSH"]], rtol=RTOL
+        )
+        for row in s["density"]:
+            x, y, z = row["xyz"]
+            for lum, key in ((False, "n"), (True, "nMS")):
+                logs = k21.log_number_densities(x, y, z, luminous_only=lum)
+                for i, ln in enumerate(logs):
+                    if ln is None:
+                        continue
+                    np.testing.assert_allclose(
+                        ln,
+                        np.log(row[key][i]),
+                        rtol=RTOL,
+                        atol=RTOL,
+                        err_msg=f"{name} D={row['D']} {key}[{i}]",
+                    )
+
+
+def test_rotation_curve_matches_genulens(points):
+    c = points["sight_lines"]["baade"]["constants"]
+    np.testing.assert_allclose(k21.ROTCURVE_R, c["Rcs"], rtol=RTOL)
+    np.testing.assert_allclose(k21.ROTCURVE_V, c["Vcs"], rtol=RTOL)
+    # the exact inverse of L = v_c R
+    rg = np.linspace(1.0, 25000.0, 4001)
+    back, _ = k21._guiding_radius(k21.rotation_curve(rg) * rg, np)
+    np.testing.assert_allclose(back, rg, rtol=1e-12)
+
+
+def test_shu_distribution_matches_calc_prrg(points):
+    """The unnormalized Shu DF equals genulens's calc_PRRg on its f_g grid
+    (analytic: fixture precision); where genulens returns 0 the port is
+    below 1e-6 of the peak; the normalization agrees with genulens's
+    trapezoid over its truncated support to 1%."""
+    n_checked = 0
+    for name, s in _sight_lines(points):
+        for n in s.get("shu", []):
+            fg = np.array(n["fg_grid"])
+            ref = np.array(n["P_unnorm_grid"])
+            lp = k21.log_shu_unnormalized(
+                fg, n["R_node"], n["z_node"], n["comp"]
+            )
+            ok = ref > 1e-250
+            np.testing.assert_allclose(
+                lp[ok],
+                np.log(ref[ok]),
+                rtol=1e-10,
+                atol=1e-10,
+                err_msg=f"{name} comp {n['comp']}",
+            )
+            assert np.all(np.exp(lp[~ok]) < 1e-6 * ref.max())
+            lz = k21.shu_log_norm(n["R_node"], n["z_node"])[n["comp"]]
+            assert abs(np.exp(lz) / n["norm"] - 1.0) < 0.01, (name, n)
+            n_checked += 1
+    assert n_checked >= 50
+
+
+def test_disk_and_bar_kinematic_blocks_match_genulens(points):
+    """Analytic velocity blocks: disk dispersions (age-dependent, radial
+    gradients) and the bar's mean and dispersions, to fixture precision."""
+    for name, s in _sight_lines(points):
+        if "velocity" not in s:
+            continue
+        pos = {row["D"]: row["xyz"] for row in s["density"]}
+        for v in s["velocity"]:
+            x, y, z = pos[v["D"]]
+            if v["comp"] < 8:
+                su, sw = k21.disk_dispersions(v["R"], v["comp"])
+                np.testing.assert_allclose(
+                    [su, sw], [v["sigU"], v["sigW"]], rtol=RTOL
+                )
+            elif v["comp"] == 8:
+                (mx, my, _), sig = k21.bar_mean_and_sigma(x, y, z)
+                # the 1 pc^2 radius floor moves these by < 1e-8 relative
+                np.testing.assert_allclose(
+                    [mx, my], v["mean_xyz"][:2], rtol=1e-7, atol=1e-7
+                )
+                np.testing.assert_allclose(sig, v["sigma_xyz"], rtol=RTOL)
+
+
+def test_vphi_density_against_genulens_sampler(points):
+    """The disk v_phi density is normalized (to 0.5%: the bilinear log Z
+    table, worst at R < 1 kpc) and its central quantiles (16,
+    25, 50, 75, 84%) match genulens's own sampler (20000 draws of
+    get_vxyz_ran) to 8% of the 16-84% width.  The remaining gap is the
+    port's stated deviation: genulens draws f_g from the table node BELOW a
+    star (100 pc in R, 200 pc in |z|), the port at the star's own (R, z);
+    largest (5.5% measured) at R ~ 1 kpc.  The tails differ more because
+    genulens truncates its table where P < 1% of the peak."""
+    vg = np.linspace(-400.0, 700.0, 22001)
+    for name, s in _sight_lines(points):
+        if "velocity" not in s:
+            continue
+        pos = {row["D"]: row["xyz"] for row in s["density"]}
+        for v in s["velocity"]:
+            if v["comp"] >= 8:
+                continue
+            x, y, z = pos[v["D"]]
+            p = np.exp(k21.log_vphi_density(vg, v["R"], z, v["comp"]))
+            assert abs(np.trapezoid(p, vg) - 1.0) < 5e-3, (
+                name,
+                v["D"],
+                v["comp"],
+            )
+            cdf = np.cumsum(p)
+            cdf /= cdf[-1]
+            probs = np.array(v["probs"])
+            mc = np.array(v["mc_q_vphi"])
+            q = np.interp(probs, cdf, vg)
+            width = mc[7] - mc[3]
+            central = slice(3, 8)
+            err = np.max(np.abs(q[central] - mc[central])) / width
+            assert err < 0.08, (name, v["D"], v["comp"], err)
+
+
+@pytest.mark.slow  # compiles the gradient graph (~2 min on a cold cache)
+def test_pytensor_graph_matches_numpy_with_finite_gradient(points):
+    """The same expressions as a pytensor graph: equal to numpy and with a
+    finite gradient in position and velocity at every fixture point (and on
+    the bar's axis and at counter-rotation, where genulens has zeros)."""
+    import pytensor
+    import pytensor.tensor as pt
+
+    s = points["sight_lines"]["baade"]
+    xyz = np.array([row["xyz"] for row in s["density"]])
+    rng = np.random.default_rng(1)
+    vel = rng.normal(
+        [0.0, 200.0, 0.0], [80.0, 120.0, 60.0], size=(len(xyz), 3)
+    )
+    # the bar's minor axis and a counter-rotating star
+    xyz = np.vstack([xyz, [[0.0, 0.0, 50.0], [3000.0, 100.0, -200.0]]])
+    vel = np.vstack([vel, [[10.0, 5.0, 3.0], [0.0, -150.0, 0.0]]])
+    xs, vs = pt.dmatrix("xs"), pt.dmatrix("vs")
+    dens = k21.log_number_densities(xs[:, 0], xs[:, 1], xs[:, 2], xp=pt)
+    velo = k21.log_velocity_densities(
+        xs[:, 0], xs[:, 1], xs[:, 2], vs[:, 0], vs[:, 1], vs[:, 2], xp=pt
+    )
+    terms = [d + v for d, v in zip(dens, velo) if d is not None]
+    total = pt.sum(pt.logsumexp(pt.stack(terms), axis=0))
+    f = pytensor.function(
+        [xs, vs], [pt.stack(terms), *pt.grad(total, [xs, vs])]
+    )
+    got, gx, gv = f(xyz, vel)
+    dn = k21.log_number_densities(xyz[:, 0], xyz[:, 1], xyz[:, 2])
+    vn = k21.log_velocity_densities(*xyz.T, *vel.T)
+    want = np.array([d + v for d, v in zip(dn, vn) if d is not None])
+    np.testing.assert_allclose(got, want, rtol=1e-10, atol=1e-8)
+    assert np.all(np.isfinite(gx)) and np.all(np.isfinite(gv))
