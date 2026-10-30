@@ -13,6 +13,7 @@ from exozippy.components.parameterization import (
     mode_manifest,
     pin_unselected,
 )
+from exozippy.components.relations import StellarRelation
 from exozippy.config import PRECEDENCE_DERIVED_USER, user_entry
 from exozippy.constants import (
     FFP_MASS_FUNCTION_MIN_MEARTH,
@@ -69,6 +70,33 @@ def _microlensing_only_star_indices(system):
         if ctype == "star"
     }
     return source_idx - lens_idx
+
+
+def _mass_reader_star_indices(system):
+    """Stars whose mass a stellar-structure component reads in the likelihood.
+
+    The components that read a star's mass are the empirical relations
+    (mann and torres predict it, mamajek predicts teff/radius FROM it) AND
+    the evolutionary models, which are not empirical relations: a MIST
+    track is indexed by the star's mass (``star.logmass`` is the track's
+    mass coordinate).  All of them share the ``StellarRelation`` wiring
+    mixin (``components/relations.py``) and name their target stars in
+    ``star_indices`` (set in ``load_data``, i.e. before this stage-3
+    caller), so they are asked through it rather than by name.  A
+    microlensing-only source among those stars has a mass term of its own
+    and must stay free.
+
+    The name list this replaced, ``("mann", "torres", "mamajek")``, held
+    only the empirical relations, so it pinned the mass of a source star
+    that an evolutionary model constrains through its distance
+    (microlensing) and its radius/teff (SED): the track then had to fit the
+    star at its seed-0 mass.
+    """
+    out = set()
+    for comp in system.get_all_components():
+        if isinstance(comp, StellarRelation):
+            out |= {int(s) for s in comp.star_indices}
+    return out
 
 
 # One reader of one star's structural parameter.  ``param`` is the star
@@ -1845,11 +1873,7 @@ class Star(Component):
         # below and the tier reasoning on STRUCTURE_PARAMS.
         ml_source_idx = _microlensing_only_star_indices(system)
         if ml_source_idx:
-            relation_idx = set()
-            for relation in ("mann", "torres", "mamajek"):
-                comp = getattr(system, relation, None)
-                if comp is not None:
-                    relation_idx |= set(comp.star_indices)
+            relation_idx = _mass_reader_star_indices(system)
 
             abs_astrom_idx = set()
             astrom = getattr(system, "astrometryinstrument", None)
