@@ -38,9 +38,10 @@ them:
   * sources are weighted by n(D_S) D_S^2 only -- no luminosity function or
     magnitude limit (genulens's ``gammaDs`` exponent is 2 here, versus its
     default 0.5 ~ an I < 21 source sample);
-  * the lens population has no remnants (genulens REMNANT 1 adds white
-    dwarfs, neutron stars and black holes, which feed the long-t_E tail),
-    and no binary lenses.
+  * by default the lens population has no remnants (genulens REMNANT 1
+    adds white dwarfs, neutron stars and black holes); ``sample
+    --present-day`` turns on the galacticmodel's present-day mass function
+    (review 1.7.2), which has them.  Neither has binary lenses.
 
 With no light curve there is no t0_par and no Earth velocity, so
 ``mu_rel_geo`` falls back to the heliocentric value (mulensevent warns).
@@ -423,8 +424,12 @@ def build_config(
     pm_max=50.0,
     rv_max_ms=1.0e6,
     lens_logmass_upper=None,
+    present_day=False,
 ):
     """Lens + source + galactic model, no light curve.
+
+    ``present_day`` turns on the galacticmodel's present-day mass function
+    (review 1.7.2: MIST turnoff + WD/NS/BH remnants, per population).
 
     The bounds tighten the defaults.yaml supports (1 mpc - 100 kpc,
     +/-1e5 mas/yr, +/-c) only to keep the logit coordinates well scaled.
@@ -442,7 +447,9 @@ def build_config(
         "mulensevent": [{"finite_source": False}],
         # anchor_idx 1: the line of sight is the SOURCE's, the microlensing
         # convention (examples/ob140939).
-        "galacticmodel": [{"name": "gm", "anchor_idx": 1}],
+        "galacticmodel": [
+            {"name": "gm", "anchor_idx": 1, "present_day": bool(present_day)}
+        ],
         "logger_level": "WARNING",
     }
     params = {}
@@ -485,6 +492,7 @@ def sample_prior(
     target_accept=0.95,
     lens_logmass_upper=None,
     trace_path=None,
+    present_day=False,
 ):
     """Sample the EXOZIPPy prior on one sight line.
 
@@ -501,7 +509,10 @@ def sample_prior(
     sl = SIGHTLINES[sightline]
     ra, dec = _radec(sl["l"], sl["b"])
     config, params = build_config(
-        ra, dec, lens_logmass_upper=lens_logmass_upper
+        ra,
+        dec,
+        lens_logmass_upper=lens_logmass_upper,
+        present_day=present_day,
     )
     system = System(config, user_params=params)
     system.prepare()
@@ -580,6 +591,8 @@ def cmd_sample(args):
         if args.lens_logmass_upper is None
         else f"mlcap{args.lens_logmass_upper:+.2f}_"
     )
+    if args.present_day:
+        tag = "pdmf_" + tag
     cols, idata, names_v, wall = sample_prior(
         args.sightline,
         draws=args.draws,
@@ -590,6 +603,7 @@ def cmd_sample(args):
         target_accept=args.target_accept,
         lens_logmass_upper=args.lens_logmass_upper,
         trace_path=out_dir / f"exozippy_{tag}{args.sightline}_trace.nc",
+        present_day=args.present_day,
     )
     post = idata.posterior
 
@@ -630,6 +644,13 @@ def cmd_sample(args):
             )
         ),
     }
+    if args.present_day:
+        # The galacticmodel's Deterministic: P(remnant) per PDMF star, in
+        # star order (Lens first).  Its mean is the prior's rate-weighted
+        # dark-lens fraction.
+        p_rem = np.asarray(post["galacticmodel.p_remnant"])
+        out["p_remnant_lens_mean"] = float(p_rem[..., LENS_IDX].mean())
+    out["present_day"] = bool(args.present_day)
     _write_json(out_dir / f"exozippy_{tag}{args.sightline}.json", out)
     np.savez_compressed(
         out_dir / f"exozippy_{tag}{args.sightline}_draws.npz", **cols
@@ -919,6 +940,11 @@ def main(argv=None):
         type=float,
         default=None,
         help="localization switch: upper bound on the lens log10 mass",
+    )
+    s.add_argument(
+        "--present-day",
+        action="store_true",
+        help="galacticmodel present_day: true (review 1.7.2's PDMF)",
     )
 
     m = sub.add_parser("mroz", help="build the Mroz 2017/2019 references")
