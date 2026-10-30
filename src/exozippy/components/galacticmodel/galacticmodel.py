@@ -1383,7 +1383,9 @@ class GalacticModel(Component):
         ]
         if mass_terms is not None:
             branch_logp = [bl + mt for bl, mt in zip(branch_logp, mass_terms)]
-            self._add_remnant_probability(birth_logmass, branch_logp, pdmf_mask)
+            self._add_remnant_probability(
+                birth_logmass, branch_logp, pdmf_mask
+            )
 
         volume_element = 2.0 * pt.log(distance * 1000.0)
 
