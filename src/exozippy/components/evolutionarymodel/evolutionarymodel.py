@@ -51,6 +51,18 @@ TRACK_PARAMS = ("initfeh", "eep", "age")
 DEEP_DAGE_MIN = 1e-14
 DEEP_DAGE_MAX = 1e3
 
+# Clip on d log10 M_ini / d log10 M, the Jacobian of sampling the PRESENT-DAY
+# mass while the tracks (and any mass function) are densities in the initial
+# one (mist_grid's "Re-axed on the present-day mass").  It is 1 to < 1e-3
+# wherever mass loss is negligible; on the shipped grid it is within
+# [0.5, 2] on all but 0.3% of the nodes with no here_be_dragons flag (4812
+# of 1.6e6, all at >= 2.8 solMass) and within this clip on all but 35, the
+# near-plateaus of the present-day mass where massive tracks cross.  Like
+# DEEP_DAGE_MAX, the UPPER end is what keeps a large derivative from being
+# an unbounded reward.
+MASS_JACOBIAN_MIN = 0.1
+MASS_JACOBIAN_MAX = 10.0
+
 # The EEP seed's zero-age main sequence: rows below it are pre-main-sequence
 # and pay SEED_PRE_MS_PENALTY in the seed's chi2, so a start lands on the
 # main sequence unless the data insist.  MIST's primary EEP 202 is the ZAMS
@@ -76,7 +88,10 @@ class EvolutionaryModel(StellarRelation, Component):
         MCMC steps in:  star.logmass, star.initfeh, star.eep,
                         star.feh, star.radius, star.teff, star.age
         Interpolated at (star.logmass, star.initfeh, star.eep) over the MIST
-        grid:           feh_mist, radius_mist, teff_mist, age_mist
+        grid re-axed on the PRESENT-DAY mass (star.logmass is the mass the
+        star has now, for every consumer):
+                        feh_mist, radius_mist, teff_mist, age_mist, and the
+                        initial mass that present-day mass implies
         Penalty:        Gaussian potential between each sampled quantity and
                         its MIST-predicted counterpart, floored at a
                         mass-dependent systematic (EXOFASTv2's
@@ -87,6 +102,10 @@ class EvolutionaryModel(StellarRelation, Component):
                         prior EEP gets for free (an ordinary bounded free
                         Parameter) into a flat prior in AGE -- EEP steps are
                         not uniform in time.  See build_likelihood.
+        Mass:           a potential in log|d log M_ini / d log M| keeps the
+                        prior a density in the INITIAL mass (what the tracks
+                        and any IMF are written in); initial_logmass hands
+                        that mass to galacticmodel's IMF.
         Dragons:        `here_be_dragons`, interpolated the same way as the
                         four predicted quantities, feeds a smooth penalty
                         that grows with its value, so the unreliable tail of
@@ -110,6 +129,11 @@ class EvolutionaryModel(StellarRelation, Component):
     """
 
     yaml_key = "evolutionarymodel"
+
+    # The (n_elements, n_outputs) MIST prediction belongs to one build: it is
+    # read by build_likelihood, by initial_logmass (galacticmodel's IMF, any
+    # stage-7 order) and by compile_plotters, which must all see ONE node.
+    per_build_caches = ("_pred_cache",)
 
     # See CONSTRAINABLE above: this is the mixin's hook for a component whose
     # constrainable set is not (mass, radius).
@@ -218,6 +242,7 @@ class EvolutionaryModel(StellarRelation, Component):
         self.age_floor = []
         self.dragon_penalty_weight = []
         self._grids = []
+        self._pred_cache = None
         # Per instance, for the prose: two instances may name different
         # model releases, and a single attribute overwritten in this loop
         # cited only the last one (review 2.8.13 (i)).
@@ -570,6 +595,10 @@ class EvolutionaryModel(StellarRelation, Component):
     def _interpolate(self, system):
         """(n_elements, n_outputs) of MIST predictions, one row per instance.
 
+        Built once per build and cached (``per_build_caches``): the
+        likelihood, the initial mass handed to the IMF and the Kiel node all
+        read this one node.
+
         Instances are grouped by the grid object they query before evaluating:
         ``mist_grid.load_mist_grid`` is cached, so every instance naming the
         same (model, alpha, vvcrit) shares one dict, and the interpolator
@@ -577,10 +606,13 @@ class EvolutionaryModel(StellarRelation, Component):
         would build n_elements separate interpolation subgraphs against the
         same ~86 MB constant.
         """
+        if self._pred_cache is not None:
+            return self._pred_cache
         star = system.star
         smap = self.star_map_tensor
         coords_by_param = (
-            star.logmass.value[smap],  # log10(solMass) -- the grid's mass axis
+            # log10(solMass), PRESENT-DAY -- the re-axed grid's mass axis
+            star.logmass.value[smap],
             star.initfeh.value[smap],
             star.eep.value[smap],
         )
@@ -596,7 +628,23 @@ class EvolutionaryModel(StellarRelation, Component):
             block = grid["interpolator"].evaluate(coords)  # (len(sel), n_out)
             for j, i in enumerate(idxs):
                 rows[i] = block[j]
-        return pt.stack(rows)
+        self._pred_cache = pt.stack(rows)
+        return self._pred_cache
+
+    def initial_logmass(self, system):
+        """``{star index: log10 initial mass}`` for every star this models.
+
+        ``star.logmass`` is the PRESENT-DAY mass; the track it sits on was
+        born heavier by whatever its winds have carried off (the grid's
+        ``star_mass``). A mass function is a density in the birth mass, so
+        galacticmodel's IMF reads it here (``Component.initial_logmass``).
+        The Jacobian that makes the prior a density in this coordinate is
+        this component's own ``mass_jacobian`` potential.
+        """
+        if not self.n_elements:
+            return {}
+        x = self._interpolate(system)[:, OUTPUT_INDEX["logmass_initial"]]
+        return {si: x[i] for i, si in enumerate(self.star_indices)}
 
     def _floor_vector(self, user_floors, default_tensor):
         """Per-instance systematic floor: the user's, else the default.
@@ -634,12 +682,15 @@ class EvolutionaryModel(StellarRelation, Component):
         age_pred = pred[:, OUTPUT_INDEX["age_mist_gyr"]]
         deep_dage = pred[:, OUTPUT_INDEX["dEEP_dage"]]
         dragons = pred[:, OUTPUT_INDEX["here_be_dragons"]]
+        logmass_initial = pred[:, OUTPUT_INDEX["logmass_initial"]]
+        dlogmini_dlogm = pred[:, OUTPUT_INDEX["dlogmass_initial_dlogmass"]]
 
         pm.Deterministic(f"{self.prefix}.feh_pred", feh_pred)
         pm.Deterministic(f"{self.prefix}.radius_pred", radius_pred)
         pm.Deterministic(f"{self.prefix}.teff_pred", teff_pred)
         pm.Deterministic(f"{self.prefix}.age_pred", age_pred)
         pm.Deterministic(f"{self.prefix}.here_be_dragons", dragons)
+        pm.Deterministic(f"{self.prefix}.mass_initial", 10.0**logmass_initial)
 
         # ---- systematic floors (EXOFASTv2 massradius_mist.pro) -----------
         # Mass-dependent default, per element; a per-instance user override
@@ -722,6 +773,26 @@ class EvolutionaryModel(StellarRelation, Component):
         )
         pm.Potential(f"{self.prefix}.eep_age_jacobian", jacobian_logp)
 
+        # ---- present-day -> initial mass Jacobian --------------------------
+        # star.logmass is the PRESENT-DAY mass (every other consumer reads
+        # it); the tracks are indexed by the INITIAL mass, and so is the
+        # prior: before the grid carried star_mass the sampled mass WAS the
+        # track's initial mass, flat in log, with any IMF on it. Sampling
+        # y = log M instead of x = log M_ini at fixed (initfeh, EEP) changes
+        # the density by |dx/dy|, so adding log|dx/dy| keeps the prior a
+        # density in x -- flat in log M_ini, or the IMF evaluated at x
+        # (galacticmodel reads x through initial_logmass). Together with the
+        # EEP -> age term above this is the full Jacobian of
+        # (log M, initfeh, EEP) -> (log M_ini, initfeh, age): the map is
+        # triangular, so its determinant is the product of the two. On the
+        # main sequence dx/dy = 1 to < 1e-3 and the term is ~0.
+        mass_jacobian_logp = pt.sum(
+            pt.log(
+                pt.clip(dlogmini_dlogm, MASS_JACOBIAN_MIN, MASS_JACOBIAN_MAX)
+            )
+        )
+        pm.Potential(f"{self.prefix}.mass_jacobian", mass_jacobian_logp)
+
         # ---- here_be_dragons penalty ---------------------------------------
         # A smooth, monotonically-growing cost for wandering into the part
         # of a track past its first unreliable point. here_be_dragons is
@@ -788,6 +859,15 @@ class EvolutionaryModel(StellarRelation, Component):
             supersedes_bounds=True,
         )
 
+        # The mass Jacobian multiplies whatever else star.logmass carries
+        # (its uniform bounds, or the IMF galacticmodel declares), so it
+        # does not supersede it.
+        star.logmass.add_prior_contribution(
+            r"$\times |{\rm d}\log M_{\rm ini}/{\rm d}\log M_*|$",
+            text="x |dlog M_ini/dlog M| (a density in the MIST initial mass)",
+            elements=list(self.star_indices),
+        )
+
     # ------------------------------------------------------------------
     # Plotting: the Kiel diagram (logg vs Teff)
     #
@@ -798,12 +878,15 @@ class EvolutionaryModel(StellarRelation, Component):
     def compile_plotters(self, model, system):
         """Compile the per-instance Kiel-diagram quantities.
 
-        One node, ``(n_elements, 9)``, so a posterior draw costs one call:
+        One node, ``(n_elements, 10)``, so a posterior draw costs one call:
 
-            logmass, initfeh   the track coordinates -- returned numerically
+            logmass, initfeh   the sampled (present-day) mass and initial
+                               [Fe/H]
+            logmass_initial    the track's INITIAL mass, returned numerically
                                so plot_data can build the whole 807-point
-                               curve in numpy (mist_grid.interpolate_track)
-                               rather than unrolling it into the graph
+                               track in numpy (mist_grid.interpolate_track,
+                               mass="initial") rather than unrolling it into
+                               the graph
             teff_mist, logg_mist    the MIST prediction at (logmass, initfeh, eep)
             teff_fit, logg_fit      what the fit actually settled on
             sigma_teff, sigma_logg  the systematic floor, as error bars
@@ -811,11 +894,11 @@ class EvolutionaryModel(StellarRelation, Component):
                                track to draw (see KIEL_EEP_WINDOW)
 
         ``logg`` is neither a grid column nor a constrained quantity: MIST
-        tabulates radius, and logg follows from it and the mass, which along
-        a track is the grid's own mass axis (the "current mass == initial
-        mass" assumption every quantity here is computed under).  So both
-        loggs come from ``calc_logg_from_logmass`` and differ only in which
-        radius they take -- which is exactly the comparison the chart is for.
+        tabulates radius, and logg follows from it and the PRESENT-DAY mass,
+        which is the sampled ``star.logmass`` (the grid is re-axed on it).
+        So both loggs come from ``calc_logg_from_logmass`` at that mass and
+        differ only in which radius they take -- which is exactly the
+        comparison the chart is for.
         """
         import pytensor
 
@@ -857,6 +940,7 @@ class EvolutionaryModel(StellarRelation, Component):
             [
                 logmass,
                 star.initfeh.value[smap],
+                pred[:, OUTPUT_INDEX["logmass_initial"]],
                 teff_pred,
                 calc_logg_from_logmass(logmass, radius_pred),
                 star.teff.value[smap],
@@ -1024,9 +1108,14 @@ class EvolutionaryModel(StellarRelation, Component):
 
         prose.add(
             f"We modeled {join_names(clauses)}, interpolating the grid "
-            r"in initial mass, initial [Fe/H], and equivalent "
+            r"in mass, initial [Fe/H], and equivalent "
             r"evolutionary point (EEP) to predict the current "
-            r"[Fe/H], radius, effective temperature, and age. ",
+            r"[Fe/H], radius, effective temperature, and age. "
+            r"The tracks are tabulated by initial mass; we sampled the "
+            r"present-day mass, which every other part of the model uses, "
+            r"and interpolated the grid re-axed on MIST's present-day mass "
+            r"at each EEP, so the initial mass follows from it. The prior "
+            r"on the stellar mass is a density in the initial mass. ",
             section="stellar",
             key=f"{self.prefix}.tracks",
             rank=20.0,

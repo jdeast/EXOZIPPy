@@ -173,6 +173,7 @@ def write_synthetic_mist_grid(
     alpha=0.0,
     vvcrit=0.0,
     at_eep=None,
+    mass_loss=None,
 ):
     """Write a tiny MIST track grid and return the ``model_root`` for it.
 
@@ -190,6 +191,11 @@ def write_synthetic_mist_grid(
     ``at_eep`` is ``{column: {eep: value}}``: the value every track carries
     in that column at that EEP, replacing the smooth default -- for pinning
     the Jacobian's clip against a table defect, or the dragon penalty.
+
+    ``mass_loss(mass, frac)`` is the FRACTION of its initial mass a track
+    has lost at fractional position ``frac`` (0 at the first EEP, 1 at the
+    last); the ``star_mass`` column is ``mass * (1 - mass_loss)``. Default:
+    no mass loss, so the present-day and initial mass axes coincide.
 
     Returns the directory to pass as the component's ``model_root:`` -- the
     ``MIST`` directory itself (``<model_root>/<model>/EEPs``), mirroring
@@ -231,6 +237,15 @@ def write_synthetic_mist_grid(
                         "here_be_dragons": at_eep.get(
                             "here_be_dragons", {}
                         ).get(eep, 0.0),
+                        "star_mass": float(mass)
+                        * (
+                            1.0
+                            - (
+                                0.0
+                                if mass_loss is None
+                                else mass_loss(mass, frac)
+                            )
+                        ),
                     }
                 )
 

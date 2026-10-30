@@ -51,6 +51,8 @@ class _MockStar:
 class _MockSystem:
     def __init__(self):
         self.star = _MockStar()
+        # No component models a star's mass loss (Component.initial_logmass).
+        self.active_components = {}
 
 
 def _make_gm(config=None):

@@ -254,18 +254,25 @@ RECORDS: Mapping[str, ZenodoRecord] = MappingProxyType(
         ),
         # The processed MISTv2.5 EEP track grids, keyed by the
         # {afe}_{vvcrit} stem eep_grid.eep_grid_filename builds. Consumer:
-        # models/MIST/eep_grid.py.
+        # models/MIST/eep_grid.py. Version 2 (record 23802906) adds the
+        # present-day star_mass and the per-track final_star_mass/final_EEP
+        # columns; version 1's eleven columns are carried over bit for bit
+        # (components/evolutionarymodel/evolutionarymodel.md).
         "mist_eep_grids": ZenodoRecord(
-            record_id=21893308,
+            record_id=23802906,
             concept_record_id=21893307,
             title="MISTv2.5 model grids for EXOZIPPy",
             creators=("Sandhaus, Phoebe", "Eastman, Jason"),
             citation_key=None,
             files=_pins(
                 {
+                    "MANIFEST.txt": (
+                        73,
+                        "4481988eebaf5cdceaed5f4dbbfbd801",
+                    ),
                     "afe_p0_vvcrit0.0.grid.parquet": (
-                        127992558,
-                        "30545e0087ddd7dd79e87f294f4d8d58",
+                        144797120,
+                        "050509775cee55c1ee67232575d83433",
                     ),
                 }
             ),

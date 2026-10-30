@@ -799,7 +799,7 @@ class GalacticModel(Component):
         w = pdmf_mask.astype(float)
         return [-w * self._pdmf.log_lum_frac[b] for b in range(len(BRANCHES))]
 
-    def _pdmf_branch_terms(self, stars, pdmf_mask):
+    def _pdmf_branch_terms(self, birth_logmass, pdmf_mask):
         """(mass_terms, dens_offsets), one per-star vector per branch.
 
         ``mass_terms[b]`` is log phi_b(logmass) normalized over each star's
@@ -810,14 +810,16 @@ class GalacticModel(Component):
         """
         pd = self._pdmf
         w = pdmf_mask.astype(float)
-        x = stars.logmass.value
+        # The BIRTH mass (_birth_logmass): a star whose mass loss a component
+        # models is placed in the mass function at its initial mass.
+        x = birth_logmass
         mass_terms = []
         for b in range(len(BRANCHES)):
             log_phi = interp_table(pd.log_table[b], pd.x0, PDMF_GRID_DEX, x)
             mass_terms.append(w * (log_phi - pd.log_norm[b]))
         return mass_terms, self._pdmf_offsets(pdmf_mask)
 
-    def _add_remnant_probability(self, stars, branch_logp, pdmf_mask):
+    def _add_remnant_probability(self, birth_logmass, branch_logp, pdmf_mask):
         """``galacticmodel.p_remnant``: per PDMF star (in star order), the
         probability that it is a dark remnant (WD/NS/BH) rather than a
         luminous star, given its mass, position and velocity: the branch
@@ -829,7 +831,7 @@ class GalacticModel(Component):
         pd = self._pdmf
         stacked = pt.stack(branch_logp)[:, idx]
         resp = pt.exp(stacked - pm.math.logsumexp(stacked, axis=0))
-        x = stars.logmass.value[idx]
+        x = birth_logmass[idx]
         dark = pt.stack(
             [
                 interp_table(pd.dark_frac[b], pd.x0, PDMF_GRID_DEX, x)
@@ -838,6 +840,35 @@ class GalacticModel(Component):
         )
         pm.Deterministic(
             f"{self.prefix}.p_remnant", pt.sum(resp * dark, axis=0)
+        )
+
+    def _birth_logmass(self, system, stars):
+        """The ``stars.logmass`` vector with each star's BIRTH mass in place.
+
+        A star whose present-day mass differs from its initial one has a
+        component that says so: ``Component.initial_logmass`` returns
+        ``{star index: log10 initial mass}`` (the evolutionary model, which
+        also adds the Jacobian of that change of coordinate).  Two
+        components claiming one star would be two different birth masses,
+        and raise.  Assembled with ``set_subtensor``, never ``pt.where``.
+        """
+        claims = {}
+        for comp in system.active_components.values():
+            for si, value in comp.initial_logmass(system).items():
+                if si in claims:
+                    raise ValueError(
+                        f"[{self.prefix}] star {si} has an initial mass from "
+                        f"both '{claims[si][0]}' and '{comp.prefix}'; a star "
+                        f"has one birth mass."
+                    )
+                claims[si] = (comp.prefix, value)
+        logmass = stars.logmass.value
+        if not claims:
+            return logmass
+        idx = sorted(claims)
+        return pt.set_subtensor(
+            logmass[np.asarray(idx, dtype=int)],
+            pt.stack([claims[i][1] for i in idx]),
         )
 
     def _declare_mass_prior(self, stars, ffp_mask, pdmf_mask=None):
@@ -1193,6 +1224,13 @@ class GalacticModel(Component):
         # here is a supported option.  BOTH are densities in the SAMPLED
         # coordinate x = log10(M), not in M, and both are summed over every
         # modeled star (lens and source alike).
+        #
+        # A mass function is a density in the BIRTH mass.  For most stars
+        # that is star.logmass itself; a star whose mass loss is modeled
+        # (a MIST track) samples its PRESENT-DAY mass, and the component
+        # that models it supplies the initial mass along with the Jacobian
+        # that makes this a density in it (Component.initial_logmass).
+        birth_logmass = self._birth_logmass(system, stars)
         if self.imf == "salpeter":
             # Salpeter (1955): dN/dM ~ M^-alpha, alpha = 2.35.  Change of
             # variables to x = log10(M)  (M = 10^x, dM/dx = M ln10):
@@ -1207,7 +1245,7 @@ class GalacticModel(Component):
             # sound, and the support IS bounded (star.logmass carries hard
             # lower/upper), so the density is proper and normalizable.
             k = SALPETER_IMF_SLOPE + 1.0
-            imf_logp = k * np.log(10.0) * stars.logmass.value - (
+            imf_logp = k * np.log(10.0) * birth_logmass - (
                 _power_law_log_norm(k, stars.logmass)
             )
         else:
@@ -1231,9 +1269,7 @@ class GalacticModel(Component):
             # start ONLY because these stars are near the Chabrier peak; the
             # density itself moves by +0.57 nats at 10 Msun and more above.
             # Both re-pinned in tests/test_runaway_logp_regression.py.
-            imf_logp = chabrier_logmass_logp(
-                stars.logmass.value, stars.logmass
-            )
+            imf_logp = chabrier_logmass_logp(birth_logmass, stars.logmass)
 
         # Per-star opt-out of the stellar IMF.  A microlensing lens that is a
         # free-floating planet MUST be declared as a star (Lens._validate_
@@ -1260,7 +1296,7 @@ class GalacticModel(Component):
             imf_logp = (
                 w
                 * ffp_logmass_logp(
-                    stars.logmass.value, stars.ffp_alpha, stars.logmass
+                    birth_logmass, stars.ffp_alpha, stars.logmass
                 )
                 + (1.0 - w) * imf_logp
             )
@@ -1345,7 +1381,7 @@ class GalacticModel(Component):
             # Every term is a finite table interpolation: no branch
             # selection, no where (CLAUDE.md).
             mass_terms, dens_offsets = self._pdmf_branch_terms(
-                stars, pdmf_mask
+                birth_logmass, pdmf_mask
             )
             log_dens = [d + off for d, off in zip(log_dens, dens_offsets)]
         branch_logp = [
@@ -1353,7 +1389,9 @@ class GalacticModel(Component):
         ]
         if mass_terms is not None:
             branch_logp = [bl + mt for bl, mt in zip(branch_logp, mass_terms)]
-            self._add_remnant_probability(stars, branch_logp, pdmf_mask)
+            self._add_remnant_probability(
+                birth_logmass, branch_logp, pdmf_mask
+            )
 
         volume_element = 2.0 * pt.log(distance * 1000.0)
 

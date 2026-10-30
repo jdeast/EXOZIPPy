@@ -442,6 +442,25 @@ class Component(ABC):
         """
         return {}
 
+    def initial_logmass(self, system):
+        """Stage 7: the BIRTH mass of each star whose mass loss this
+        component models, ``{star index: log10(M_ini / solMass) tensor}``.
+
+        ``star.logmass`` is the mass a star has NOW -- every consumer (an RV
+        semi-amplitude, a transit density, a lens mass) wants that one. A
+        mass FUNCTION is a density in the mass at birth, so the component
+        applying one (galacticmodel's IMF) evaluates it at the initial mass
+        wherever a component supplies one here. A component that does must
+        also add the Jacobian ``log |d log M_ini / d log M|`` of that change
+        of coordinate itself, so the prior is a density in the initial mass
+        whether or not anything applies a mass function. Callable any time
+        after stage 6 (every Parameter exists by then), in any component
+        order. The evolutionary model is the one implementation
+        (``components/evolutionarymodel/evolutionarymodel.md``); the default
+        models no mass loss and returns ``{}``.
+        """
+        return {}
+
     # Attribute names holding something that BELONGS TO ONE BUILD: a
     # pytensor node the component stashed, or a function compiled against
     # one.  ``System.build_model`` clears every one of them before stage 5,
