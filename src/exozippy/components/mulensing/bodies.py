@@ -44,6 +44,8 @@ EVENT_KEYS = frozenset(
         "fitmurel",
         "fitpirel",
         "fitthetae",
+        "vbm_tol",
+        "vbm_reltol",
     }
 )
 LENS_ENTRY_KEYS = frozenset({"body", "name", "orbit"})

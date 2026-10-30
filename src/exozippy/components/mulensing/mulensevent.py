@@ -48,7 +48,13 @@ from exozippy.skyframe import observer_sky_offset, parallax_factors, sky_basis
 
 from ..galacticmodel.physics import expected_proper_motion
 from .bodies import body_entries, resolve_orbit_ref, validate_event_config
-from .op import BinaryLensMagOp, MulensMagOp, VBMDirectMagOp
+from .op import (
+    VBM_RELTOL_DEFAULT,
+    VBM_TOL_DEFAULT,
+    BinaryLensMagOp,
+    MulensMagOp,
+    VBMDirectMagOp,
+)
 from .physics import (
     MU_REL_FLOOR,
     T_E_FLOOR,
@@ -76,6 +82,49 @@ FRAME_VELOCITY_STEP_DAYS = 0.05
 # alpha is stored in radians (lens.alpha's internal_unit) and consumed in
 # degrees by both magnification backends.
 _RAD_TO_DEG = 180.0 / np.pi
+
+
+_VBM_ACCURACY_DEFAULTS = {
+    "vbm_tol": VBM_TOL_DEFAULT,
+    "vbm_reltol": VBM_RELTOL_DEFAULT,
+}
+
+
+def parse_vbm_accuracy(ev, key):
+    """``mulensevent.<key>`` (``vbm_tol`` or ``vbm_reltol``) as a float, or
+    its default when the key is absent; anything else raises naming the key.
+
+    A plain number only (the scalar-or-list rule): a bool, a string or a
+    list is refused rather than coerced.  ``vbm_tol`` must be in (0, 1):
+    VBM's absolute goal, where zero never converges and a value > 1 is read
+    by VBM as a fixed NUMBER of contour points instead (a different
+    algorithm this key does not offer).  ``vbm_reltol`` must be in [0, 1):
+    0 switches the relative goal off, and 1 would accept any answer.
+    """
+    if key not in ev:
+        return _VBM_ACCURACY_DEFAULTS[key]
+    val = ev[key]
+    if isinstance(val, bool) or not isinstance(val, (int, float)):
+        hint = (
+            "  (PyYAML reads an exponent without a decimal point, e.g. "
+            "1e-4, as a string: write 1.0e-4.)"
+            if isinstance(val, str)
+            else ""
+        )
+        raise ValueError(
+            f"mulensevent.{key} must be a number, got {val!r} "
+            f"({type(val).__name__}).{hint}"
+        )
+    val = float(val)
+    if key == "vbm_tol":
+        ok = bool(np.isfinite(val)) and 0.0 < val < 1.0
+        need = "in (0, 1)"
+    else:
+        ok = bool(np.isfinite(val)) and 0.0 <= val < 1.0
+        need = "in [0, 1)"
+    if not ok:
+        raise ValueError(f"mulensevent.{key} must be {need}, got {val!r}.")
+    return val
 
 
 class MulensEvent(Component):
@@ -187,6 +236,11 @@ class MulensEvent(Component):
         self.use_op = bool(ev.get("use_op", False))
 
         self.backend = ev.get("backend", "vbm_direct")
+        # VBM's accuracy goals for every VBMDirectMagOp this event builds
+        # (the photometric Op under the default backend, and the
+        # astrometric Op under either).  mulensing.md, "VBM accuracy".
+        self.vbm_tol = parse_vbm_accuracy(ev, "vbm_tol")
+        self.vbm_reltol = parse_vbm_accuracy(ev, "vbm_reltol")
         self._warned_linear_ld_backend = False
         if self.backend not in ("vbm_direct", "mulensmodel"):
             raise ValueError(
@@ -438,6 +492,32 @@ class MulensEvent(Component):
                     "Yoo04 where u/rho <= 99 (the end of Yoo04's table) and "
                     "a point source beyond, which is within 0.014 mmag "
                     "there."
+                ),
+            },
+            {
+                "key": "vbm_tol",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "VBMicrolensing's absolute accuracy goal on the "
+                    "magnification (vbm.Tol), a float in (0, 1). Default 1e-3 "
+                    "(VBM's own). Reaches every VBMicrolensing Op: the "
+                    "light curve under backend 'vbm_direct' and the "
+                    "astrometric centroid under either backend."
+                ),
+            },
+            {
+                "key": "vbm_reltol",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "VBMicrolensing's relative accuracy goal (vbm.RelTol), "
+                    "a float in [0, 1). Default 0 (off: Tol alone decides). "
+                    "A nonzero value lets VBM stop on whichever goal is "
+                    "met first, and makes its first-annulus limb-darkening "
+                    "false convergence more likely (mulensing.md)."
                 ),
             },
             {
@@ -2348,6 +2428,8 @@ class MulensEvent(Component):
             orbital_motion=geometry_series is not None,
             source_motion=source_series is not None,
             astrometry=astrometry,
+            accuracy=self.vbm_tol,
+            relative_accuracy=self.vbm_reltol,
         )
         op_inputs = [
             pt.stack(param_list),

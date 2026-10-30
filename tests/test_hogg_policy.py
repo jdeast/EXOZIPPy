@@ -36,10 +36,10 @@ class _DummyInstrument(Instrument):
 
 
 class _QuietConfigManager(_DummyConfigManager):
-    def add_hint(self, path, value, rank=None):
+    def add_hint(self, path, value, rank=None, unit=None):
         pass
 
-    def add_scale_hint(self, path, scale):
+    def add_scale_hint(self, path, scale, unit=None):
         pass
 
 

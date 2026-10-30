@@ -15,7 +15,9 @@ def get_ephemeris(target_id, start_time, stop_time, step="1h", outfile=None):
     Parameters:
     -----------
     target_id : str
-        JPL ID (e.g., '-79' for Spitzer, '-163' for K2, 'Swift')
+        JPL ID (e.g., '-79' for Spitzer, '-227' for Kepler/K2, 'Swift').
+        Check the returned target name: '-163' is WISE, not K2 (k2.eph
+        was once generated from it).
     start_time : str
         Start date (e.g., '2014-05-01')
     stop_time : str

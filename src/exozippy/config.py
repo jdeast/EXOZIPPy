@@ -1617,9 +1617,15 @@ class ConfigManager:
             f"the value could be read in."
         )
 
-    def _translate_and_scale(self, path, value):
+    def _translate_and_scale(self, path, value, unit=None):
         """Standardize a human-readable path to internal-index form and convert
         its value to internal units.  Returns (translated_path, internal_value).
+
+        ``unit=None`` reads ``value`` in the parameter's resolved USER unit
+        (a user ``unit:`` override, else the defaults.yaml ``unit``).  A
+        ``unit`` string states the unit the number is actually in, and the
+        value is converted straight to the parameter's ``internal_unit`` --
+        the user's display unit plays no part (see ``add_hint``).
 
         The ONE implementation shared by add_hint / add_scale_hint /
         add_seed_hints / seed_start_value, so they cannot drift apart on
@@ -1669,6 +1675,10 @@ class ConfigManager:
         self._reject_broadcast_hint_path(path, translated_path)
 
         final_parts = translated_path.split(".")
+        if unit is not None:
+            return translated_path, float(value) * self._stated_unit_factor(
+                translated_path, unit
+            )
         if len(final_parts) >= 2:
             c_type, p_name = final_parts[0], final_parts[-1]
             factor = self.get_conversion_factor(
@@ -1680,7 +1690,33 @@ class ConfigManager:
 
         return translated_path, internal_value
 
-    def add_hint(self, path, value, rank=PRECEDENCE_DERIVED_DATA):
+    def _stated_unit_factor(self, translated_path, unit):
+        """user -> internal multiplier for a value a COMPONENT computed in
+        the stated ``unit`` (review 1.5.10).
+
+        The parameter must declare an ``internal_unit`` in its defaults.yaml:
+        a component stating a unit for a parameter that has none is a
+        bookkeeping bug in that component, and is raised, naming both.
+        """
+        parts = translated_path.split(".")
+        if len(parts) < 2:
+            raise ValueError(
+                f"[{translated_path}] a hint with unit={unit!r} needs a "
+                f"<component>.<param> path."
+            )
+        c_type, p_name = parts[0], parts[-1]
+        i_str = (self.base_defaults.get(c_type, {}).get(p_name, {}) or {}).get(
+            "internal_unit"
+        )
+        if not i_str:
+            raise ValueError(
+                f"[{translated_path}] a hint was pushed with unit={unit!r}, "
+                f"but {c_type}.{p_name} declares no internal_unit in its "
+                f"defaults.yaml, so the stated unit cannot be converted."
+            )
+        return unit_conversion(unit, i_str, translated_path)
+
+    def add_hint(self, path, value, rank=PRECEDENCE_DERIVED_DATA, unit=None):
         """Register a component's ranked, data-driven START VALUE.
 
         This is the one correct channel for a start value a component
@@ -1700,7 +1736,18 @@ class ConfigManager:
 
         Converts human-readable paths to strict indices and scales to
         internal units (``_translate_and_scale``, shared with every other
-        hint channel).  A hint is one scalar feeding ``initval`` and nothing
+        hint channel).
+
+        STATE THE UNIT OF A NUMBER YOU COMPUTED (``unit=``).  Without it the
+        value is read in the parameter's resolved USER unit, which honors a
+        user ``unit:`` override -- right for a value that came out of the
+        user's own params (or out of ``resolve()``), wrong for one a
+        component computed in a fixed unit.  RVInstrument's gamma start, the
+        mean RV in m/s, used to be pushed bare, so ``rvinstrument.0.gamma:
+        {unit: km/s}`` read 12002 m/s as 12002 km/s and started gamma 1000x
+        off (review 1.5.10); Planet's K start did the same.  With ``unit=``
+        the value goes straight from that unit to ``internal_unit`` through
+        ``unit_conversion`` and the user's display unit plays no part.  A hint is one scalar feeding ``initval`` and nothing
         else: a bound, a prior or a structural pin goes through
         ``add_override``, a preliminary whitening scale through
         ``add_scale_hint``.
@@ -1714,7 +1761,7 @@ class ConfigManager:
         by hand).
         """
         translated_path, internal_value = self._translate_and_scale(
-            path, value
+            path, value, unit=unit
         )
 
         # Store the fully processed, ready-to-use hint
@@ -1850,7 +1897,7 @@ class ConfigManager:
         val = float(sets[seed][tpath])
         return val / factor if factor else val
 
-    def add_scale_hint(self, path, scale):
+    def add_scale_hint(self, path, scale, unit=None):
         """
         Register a context-appropriate PRELIMINARY init_scale for a parameter.
 
@@ -1866,9 +1913,12 @@ class ConfigManager:
         The most specific spelling wins: a 3-part path here beats a 2-part
         broadcast one for the element it names, exactly as it does for every
         other field ``resolve()`` layers.
+
+        ``unit=`` states the unit a COMPUTED scale is in, exactly as for
+        ``add_hint``; without it the scale is read in the user's unit.
         """
         translated_path, internal_scale = self._translate_and_scale(
-            path, scale
+            path, scale, unit=unit
         )
         self.scale_hints[translated_path] = internal_scale
 

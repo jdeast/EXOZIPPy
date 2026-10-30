@@ -120,6 +120,14 @@ def _base_mm_params(p):
 # event but a collapsed theta_E (see VBMDirectMagOp._compute).
 RHO_CEILING = 1e3
 
+# VBMicrolensing's accuracy goals, vbm.Tol (absolute, on A) and vbm.RelTol
+# (relative), as every VBMDirectMagOp sets them unless the event config's
+# `vbm_tol` / `vbm_reltol` says otherwise (mulensevent.parse_vbm_accuracy;
+# mulensing.md, "VBM accuracy").  Tol is VBM's own default; RelTol = 0 turns
+# VBM's relative criterion off.
+VBM_TOL_DEFAULT = 1e-3
+VBM_RELTOL_DEFAULT = 0.0
+
 
 def _safe_rho(value):
     """Floor the source radius at physics.RHO_FLOOR.
@@ -551,8 +559,8 @@ class VBMDirectMagOp(Op):
         n_companions=1,
         use_rho=False,
         bandpass=None,
-        accuracy=1e-3,
-        relative_accuracy=0.0,
+        accuracy=VBM_TOL_DEFAULT,
+        relative_accuracy=VBM_RELTOL_DEFAULT,
         quadratic_ld=False,
         orbital_motion=False,
         source_motion=False,

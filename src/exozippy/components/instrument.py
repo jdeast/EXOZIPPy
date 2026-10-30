@@ -294,7 +294,7 @@ class ConcatenatedData:
             df = self._read_data(i, roles=("time", "rv", "err"), detrend=True)
             ...per-file work...
             blocks.add(i, time=..., obs=..., err=..., df=df)
-        blocks.finalize("rv", user_factor=...)
+        blocks.finalize("rv", user_factor=..., hint_unit="m/s")
 
     WHY AN ACCUMULATOR AND NOT A TEMPLATE METHOD WITH A PER-FILE HOOK.  The
     three children disagree about *when* the files are read:
@@ -413,7 +413,7 @@ class ConcatenatedData:
         self.counts.append(n_obs)
 
     # -- after the loop --------------------------------------------------
-    def finalize(self, observable, user_factor=1.0):
+    def finalize(self, observable, user_factor=1.0, hint_unit=None):
         """Concatenate, publish on the owner, and run the optional hooks.
 
         Sets ``time``, ``<observable>``, ``err``, ``inst_map``,
@@ -424,9 +424,11 @@ class ConcatenatedData:
         no-ops unless a file set ``gp:`` / ``likelihood:``.
 
         ``user_factor`` converts the concatenated error from the internal unit
-        it is held in to the user unit the GP amplitude and the robust
-        ``out_scale`` are declared in (both are declared in the same unit as
-        the data, so one factor serves both).
+        it is held in to ``hint_unit``, the defaults.yaml unit the GP
+        amplitude and the robust ``out_scale`` are declared in (both are
+        declared in the same unit as the data, so one factor serves both).
+        The start hints are pushed stating ``hint_unit`` (review 1.5.10);
+        ``None`` for a dimensionless observable.
         """
         owner = self.owner
         if len(self.counts) != owner.n_elements:
@@ -457,10 +459,17 @@ class ConcatenatedData:
         ) = owner._build_block_detrend(self.detrend, owner.n_total_obs)
 
         owner._prepare_gp(
-            owner.time, owner.err, owner.inst_map, user_factor=user_factor
+            owner.time,
+            owner.err,
+            owner.inst_map,
+            user_factor=user_factor,
+            hint_unit=hint_unit,
         )
         owner._prepare_robust(
-            owner.err, owner.inst_map, user_factor=user_factor
+            owner.err,
+            owner.inst_map,
+            user_factor=user_factor,
+            hint_unit=hint_unit,
         )
 
     def row_ranges(self):
@@ -1155,7 +1164,9 @@ class Instrument(TimeSystem, Component):
             ]
         return names
 
-    def _prepare_gp(self, time, err, inst_map, user_factor=1.0):
+    def _prepare_gp(
+        self, time, err, inst_map, user_factor=1.0, hint_unit=None
+    ):
         """Stage 1: index and seed the GP terms from the loaded data.
 
         Call at the end of ``load_data``, once the concatenated ``time``,
@@ -1177,8 +1188,11 @@ class Instrument(TimeSystem, Component):
            knows the activity amplitude should just set ``initval``.
 
         ``user_factor`` converts the error from the internal unit the caller
-        holds it in to the user unit the amplitude parameter is declared in
-        (hints are pushed in user units).
+        holds it in to ``hint_unit``, the unit the amplitude parameter is
+        declared in (its defaults.yaml ``unit``), and the hint is pushed
+        STATING that unit, so a user ``unit:`` override on the amplitude
+        cannot rescale it (review 1.5.10).  ``hint_unit=None`` for a
+        dimensionless observable.
         """
         if not self.has_gp:
             return
@@ -1210,8 +1224,8 @@ class Instrument(TimeSystem, Component):
                 path = (
                     f"{self.prefix}.{i}.{gp_support.GP_AMPLITUDE_PARAM[kind]}"
                 )
-                self.config_manager.add_hint(path, amp)
-                self.config_manager.add_scale_hint(path, amp)
+                self.config_manager.add_hint(path, amp, unit=hint_unit)
+                self.config_manager.add_scale_hint(path, amp, unit=hint_unit)
 
     def _register_gp(self, manifest):
         """Stage 3: add this component's GP hyperparameters to ``manifest``.
@@ -1694,7 +1708,7 @@ class Instrument(TimeSystem, Component):
         append it next to ``_likelihood_config_schema``."""
         return robust_support.out_frac_prior_config_schema_entry()
 
-    def _prepare_robust(self, err, inst_map, user_factor=1.0):
+    def _prepare_robust(self, err, inst_map, user_factor=1.0, hint_unit=None):
         """Stage 1: index the robust files and seed the mixture scale.
 
         Call at the end of ``load_data``, right next to ``_prepare_gp``.
@@ -1705,9 +1719,12 @@ class Instrument(TimeSystem, Component):
         median(err)`` (with a matching whitening scale hint -- the start is
         the natural width of the parameter), and a CAP of ``SCALE_CAP_FACTOR
         x median(err)`` recorded in ``_robust_scale_caps`` for
-        ``_register_robust`` to attach at stage 3.  Both are in the USER
-        unit ``out_scale`` is declared in (``user_factor`` converts from the
-        internal unit the caller holds the errors in).
+        ``_register_robust`` to attach at stage 3.  Both are in
+        ``hint_unit``, the defaults.yaml unit ``out_scale`` is declared in
+        (``user_factor`` converts from the internal unit the caller holds
+        the errors in): the start hint states it (review 1.5.10), and the
+        cap is a manifest bound, which ``resolve()`` reads in the defaults
+        unit.
 
         The start used to be 10x the median, "so the two mixture components
         start separated and cannot swap roles during tuning".  Review 8.6.3
@@ -1761,8 +1778,8 @@ class Instrument(TimeSystem, Component):
                 robust_support.SCALE_CAP_FACTOR * median_err
             )
             path = f"{self.prefix}.{i}.{scale_param}"
-            self.config_manager.add_hint(path, start)
-            self.config_manager.add_scale_hint(path, start)
+            self.config_manager.add_hint(path, start, unit=hint_unit)
+            self.config_manager.add_scale_hint(path, start, unit=hint_unit)
 
     def _register_robust(self, manifest):
         """Stage 3: add this component's robust-likelihood parameters.

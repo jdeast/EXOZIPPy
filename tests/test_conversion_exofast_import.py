@@ -46,12 +46,6 @@ def test_omega_import_scale_is_radians_to_degrees_and_round_trips():
     assert float(np.ravel(p.initval)[0]) == pytest.approx(omega_rad, rel=1e-15)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="review 1.9.13: MSUN_PER_MJUP is 1047.348644 (the IAU 2009 Sun/Jupiter-system "
-    "mass ratio), while planet.mass's jupiterMass is astropy's IAU 2015 "
-    "nominal 1047.5655; an mpsun prior imports 2.1e-4 low",
-)
 def test_mpsun_import_scale_is_the_ratio_astropy_reads_jupiter_mass_with():
     """
     Given EXOFASTv2's planet mass in solar masses (mpsun),

@@ -81,10 +81,10 @@ class _RecordingConfigManager(_DummyConfigManager):
         self.hints = {}
         self.scale_hints = {}
 
-    def add_hint(self, path, value, rank=None):
+    def add_hint(self, path, value, rank=None, unit=None):
         self.hints[path] = value
 
-    def add_scale_hint(self, path, scale):
+    def add_scale_hint(self, path, scale, unit=None):
         self.scale_hints[path] = scale
 
 
