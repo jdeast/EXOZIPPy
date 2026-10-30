@@ -46,6 +46,7 @@ ANG_TO_MICRON_CONST = u.Angstrom.to(u.micron)
 # units.  IAU 2015 Resolution B3 nominal values via astropy.
 MSUN_TO_MEARTH = (1.0 * u.M_sun).to(u.M_earth).value
 RSUN_TO_REARTH = (1.0 * u.R_sun).to(u.R_earth).value
+RJUP_TO_REARTH = (1.0 * u.R_jup).to(u.R_earth).value
 
 # Stefan-Boltzmann constant in cgs (erg s-1 cm-2 K-4), for the incident
 # stellar flux at the planet (planet.fave): sigma_sb * teff^4 is the flux at

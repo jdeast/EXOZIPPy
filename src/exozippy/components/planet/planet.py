@@ -11,7 +11,12 @@ from exozippy.components.parameterization import (
     pin_unselected,
 )
 from exozippy.config import user_entry
-from exozippy.constants import KEPLER_CONST, MSUN_TO_MEARTH, RSUN_TO_REARTH
+from exozippy.constants import (
+    KEPLER_CONST,
+    MSUN_TO_MEARTH,
+    RJUP_TO_REARTH,
+    RSUN_TO_REARTH,
+)
 from exozippy.outputs.prose import get_collector, join_names
 from exozippy.outputs.texutils import latex_escape
 from exozippy.potentials import soft_lower_bound
@@ -1085,6 +1090,7 @@ class Planet(Component):
         )
 
         self._add_chen_potential()
+        self._warn_chen_only_mass(system)
         self._annotate_chen_table_notes(system)
         # Modeling-draft prose, declared next to the potential it describes
         # (outputs/prose.py's declare-at-site rule).
@@ -1600,6 +1606,81 @@ class Planet(Component):
             f"{self.prefix}.chen_prior",
             pt.sum(pt.where(pt.as_tensor_variable(mask), logp, 0.0)),
         )
+
+    def chen_only_mass_planets(self, system):
+        """Planets whose mass ONLY the Chen relation constrains and whose
+        radius start reaches the relation's degenerate Jovian regime.
+
+        Returns ``{index: radius start in Earth radii}``.  Review 2.8.18: in
+        a transit-only fit the mass is set by the radius through Chen &
+        Kipping, which at and above ~1 RJ is nearly flat in radius with
+        kinks at its breaks, so the mass spans decades and NUTS does not mix
+        it (SBC: 218 of 300 transit replicates failed convergence on log_q;
+        296 of 300 converged with log_q pinned).  The relation is NOT
+        smoothed and the coordinate is NOT changed (JDE 2026-10-30); the
+        user is told instead.
+
+        Excluded: a planet whose mass something else reads -- RV or
+        astrometry (then Chen does not derive the mass), a microlensing
+        lens body, or the user's own pin, prior or link on any mass
+        coordinate (``planet.mass``/``log_q``/``msini``).  The radius is
+        the stage-4 start (``probe_start``), the best a build-time check
+        has; the threshold is ``physics.CHEN_DEGENERATE_RPEARTH``.
+        """
+        lens = system.active_components.get("lens")
+        lens_bodies = set(lens.bodies) if lens is not None else set()
+        candidates = []
+        for p in range(self.n_elements):
+            if not self.chen[p] or "mass" not in self.chen_derives[p]:
+                continue
+            if ("planet", p) in lens_bodies:
+                continue
+            user_says = False
+            for coord in ("mass", "log_q", "msini"):
+                for field in ("sigma", "mu"):
+                    user_says |= bool(self.user_wrote_field(coord, field)[p])
+                for per_elem in self.config_manager.get_element_links(
+                    self.prefix, coord
+                ).values():
+                    user_says |= p in {int(i) for i in per_elem}
+            if not user_says:
+                candidates.append(p)
+        if not candidates:
+            return {}
+        paths = [f"{self.prefix}.{p}.radius" for p in candidates]
+        probed = self.config_manager.probe_start(paths)
+        out = {}
+        for p, path in zip(candidates, paths):
+            start = probed[path]
+            if start.value is None:
+                raise ValueError(
+                    f"[{self.prefix}.{self.names[p]}] the radius has no "
+                    f"start at build time ({start.source}); the Chen-only "
+                    "mass check needs one."
+                )
+            rpearth = float(start.value) * RSUN_TO_REARTH
+            if rpearth >= physics.CHEN_DEGENERATE_RPEARTH:
+                out[p] = rpearth
+        return out
+
+    def _warn_chen_only_mass(self, system):
+        """Warn per planet found by :meth:`chen_only_mass_planets`."""
+        for p, rpearth in self.chen_only_mass_planets(system).items():
+            nm = self.names[p]
+            logger.warning(
+                f"[{self.prefix}.{nm}] the mass is constrained ONLY by the "
+                f"Chen & Kipping (2017) mass-radius relation (no RV, "
+                f"astrometry or prior measures it), and the radius start "
+                f"({rpearth / RJUP_TO_REARTH:.2f} RJ) reaches the relation's "
+                f"degenerate Jovian regime (>= "
+                f"{physics.CHEN_DEGENERATE_RPEARTH / RJUP_TO_REARTH:.2f} RJ), "
+                f"where nearly every mass from Saturn to the hydrogen-burning "
+                f"limit predicts the same radius and the regime breaks are "
+                f"kinks.  The mass, and everything derived from it, is "
+                f"unlikely to mix under NUTS.  Pin it ({self.prefix}.{nm}."
+                f"mass: {{initval: <value>, sigma: 0}}) or give it a prior "
+                f"(mu/sigma)."
+            )
 
     CHEN_TABLE_NOTE = r"Derived from \citet{Chen:2017}"
 
