@@ -5,7 +5,7 @@ config, and `tests/test_examples_prepare.py` exempts it for that reason.  It
 holds driver scripts, their SGE job files, and their result rows.  Each
 realization generates its config in a temporary working directory.
 
-Job logs (`injrec.*.log`, `vbmbench.*.log`, `diagcosi.*.log`) are pipeline
+Job logs (`injrec.*.log`, `vbmbench.*.log`, `diagcosi.*.log`, `sbc_*.log`) are pipeline
 output and are NOT committed, following the same convention as
 `examples/DC2018`.
 
@@ -51,6 +51,66 @@ those means drawing truth from the model's own joint prior, which is
 simulation-based calibration and a different design. The transit leg pins
 limb darkening to zero to match its uniform-disk generator, so it validates
 the transit *geometry* and says nothing about the limb-darkening machinery.
+
+## sbc.py -- simulation-based calibration (review 7.16.4)
+
+Talts et al. (2018): draw the truth from the PRIOR, simulate data from it,
+fit, and record the rank of the truth among L = 99 thinned posterior draws.
+If the prior, the likelihood and every Jacobian agree, the rank is uniform
+for every scalar function of the parameters, sampled or derived. A U-shaped
+histogram means the posterior is too narrow, a hump too wide, a slope biased.
+Where inject_recover.py asks "is the truth recovered", this asks "is the
+posterior the right width", and it covers the prior-dominated parameters
+inject_recover.py has to leave out.
+
+Models: `rv_circ` and `rv_ecc` (one planet, RV only), `transit` (one
+circular planet, uniform disk), `transit_pinq` (the same with the planet's
+mass pinned, which isolates the transit geometry from the Chen-only mass
+coordinate), `pk` (one subject, oral one-compartment).
+
+```bash
+OUT=/scratch/sbc MODEL=rv_circ sbatch --array=0 sbc.sbatch prior     # 300 prior draws
+OUT=/scratch/sbc MODEL=rv_circ sbatch --array=0-29 sbc.sbatch run    # 10 replicates per task
+OUT=/scratch/sbc MODEL=rv_circ sbatch --array=0 sbc.sbatch analyze   # summary + figures
+```
+
+Submit from this directory (the job locates the source tree from it).
+
+Design points, each of which a first draft got wrong:
+
+- **The prior is the BUILT model's.** Prior draws are NUTS on the built model
+  with its observed variables removed (`prior_only_model`), so every
+  logit-uniform Jacobian, Gaussian prior, component potential and soft
+  barrier is in it. `pm.sample_prior_predictive` cannot be used: a logit
+  element's raw coordinate draws N(0, 1) forward, which is not its prior.
+- **The data come from an independent forward model** (a Keplerian, the exact
+  overlap area, the closed-form PK curve), and every replicate checks that
+  exozippy's mean and sigma at the truth agree with it (measured: 1e-8 sigma
+  for RV, 1e-12 for PK, 3e-4 sigma for the transit) before fitting.
+- **The prior must not depend on the data.** Every sampled element's start,
+  bounds and prior are in the params file and the design is fixed, and each
+  replicate asserts that its build's raw transform and its prior density at
+  the truth equal the prior build's. This caught one case: an unbounded
+  `orbit.tc` is sampled at the data's information-weighted epoch, which moves
+  with the simulated data, so the specs bound `tc` to its own window.
+- **The fit starts at the truth and the whitening is not measured.** SBC
+  tests the model, not mode-finding; the measured soft-barrier steepness is
+  data-dependent, so measuring it would break the previous point by
+  construction. NUTS adapts its own mass matrix.
+- **Non-converged replicates are counted, never hidden.** A replicate is
+  converged when every tracked quantity has Rhat <= 1.01, bulk ESS >= 400,
+  tail ESS >= 200, and there are no divergences. `analyze` reports the ranks
+  of the converged set and of all replicates, since dropping is a selection
+  effect.
+
+Statistics (`sbc_stats.py`): chi2 over 20 rank bins, KS of the randomized
+fractional rank, and the ECDF difference with the simultaneous 95% band of
+Sailynoja, Buerkner & Vehtari (2022), whose per-point level is adjusted by
+simulation so a uniform sample stays inside at all 99 evaluation points 95%
+of the time. Tests: `tests/test_sbc_stats.py` (the statistics reject a U, a
+hump and a slope) and `tests/test_sbc_smoke.py` (slow: 20 PK replicates end
+to end, plus a negative control that ranks each posterior against the wrong
+replicate's truth and must be rejected).
 
 ## aggregate_pulls.py
 
