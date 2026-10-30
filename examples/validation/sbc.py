@@ -46,7 +46,7 @@ Subcommands (run from anywhere; outputs go under --outdir):
     python sbc.py run     --model rv_circ --start 0 --count 10 --outdir OUT
     python sbc.py analyze --model rv_circ --outdir OUT
 
-Models: rv_circ, rv_ecc, transit, transit_pinq, pk.  ``prior`` writes OUT/<model>/prior.npz;
+Models: rv_circ, rv_ecc, transit, transit_pinq, pk, mulens_pspl.  ``prior`` writes OUT/<model>/prior.npz;
 ``run`` writes one OUT/<model>/rows/rep_NNNN.json per replicate; ``analyze``
 writes OUT/<model>/summary.json and the rank-histogram and ECDF-difference
 figures (with the simultaneous band of Sailynoja, Buerkner & Vehtari 2022,
@@ -140,6 +140,40 @@ def one_compartment(t, dose, ka, ke, v):
     return dose * ka / (v * (ka - ke)) * (np.exp(-ke * t) - np.exp(-ka * t))
 
 
+def earth_skowron_deviations(t, t0_par):
+    """Earth's offset (AU, ICRS equatorial) from its straight-line motion
+    through its t0_par position and velocity (Skowron et al. 2011), from
+    astropy's own ephemeris -- not exozippy's ephemeris module."""
+    from astropy.coordinates import get_body_barycentric_posvel
+    from astropy.time import Time
+
+    def posvel(tt):
+        p, v = get_body_barycentric_posvel("earth", Time(tt, format="jd", scale="tdb"))
+        return (
+            np.atleast_2d(p.xyz.to("au").value.T),
+            np.atleast_2d(v.xyz.to("au/d").value.T),
+        )
+
+    pos, _ = posvel(np.asarray(t, dtype=float))
+    p0, v0 = posvel(np.array([t0_par]))
+    return pos - (p0 + v0 * (np.asarray(t)[:, None] - t0_par))
+
+
+def pspl_parallax_mag(t, t0, u0, tE, piEN, piEE, ra, dec, t0_par):
+    """Point-lens point-source magnification with annual parallax, in the
+    geocentric frame: tau = (t - t0)/tE - dN piEN - dE piEE,
+    beta = u0 + dN piEE - dE piEN (the MulensModel / Skowron et al. 2011
+    convention; d = the observer's sky-projected offset)."""
+    xyz = earth_skowron_deviations(t, t0_par)
+    x, y, z = xyz[:, 0], xyz[:, 1], xyz[:, 2]
+    de = -x * np.sin(ra) + y * np.cos(ra)
+    dn = -x * np.cos(ra) * np.sin(dec) - y * np.sin(ra) * np.sin(dec) + z * np.cos(dec)
+    tau = (t - t0) / tE - dn * piEN - de * piEE
+    beta = u0 + dn * piEE - de * piEN
+    u2 = tau**2 + beta**2
+    return (u2 + 2.0) / np.sqrt(u2 * (u2 + 4.0))
+
+
 # ---------------------------------------------------------------------------
 # Model specifications.  Each one fixes a DESIGN (times, error bars), a config,
 # a params file that states every sampled element's start and prior, and an
@@ -155,6 +189,7 @@ class Spec:
     # Sampler budget for the prior-only chains.
     prior_tune = 3000
     prior_chains = 8
+    prior_target_accept = 0.95
 
     def write_data(self, workdir, values=None):
         raise NotImplementedError
@@ -479,12 +514,133 @@ class PKSpec(Spec):
         return mean, sigma, mean + sigma * rng.standard_normal(self.t.size)
 
 
+class MulensSpec(Spec):
+    """1L1S point-source point-lens event, one light curve in flux.
+
+    The physical state (both stars' masses, distances, proper motions and
+    radial velocities) is sampled under the full galactic prior and the
+    event-rate weight -- the defaults, deliberately: that prior is what is
+    being tested.  Only the light-curve nuisances and the event's own
+    observables get user boxes.  Annual parallax is always on in this
+    model, so the independent simulator carries it (astropy's Earth).
+    """
+
+    name = "mulens_pspl"
+    ra_deg, dec_deg = 266.87, -34.73
+    err = 0.01  # flux, baseline ~1
+    tune = 2000
+    draws = 1000
+    # Measured on the galactic prior alone (no data), default coordinates:
+    # 20% of NUTS transitions diverge at target_accept 0.95 and 1.5% at
+    # 0.995, where the adapted step size falls to ~2e-3.  The full
+    # coordinate-swap set cut the prior's divergences from 75 to 4 in 400.
+    target_accept = 0.99
+    prior_target_accept = 0.99
+
+    def __init__(self, swaps=()):
+        # swaps: mulensevent coordinate switches (fitmurel, fitpirel,
+        # fitthetae).  Each carries its exact Jacobian, so the prior is the
+        # same; only the coordinates NUTS walks change (mulensing.md,
+        # "Choosing a coordinate set").
+        self.swaps = tuple(swaps)
+        if self.swaps:
+            self.name = "mulens_pspl_" + "_".join(
+                w.replace("fit", "") for w in self.swaps
+            )
+        self.t = np.arange(T0 - 200.0, T0 + 200.0, 0.5)
+
+    def write_data(self, workdir, values=None):
+        v = np.ones_like(self.t) if values is None else values
+        np.savetxt(
+            Path(workdir) / "synth.flux",
+            np.column_stack([self.t, v, np.full_like(self.t, self.err)]),
+            fmt="%.10f",
+        )
+
+    def config(self):
+        return {
+            "star": [{"name": "Lens"}, {"name": "Source"}],
+            "mulensevent": [
+                {
+                    "finite_source": False,
+                    "t0_par": T0,
+                    "use_op": False,
+                    "peak_find": False,
+                    **{w: True for w in self.swaps},
+                }
+            ],
+            "lens": [{"body": "star.Lens"}],
+            "source": [{"body": "star.Source"}],
+            "galacticmodel": [{"name": "synth", "anchor_idx": 1}],
+            "band": [{"name": "Cousins_I", "filter": "Cousins_I"}],
+            "mulensinstrument": [
+                {
+                    "name": "SYNTH",
+                    "file": "synth.flux",
+                    "band": "Cousins_I",
+                    "data_format": "flux",
+                }
+            ],
+        }
+
+    def params(self):
+        return {
+            "star.Lens.ra": {"initval": self.ra_deg, "sigma": 0},
+            "star.Lens.dec": {"initval": self.dec_deg, "sigma": 0},
+            "star.Source.ra": {"initval": self.ra_deg, "sigma": 0},
+            "star.Source.dec": {"initval": self.dec_deg, "sigma": 0},
+            "source.Source.t_0": {"initval": T0, "lower": T0 - 5.0, "upper": T0 + 5.0},
+            # u_0 > 0: +/- u_0 are (nearly, with parallax) the same event,
+            # and a chain started at the truth would see only one of them.
+            "source.Source.u_0": {"initval": 0.3, "lower": 0.01, "upper": 1.0},
+            "mulensinstrument.SYNTH.log_f_total": {
+                "initval": 0.0,
+                "lower": -0.2,
+                "upper": 0.2,
+            },
+            "mulensinstrument.SYNTH.q_source": {
+                "initval": 0.6,
+                "lower": 0.2,
+                "upper": 1.0,
+            },
+            "mulensinstrument.SYNTH.err_scale": {
+                "initval": 1.0,
+                "lower": 0.8,
+                "upper": 1.25,
+            },
+        }
+
+    def simulate(self, truth, system, rng):
+        ra, dec = np.radians(self.ra_deg), np.radians(self.dec_deg)
+        A = pspl_parallax_mag(
+            self.t,
+            truth["source.t_0"][0],
+            truth["source.u_0"][0],
+            truth["mulensevent.t_E"][0],
+            truth["mulensevent.pi_E_N"][0],
+            truth["mulensevent.pi_E_E"][0],
+            ra,
+            dec,
+            T0,
+        )
+        fs = truth["mulensinstrument.f_source"][0]
+        fb = truth["mulensinstrument.f_blend"][0]
+        mean = fs * A + fb
+        sigma = self.err * truth["mulensinstrument.err_scale"][0] * np.ones_like(self.t)
+        return mean, sigma, mean + sigma * rng.standard_normal(self.t.size)
+
+
 SPECS = {
     "rv_circ": lambda: RVSpec(eccentric=False),
     "rv_ecc": lambda: RVSpec(eccentric=True),
     "transit": TransitSpec,
     "transit_pinq": lambda: TransitSpec(pin_mass=True),
     "pk": PKSpec,
+    "mulens_pspl": MulensSpec,
+    "mulens_pspl_murel": lambda: MulensSpec(swaps=("fitmurel",)),
+    "mulens_pspl_murel_pirel_thetae": lambda: MulensSpec(
+        swaps=("fitmurel", "fitpirel", "fitthetae")
+    ),
 }
 
 
@@ -687,7 +843,7 @@ def cmd_prior(args, spec=None):
             tune=spec.prior_tune,
             chains=chains,
             cores=min(chains, args.cores),
-            target_accept=0.95,
+            target_accept=spec.prior_target_accept,
             random_seed=args.seed,
             progressbar=False,
             compute_convergence_checks=False,
