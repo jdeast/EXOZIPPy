@@ -1126,11 +1126,30 @@ def cmd_analyze(args):
     )
     sampled = {p for p in prior_report["fingerprint"]}
 
+    # A quantity that is constant up to round-off (e.g. planet.mass when the
+    # mass coordinate and the star are pinned) has no rank: every draw TIES
+    # the truth.  Measured on transit_pinq: planet.mass varied at 1e-19 in
+    # the prior draws, passed a std > 0 test, and ranked 0 in every
+    # replicate.  Drop such quantities, and break genuine ties at random.
+    def spread(k):
+        vals = [r["quantities"][k]["truth"] for r in usable if k in r["quantities"]]
+        scale = max(np.max(np.abs(vals)), 1e-300)
+        return np.ptp(vals) / scale
+
+    names = [k for k in names if spread(k) > 1e-9]
+    tie_rng = np.random.default_rng(7164)
+
+    def rank_of(q):
+        if "thin" not in q:
+            return q["rank"]
+        thin = np.asarray(q["thin"])
+        below = int(np.sum(thin < q["truth"]))
+        ties = int(np.sum(thin == q["truth"]))
+        return below + int(tie_rng.integers(0, ties + 1))
+
     def ranks(sel):
         return {
-            k: [
-                r["quantities"][k]["rank"] for r in sel if k in r["quantities"]
-            ]
+            k: [rank_of(r["quantities"][k]) for r in sel if k in r["quantities"]]
             for k in names
         }
 
