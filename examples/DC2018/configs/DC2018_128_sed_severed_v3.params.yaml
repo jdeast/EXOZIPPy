@@ -1,7 +1,9 @@
 # Everything in DC2018_128.params.yaml, PLUS the photometric zeropoint.
 star.Lens.ra: {initval: 267.595, sigma: 0}
 star.Lens.dec: {initval: -28.982, sigma: 0}
-star.Lens.teff: {sigma: 0.0}
+# mann (on the Lens) reads the lens's feh and radius, so these two pins
+# hold real quantities; star.Lens.teff is read by nothing here (the SED
+# does not see the lens) and is inactive without a pin.
 star.Lens.feh: {sigma: 0.0}
 star.Lens.radius: {sigma: 0.0}
 planet.Companion.radius: {sigma: 0}

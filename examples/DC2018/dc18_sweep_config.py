@@ -30,7 +30,7 @@ WHAT DELIBERATELY IS NOT CARRIED OVER FROM v7:
     s/q/alpha left at generic starts so the sampler has to find the
     planet on its own.  (The fragment replaced a seed JSON read through
     the `mmexofast:` key, removed 2026-10-01; same numbers.)
-  * The solar pins run_event.py still writes (`star.Lens.teff: sigma: 0`
+  * The solar pins run_event.py used to write (`star.Lens.teff: sigma: 0`
     and friends).  2.9.10 showed those force the lens mass through the SED
     floor potentials; v5 removed them and the lens mass went from 1.98x
     truth to 0.85x.

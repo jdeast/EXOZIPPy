@@ -139,21 +139,19 @@ def build_config(name, files, prefix, args):
 def build_user_params(ra, dec, fix_u1=False, bands_for_u1=()):
     """Fixed-parameter overrides, mirroring examples/DC2018_128.
 
-    Coordinates come from event_info.txt. The Lens's radius/teff/feh fixes
-    are the same 'not constrainable without SED data' hack the DC2018_128
-    example documents; the microlensing start values are deliberately
-    ABSENT so the built-in peak finder seeds them from the light curves (a
-    user entry would outrank it). The Source star
-    needs none of this: star.py pins its mass/teff/feh/radius/ra/dec
-    automatically for any star that is purely a microlensing source (never
-    also a lens body), falling back to the Lens's coordinates here.
+    Coordinates come from event_info.txt. There are no Lens radius/teff/feh
+    entries: in this topology (no SED, evolutionary model or empirical
+    relation) nothing reads them, and the star component makes them
+    inactive by itself (star.md, "Which stellar structure parameters a
+    topology actually has"); the sigma-0 pins once written here did
+    nothing.  A caller that adds an SED or a relation on the lens states its
+    own priors.  The microlensing start values are deliberately ABSENT so
+    the built-in peak finder seeds them from the light curves (a user entry
+    would outrank it).  The Source's coordinates fall back to the Lens's.
     """
     params = {
         "star.Lens.ra": {"initval": ra, "sigma": 0},
         "star.Lens.dec": {"initval": dec, "sigma": 0},
-        "star.Lens.teff": {"sigma": 0.0},
-        "star.Lens.feh": {"sigma": 0.0},
-        "star.Lens.radius": {"sigma": 0.0},
         "planet.Companion.radius": {"sigma": 0},
     }
     if fix_u1:

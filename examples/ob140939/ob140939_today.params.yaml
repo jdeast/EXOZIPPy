@@ -70,6 +70,7 @@ star.Source.radius:
 mulensinstrument.Spitzer.f_source:
     mu: "0.3266 * mulensinstrument.OGLE4.f_source"
     sigma: 7.0
+    citation: Yee:2015
 
 # ---- source SED + OGLE zero-point tie ----------------------------------
 # OGLE flux unit 1 = I 22 (calibrated OGLE-IV I, Vega); sigma 0.2 covers
@@ -94,12 +95,14 @@ star.Source.av:
     sigma: 0.49
     lower: 0.0
     upper: 15.0
+    citation: [Surot:2020, Nishiyama:2009]
 
 # Bulge metallicity distribution (Ness+2013, Zoccali+2017); no spectrum.
 star.Source.feh:
     initval: 0.0
     mu: 0.0
     sigma: 0.5
+    citation: [Ness:2013, Zoccali:2017]
 
 # Old-bulge RGB mass ~0.8-1.25 Msun.
 star.Source.logmass:
