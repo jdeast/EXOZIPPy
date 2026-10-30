@@ -28,6 +28,7 @@ import logging
 import numpy as np
 import pytest
 
+from conftest import write_synthetic_mist_grid
 from exozippy.manifest import interpret_manifest_entry
 from exozippy.system import System
 
@@ -362,3 +363,101 @@ def test_a_parameter_no_star_uses_is_still_declared():
     for param in ("radius", "teff"):
         assert param in star.manifest
         assert not np.any(_mask(star, param))
+
+
+# ----------------------------------------------------------------------
+# Tier 2 for logmass: a microlensing-only source's mass is pinned unless a
+# component reads it -- an empirical relation or an evolutionary model.
+# ----------------------------------------------------------------------
+@pytest.fixture(scope="module")
+def mist_root(tmp_path_factory):
+    """A tiny synthetic MIST grid (no test may depend on the shipped one)."""
+    return write_synthetic_mist_grid(tmp_path_factory.mktemp("mist_models"))
+
+
+def _logmass_pin(star):
+    """Per star, True where the manifest pins logmass (`sigma: 0` override)."""
+    options = interpret_manifest_entry(star.manifest.get("logmass")).options
+    sigma = (options.get("overrides") or {}).get("sigma")
+    if sigma is None:
+        return [False] * star.n_elements
+    return [s is not None and not np.isnan(s) and s == 0.0 for s in sigma]
+
+
+def test_a_source_with_no_relation_keeps_its_mass_pinned():
+    """
+    Given a microlensing fit whose source star's mass nothing but the IMF reads,
+    When the star component registers its parameters,
+    Then the source's logmass is pinned through the overrides channel and
+      the lens's is not.
+
+    Only the IMF reads such a mass, so this tier-2 pin stands; whether it
+    should is a separate decision, and this test holds it in place.
+    """
+    star = _star(_mulens_config())
+
+    assert _logmass_pin(star) == [False, True]
+
+
+def test_an_evolutionary_model_on_the_source_frees_its_mass(mist_root):
+    """
+    Given the same fit with an evolutionarymodel block naming the source,
+    When the star component registers its parameters,
+    Then the source's logmass is free.
+
+    An evolutionary model is not an empirical relation, but a track is
+    indexed by the star's mass, so it reads it: with MIST in place of torres the mass is constrained through the source's distance
+    and its radius/teff.  The name list this replaced held only the
+    empirical relations (mann, torres, mamajek), so the mass stayed pinned at its seed-0 start and the
+    track had to fit the star at that mass on every seed.
+    """
+    config = _mulens_config(
+        extra={
+            "evolutionarymodel": [
+                {"star": "Source", "model_root": str(mist_root)}
+            ]
+        }
+    )
+
+    star = _star(config)
+
+    assert _logmass_pin(star) == [False, False]
+
+
+def test_an_evolutionary_model_on_the_lens_only_leaves_the_source_pinned(
+    mist_root,
+):
+    """
+    Given an evolutionarymodel block naming only the lens,
+    When the star component registers its parameters,
+    Then the source's logmass is still pinned: a mass reader frees the
+      stars its instances NAME, not every star in a config carrying the block.
+    """
+    config = _mulens_config(
+        extra={
+            "evolutionarymodel": [
+                {"star": "Lens", "model_root": str(mist_root)}
+            ]
+        }
+    )
+
+    star = _star(config)
+
+    assert _logmass_pin(star) == [False, True]
+
+
+def test_an_empirical_relation_on_the_source_still_frees_its_mass():
+    """
+    Given torres naming the source (the old name list held only the
+      empirical relations),
+    When the star component registers its parameters,
+    Then the source's logmass is free, as before the mass readers were asked
+    through their shared mixin instead of by name.
+    """
+    config = _mulens_config(
+        extra={"torres": [{"star": "Source", "constrain": ["mass", "radius"]}]}
+    )
+
+    star = _star(config)
+
+    assert _logmass_pin(star) == [False, False]
