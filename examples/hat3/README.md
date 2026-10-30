@@ -50,8 +50,14 @@ Seed it only if you know the evolutionary phase. `star.A.age` likewise
 keeps its defaults.yaml start; the tracks constrain it, and HAT-P-3's age
 is not independently known.
 
-**The Claret tie.** `hat3_mist_claret.params.yaml` has no `band.TESS.q1`/
-`q2` start: the tie seeds them from the Claret table at the star's start,
-which is the point of testing it, and a start written in the params file
-would win over that seed. The tie's width is `band.TESS.du1`/`du2`'s sigma
-(default 0.05, the tables' systematic floor, applied once per band).
+**The Claret tie.** The tie is on by default, so it applies to every
+config here with a transit (`hat3`, `hat3_transitonly`, `hat3_mist_claret`;
+the last writes `star_constrains_ld: true` out explicitly). None of their
+params files gives a `band.TESS` limb-darkening start: the tie seeds q1/q2
+from the Claret table at the star's starting teff/logg/feh, so the start
+sits exactly on the table (`band.TESS.du1 = du2 = 0`), and a start written
+in the params file would win over that seed. `hat3.params.yaml` used to
+carry `u1`/`u2` initvals with their own 0.05 Gaussians; the derived u1/u2
+could not be started there (the model started on the table anyway), and
+the Gaussians duplicated the tie. The tie's width is `band.TESS.du1`/`du2`'s
+sigma (default 0.05, the tables' systematic floor, applied once per band).

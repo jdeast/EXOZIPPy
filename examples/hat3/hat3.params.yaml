@@ -57,13 +57,6 @@ orbit.b.secosw:
 orbit.b.sesinw:
     initval: 0.09205694
 
-band.TESS.u1:
-  initval: 0.4169
-  sigma: 0.05
-band.TESS.u2:
-  initval: 0.1966
-  sigma: 0.05
-
 rvinstrument.HIRES.gamma:
     initval: -14.01010534
 rvinstrument.HIRES.jitter_variance:

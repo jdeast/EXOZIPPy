@@ -2,13 +2,12 @@
 star.Lens.ra: {initval: 267.595, sigma: 0}
 star.Lens.dec: {initval: -28.982, sigma: 0}
 
-# Not constrainable without data on the lens itself.  The Source needs none
-# of this: star.py pins mass/teff/feh/radius/ra/dec for any star that is
-# purely a microlensing source -- unless it appears in an SED, which
-# un-pins teff/feh/radius so the photometry can constrain them.
-star.Lens.teff: {sigma: 0.0}
-star.Lens.feh: {sigma: 0.0}
-star.Lens.radius: {sigma: 0.0}
+# No star.Lens/Source teff, feh or radius entries: with no SED, evolutionary
+# model or empirical relation nothing reads them (the source radius is read
+# through rho, and stays free), so the star component makes them inactive
+# by itself (star.md, "Which stellar structure parameters a topology
+# actually has").  The companion's radius is not on that list, so it is
+# still pinned here.
 planet.Companion.radius: {sigma: 0}
 
 # The DC2018 simulations contain NO limb darkening: `gamma` is 0 in all 44
