@@ -1,5 +1,7 @@
 # galacticmodel: the frame and how it is tested
 
+**Provenance:** this component derives from genulens (Koshimoto, Baba & Bennett 2021, ApJ 917, 78, "K21"; https://github.com/nkoshimoto/genulens). Cite K21 when you use it.
+
 The galactic model's mass prior (IMF, FFP mass function, and the present-day mass function -- `present_day: true`, the DEFAULT since review 1.7.2 -- with its MIST turnoff and WD/NS/BH remnants, `pdmf.py`), its density and velocity mixture, linked stars and the evidence normalizer are documented in `src/exozippy/components/star/star.md` ("Stellar mass priors", "Linked stars", "The stellar distance prior"). This file holds what is specific to the coordinates: which frame the kinematic prior works in, why, and the tests that pin it. Read it before touching `physics.py`'s `line_of_sight_basis`, `galactic_xyz` or `polar_velocity`, the bar angle, or any sign in the velocity transform.
 
 ## One frame for positions and velocities
