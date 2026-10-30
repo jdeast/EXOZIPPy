@@ -273,6 +273,9 @@ class MulensInstrument(Instrument):
             parse_magsys(c.get("magsys"), f"mulensinstrument {name!r}")
             for name, c in zip(self.names, self.config)
         ]
+        # The resolution last LOGGED per light curve (_resolve_zeropoint_
+        # systems logs it once per build, again only if it changes).
+        self._zp_magsys_logged = {}
 
     @property
     def prefix(self):
@@ -3032,7 +3035,7 @@ class MulensInstrument(Instrument):
                 if stated is not None
                 else "the filter's native system"
             )
-            logger.info(
+            message = (
                 f"mulensinstrument {name}: zeropoint magnitude system "
                 f"{mag_system} ({how}; the SED predicts Vega, so "
                 + (
@@ -3042,6 +3045,12 @@ class MulensInstrument(Instrument):
                     else "no conversion)."
                 )
             )
+            # Stage 3 can run twice (a topology revision or a stage-1
+            # estimate re-read after the start solve, System.prepare): log a
+            # light curve's resolution once, and again only if it CHANGED.
+            if self._zp_magsys_logged.get(name) != message:
+                logger.info(message)
+                self._zp_magsys_logged[name] = message
 
     def _user_states(self, field):
         """Per light curve: did the USER state zeropoint ``field``?
