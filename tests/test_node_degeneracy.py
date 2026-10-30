@@ -421,3 +421,32 @@ def test_the_fold_is_a_no_op_where_nothing_is_degenerate(tmp_path):
     system = System(config, _params())
     system.prepare()
     assert not system.orbit.fold_node_degeneracy(xr.Dataset())
+
+
+def test_a_user_tc_box_on_a_node_degenerate_orbit_raises(tmp_path):
+    """
+    Given an astrometry-only (node-degenerate) orbit whose tc the user
+      bounds,
+    When the system is prepared,
+    Then it raises naming the orbit: the fold wraps a flipped tc by one
+      window width, which is one period only for the component's own window
+      (a user tc box has been honored since review 1.8.17; it used to be
+      silently replaced).
+    """
+    config = {
+        "star": [{"name": "A", "mist": False}],
+        "planet": [{"name": "BH"}],
+        "orbit": [{"name": "BH"}],
+        "astrometryinstrument": [
+            {
+                "name": "Rel",
+                "file": _write_rel(tmp_path / "sim.rel.astrom"),
+                "mode": "rel",
+            }
+        ],
+    }
+    params = _params()
+    params["orbit.BH.tc"] = {"initval": _TRUTH["tc"], "lower": 2455050.0}
+    system = System(config, params)
+    with pytest.raises(ValueError, match=r"BH: a lower/upper on tc"):
+        system.prepare()

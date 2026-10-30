@@ -1574,6 +1574,21 @@ class Orbit(Component):
         shifted = self.tc_epoch != 0
         tc_sampled_init = tc_init + self.tc_epoch * period_init
         self.epoch_modes = ["shifted" if s else "user" for s in shifted]
+
+        # The window is a MODELLING default, not a validity limit (the
+        # likelihood is finite a period away), so it is an option WITH A GAP
+        # (config.md): NaN on every element whose bound the user wrote, which
+        # `layer_options` reads as "keep the resolved value".  A bare option
+        # replaced the user's box outright -- `tc: {lower: T0 - 0.3, upper:
+        # T0 + 0.3}` built its transform on T0 +/- P/2 (review 1.8.17).  The
+        # user may tighten OR loosen it.  An orbit whose tc the user bounded
+        # is never shifted (`_user_fixes_tc_support`), so the -inf/+inf of a
+        # derived tc is never gapped.
+        def _gap(param, field, values):
+            return np.where(
+                self.user_wrote_field(param, field), np.nan, values
+            )
+
         epoch_entries = mode_manifest(
             self.epoch_modes,
             self.EPOCH_MODE_TABLE,
@@ -1584,12 +1599,24 @@ class Orbit(Component):
                 # defaults.yaml range and add one.
                 "tc": {
                     "force_node": True,
-                    "lower": np.where(shifted, -np.inf, tc_init - half_period),
-                    "upper": np.where(shifted, np.inf, tc_init + half_period),
+                    "lower": _gap(
+                        "tc",
+                        "lower",
+                        np.where(shifted, -np.inf, tc_init - half_period),
+                    ),
+                    "upper": _gap(
+                        "tc",
+                        "upper",
+                        np.where(shifted, np.inf, tc_init + half_period),
+                    ),
                 },
                 "tc_sampled": {
-                    "lower": tc_sampled_init - half_period,
-                    "upper": tc_sampled_init + half_period,
+                    "lower": _gap(
+                        "tc_sampled", "lower", tc_sampled_init - half_period
+                    ),
+                    "upper": _gap(
+                        "tc_sampled", "upper", tc_sampled_init + half_period
+                    ),
                 },
             },
             where=f"{self.prefix} sampled epoch",
@@ -1850,11 +1877,38 @@ class Orbit(Component):
             # system is not degenerate at all, and treating it as if it were
             # cost it a table note it did not deserve.
             self.node_degenerate = self._node_degenerate_orbits(system)
+            # The fold moves a flipped draw's tc to the other conjunction and
+            # wraps it back by one window width, which is one period only for
+            # the component's own window.  A user tc box (honored since review
+            # 1.8.17; before that it was silently replaced) would make that
+            # wrap move tc by a non-period amount, so refuse the pairing.
+            boxed = self.node_degenerate & (
+                self.user_wrote_field("tc", "lower")
+                | self.user_wrote_field("tc", "upper")
+            )
+            if boxed.any():
+                names = ", ".join(self.names[i] for i in np.flatnonzero(boxed))
+                raise ValueError(
+                    f"[{self.prefix}] orbit(s) {names}: a lower/upper on tc "
+                    "is not supported where astrometry without RVs leaves "
+                    "the ascending node degenerate -- the post-sampling "
+                    "fold moves tc to the other conjunction and needs tc's "
+                    "one-period window.  Remove the bound (a tc mu/sigma "
+                    "prior is fine)."
+                )
             if self.node_degenerate.any():
                 self._declare_node_degeneracy()
 
         i180_arr = np.atleast_1d(getattr(self, "i180", False)) | has_astrometry
-        derived_lowers = np.where(i180_arr, -1.0, 0.0)
+        # An option WITH A GAP (config.md): the half-plane is the
+        # component's default, but a `lower` the user wrote on cos i -- a
+        # tighter inclination box, or -1 to open both branches -- is kept
+        # rather than replaced (the audit that followed review 1.8.17).
+        derived_lowers = np.where(
+            self.user_wrote_field("cosi", "lower"),
+            np.nan,
+            np.where(i180_arr, -1.0, 0.0),
+        )
         # merge_options, not a fresh dict: on a `fitchord` orbit this entry
         # carries an expr_key, and overwriting it would silently turn the
         # derived cos i back into a sampled one (review 4.5.3).  The bound
