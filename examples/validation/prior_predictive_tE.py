@@ -4,10 +4,17 @@ Build a lens + source model with NO light curve for one bulge sight line,
 sample the prior with event-rate weighting, and store the quantiles of
 t_E, D_L, D_S, mu_rel and M_L -- for comparison with survey-measured,
 efficiency-corrected t_E distributions (Mroz et al. 2017, 2019) and with
-genulens (Koshimoto, Baba & Bennett 2021) run for the same sight lines.
+genulens (Koshimoto, Baba & Bennett 2021, ApJ 917, 78; K21) run for the
+same sight lines.
 
 A frame, sign, kinematics, IMF or density error shifts t_E, so this is one
 end-to-end check of the whole prior that does not depend on genulens.
+
+OGLE IS A CONSISTENCY CHECK, NOT AN INDEPENDENT CALIBRATION TARGET: K21
+fit their IMF to these same OGLE-IV t_E distributions, so genulens
+matching OGLE holds by construction, and a K21-like mass function here
+matching OGLE checks our implementation of their model, not the IMF.  Do
+not tune the prior to OGLE's t_E; that counts the data twice.
 
 HOW THE PRIOR IS EVENT-RATE WEIGHTED (nothing here adds a term; this is
 what the model already does, so the script samples exactly what a real
@@ -34,9 +41,9 @@ microlensing fit uses as its prior):
 
 Together: p(D_L, D_S, v_L, v_S, M_L) ~ n_L(D_L) D_L^2 f_L(v_L) Phi(M_L)
 x n_S(D_S) D_S^2 f_S(v_S) x theta_E mu_rel, the standard event-rate
-weighting.  Two differences from what a survey measures are KNOWN and are
-model choices, not bugs; Part B has to account for them, not rediscover
-them:
+weighting.  Differences from what a survey measures that are KNOWN and
+are model choices, not bugs; Part B has to account for them, not
+rediscover them:
 
   * sources are weighted by n(D_S) D_S^2 only -- no luminosity function or
     magnitude limit (genulens's ``gammaDs`` exponent is 2 here, versus its
@@ -44,8 +51,10 @@ them:
   * the lens mass function is the galacticmodel's present-day one by
     default (review 1.7.2: MIST turnoff, white dwarfs, neutron stars and
     black holes, as genulens REMNANT 1); ``sample --no-present-day``
-    restores the IMF as the present-day mass function.  Neither has
-    binary lenses.
+    restores the IMF as the present-day mass function.  The genulens
+    reference is its REMNANT 1 run for the same reason (REMNANT 0
+    DISCARDS evolved lenses instead; see GENULENS_VARIANTS);
+  * neither this prior nor the genulens references have binary lenses.
 
 With no light curve there is no t0_par and no Earth velocity, so
 ``mu_rel_geo`` falls back to the heliocentric value (mulensevent warns).
@@ -289,16 +298,32 @@ def cmd_mroz(args):
 # ----------------------------------------------------------------------
 # genulens
 # ----------------------------------------------------------------------
-# Two configurations per sight line.  "matched" is genulens as close to
-# the EXOZIPPy prior as its switches allow (source weight n D^2: gammaDs
-# 2; no remnants; no binaries); "survey" is genulens's default
-# survey-like source weighting (gammaDs 0.5 ~ I_s < 21) with remnants on,
-# the closest genulens gets to what OGLE measured.  The gap between the
-# two is the size of the two KNOWN model differences in the docstring.
+# Three configurations per sight line, none with binary lenses.
+#
+# * "remnants" -- THE comparison reference for M_L, D_L, D_S and mu_rel:
+#   source weight n D^2 (gammaDs 2, as this prior has) and REMNANT 1, i.e.
+#   every population's evolved stars become white dwarfs, neutron stars
+#   and black holes (K21's present-day mass function; ~21% dark lenses
+#   toward Baade's window).
+# * "survey" -- the same with genulens's default source weighting
+#   (gammaDs 0.5 ~ an I_s < 21 sample), the closest genulens gets to what
+#   OGLE measured.  survey vs remnants differs ONLY in the source weight,
+#   so it measures the one known model difference left (no source
+#   luminosity function here).
+# * "discard" -- REMNANT 0, which is NOT "no remnants": genulens then
+#   DISCARDS every lens whose initial mass exceeds its population's dying
+#   mass (event_sampler.cpp, `else { j--; continue; }`), so the dead mass
+#   simply vanishes from the lens population.  Kept only to show the size
+#   of that choice (Baade: M_L median 0.31 vs 0.46 Msun); never compare a
+#   mass function against it.  Before 2026-10-30 this run was labelled
+#   "matched" and was wrongly used as the mass reference.
 GENULENS_VARIANTS = {
-    "matched": ["gammaDs", "2.0", "REMNANT", "0", "BINARY", "0"],
+    "remnants": ["gammaDs", "2.0", "REMNANT", "1", "BINARY", "0"],
     "survey": ["REMNANT", "1", "BINARY", "0"],
+    "discard": ["gammaDs", "2.0", "REMNANT", "0", "BINARY", "0"],
 }
+#: The variant every mass / geometry / kinematics comparison uses.
+GENULENS_REFERENCE = "remnants"
 # VERBOSITY 3 columns (genulens event_reporter.cpp print_event).
 GENULENS_COLS = (
     "wtj M_L D_L D_S t_E theta_E pi_E pi_EN pi_EE mu_rel mu_Sl mu_Sb "
@@ -375,6 +400,16 @@ def cmd_genulens(args):
                 },
                 d["wtj"],
             )
+            # Rate-weighted lens types (fREM: 0 luminous, 1 WD, 2 NS, 3
+            # BH) and the share of lenses above 1 Msun.
+            wsum = d["wtj"].sum()
+            stats["lens_type_fraction"] = {
+                lab: float(d["wtj"][d["fREM"] == k].sum() / wsum)
+                for k, lab in enumerate(("luminous", "WD", "NS", "BH"))
+            }
+            stats["frac_M_L_gt_1"] = float(
+                d["wtj"][d["M_L"] > 1.0].sum() / wsum
+            )
             stats["_cmd"] = " ".join(["genulens"] + cmd[1:])
             stats["_summary_lines"] = summary
             store[name][variant] = stats
@@ -384,7 +419,10 @@ def cmd_genulens(args):
             p = d["wtj"] / d["wtj"].sum()
             k = rng.choice(len(p), size=min(args.n_keep, len(p)), p=p)
             keep = np.column_stack(
-                [d[c][k] for c in ("t_E", "D_L", "D_S", "mu_rel", "M_L")]
+                [
+                    d[c][k]
+                    for c in ("t_E", "D_L", "D_S", "mu_rel", "M_L", "fREM")
+                ]
             )
             np.savetxt(
                 REFS / f"genulens_{name}_{variant}_resampled.dat",
@@ -393,7 +431,8 @@ def cmd_genulens(args):
                 header=(
                     f"genulens {stats['_cmd'][9:]}\n"
                     f"{args.n_keep} draws resampled by wtj (equal weight).\n"
-                    "t_E[d] D_L[pc] D_S[pc] mu_rel_geo[mas/yr] M_L[Msun]"
+                    "t_E[d] D_L[pc] D_S[pc] mu_rel_geo[mas/yr] M_L[Msun] "
+                    "fREM[0 luminous, 1 WD, 2 NS, 3 BH]"
                 ),
             )
     if args.run_only:
@@ -402,8 +441,14 @@ def cmd_genulens(args):
         "_note": (
             "genulens (Koshimoto, Baba & Bennett 2021, ApJ 917, 78; "
             "github.com/nkoshimoto/genulens) wtj-weighted quantiles. "
-            "mu_rel is GEOCENTRIC at genulens's default vEarthlb."
+            "mu_rel is GEOCENTRIC at genulens's default vEarthlb. "
+            "Variants: remnants (gammaDs 2, REMNANT 1) is the reference; "
+            "survey (gammaDs 0.5, REMNANT 1); discard (gammaDs 2, REMNANT "
+            "0 -- DISCARDS evolved lenses, not a mass reference). K21 fit "
+            "its IMF to the OGLE-IV t_E distributions (Mroz+2017/2019), so "
+            "genulens agreeing with OGLE holds by construction."
         ),
+        "_reference_variant": GENULENS_REFERENCE,
         "_genulens_commit": args.commit,
         "sightlines": store,
     }
@@ -764,19 +809,27 @@ def _read_resampled(sightline, variant):
     a = np.loadtxt(REFS / f"genulens_{sightline}_{variant}_resampled.dat")
     return {
         c: a[:, i]
-        for i, c in enumerate(("t_E", "D_L", "D_S", "mu_rel", "M_L"))
+        for i, c in enumerate(("t_E", "D_L", "D_S", "mu_rel", "M_L", "fREM"))
+        if i < a.shape[1]
     }
 
 
 def decompose(ez, gen, rng):
     """Localize a t_E difference.  t_E = sqrt(kappa M_L pi_rel) / mu_rel,
-    and in BOTH models the rate-weighted lens mass is independent of the
-    geometry and kinematics (the IMF does not depend on position, and the
-    rate weight theta_E mu_rel factorizes as sqrt(M_L) x sqrt(pi_rel)
-    mu_rel), so the IMF's share is EXACT by swapping masses:
-    t_E' = t_E sqrt(M'/M) with M' drawn from genulens's rate-weighted
-    M_L.  What remains, t_E / sqrt(M_L), is geometry + kinematics, split
-    further into pi_rel (density) and mu_rel (kinematics) marginals."""
+    and the rate weight theta_E mu_rel factorizes as sqrt(M_L) x
+    sqrt(pi_rel) mu_rel, so when a model's mass function does not depend
+    on position the rate-weighted lens mass is independent of geometry
+    and kinematics and the mass function's share is isolated by swapping
+    masses: t_E' = t_E sqrt(M'/M) with M' drawn from genulens's
+    rate-weighted M_L (its reference variant, remnants ON).
+
+    EXACT only for EXOZIPPy's ``present_day: false`` (one IMF everywhere).
+    A present-day mass function differs by population (each has its own
+    turnoff and remnants), in EXOZIPPy's default and in genulens alike,
+    which couples the mass weakly to D_L; there the swap is an
+    approximation.  What remains, t_E / sqrt(M_L), is geometry +
+    kinematics, split further into pi_rel (density) and mu_rel
+    (kinematics) marginals."""
     out = {}
     for name, d in (("exozippy", ez), ("genulens", gen)):
         pi_rel = 1000.0 / d["D_L"] - 1000.0 / d["D_S"]
@@ -790,7 +843,7 @@ def decompose(ez, gen, rng):
             "D_S": _q(d["D_S"]),
         }
     m_swap = rng.choice(gen["M_L"], size=ez["M_L"].size)
-    out["exozippy_with_genulens_IMF"] = {
+    out["exozippy_with_genulens_masses"] = {
         "t_E": _q(ez["t_E"] * np.sqrt(m_swap / ez["M_L"]))
     }
     return {
@@ -834,10 +887,11 @@ def cmd_compare(args):
                 "ks_p": p,
             }
         if "baseline" in ez_runs:
-            row["decomposition_vs_genulens_matched"] = decompose(
-                ez_runs["baseline"], gen["matched"], rng
+            row[f"decomposition_vs_genulens_{GENULENS_REFERENCE}"] = decompose(
+                ez_runs["baseline"], gen[GENULENS_REFERENCE], rng
             )
-            # D_L / mu_rel / M_L against genulens (both variants), KS.
+            # D_L / mu_rel / M_L against genulens (every variant; the
+            # reference is GENULENS_REFERENCE), KS.
             from scipy.stats import ks_2samp
 
             row["vs_genulens"] = {
