@@ -572,8 +572,28 @@ THETA_E_LENSING_MIN = 1e-6  # mas
 #
 # Both are the values that were already in force everywhere they appeared, so
 # naming them changed no result; see the PR that introduced them.
+#
+# S_FLOOR no longer reaches VBM (review 1.6.22): the vbm_direct Op MERGES a
+# pair closer than S_MERGE (below) instead of clamping it.  It stays as a
+# division guard on the t0_par separation (calc_beta, calc_period_min: s =
+# 10**log_s > 0, so it never binds there), on the flux bootstrap's stage-1
+# seed and on the MulensModel A/B reference builder (binary, static s).
 S_FLOOR = 1e-6  # Einstein radii (binary separation)
 RHO_FLOOR = 1e-9  # Einstein radii (source radius)
+
+# S_MERGE    two lenses closer than this ARE one lens of their summed mass, at
+#            their center of mass (op.close_lens_groups/merge_lens_groups;
+#            review 1.6.22).  Exact in the limit, and the only well-posed
+#            answer below it: VBM's polynomial roots lose accuracy as a pair
+#            closes, so a pair handed to it at 1e-6 (the old S_FLOOR clamp,
+#            reached whenever a linear orbit's s(t) crossed zero inside the
+#            data span) returned magnifications wrong by up to 10%.
+#            Measured (mulensing.md, "A lens pair closer than S_MERGE is one
+#            lens"): the merge error at 1e-3 is at most ~1e-5 of A (point
+#            source, A <= 1e4; smaller for a finite one), while VBM's error
+#            on the unmerged pair is at Tol only from ~3e-4 up (three
+#            lenses, Multipoly) and ~1e-5 up (two).
+S_MERGE = 1e-3  # Einstein radii (lens-lens separation)
 
 
 def apply_u_0_floor(u_0):
