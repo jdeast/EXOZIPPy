@@ -454,8 +454,9 @@ def test_chabrier_is_the_default_and_carries_the_truncation_normalizer():
     assert log_z == pytest.approx(0.3539152164266602, rel=1e-9)
     assert imf == pytest.approx(-0.5488319618, rel=1e-9)
     # untouched by the IMF change.  Re-pinned when positions and velocities
-    # moved into one frame (review 1.7.1): 10.09330069291524 before.
-    assert kinematic == 10.047284744610437
+    # moved into one frame (review 1.7.1): 10.09330069291524 before; and
+    # when the bar became K21's E+E_X (review 1.7.3): 10.047284744610437.
+    assert kinematic == 11.161136988268666
 
 
 def test_multiple_galacticmodel_blocks_raise():
@@ -662,13 +663,7 @@ def _reference_kinematic_lp(d_pc, pm_ra, pm_dec, rv_ms):
         GALACTOCENTRIC_FRAME,
     )
     from exozippy.constants import (
-        BULGE_BAR_ANGLE,
         BULGE_CENTRAL_NUMBER_DENSITY,
-        BULGE_DENSITY_X_0,
-        BULGE_DENSITY_Y_0,
-        BULGE_DENSITY_Z_0,
-        BULGE_RC,
-        BULGE_RC_WIDTH,
         BULGE_ROTATION_ANGULAR_VELOCITY,
         BULGE_VELOCITY_SIGMA_1,
         BULGE_VELOCITY_SIGMA_2,
@@ -721,10 +716,6 @@ def _reference_kinematic_lp(d_pc, pm_ra, pm_dec, rv_ms):
     v_r = v_y * (y / r) + v_x * (x / r)
     v_phi = v_y * (x / r) - v_x * (y / r)
 
-    cos_bar, sin_bar = np.cos(BULGE_BAR_ANGLE), np.sin(BULGE_BAR_ANGLE)
-    x_bar = x * cos_bar + y * sin_bar
-    y_bar = -x * sin_bar + y * cos_bar
-
     r_plateau = hinge(r - DISK_RDBREAK) - (SUN_GC_DISTANCE - DISK_RDBREAK)
     L_thin = (
         np.log(DISK_LOCAL_NUMBER_DENSITY)
@@ -757,15 +748,9 @@ def _reference_kinematic_lp(d_pc, pm_ra, pm_dec, rv_ms):
             * THICK_DISK_VELOCITY_SIGMA_W
         )
     )
-    r_s = np.sqrt(
-        (x_bar / BULGE_DENSITY_X_0) ** 2
-        + (y_bar / BULGE_DENSITY_Y_0) ** 2
-        + (z / BULGE_DENSITY_Z_0) ** 2
-    )
     L_bulge = (
         np.log(BULGE_CENTRAL_NUMBER_DENSITY)
-        - 0.5 * r_s
-        - 0.5 * (hinge(r - BULGE_RC) / BULGE_RC_WIDTH) ** 2
+        + np.log(_genulens_bar_profile(x, y, z, r))
         - 0.5 * (v_r / BULGE_VELOCITY_SIGMA_1) ** 2
         - 0.5
         * (
@@ -822,10 +807,50 @@ def test_kinematic_prior_matches_independent_reference(
     )
 
 
+def _genulens_bar_profile(x, y, z, r):
+    """genulens calc_rhoB (model 5 + X-shape 5, K21's E+E_X; its
+    model/parameters.hpp defaults), transcribed independently of
+    physics.bar_log_profile from simulation/density_runtime.cpp, in kpc.
+    Two deliberate departures, both the model's: |u| is the plain abs (the
+    model rounds it at 1e-6 scale lengths) and the cylindrical cutoffs use
+    the model's smooth hinge where genulens has ``if (R >= Rc)``."""
+
+    def hinge(t):
+        return 0.5 * (t + np.sqrt(t * t + 0.0025))
+
+    th = np.radians(27.0)
+    xb = x * np.cos(th) + y * np.sin(th)
+    yb = -x * np.sin(th) + y * np.cos(th)
+    zb = z
+    xn, yn, zn = (
+        np.abs(xb / 0.930623146993329),
+        np.abs(yb / 0.370784386649364),
+        np.abs(zb / 0.239547516030578),
+    )
+    c1, c2 = 1.20011972384328, 4.09326795684828
+    rs = ((xn**c1 + yn**c1) ** (c2 / c1) + zn**c2) ** (1 / c2)
+    rho = np.exp(-rs) * np.exp(-0.5 * (hinge(r - 2.63178535429573) / 0.5) ** 2)
+    c1x, c2x, bzx = 1.3087131258784, 2.21745322869032, 1.37774815817195
+    rho_x = 0.0
+    for sign in (-1.0, 1.0):
+        xn = np.abs((xb + sign * bzx * zb) / 0.278027059842233)
+        yn = np.abs(yb / 0.176318528789193)
+        zn = np.abs(zb / 0.286791941602401)
+        rs = ((xn**c1x + yn**c1x) ** (c2x / c1x) + zn**c2x) ** (1 / c2x)
+        rho_x = rho_x + np.exp(-rs)
+    rho_x = (
+        rho_x
+        * 1.43975636704683
+        * np.exp(-0.5 * (hinge(r - 1.30163829617294) / 0.5) ** 2)
+    )
+    return rho + rho_x
+
+
 def test_bulge_number_density_matches_vvv_box_budget():
     """
-    Given the bar profile the component actually uses (exp(-r_s/2), Zhu+17
-      axes, BULGE_RC cutoff),
+    Given the bar profile the component uses (Koshimoto+2021's E+E_X with
+      its cylindrical cutoffs, review 1.7.3), transcribed independently
+      from genulens,
     When its central density is derived with genulens's VVV-box budget
       (rho0b = (frho0b * M_VVV(Portail+17) - M_disk_in_box)/box integral,
       then mass -> MS+BD number via fb_MS/mean-MS-mass),
@@ -835,11 +860,6 @@ def test_bulge_number_density_matches_vvv_box_budget():
     """
     from exozippy.constants import (
         BULGE_CENTRAL_NUMBER_DENSITY,
-        BULGE_DENSITY_X_0,
-        BULGE_DENSITY_Y_0,
-        BULGE_DENSITY_Z_0,
-        BULGE_RC,
-        BULGE_RC_WIDTH,
         DISK_RDBREAK,
         DISK_SCALE_HEIGHT,
         DISK_SCALE_LENGTH,
@@ -848,24 +868,26 @@ def test_bulge_number_density_matches_vvv_box_budget():
         THICK_DISK_SCALE_LENGTH,
     )
 
-    # ARRANGE: Portail+17 VVV box, bar frame, in kpc
+    # ARRANGE: Portail+17 VVV box, bar frame, in kpc (the profile is
+    # symmetric under x_bar -> -x_bar with z -> -z, and y_bar -> -y_bar;
+    # integrate the whole box rather than lean on it).
     xmax, ymax, zmax = 2.2, 1.4, 1.2
-    n = 200
-    xg = np.linspace(0.0, xmax, n)
-    yg = np.linspace(0.0, ymax, n)
-    zg = np.linspace(0.0, zmax, n)
-    X, Y = np.meshgrid(xg, yg, indexing="ij")
-    R = np.hypot(X, Y)
-    cut = np.exp(-0.5 * (np.maximum(R - BULGE_RC, 0.0) / BULGE_RC_WIDTH) ** 2)
-    box_integral = 0.0  # kpc^3
-    for zz in zg:
-        r_s = np.sqrt(
-            (X / BULGE_DENSITY_X_0) ** 2
-            + (Y / BULGE_DENSITY_Y_0) ** 2
-            + (zz / BULGE_DENSITY_Z_0) ** 2
+    n = 101
+    xg = np.linspace(-xmax, xmax, 2 * n + 1)
+    yg = np.linspace(-ymax, ymax, 2 * n + 1)
+    zg = np.linspace(-zmax, zmax, 2 * n + 1)
+    th = np.radians(27.0)
+    XB, YB = np.meshgrid(xg, yg, indexing="ij")
+    X = XB * np.cos(th) - YB * np.sin(th)
+    Y = XB * np.sin(th) + YB * np.cos(th)
+    R = np.sqrt(X**2 + Y**2 + 1e-6)
+    slab = [
+        np.trapezoid(
+            np.trapezoid(_genulens_bar_profile(X, Y, zz, R), yg, axis=1), xg
         )
-        box_integral += (np.exp(-0.5 * r_s) * cut).sum()
-    box_integral *= 8 * (xg[1] - xg[0]) * (yg[1] - yg[0]) * (zg[1] - zg[0])
+        for zz in zg
+    ]
+    box_integral = np.trapezoid(slab, zg)  # kpc^3
 
     # Disk mass in the box (all R < BULGE_RC < DISK_RDBREAK -> plateau).
     # Local MASS densities incl. WDs (genulens rho0d): thin 0.0501,
@@ -888,7 +910,8 @@ def test_bulge_number_density_matches_vvv_box_budget():
     rho0b = (0.839014514507754 * 1.32e10 - m_disk_box) / (box_integral * 1e9)
     n0_msb = rho0b * (1.62 / 2.07) / 0.227943
 
-    # ASSERT: 1% covers the box-integral grid resolution
+    # ASSERT: 1% covers the box-integral grid resolution (and the model's
+    # 1e-6 rounding of |u|)
     assert np.isclose(n0_msb, BULGE_CENTRAL_NUMBER_DENSITY, rtol=0.01), (
         f"recomputed {n0_msb:.4f} vs constant {BULGE_CENTRAL_NUMBER_DENSITY}"
     )

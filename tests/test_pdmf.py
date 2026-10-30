@@ -16,7 +16,7 @@ import pytest
 
 from conftest import _DummyConfigManager
 from exozippy.components.galacticmodel import galacticmodel as gm
-from exozippy.components.galacticmodel import pdmf
+from exozippy.components.galacticmodel import pdmf, populations
 
 
 def _chabrier(x):
@@ -50,7 +50,11 @@ def test_single_age_remnant_fraction_matches_turnoff_quadrature(monkeypatch):
       M_die(10 Gyr) = 0.942 Msun (design table: 0.94) mapped through
       Kalirai+2008 / Raithel+2018, to the smoothing's precision.
     """
-    monkeypatch.setattr(pdmf, "THICK_AGE_GYR", 10.0)
+    # A (near) single age through the shared definition (populations.py):
+    # 10 +/- 0.01 Gyr is a step in age on the lifetime scale.
+    monkeypatch.setattr(populations, "THICK_AGE_MEAN_GYR", 10.0)
+    monkeypatch.setattr(populations, "THICK_AGE_SIGMA_GYR", 0.01)
+    monkeypatch.setitem(populations.POPULATION_FEH, "thick_disk", -0.5)
     pd = pdmf.PresentDayMassFunction(_chabrier, [-9.0], [2.5])
     d = pd.dens["thick_disk"]
     sel = (pd.x >= -9.0) & (pd.x <= 2.5)

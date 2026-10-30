@@ -372,7 +372,9 @@ def test_position_normalizer_matches_an_independent_quadrature():
         finer = log_position_norm(1e-3, 1e5, sun_xyz, los_hat)
     finally:
         gm_mod._POSITION_QUAD_POINTS = n0
-    assert abs(finer - got) < 1e-9
+    # 1e-9 until review 1.7.3: K21's boxy bar core is sharper than the old
+    # ellipsoid's, and 4x the points now moves log Z by ~1.0e-9.
+    assert abs(finer - got) < 1e-8
 
 
 def test_evidence_log_norm_counts_independent_positions():

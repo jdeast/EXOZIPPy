@@ -20,12 +20,15 @@ per population.  The prescriptions are genulens's (Koshimoto, Baba & Bennett
 2021, ApJ 917, 78 = K21; and its source, model/mass_function.cpp), which in
 turn are PopSyCLE's (Lam et al. 2020, ApJ 889, 31, App. C):
 
-  * ages: thin disk star formation ~ exp(-(10 Gyr - T) / 7 Gyr) over
-    0-10 Gyr (genulens's wtSFR, i.e. more old stars); thick disk a single
-    age of 12 Gyr; bulge Gaussian 9 +/- 1 Gyr;
+  * ages: populations.py's (review 1.7.5; the same distributions the
+    per-star age prior uses): thin disk star formation ~ exp(-(10 Gyr -
+    T) / 7 Gyr) over 0-10 Gyr (genulens's wtSFR, i.e. more old stars;
+    0.1 Gyr logistic edge); thick disk 12 +/- 1 Gyr (K21's single age
+    given a width); bulge Gaussian 9 +/- 1 Gyr;
   * turnoff: from OUR MIST v2.5 grid's lifetimes (``mist_lifetimes.csv``,
-    scripts/make_mist_lifetimes.py), at one [Fe/H] per population
-    (``POPULATION_FEH``); genulens uses PARSEC isochrones instead, a few %
+    scripts/make_mist_lifetimes.py), at one [Fe/H] per population, each
+    population's MDF mean (``populations.POPULATION_FEH``: thin 0, thick
+    -0.78, bulge +0.04); genulens uses PARSEC isochrones instead, a few %
     apart in M_die;
   * white dwarfs (M_ini < 9 Msun): Kalirai et al. 2008,
     M_WD = 0.109 M_ini + 0.394;
@@ -62,28 +65,11 @@ from pathlib import Path
 
 import numpy as np
 import pytensor.tensor as pt
-from scipy.special import ndtr
 
-#: Branch order (galacticmodel.BRANCHES).
-POPULATIONS = ("thin_disk", "thick_disk", "bulge")
-
-# ---- age distributions (K21 / genulens) -------------------------------
-#: Thin disk: SFR weight exp(-(THIN_AGE_MAX - T) / THIN_SFR_TIMESCALE) on
-#: [0, THIN_AGE_MAX] Gyr (genulens stellar_population_runtime wtSFR,
-#: gamma = 1 / tSFR, tSFR = 7 Gyr).
-THIN_AGE_MAX_GYR = 10.0
-THIN_SFR_TIMESCALE_GYR = 7.0
-#: Thick disk: one age (Robin et al. 2014 via K21).
-THICK_AGE_GYR = 12.0
-#: Bulge/bar: Gaussian (Koshimoto et al. 2020 via K21).
-BULGE_AGE_MEAN_GYR = 9.0
-BULGE_AGE_SIGMA_GYR = 1.0
-
-#: One initial [Fe/H] per population for the MIST lifetimes.  genulens uses
-#: one PARSEC metallicity per population too; its dying masses (Minidie.dat:
-#: thin disk 10 Gyr 1.011, thick disk 12 Gyr 0.857 Msun) sit between our
-#: [Fe/H] = 0 and -0.5 rows, closest to these choices.
-POPULATION_FEH = {"thin_disk": 0.0, "thick_disk": -0.5, "bulge": 0.0}
+# The age distributions and the per-population turnoff metallicity are
+# populations.py's -- ONE definition shared with the per-star age and [Fe/H]
+# priors (review 1.7.5).
+from .populations import POPULATION_FEH, POPULATIONS, age_cdf
 
 # ---- initial-final mass relations ------------------------------------
 #: Kalirai et al. 2008 white dwarfs below this initial mass (genulens
@@ -154,20 +140,10 @@ def log10_lifetime_gyr(logm_ini, feh):
 
 def alive_fraction(population, logm_ini):
     """P_b(alive | M_ini): the fraction of population b's stars of this
-    initial mass still on their track today, age marginalized."""
+    initial mass still on their track today, age marginalized over the
+    population's age distribution (populations.age_cdf at the lifetime)."""
     tau = 10.0 ** log10_lifetime_gyr(logm_ini, POPULATION_FEH[population])
-    if population == "thin_disk":
-        # CDF of g(T) ~ exp(T / t_sfr) on [0, T_max], at T = tau.
-        t = np.clip(tau, 0.0, THIN_AGE_MAX_GYR)
-        s = THIN_SFR_TIMESCALE_GYR
-        return np.expm1(t / s) / np.expm1(THIN_AGE_MAX_GYR / s)
-    if population == "thick_disk":
-        return (tau > THICK_AGE_GYR).astype(float)
-    if population == "bulge":
-        lo = ndtr(-BULGE_AGE_MEAN_GYR / BULGE_AGE_SIGMA_GYR)  # T < 0 cut
-        cdf = ndtr((tau - BULGE_AGE_MEAN_GYR) / BULGE_AGE_SIGMA_GYR)
-        return np.clip((cdf - lo) / (1.0 - lo), 0.0, 1.0)
-    raise ValueError(f"unknown Galactic population {population!r}")
+    return age_cdf(population, tau)
 
 
 def _p_ns(m_ini):
@@ -319,6 +295,8 @@ class PresentDayMassFunction:
       ``dark_frac[b]``    phi_b^dark / phi_b on the grid, in [0, 1]
       ``log_norm[b, k]``  log int phi_b over star k's support
       ``log_lum_frac[b, k]`` log of the LUMINOUS fraction of that integral
+      ``log_imf_peak``    the log IMF's maximum on the grid (the tables'
+                          IMF unit)
     """
 
     def __init__(self, log_imf, lower, upper):
@@ -332,6 +310,10 @@ class PresentDayMassFunction:
         self.x, dens = build_population_tables(
             log_imf, float(lower.min()), float(upper.max())
         )
+        #: The tables' IMF is exp(log_imf(x) - log_imf_peak): a star whose
+        #: AGE is sampled takes log_imf(x) - log_imf_peak - log_norm[b, k]
+        #: (the luminous joint IMF x g_b(T); galacticmodel, review 1.7.5).
+        self.log_imf_peak = float(np.max(log_imf(self.x)))
         self.x0 = float(self.x[0])
         self.dens = dens
         n_star = max(lower.size, upper.size)

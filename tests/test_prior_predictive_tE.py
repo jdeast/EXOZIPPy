@@ -60,12 +60,22 @@ q10 does NOT (|ln ratio| ~0.6 against ~0.5): the prior still has too few
 short events.  That is geometric, not the mass function: t_E / sqrt(M_L)
 is 37.5 d at the median against genulens's 30.9 (sources ~0.9 kpc farther,
 D_S median 9.6 vs 8.7 kpc), +44% toward BLG505; mu_rel agrees (KS 0.06).
-So the xfail stays strict and names q10; when the geometry is fixed it
-turns into an XPASS and fails strictly: update the test then, do not
-widen the tolerance.  With present_day on, the lens mass is no longer
-independent of position (each population has its own present-day mass
-function), so the genulens mass swap below is an approximation rather than
-exact; it is kept as the localization it was.
+It was a strict xfail naming q10.  With present_day on, the lens mass is
+no longer independent of position (each population has its own
+present-day mass function), so the genulens mass swap below is an
+approximation rather than exact; it is kept as the localization it was.
+
+THE GEOMETRY IS FIXED TOO (review 1.7.3: the bar density is now K21's
+E+E_X; the old ellipsoid, with a 3.2 kpc e-folding length along the bar,
+put sources ~0.9 kpc too far).  Measured 2026-10-30 (4 x 2500 NUTS draws,
+Baade): t_E = 6.85 / 20.0 / 57.5 d (genulens remnants 5.6 / 18.1 / 54.2),
+D_S median 8.86 kpc and D_L 7.30 (genulens 8.74, 7.27); |ln ratio| against
+OGLE 0.49 / 0.06 / 0.11 for tolerances 0.53 / 0.30 / 0.22 (the
+remnants-on sys term above).  So the xfail was removed (JDE ruling
+2026-10-30) and this is now a regression guard at the stated tolerances:
+do not widen them.  q10 has the smallest margin; what is left of it is
+the bar's kinematics (mu_rel median 5.5 vs genulens 6.1 mas/yr), which the
+K21 port (review 1.7.6) replaces.
 """
 
 import importlib
@@ -133,13 +143,6 @@ def _tolerances(pp, model_te, ess):
     return q_mod, q_ref, tol
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="review 1.7.3: with the present-day lens mass function (1.7.2) "
-    "the median and q90 of t_E agree with OGLE toward Baade's window, but "
-    "q10 is still ~2x long (8.2 vs 4.2 d) -- too few short events, the "
-    "source/lens geometry, not the mass function",
-)
 def test_prior_tE_matches_ogle_baade_window(pp, baade_draws):
     """
     Given the microlensing prior sampled alone toward Baade's window,
@@ -166,8 +169,8 @@ def test_prior_tE_with_genulens_lens_masses_matches_ogle_baade_window(
       sqrt(M_L); approximately a swap of the mass function alone, see the
       module docstring),
     Then the median agrees with OGLE within the stated tolerance.  q10 is
-      not asserted (it is the open geometric shortfall the xfail above
-      names), and neither is q90: with the remnants-on masses it sits at
+      not asserted (it was the geometric shortfall of review 1.7.3, and
+      a mass swap does not touch it), and neither is q90: with the remnants-on masses it sits at
       the edge (ln ratio ~0.19 for a tolerance of ~0.21 on the full 4 x
       5000-draw run), so asserting it would make the test flaky.  With the
       REMNANT 0 masses used before 2026-10-30 this test passed on median

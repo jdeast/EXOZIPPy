@@ -9,9 +9,9 @@ the fidelity notes say where it departs.
 
 Fidelity notes (vs genulens, reviewed 2026-08): the thin disk collapses
 genulens's 7 age bins into one exponential layer with its B14disk-mode
-(Bennett et al. 2014) kinematics instead of the Shu DF; the bar keeps a
-plain-ellipsoid exp(-r_s/2) profile (not the K21 super-ellipsoid + X-shape)
-but carries genulens's outer cylindrical cutoff and VVV-box-budget
+(Bennett et al. 2014) kinematics instead of the Shu DF; the bar DENSITY is
+K21's E+E_X boxy bar with its X-shape and cylindrical cutoffs (since review
+1.7.3; physics.bar_log_profile) with genulens's VVV-box-budget
 normalization; NSD, stellar halo, and the bar's spatial sigma gradients /
 streaming motion are omitted.  All three branch weights are genulens's
 NUMBER-density channel on one absolute scale, so the logsumexp mixture
@@ -33,13 +33,7 @@ from exozippy.components.component import Component
 # below normalize over star.logmass's.
 from exozippy.components.parameter import sampled_bounds as _sampled_bounds
 from exozippy.constants import (
-    BULGE_BAR_ANGLE,
     BULGE_CENTRAL_NUMBER_DENSITY,
-    BULGE_DENSITY_X_0,
-    BULGE_DENSITY_Y_0,
-    BULGE_DENSITY_Z_0,
-    BULGE_RC,
-    BULGE_RC_WIDTH,
     BULGE_ROTATION_ANGULAR_VELOCITY,
     BULGE_VELOCITY_SIGMA_1,
     BULGE_VELOCITY_SIGMA_2,
@@ -79,15 +73,20 @@ ANCHOR_PLACEHOLDER_DEC_DEG = 0.0
 # The frame, the line-of-sight basis and the position transform live in
 # physics.py (the numpy layer) so the start-value hints in
 # mulensing/lens.py use exactly the code this likelihood uses.
+from . import populations  # noqa: E402
 from .pdmf import GRID_DEX as PDMF_GRID_DEX  # noqa: E402
 from .pdmf import PresentDayMassFunction, interp_table  # noqa: E402
 from .physics import (  # noqa: E402
     GALACTOCENTRIC_FRAME,
+    bar_log_profile,
     line_of_sight_basis,
     polar_velocity,
 )
 from .physics import (  # noqa: E402
     galactic_xyz as _galactic_xyz_np,
+)
+from .physics import (
+    hinge as _hinge,
 )
 
 
@@ -408,12 +407,6 @@ VELOCITY_COORDS = ("pm_ra", "pm_dec", "rv")
 _POSITION_QUAD_POINTS = 200001
 
 
-def _hinge(t, xp):
-    # Smooth max(t, 0) (C-infinity), transition width ~50 pc in kpc units --
-    # keeps the plateau/cutoff kinks differentiable.
-    return 0.5 * (t + xp.sqrt(t * t + 0.0025))
-
-
 def branch_log_number_densities(x, y, z, r, xp=pt):
     """log number density (stars/pc^3) of each branch, in BRANCHES order.
 
@@ -444,24 +437,14 @@ def branch_log_number_densities(x, y, z, r, xp=pt):
         - z_smooth / THICK_DISK_SCALE_HEIGHT
     )
 
-    # 3. Bulge/bar, anchored at its center.  The Gaussian cylindrical cutoff
-    # beyond BULGE_RC (genulens Rc/srob) is what confines the bar: without
-    # it the shallow exp(-r_s/2) profile is still 9% of central at a 4-kpc
-    # lens distance (vs ~4e-6 in genulens), flooding the disk range with
-    # spurious bulge stars.
-    cos_bar = np.cos(BULGE_BAR_ANGLE)
-    sin_bar = np.sin(BULGE_BAR_ANGLE)
-    x_bar = x * cos_bar + y * sin_bar
-    y_bar = -x * sin_bar + y * cos_bar
-    r_bulge_coord = xp.sqrt(
-        (x_bar / BULGE_DENSITY_X_0) ** 2
-        + (y_bar / BULGE_DENSITY_Y_0) ** 2
-        + (z / BULGE_DENSITY_Z_0) ** 2
-    )
-    log_dens_bulge = (
-        np.log(BULGE_CENTRAL_NUMBER_DENSITY)
-        - 0.5 * r_bulge_coord
-        - 0.5 * (_hinge(r - BULGE_RC, xp) / BULGE_RC_WIDTH) ** 2
+    # 3. Bulge/bar, anchored at its center: K21's E+E_X boxy bar with its
+    # X-shape and cylindrical cutoffs (physics.bar_log_profile; review
+    # 1.7.3).  Until 2026-10 this was a plain ellipsoid exp(-r_s/2) with
+    # axes (1.59, 0.42, 0.42) kpc -- an e-folding length of 3.2 kpc along
+    # the bar, which put sources ~0.6 kpc (unweighted n D^2 median) too far
+    # behind the Galactic center toward Baade's window.
+    log_dens_bulge = np.log(BULGE_CENTRAL_NUMBER_DENSITY) + bar_log_profile(
+        x, y, z, r, xp
     )
     return log_dens_thin, log_dens_thick, log_dens_bulge
 
@@ -681,6 +664,17 @@ class GalacticModel(Component):
                 f"{present_day!r}."
             )
         self.present_day = present_day
+        # Population-conditional age and [Fe/H] priors (review 1.7.5): two
+        # independent booleans (JDE's n-way ruling), default on.  They act
+        # only on a star whose age / initfeh is SAMPLED (a star on an
+        # evolutionary track); every other star is untouched.
+        for key in ("population_age", "population_feh"):
+            val = self.config[0].get(key, True)
+            if not isinstance(val, bool):
+                raise ValueError(
+                    f"galacticmodel {key} must be true or false, got {val!r}."
+                )
+            setattr(self, key, val)
 
     @property
     def prefix(self):
@@ -722,12 +716,44 @@ class GalacticModel(Component):
                     "(Kalirai+2008), neutron stars or black holes "
                     "(Raithel+2018), with the age marginalized over each "
                     "population's age distribution (Koshimoto+2021: thin "
-                    "disk 0-10 Gyr, thick disk 12 Gyr, bulge 9 +/- 1 Gyr), "
+                    "disk 0-10 Gyr, thick disk 12 +/- 1 Gyr, bulge 9 +/- 1 Gyr), "
                     "and the mass prior moves inside the thin/thick/bulge "
                     "mixture.  Applies to every star on the stellar IMF "
                     "(not to 'mass_function: ffp' stars).  Remnants are "
                     "DARK in the mass prior only: a lens's light still "
                     "comes from its stellar relation (review 8.10.7)."
+                ),
+            },
+            {
+                "key": "population_age",
+                "kind": "option",
+                "accepts": [True, False],
+                "required": False,
+                "doc": (
+                    "Population-conditional AGE prior (default true): a "
+                    "star whose age is sampled (a star on an evolutionary "
+                    "track) takes its age from the thin-disk (star "
+                    "formation over 0-10 Gyr), thick-disk (12 +/- 1 Gyr) "
+                    "or bulge (9 +/- 1 Gyr) age distribution, mixed by the "
+                    "same density x kinematics weights as its position "
+                    "(Koshimoto+2021), instead of uniform on its bounds.  "
+                    "The same distributions the present-day mass function "
+                    "marginalizes.  false = the uniform prior."
+                ),
+            },
+            {
+                "key": "population_feh",
+                "kind": "option",
+                "accepts": [True, False],
+                "required": False,
+                "doc": (
+                    "Population-conditional INITIAL-METALLICITY prior "
+                    "(default true) on a star whose initfeh is sampled: "
+                    "thin disk 0.0 +/- 0.2 dex at R0 with a -0.06 dex/kpc "
+                    "radial gradient (Genovali+2014), thick disk -0.78 +/- "
+                    "0.30 (Robin+2003), bulge 45% at -0.30 +/- 0.25 plus "
+                    "55% at +0.32 +/- 0.11 (Hill+2011), mixed like "
+                    "population_age.  false = the uniform prior."
                 ),
             },
             {
@@ -799,7 +825,14 @@ class GalacticModel(Component):
         w = pdmf_mask.astype(float)
         return [-w * self._pdmf.log_lum_frac[b] for b in range(len(BRANCHES))]
 
-    def _pdmf_branch_terms(self, birth_logmass, pdmf_mask):
+    def _log_imf_pt(self, x):
+        """The selected IMF's symbolic log density in x (unnormalized; the
+        same function ``_log_imf_np`` tabulates)."""
+        if self.imf == "salpeter":
+            return (SALPETER_IMF_SLOPE + 1.0) * np.log(10.0) * x
+        return chabrier_logmass_logp(x, param=None, xp=pt)
+
+    def _pdmf_branch_terms(self, birth_logmass, pdmf_mask, aged_mask=None):
         """(mass_terms, dens_offsets), one per-star vector per branch.
 
         ``mass_terms[b]`` is log phi_b(logmass) normalized over each star's
@@ -807,32 +840,214 @@ class GalacticModel(Component):
         times the 0/1 PDMF mask -- arithmetic, so a non-PDMF star's entry
         is exactly 0 with a zero gradient (the table is finite everywhere,
         so 0 * finite cannot poison anything).
+
+        A star in ``aged_mask`` (its age sampled under the population age
+        prior, review 1.7.5) is a LUMINOUS star of known age: its joint
+        mass-age prior in branch b is IMF(x) g_b(T) [T < tau(x)], whose
+        age marginal is exactly phi_b's luminous part.  So it takes the
+        IMF itself (in the tables' unit, same ``log_norm`` and the same
+        -log F_lum,b density offset) and ``g_b(T)`` from the age term; the
+        alive condition is its evolutionary track's.  Using phi_b here
+        would charge the alive fraction twice and admit remnant masses.
+        Both are evaluated at ``birth_logmass`` (``_birth_logmass``, PR
+        #528: the initial mass where a component models mass loss).
         """
         pd = self._pdmf
         w = pdmf_mask.astype(float)
+        a = (
+            np.zeros_like(w)
+            if aged_mask is None
+            else (aged_mask & pdmf_mask).astype(float)
+        )
         # The BIRTH mass (_birth_logmass): a star whose mass loss a component
-        # models is placed in the mass function at its initial mass.
+        # models is placed in the mass function, and its IMF, at its
+        # initial mass.
         x = birth_logmass
+        log_imf = None
+        if a.any():
+            log_imf = self._log_imf_pt(x) - pd.log_imf_peak
         mass_terms = []
         for b in range(len(BRANCHES)):
             log_phi = interp_table(pd.log_table[b], pd.x0, PDMF_GRID_DEX, x)
+            if log_imf is not None:
+                log_phi = (1.0 - a) * log_phi + a * log_imf
             mass_terms.append(w * (log_phi - pd.log_norm[b]))
         return mass_terms, self._pdmf_offsets(pdmf_mask)
 
-    def _add_remnant_probability(self, birth_logmass, branch_logp, pdmf_mask):
+    # ------------------------------------------------------------------
+    # Population-conditional age and [Fe/H] priors (review 1.7.5;
+    # populations.py holds the distributions).
+    # ------------------------------------------------------------------
+
+    def _population_mask(self, stars, name, enabled):
+        """Per star: does star.<name> take the population prior?  Only a
+        SAMPLED element (a free coordinate: not pinned, not derived, not
+        hard-linked -- an orbit member's age is its anchor's, counted once
+        there) and only with the toggle on.  A star with no track has no
+        age/initfeh element at all; one an evolutionarymodel does not name
+        has them pinned at a bookkeeping value (``_pin_unmodeled_stars``),
+        which must not steer its population."""
+        n_star = int(np.atleast_1d(stars.distance.initval).size)
+        param = getattr(stars, name, None)
+        if not enabled or param is None:
+            return np.zeros(n_star, dtype=bool)
+        return np.array(
+            [param.element_is_sampled(k) for k in range(n_star)], dtype=bool
+        )
+
+    def _support(self, param, mask):
+        """Static (lower, upper) per star of a Parameter that must have
+        them; masked-off stars get a wide dummy support (never read, but
+        kept finite so 0 * term stays 0)."""
+        bounds = _sampled_bounds(param)
+        if bounds is None:
+            raise ValueError(
+                f"[{self.prefix}] the population prior on {param.label} "
+                f"needs finite static lower/upper bounds; none could be read."
+            )
+        n = mask.size
+        lo = np.broadcast_to(np.atleast_1d(bounds[0]), (n,)).astype(float)
+        hi = np.broadcast_to(np.atleast_1d(bounds[1]), (n,)).astype(float)
+        if getattr(param, "element_links", None) and (
+            param.element_links.get("lower")
+            or param.element_links.get("upper")
+        ):
+            logger.warning(
+                f"[{self.prefix}] {param.label} carries a linked bound; the "
+                f"population prior is normalized over its STATIC bounds."
+            )
+        return lo, hi
+
+    def _population_branch_terms(self, stars, r, age_mask, feh_mask):
+        """Per branch, per star: log g_b(age) + log p_b(initfeh | R), each
+        normalized over the star's own support, times the 0/1 masks.
+
+        Normalized per branch, so adding them inside the mixture leaves the
+        branch weights the physical number densities: the joint over
+        (position, velocity, mass, age, [Fe/H]) stays a normalized density
+        and ``evidence_log_norm`` is unchanged.  The thin disk's [Fe/H]
+        normalizer moves with R (its center does), so it is in the graph;
+        the rest are build-time constants.  Every term is finite on every
+        element (a masked-off star gets a wide dummy support), so the 0/1
+        weight is plain arithmetic, never a selection.
+        """
+        n_b = len(BRANCHES)
+        terms = [0.0] * n_b
+        if age_mask.any():
+            w = age_mask.astype(float)
+            lo, hi = self._support(stars.age, age_mask)
+            lo = np.where(age_mask, lo, 0.0)
+            hi = np.where(age_mask, hi, populations.AGE_MAX_GYR)
+            t = stars.age.value
+            for b, pop in enumerate(BRANCHES):
+                log_g = populations.log_age_density(pop, t, xp=pt)
+                terms[b] = terms[b] + w * (
+                    log_g - populations.log_age_norm(pop, lo, hi)
+                )
+        if feh_mask.any():
+            w = feh_mask.astype(float)
+            lo, hi = self._support(stars.initfeh, feh_mask)
+            populations.check_thin_disk_feh_support(
+                lo[feh_mask], hi[feh_mask], f"[{self.prefix}] star.initfeh"
+            )
+            lo = np.where(feh_mask, lo, -10.0)
+            hi = np.where(feh_mask, hi, 10.0)
+            f = stars.initfeh.value
+            for b, pop in enumerate(BRANCHES):
+                log_p = populations.log_feh_density(pop, f, r_kpc=r, xp=pt)
+                if pop == "thin_disk":
+                    log_z = populations.thin_disk_log_feh_norm(
+                        r, lo, hi, xp=pt
+                    )
+                else:
+                    log_z = populations.log_feh_norm(pop, lo, hi)
+                terms[b] = terms[b] + w * (log_p - log_z)
+        return terms
+
+    def _declare_population_priors(self, system, stars, age_mask, feh_mask):
+        """Prior-column declarations and the draft sentence for the
+        population age / [Fe/H] priors (declare-at-site rule)."""
+        from ...outputs.prose import get_collector
+
+        if age_mask.any():
+            stars.age.add_prior_contribution(
+                latex=(
+                    r"Galactic-population mixture: thin disk SFH "
+                    r"$\propto e^{-(10-T)/7}$ on 0--10\,Gyr, thick disk "
+                    r"$12 \pm 1$\,Gyr, bulge $9 \pm 1$\,Gyr"
+                ),
+                text=(
+                    "Galactic-population mixture: thin disk SFH "
+                    "exp(-(10-T)/7) on 0-10 Gyr, thick disk 12+/-1 Gyr, "
+                    "bulge 9+/-1 Gyr"
+                ),
+                elements=np.nonzero(age_mask)[0],
+                supersedes_bounds=True,
+            )
+        if feh_mask.any():
+            stars.initfeh.add_prior_contribution(
+                latex=(
+                    r"Galactic-population mixture: thin disk "
+                    r"$\mathcal{N}(-0.06\,(R-R_0), 0.2)$, thick disk "
+                    r"$\mathcal{N}(-0.78, 0.3)$, bulge "
+                    r"$0.45\,\mathcal{N}(-0.30, 0.25) + "
+                    r"0.55\,\mathcal{N}(0.32, 0.11)$"
+                ),
+                text=(
+                    "Galactic-population mixture: thin disk "
+                    "N(-0.06 (R-R0), 0.2), thick disk N(-0.78, 0.3), bulge "
+                    "0.45 N(-0.30, 0.25) + 0.55 N(0.32, 0.11)"
+                ),
+                elements=np.nonzero(feh_mask)[0],
+                supersedes_bounds=True,
+            )
+        if not (age_mask.any() or feh_mask.any()):
+            return
+        what = " and ".join(
+            w
+            for w, m in (("age", age_mask), ("initial metallicity", feh_mask))
+            if m.any()
+        )
+        get_collector(system).add(
+            rf"The {what} prior of each star on an evolutionary track "
+            r"follows its Galactic population, mixed with the same "
+            r"density and kinematic weights as its position: ages from "
+            r"a thin-disk star-formation history "
+            r"$\propto e^{-(10\,{\rm Gyr}-T)/7\,{\rm Gyr}}$ over "
+            r"0--10\,Gyr, a $12 \pm 1$\,Gyr thick disk and a "
+            r"$9 \pm 1$\,Gyr bulge \citep{Koshimoto:2021}; metallicities "
+            r"from a thin disk centered on solar at the Sun with the "
+            r"Cepheid gradient of $-0.06$\,dex\,kpc$^{-1}$ "
+            r"\citep{Genovali:2014} and a 0.2\,dex width, a thick disk at "
+            r"$-0.78 \pm 0.30$ \citep{Robin:2003}, and the two-component "
+            r"bulge distribution of \citet{Hill:2011}.",
+            section="priors",
+            key=f"{self.prefix}.population_age_feh",
+            rank=21,
+        )
+
+    def _add_remnant_probability(
+        self, birth_logmass, branch_logp, pdmf_mask, aged_mask=None
+    ):
         """``galacticmodel.p_remnant``: per PDMF star (in star order), the
         probability that it is a dark remnant (WD/NS/BH) rather than a
         luminous star, given its mass, position and velocity: the branch
         responsibilities times each branch's dark fraction at its mass.  A
         Deterministic for reporting; it does not enter the logp.  For a
         star in a linked group the responsibilities are its own terms', an
-        approximation to the group's shared population."""
+        approximation to the group's shared population.  A star whose age
+        is sampled (``aged_mask``) is luminous by construction: 0."""
         idx = np.nonzero(pdmf_mask)[0]
         pd = self._pdmf
         stacked = pt.stack(branch_logp)[:, idx]
         resp = pt.exp(stacked - pm.math.logsumexp(stacked, axis=0))
         x = birth_logmass[idx]
-        dark = pt.stack(
+        lum_only = (
+            np.zeros(idx.size)
+            if aged_mask is None
+            else aged_mask[idx].astype(float)
+        )
+        dark = (1.0 - lum_only) * pt.stack(
             [
                 interp_table(pd.dark_frac[b], pd.x0, PDMF_GRID_DEX, x)
                 for b in range(len(BRANCHES))
@@ -998,7 +1213,7 @@ class GalacticModel(Component):
                 r"or neutron stars and black holes following "
                 r"\citet{Raithel:2018}, with the age marginalized over "
                 r"each population's age distribution (thin disk 0--10\,Gyr, "
-                r"thick disk 12\,Gyr, bulge $9 \pm 1$\,Gyr).  The mass "
+                r"thick disk $12 \pm 1$\,Gyr, bulge $9 \pm 1$\,Gyr).  The mass "
                 r"prior therefore enters inside the thin-disk, thick-disk "
                 r"and bulge mixture of the Galactic model.  Remnants are "
                 r"dark in the mass prior only; the light of each star still "
@@ -1372,6 +1587,15 @@ class GalacticModel(Component):
             )
             log_sig.append(np.log(s1 * s2 * s3))
         mass_terms = None
+        # Population-conditional age / [Fe/H] priors (review 1.7.5): per
+        # branch, per star, inside the same mixture (populations.py).
+        age_mask = self._population_mask(stars, "age", self.population_age)
+        feh_mask = self._population_mask(stars, "initfeh", self.population_feh)
+        pop_terms = None
+        if age_mask.any() or feh_mask.any():
+            pop_terms = self._population_branch_terms(
+                stars, r, age_mask, feh_mask
+            )
         if self._pdmf is not None:
             # Per branch: the star's PDMF term (normalized over its own
             # logmass support) and the object-density offset -log F_lum,b
@@ -1381,17 +1605,27 @@ class GalacticModel(Component):
             # Every term is a finite table interpolation: no branch
             # selection, no where (CLAUDE.md).
             mass_terms, dens_offsets = self._pdmf_branch_terms(
-                birth_logmass, pdmf_mask
+                birth_logmass, pdmf_mask, aged_mask=age_mask
             )
             log_dens = [d + off for d, off in zip(log_dens, dens_offsets)]
+        if pop_terms is not None:
+            # Per-star terms ride with the mass terms (a linked member's
+            # entries are 0: its age/initfeh are not sampled).
+            mass_terms = (
+                pop_terms
+                if mass_terms is None
+                else [mt + pt_ for mt, pt_ in zip(mass_terms, pop_terms)]
+            )
         branch_logp = [
             dens + lv - ls for dens, lv, ls in zip(log_dens, log_vel, log_sig)
         ]
         if mass_terms is not None:
             branch_logp = [bl + mt for bl, mt in zip(branch_logp, mass_terms)]
+        if self._pdmf is not None:
             self._add_remnant_probability(
-                birth_logmass, branch_logp, pdmf_mask
+                birth_logmass, branch_logp, pdmf_mask, aged_mask=age_mask
             )
+        self._declare_population_priors(system, stars, age_mask, feh_mask)
 
         volume_element = 2.0 * pt.log(distance * 1000.0)
 
