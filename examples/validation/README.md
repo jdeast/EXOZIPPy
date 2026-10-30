@@ -153,10 +153,19 @@ D_S, mu_rel and M_L, for comparison with survey-measured,
 efficiency-corrected t_E distributions and with genulens.  A frame, sign,
 kinematics, IMF or density error shifts t_E, so this checks the whole prior
 end to end.  The script's docstring says exactly how the existing model
-event-rate weights the draws (`kinematic_prior` + `imf_prior` +
-`event_rate_prior` + `source_behind_lens`; nothing is added here) and the
-two known model differences from a survey (no source luminosity function,
-no remnant lenses).
+event-rate weights the draws (`kinematic_prior` with the present-day mass
+function inside it, `event_rate_prior`, `source_behind_lens`; nothing is
+added here) and the model difference from a survey that is known and
+deliberate (no source luminosity function).
+
+**OGLE is a consistency check here, not an independent calibration
+target.**  Koshimoto, Baba & Bennett (2021, ApJ 917, 78; K21), the model
+genulens implements and galacticmodel simplifies, fit their IMF to these
+same OGLE-IV efficiency-corrected t_E distributions (Mroz et al. 2017,
+2019).  genulens agreeing with OGLE therefore holds by construction, and
+an EXOZIPPy prior that matches OGLE with a K21-like mass function is
+checking our implementation of their model, not the mass function.
+Tuning anything in the prior to OGLE's t_E would count that data twice.
 
 Sight lines: Baade's window (1.0, -3.9) -> Mroz 2019 field BLG513; the
 OGLE-2014-BLG-0939 field (6.648, +3.611) -> BLG630, which contains that
@@ -193,10 +202,24 @@ python prior_predictive_tE.py compare --exozippy-dir <scratch>
 - `mroz_tE_reference.json` -- per-field efficiency-corrected t_E
   quantiles and means for every field of both papers, with Table 7's mean.
 - `genulens_reference.json`, `genulens_<sightline>_<variant>_resampled.dat`
-  -- genulens wtj-weighted quantiles and 2000 weight-resampled draws per
-  sight line, for two configurations: `matched` (gammaDs 2, REMNANT 0: as
-  close to the EXOZIPPy prior as genulens's switches allow) and `survey`
-  (default gammaDs 0.5 ~ I_s < 21 sources, REMNANT 1).
+  -- genulens (K21; commit 2cc5870f, v2.0.0a4) wtj-weighted quantiles,
+  rate-weighted lens-type fractions, and 2000 weight-resampled draws per
+  sight line (t_E, D_L, D_S, mu_rel, M_L, fREM), no binary lenses, in
+  three configurations:
+  - `remnants` (gammaDs 2, REMNANT 1) -- THE reference for M_L, D_L, D_S
+    and mu_rel: the same n(D_S) D_S^2 source weight as this prior, and
+    every population's evolved stars turned into white dwarfs, neutron
+    stars and black holes.
+  - `survey` (default gammaDs 0.5 ~ I_s < 21 sources, REMNANT 1).  It
+    differs from `remnants` only in the source weight, so the gap between
+    the two is the size of the source luminosity function.
+  - `discard` (gammaDs 2, REMNANT 0) -- the DISCARDING mode: genulens drops
+    every lens whose initial mass exceeds its population's dying mass
+    instead of making it a remnant, so the dead mass vanishes from the
+    lens population (Baade: M_L median 0.31 Msun and no dark lenses,
+    against 0.46 Msun and ~21% dark with remnants).  It is not "no
+    remnants" in any physical sense and is never a mass reference; it was
+    labelled `matched` and used as one before 2026-10-30.
 
 EXOZIPPy's own draws are NOT committed: they depend on the code under
 test.  `compare` writes the Part B table (t_E q10/q50/q90 with the
