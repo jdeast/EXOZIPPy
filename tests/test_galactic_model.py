@@ -54,7 +54,10 @@ class _MockSystem:
 
 
 def _make_gm(config=None):
-    cfg = config or [{}]
+    # present_day: false -- these tests pin the IMF and kinematic
+    # expressions themselves (the pre-1.7.2 model); the present-day mass
+    # function is tests/test_pdmf.py's.
+    cfg = [{"present_day": False, **c} for c in (config or [{}])]
     return GalacticModel(cfg, _DummyConfigManager())
 
 
@@ -907,7 +910,9 @@ def _logmass_lower(imf=None, user_params=None, names=("A",)):
     system = _DummySystem()
     system.config_manager = cm
     if imf is not None:
-        system.galacticmodel = GalacticModel([{"IMF": imf}], cm)
+        system.galacticmodel = GalacticModel(
+            [{"IMF": imf, "present_day": False}], cm
+        )
 
     star.register_parameters(system)
     with pm.Model() as model:
@@ -1025,7 +1030,9 @@ def test_salpeter_model_builds_with_finite_logp_and_gradient():
 
     config = {
         "star": [{"name": "Lens"}, {"name": "Source"}],
-        "galacticmodel": [{"name": "gm", "IMF": "Salpeter"}],
+        "galacticmodel": [
+            {"name": "gm", "IMF": "Salpeter", "present_day": False}
+        ],
     }
     user_params = {
         "star.Lens.ra": {"initval": 270.0, "sigma": 0},

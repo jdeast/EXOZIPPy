@@ -668,7 +668,7 @@ class GalacticModel(Component):
         # orthogonal to the IMF choice (it evolves whichever IMF is
         # selected).  A boolean, never a string: "false" in YAML quotes
         # would otherwise be truthy.
-        present_day = self.config[0].get("present_day", False)
+        present_day = self.config[0].get("present_day", True)
         if not isinstance(present_day, bool):
             raise ValueError(
                 f"galacticmodel present_day must be true or false, got "
@@ -709,7 +709,9 @@ class GalacticModel(Component):
                 "required": False,
                 "doc": (
                     "Evolve the IMF to a PRESENT-DAY mass function per "
-                    "Galactic population (default false): stars above "
+                    "Galactic population (default true; false keeps the "
+                    "IMF as the present-day mass function, for regression "
+                    "comparison): stars above "
                     "their population's MIST turnoff become white dwarfs "
                     "(Kalirai+2008), neutron stars or black holes "
                     "(Raithel+2018), with the age marginalized over each "
@@ -1259,9 +1261,10 @@ class GalacticModel(Component):
 
         # Present-day mass function (review 1.7.2): the stars it covers take
         # their mass prior INSIDE the population mixture below (it depends
-        # on the population), so they leave this potential.  Off -> this
-        # block is skipped and the potential is the expression it always
-        # was (bit-identical start logp on every shipped example).
+        # on the population), so they leave this potential.  With
+        # present_day: false this block is skipped and the potential is the
+        # pre-1.7.2 expression (bit-identical start logp on every shipped
+        # example).
         pdmf_mask = self._pdmf_mask(stars, ffp_mask)
         self._pdmf = None
         if pdmf_mask.any():

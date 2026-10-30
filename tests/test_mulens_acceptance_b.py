@@ -410,6 +410,14 @@ def _two_frame_basis(ra_rad, dec_rad):
 
 
 @pytest.mark.slow
+def _imf_as_present_day(cfg):
+    """The presplit recording predates the present-day mass function
+    (review 1.7.2), so it is replayed with the IMF as the present-day one --
+    the model it recorded."""
+    gm = cfg["galacticmodel"]
+    (gm[0] if isinstance(gm, list) else gm)["present_day"] = False
+
+
 def test_ob161003_collapse_reconciles_against_the_presplit_recording():
     """
     Given the post-split ob161003 model started at the stage-0 recording's
@@ -489,7 +497,11 @@ def test_ob161003_collapse_reconciles_against_the_presplit_recording():
             galactic_mod, "line_of_sight_basis", _two_frame_basis
         ),
     ):
-        system, model = build(fixture, extra_params=_OB161003_PRESPLIT_PM)
+        system, model = build(
+            fixture,
+            extra_params=_OB161003_PRESPLIT_PM,
+            edit_config=_imf_as_present_day,
+        )
         # ACT -- decompose at this model's own solved start (which the
         # seeds above pin to the recording's start).
         parts, _, reconciles, _ = decompose(system, model)
@@ -500,7 +512,11 @@ def test_ob161003_collapse_reconciles_against_the_presplit_recording():
     # the data term at the same start, well inside 1e-4 relative, and nothing like the 1e-9 edge
     # held below.  Pins that the switch above is what separates the two
     # builds, so a future change cannot hide behind it.
-    system_now, model_now = build(fixture, extra_params=_OB161003_PRESPLIT_PM)
+    system_now, model_now = build(
+        fixture,
+        extra_params=_OB161003_PRESPLIT_PM,
+        edit_config=_imf_as_present_day,
+    )
     parts_now, _, reconciles_now, _ = decompose(system_now, model_now)
     assert reconciles_now
     data_shift = (

@@ -161,6 +161,18 @@ magnitude-format light curve: ob09020 -6.2383, ob07224 and ob161003
 ob08092 and ob170114 -0.6931, the three DC2018_128 configs -0.1009, and
 ob140939/ob140939_today ~1e-304 (flux files).  The start logp rises by
 exactly that term on each.
+
+All fourteen had their two galacticmodel terms updated when the present-day
+mass function became the default (review 1.7.2; star/star.md, "The
+present-day mass function").  Surgical again: `imf_prior` set to its new
+value 0.0 (every star's mass prior moved inside the population mixture),
+`kinematic_prior` to its new value at the stored start, `total_logp`
+adjusted by their sum; every other term replayed bit-identical before the
+edit.  Total moves: DC2018_128 x3 +0.2124, KMT-2019-BLG-1806 x3 +0.5202,
+OGLE_0383LD +0.2139, ob07224 +0.2426, ob08092 +0.2267, ob09020 +0.4107,
+ob140939 +0.2652, ob140939_today +0.3578, ob161003 +0.4590, ob170114
+-0.6682.  The presplit ob161003 recording replays with `present_day:
+false`, the model it recorded.
 """
 
 import glob
@@ -316,7 +328,9 @@ def load_fixture(name):
     return load(os.path.join(FIXTURES, name + ".json"))
 
 
-def build(fixture, extra_params=None):
+def build(fixture, extra_params=None, edit_config=None):
+    """Build a fixture's example; ``edit_config(cfg)`` may adjust the parsed
+    config in place first (e.g. a historical recording's model switch)."""
     cfg_path = os.path.join(ROOT, fixture["config"])
     par_path = os.path.join(ROOT, fixture["params"])
     cwd = os.getcwd()
@@ -328,6 +342,8 @@ def build(fixture, extra_params=None):
             par = yaml.safe_load(fh) or {}
         if extra_params:
             par.update(extra_params)
+        if edit_config is not None:
+            edit_config(cfg)
         system = System(cfg, par)
         system.prepare()
         return system, system.build_model()
