@@ -73,6 +73,7 @@ ANCHOR_PLACEHOLDER_DEC_DEG = 0.0
 # The frame, the line-of-sight basis and the position transform live in
 # physics.py (the numpy layer) so the start-value hints in
 # mulensing/lens.py use exactly the code this likelihood uses.
+from . import koshimoto21 as k21  # noqa: E402
 from . import populations  # noqa: E402
 from .pdmf import GRID_DEX as PDMF_GRID_DEX  # noqa: E402
 from .pdmf import PresentDayMassFunction, interp_table  # noqa: E402
@@ -626,6 +627,11 @@ class GalacticModel(Component):
     # needs a piecewise, continuity-matched density, not a single slope --
     # KROUPA_IMF_SLOPE is only its low-mass segment.
     SUPPORTED_IMFS = ("chabrier", "salpeter")
+    #: the galactic model (a MODEL choice, so an enum; one spelling).
+    #: koshimoto21 = the genulens port (koshimoto21.py); simplified = the
+    #: 3-population model, kept only while the port's regression comparison
+    #: needs it (it will be removed).
+    SUPPORTED_MODELS = ("simplified", "koshimoto21")
 
     def __init__(self, config, config_manager):
         super().__init__(config, config_manager)
@@ -652,6 +658,15 @@ class GalacticModel(Component):
                 f"'Kroupa' was accepted but silently ignored before 2026-08."
             )
         self.imf = imf
+        model = self.config[0].get("model", "simplified")
+        if model not in self.SUPPORTED_MODELS:
+            raise ValueError(
+                f"galacticmodel model {model!r} is not one of "
+                f"{', '.join(self.SUPPORTED_MODELS)} (case-sensitive): "
+                f"'koshimoto21' is the port of genulens (Koshimoto, Baba & "
+                f"Bennett 2021), 'simplified' the 3-population model."
+            )
+        self.model = model
         self.anchor_idx = self.config[0].get("anchor_idx", 0)
         # Present-day mass function (review 1.7.2): an independent toggle,
         # orthogonal to the IMF choice (it evolves whichever IMF is
@@ -754,6 +769,25 @@ class GalacticModel(Component):
                     "0.30 (Robin+2003), bulge 45% at -0.30 +/- 0.25 plus "
                     "55% at +0.32 +/- 0.11 (Hill+2011), mixed like "
                     "population_age.  false = the uniform prior."
+                ),
+            },
+            {
+                "key": "model",
+                "kind": "option",
+                "accepts": list(cls.SUPPORTED_MODELS),
+                "required": False,
+                "doc": (
+                    "The Galactic model (default 'simplified' while the "
+                    "port is completed): 'koshimoto21' is a faithful port "
+                    "of genulens (Koshimoto, Baba & Bennett 2021, ApJ 917, "
+                    "78; github.com/nkoshimoto/genulens) -- seven thin-disk "
+                    "age bins, thick disk, the E+E_X bar and the stellar "
+                    "halo, with genulens's Shu-distribution disk "
+                    "kinematics, bar streaming and dispersion gradients; "
+                    "'simplified' is the earlier 3-population model, kept "
+                    "for regression comparison and to be removed.  "
+                    "koshimoto21's mass function and source weighting are "
+                    "still the 3-population ones (galacticmodel.md)."
                 ),
             },
             {
@@ -1570,15 +1604,33 @@ class GalacticModel(Component):
         # pinned to 1e-6 km/s against astropy by tests/
         # test_galactic_frame.py).  The thick disk's mean rotation (170 km/s) is the
         # asymmetric drift; the bulge rotates cylindrically, Omega * r.
-        log_dens = branch_log_number_densities(x, y, z, r)
+        parent = None
+        if self.model == "koshimoto21":
+            # The genulens port (koshimoto21.py): 10 branches with their own
+            # NORMALIZED velocity densities, in genulens's position and
+            # velocity frames.  The per-population inputs not yet ported per
+            # branch (mass function, age/[Fe/H]) are mapped from each
+            # branch's population (k21.POPULATION_OF_BRANCH).
+            log_dens, log_vel, r = self._k21_branch_terms(
+                stars, ra_rad, dec_rad
+            )
+            log_sig = [0.0] * len(log_dens)
+            parent = k21.POPULATION_OF_BRANCH
+        else:
+            log_dens = branch_log_number_densities(x, y, z, r)
         vphi_means = (
-            DISK_ROTATION_VELOCITY,
-            THICK_DISK_ROTATION_VELOCITY,
-            BULGE_ROTATION_ANGULAR_VELOCITY * r,
+            None
+            if parent is not None
+            else (
+                DISK_ROTATION_VELOCITY,
+                THICK_DISK_ROTATION_VELOCITY,
+                BULGE_ROTATION_ANGULAR_VELOCITY * r,
+            )
         )
-        log_vel = []
-        log_sig = []
-        for name, vphi_mean in zip(BRANCHES, vphi_means):
+        if parent is None:
+            log_vel = []
+            log_sig = []
+        for name, vphi_mean in zip(BRANCHES, vphi_means or ()):
             s1, s2, s3 = BRANCH_SIGMAS[name]
             log_vel.append(
                 (-0.5 / s1**2) * v_r**2
@@ -1607,7 +1659,16 @@ class GalacticModel(Component):
             mass_terms, dens_offsets = self._pdmf_branch_terms(
                 birth_logmass, pdmf_mask, aged_mask=age_mask
             )
-            log_dens = [d + off for d, off in zip(log_dens, dens_offsets)]
+            # koshimoto21's branch densities already count every object
+            # (genulens's lens density n0, white dwarfs included), so the
+            # luminous-to-object offset is not added there.
+            if parent is None:
+                log_dens = [d + off for d, off in zip(log_dens, dens_offsets)]
+        if parent is not None:
+            if mass_terms is not None:
+                mass_terms = [mass_terms[j] for j in parent]
+            if pop_terms is not None:
+                pop_terms = [pop_terms[j] for j in parent]
         if pop_terms is not None:
             # Per-star terms ride with the mass terms (a linked member's
             # entries are 0: its age/initfeh are not sampled).
@@ -1622,8 +1683,23 @@ class GalacticModel(Component):
         if mass_terms is not None:
             branch_logp = [bl + mt for bl, mt in zip(branch_logp, mass_terms)]
         if self._pdmf is not None:
+            per_population = branch_logp
+            if parent is not None:
+                per_population = [
+                    pm.math.logsumexp(
+                        pt.stack(
+                            [
+                                bl
+                                for bl, j in zip(branch_logp, parent)
+                                if j == p
+                            ]
+                        ),
+                        axis=0,
+                    )
+                    for p in range(len(BRANCHES))
+                ]
             self._add_remnant_probability(
-                birth_logmass, branch_logp, pdmf_mask, aged_mask=age_mask
+                birth_logmass, per_population, pdmf_mask, aged_mask=age_mask
             )
         self._declare_population_priors(system, stars, age_mask, feh_mask)
 
@@ -1638,7 +1714,9 @@ class GalacticModel(Component):
         # +2*log(d) the intended prior rho * d^2 * f(v) * (K*d)^2 was
         # applied as rho * d^2 * f(v), under-weighting large distances by
         # d^2.
-        velocity_jacobian = 2.0 * pt.log(K_VEL_CONVERSION * distance)
+        velocity_jacobian = 2.0 * pt.log(
+            (k21.K_KMS if parent is not None else K_VEL_CONVERSION) * distance
+        )
 
         # Linked stars (star.md, "Linked stars: one position, one density
         # term").  A star whose distance is HARD-linked to another star's
@@ -1658,6 +1736,15 @@ class GalacticModel(Component):
         roots = sorted(set(int(j) for j in root_of))
         members = [k for k in range(n_star) if root_of[k] != k]
 
+        if parent is not None and (members or vel_linked):
+            raise NotImplementedError(
+                f"[{self.prefix}] model: koshimoto21 does not yet support "
+                f"stars with hard-linked distances or velocities (star.md, "
+                f"'Linked stars'): its disk velocity density is not "
+                f"Gaussian, so the conditional densities the linked path "
+                f"builds do not apply.  Use model: simplified for this "
+                f"topology until it lands."
+            )
         if not members and not vel_linked:
             # Every star independent: exactly the expression this component
             # has always built (bit-identical start logp on every shipped
@@ -1693,8 +1780,11 @@ class GalacticModel(Component):
             vel_linked,
             (sun_xyz_np, los_hat_np),
             dens_offsets=(
-                None if self._pdmf is None else self._pdmf_offsets(pdmf_mask)
+                None
+                if self._pdmf is None or parent is not None
+                else self._pdmf_offsets(pdmf_mask)
             ),
+            k21_los=self._k21_lb if parent is not None else None,
         )
         pm.Potential(f"{self.prefix}.kinematic_prior", kinematic_penalty)
 
@@ -1704,11 +1794,56 @@ class GalacticModel(Component):
         get_collector(system).add(
             r"We imposed Galactic density and kinematic priors on the "
             r"distance, proper motion, and radial velocity of each modeled "
-            r"star, following a simplified version of the parametric "
-            r"Galactic model of \citet{Koshimoto:2021}.",
+            + (
+                r"star, following the Galactic model of "
+                r"\citet{Koshimoto:2021} as implemented in genulens."
+                if parent is not None
+                else r"star, following a simplified version of the "
+                r"parametric Galactic model of \citet{Koshimoto:2021}."
+            ),
             section="priors",
             key=f"{self.prefix}.kinematic",
             rank=20,
+        )
+
+    def _k21_branch_terms(self, stars, ra_rad, dec_rad):
+        """koshimoto21's per-branch log number densities and NORMALIZED log
+        velocity densities, one per-star vector each, in k21.BRANCHES
+        order, plus the cylindrical radius (kpc) the population priors
+        read.  Positions are genulens's Dlb2xyz and velocities genulens's
+        (l, b) projection (koshimoto21.line_of_sight_basis), from the
+        anchor's sight line."""
+        l_deg, b_deg, m_np, v0_np = k21.line_of_sight_basis(ra_rad, dec_rad)
+        if k21.nsd_active(l_deg, b_deg):
+            raise NotImplementedError(
+                f"[{self.prefix}] the sight line (l, b) = ({l_deg:.3f}, "
+                f"{b_deg:.3f}) is inside genulens's nuclear-stellar-disk box "
+                f"(|l| < 5, |b| < 2); model: koshimoto21 does not port the "
+                f"NSD yet (galacticmodel.md).  Use model: simplified."
+            )
+        self._k21_lb = (l_deg, b_deg)
+        d_pc = pt.maximum(stars.distance.value, 1e-3)
+        d_kpc = d_pc / 1e3
+        x, y, z = k21.dlb_to_xyz(d_pc, l_deg, b_deg, xp=pt)
+        m = pt.as_tensor_variable(m_np)
+        cols = pt.stack(
+            [
+                k21.K_KMS * stars.pm_ra.value * d_kpc,
+                k21.K_KMS * stars.pm_dec.value * d_kpc,
+                stars.rv.value / 1e3,
+            ],
+            axis=1,
+        )
+        vel = pt.as_tensor_variable(v0_np) + (m @ cols[:, :, None]).squeeze(-1)
+        dens = k21.log_number_densities(x, y, z, xp=pt)
+        velo = k21.log_velocity_densities(
+            x, y, z, vel[:, 0], vel[:, 1], vel[:, 2], xp=pt
+        )
+        r_kpc = pt.sqrt(x * x + y * y + 1.0) / 1e3
+        return (
+            [dens[i] for i in k21.BRANCHES],
+            [velo[i] for i in k21.BRANCHES],
+            r_kpc,
         )
 
     # ------------------------------------------------------------------
@@ -1897,7 +2032,7 @@ class GalacticModel(Component):
         )
 
     def _kinematic_evidence_log_norm(
-        self, stars, roots, vel_linked, los, dens_offsets=None
+        self, stars, roots, vel_linked, los, dens_offsets=None, k21_los=None
     ):
         """The constant to ADD to a log evidence for the kinematic prior to
         be a normalized density (outputs/evidence's sign convention: the
@@ -1966,19 +2101,31 @@ class GalacticModel(Component):
                         ]
                     )
                     if (lo, hi, offs) not in cache:
-                        cache[(lo, hi, offs)] = log_position_norm(
-                            lo, hi, sun_xyz, los_hat, offsets=offs
+                        cache[(lo, hi, offs)] = (
+                            k21.log_position_norm(lo, hi, *k21_los)
+                            if k21_los is not None
+                            else log_position_norm(
+                                lo, hi, sun_xyz, los_hat, offsets=offs
+                            )
                         )
                     c = cache[(lo, hi, offs)]
             else:
                 d0 = float(stars.distance.element_start(k))
-                c = float(
-                    _log_total_number_density(
+                log_n = (
+                    k21.log_total_number_density(d0, *k21_los)
+                    if k21_los is not None
+                    else _log_total_number_density(
                         d0, sun_xyz, los_hat, offsets=offs
                     )
-                ) + 2.0 * np.log(max(d0, 1e-3))
+                )
+                c = float(log_n) + 2.0 * np.log(max(d0, 1e-3))
             if k not in vel_linked:
-                c += 1.5 * _LOG_2PI - _LOG_KMS_PER_MS
+                # koshimoto21's velocity densities are normalized in the
+                # model (their (2 pi)^(3/2) included); only the rv column's
+                # m/s -> km/s Jacobian is owed
+                c += (0.0 if k21_los is not None else 1.5 * _LOG_2PI) - (
+                    _LOG_KMS_PER_MS
+                )
             total -= c
         return float(total)
 
