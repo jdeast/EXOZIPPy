@@ -195,7 +195,46 @@ FILTER_SETS: Dict[str, List[str]] = {
         "Euclid/NISP.Y",
         "Euclid/NISP.J",
         "Euclid/NISP.H",
+        # Euclid Q2 VIS photometry of the Roman-bulge events (BC-2026-10-26)
+        "Euclid/VIS.vis",
     ],
+    # The Roman-bulge microlensing SEDs (BC-2026-10-26, review 8.6.37):
+    # HST GO 17776 (THOR) and GO 17923 photometry, VVV / VIRAC and DECaPS2
+    # catalog photometry.
+    "HST": [
+        "HST/ACS_WFC.F606W",
+        "HST/ACS_WFC.F814W",
+        "HST/WFC3_UVIS1.F606W",
+        "HST/WFC3_UVIS1.F814W",
+        "HST/WFC3_UVIS2.F606W",
+        "HST/WFC3_UVIS2.F814W",
+        "HST/WFC3_IR.F098M",
+        "HST/WFC3_IR.F127M",
+        "HST/WFC3_IR.F139M",
+        "HST/WFC3_IR.F153M",
+        "HST/WFC3_IR.F167N",
+    ],
+    "VISTA": [
+        "Paranal/VISTA.Z",
+        "Paranal/VISTA.Y",
+        "Paranal/VISTA.J",
+        "Paranal/VISTA.H",
+        "Paranal/VISTA.Ks",
+    ],
+    "DECam": [
+        "CTIO/DECam.g",
+        "CTIO/DECam.r",
+        "CTIO/DECam.i",
+        "CTIO/DECam.z",
+        "CTIO/DECam.Y",
+    ],
+    # BC-2026-10-26 item 6: every mulensinstrument band needs a BC column
+    # once an sed: block is on, and MOA-II's wide red band is the one SVO
+    # carries (MOA/MOA-II.R; there is no MOA-II.Red id).  IRAC.I1 for
+    # OGLE-2017-BLG-1275's Spitzer source flux, UKIDSS H for catalog rows.
+    "MOA": ["MOA/MOA-II.R"],
+    "Spitzer": ["Spitzer/IRAC.I1"],
+    "UKIRT": ["UKIRT/UKIDSS.H"],
 }
 
 
@@ -232,6 +271,16 @@ NATIVE_SYSTEM: Dict[str, str] = {
     # carries Kp as Vega.  No native system, so a row must state one.
     **{f: "" for f in FILTER_SETS["Kepler"]},
     **{f: "AB" for f in FILTER_SETS["Euclid"]},
+    # THOR (GO 17776) publishes VEGAMAG columns, as does the KMT-2016-0212
+    # calibration (radish, 2026-10-26); a row may still state its own system.
+    **{f: "Vega" for f in FILTER_SETS["HST"]},
+    **{f: "Vega" for f in FILTER_SETS["VISTA"]},  # VVV / VIRAC
+    **{f: "AB" for f in FILTER_SETS["DECam"]},  # DECaPS2
+    # MOA photometry is instrumental and calibrated per event against a
+    # catalog; Vega is the convention radish asked for (2026-10-26).
+    **{f: "Vega" for f in FILTER_SETS["MOA"]},
+    **{f: "Vega" for f in FILTER_SETS["Spitzer"]},  # IRAC Vega (Reach+2005)
+    **{f: "Vega" for f in FILTER_SETS["UKIRT"]},  # UKIDSS Vega (Hewett+2006)
 }
 
 
