@@ -45,9 +45,12 @@ weighting.  Differences from what a survey measures that are KNOWN and
 are model choices, not bugs; Part B has to account for them, not
 rediscover them:
 
-  * sources are weighted by n(D_S) D_S^2 only -- no luminosity function or
-    magnitude limit (genulens's ``gammaDs`` exponent is 2 here, versus its
-    default 0.5 ~ an I < 21 source sample);
+  * with ``--model koshimoto21`` (the default since the genulens port, PR
+    4b) the source is weighted as genulens weights it, n_MS(D_S)
+    sqrt(D_S / 8 kpc), and the lens mass function is genulens's (REMNANT
+    1): compare with its ``survey`` reference.  ``--model simplified``
+    weights sources by n(D_S) D_S^2 (genulens's gammaDs 2, the
+    ``remnants`` reference);
   * the lens mass function is the galacticmodel's present-day one by
     default (review 1.7.2: MIST turnoff, white dwarfs, neutron stars and
     black holes, as genulens REMNANT 1); ``sample --no-present-day``
