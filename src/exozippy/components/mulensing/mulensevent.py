@@ -772,6 +772,14 @@ class MulensEvent(Component):
         and shares its position (star.md, 'Linked stars')."""
         return [int(self.source_map[0])]
 
+    def unresolved_binary_lenses(self, system):
+        """A single-lens event's lens may be an unresolved binary
+        (Component.unresolved_binary_lenses); a lens with companions is
+        modeled body by body and is not."""
+        if len(self.lens_bodies) != 1:
+            return {}
+        return {int(self.lens_map[0]): int(self.source_map[0])}
+
     def build_maps(self):
         """Stage 2: index maps for the event-level parameter chain.
 

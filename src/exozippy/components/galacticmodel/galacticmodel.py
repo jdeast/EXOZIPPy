@@ -692,6 +692,17 @@ class GalacticModel(Component):
                 f"{remnants!r}."
             )
         self.remnants = remnants
+        binaries = self.config[0].get("binaries", False)
+        if "binaries" in self.config[0] and model != "koshimoto21":
+            raise ValueError(
+                "galacticmodel binaries is a key of model: koshimoto21."
+            )
+        if not isinstance(binaries, bool):
+            raise ValueError(
+                f"galacticmodel binaries must be true or false, got "
+                f"{binaries!r}."
+            )
+        self.binaries = binaries
         self._parse_source_selection(model)
         self.anchor_idx = self.config[0].get("anchor_idx", 0)
         # Present-day mass function (review 1.7.2): an independent toggle,
@@ -881,6 +892,21 @@ class GalacticModel(Component):
                     "holes (Raithel+2018), neutron stars and black holes "
                     "with genulens's natal kicks (350 / 100 km/s).  false = "
                     "genulens's REMNANT 0: dead stars are discarded."
+                ),
+            },
+            {
+                "key": "binaries",
+                "kind": "option",
+                "accepts": [True, False],
+                "required": False,
+                "doc": (
+                    "model: koshimoto21 only (genulens's BINARY; default "
+                    "false, genulens's default): the lens of a single-lens "
+                    "event may be an unresolved binary -- genulens's "
+                    "multiplicity, mass ratios and separations; a companion "
+                    "resolved wide leaves one body as the lens, one closer "
+                    "than the event can resolve makes the lens their total "
+                    "mass, and a detectable binary is excluded."
                 ),
             },
             {
@@ -2014,6 +2040,10 @@ class GalacticModel(Component):
                     )
                 src[int(k)] = True
         self._k21_src = src
+        self._k21_binary = {}
+        if self.binaries:
+            for comp in system.active_components.values():
+                self._k21_binary.update(comp.unresolved_binary_lenses(system))
         if self.source_selection == "sqrt_distance":
             self._k21_selection = ("sqrt_distance",)
         else:
@@ -2063,6 +2093,7 @@ class GalacticModel(Component):
             x, y, z, vel[:, 0], vel[:, 1], vel[:, 2], xp=pt
         )
         self._k21_state = (x, y, z, vel)
+        self._k21_distance = d_pc
         r_kpc = pt.sqrt(x * x + y * y + 1.0) / 1e3
         log_dens = [dens[i] for i in br]
         if self._k21_src.any():
@@ -2126,6 +2157,8 @@ class GalacticModel(Component):
                 for g in mf.GROUPS
             }
             log_lum = interp_table(mf.log_lum[j], mf.x0, PDMF_GRID_DEX, x_mass)
+            if self._k21_binary:
+                tab["still"] = self._k21_binary_still(j, tab["still"], x_mass)
             mean, sig = bases[j]
             kicked = [
                 tab[g]
@@ -2148,6 +2181,29 @@ class GalacticModel(Component):
             out.append(log_vel[j] + w * ((1.0 - src) * field + src * source))
             mass_only.append(w * ((1.0 - src) * field_m + src * source))
         self._k21_mass_only = mass_only
+        return out
+
+    def _k21_binary_still(self, j, still, x_mass):
+        """For an unresolved-binary lens (binaries: true), branch j's
+        luminous-plus-white-dwarf term with the luminous part replaced by
+        genulens's effective binary-lens density at the event's scale r0 =
+        sqrt(kappa pi_rel) D_L (koshimoto21.log_binary_lens_density; white
+        dwarfs get no companion in genulens).  Other stars keep ``still``;
+        assembled with set_subtensor."""
+        mf = self._k21_mf
+        stars_d = self._k21_distance
+        b = self._k21_branches[j]
+        log_wd = interp_table(mf.log_wd[j], mf.x0, PDMF_GRID_DEX, x_mass)
+        out = still
+        for lens, src in sorted(self._k21_binary.items()):
+            lr0 = k21.log_r0(stars_d[lens], stars_d[src], xp=pt)
+            log_bin = (
+                k21.log_binary_lens_density(b, x_mass[lens], lr0, xp=pt)
+                - mf.log_imf_peak
+            )
+            out = pt.set_subtensor(
+                out[lens], pt.logaddexp(log_bin, log_wd[lens])
+            )
         return out
 
     def _k21_grouped_logp(

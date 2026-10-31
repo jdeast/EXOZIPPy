@@ -8,6 +8,10 @@ https://github.com/nkoshimoto/genulens (GPLv3).
   (R, |z|) grid, from ``koshimoto21.log_shu_unnormalized`` (the port of
   calc_PRRg).  genulens computes the same integral (a trapezoid over its
   truncated support) at its own table nodes.
+- ``koshimoto21_binary.npz`` (always): genulens's BINARY 1 effective
+  lens-mass density per branch on (log10 M_eff, log10 r0), by Monte Carlo
+  of its multiplicity / mass-ratio / separation recipe and its blending
+  thresholds (``koshimoto21.binary_tables``).
 - with ``--genulens ROOT`` (a genulens checkout built with CMake, as
   scripts/make_genulens_fixture.py describes):
   - ``koshimoto21_nsd.npz``: genulens's input_files/NSD_moments.dat (the
@@ -91,6 +95,13 @@ def main():
         k21.SHU_NORM_FILE, r=R_GRID, z=Z_GRID, log_norm=log_norm
     )
     print(f"wrote {k21.SHU_NORM_FILE} {log_norm.shape}")
+    binary = k21.binary_tables()
+    np.savez_compressed(
+        k21.BINARY_FILE,
+        branches=np.array(k21.BRANCHES_NSD),
+        log_dens=binary.astype(np.float32),
+    )
+    print(f"wrote {k21.BINARY_FILE} {binary.shape}")
     if args.genulens:
         root = os.path.abspath(args.genulens)
         np.savez_compressed(k21.NSD_FILE, **nsd_table(root))
