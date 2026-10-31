@@ -481,6 +481,16 @@ class Component(ABC):
         """
         return {}
 
+    def selected_sources(self, system):
+        """Stage 7: the indices of the stars this component OBSERVED
+        through a flux-limited selection (a survey's source stars), as a
+        list.  A population prior that models the selection (galacticmodel's
+        genulens port weights a source by its main-sequence count and the
+        survey's detection fraction, as genulens does) applies it to these
+        stars only; every other star is a field object.  The default
+        selects nothing; the microlensing event returns its source."""
+        return []
+
     # Attribute names holding something that BELONGS TO ONE BUILD: a
     # pytensor node the component stashed, or a function compiled against
     # one.  ``System.build_model`` clears every one of them before stage 5,

@@ -161,10 +161,12 @@ def _bar_log_shape(xb, yb, zb, R, xp):
 
 
 def log_component_shapes(x, y, z, xp=np):
-    """log of genulens ``calc_rho_each``'s ``rhos[i]`` for every component
-    but the NSD (index 9, tabulated): the dimensionless shapes the number
-    densities are ``n0[i] * rhos[i]`` of.  Returns a list of 11 entries in
-    ``COMPONENTS`` order, with ``None`` at index 9.
+    """log of genulens ``calc_rho_each``'s ``rhos[i]`` for every
+    component: the dimensionless shapes the number densities are
+    ``n0[i] * rhos[i]`` of.  Returns a list of 11 entries in ``COMPONENTS``
+    order.  The NSD's (index 9) is its tabulated mass density (genulens
+    ND = 3, rho0ND = 1), returned everywhere; genulens includes the NSD
+    only on sight lines inside its box (``nsd_active``).
     """
     # 1e-12 pc^2: a strictly positive radicand, so the gradient stays finite
     # on the z axis (sqrt'(0) * 0 would be NaN); 1e-16 pc at R = 5 kpc
@@ -185,7 +187,7 @@ def log_component_shapes(x, y, z, xp=np):
     xb = x * ct + y * st
     yb = -x * st + y * ct
     out.append(_bar_log_shape(xb, yb, z, R, xp))
-    out.append(None)  # NSD: tabulated (Sormani+21 moments)
+    out.append(nsd_log_rho(R, z, xp))
     # stellar halo, normalized to 1 at the Sun's R (R0 / a)^alpha, a floored
     # at 500 pc
     z_sh = z / HALO_EPS
@@ -203,8 +205,8 @@ def log_component_shapes(x, y, z, xp=np):
 # genulens 2.0.0a4 run that wrote tests/fixtures/genulens_points.json
 # (``constants``), which tests/test_koshimoto21.py pins them to.  Units:
 # stars / pc^3 at the shape's reference point (the Sun's R in the disk
-# midplane; the bar center; the Sun for the halo).  NSD (index 9) is
-# tabulated and not yet ported.
+# midplane; the bar center; the Sun for the halo; for the NSD, per
+# Msun/pc^3 of its tabulated mass density).
 #: all objects (main sequence + giants + white dwarfs): genulens's LENS
 #: density (n0d, n0b, n0SH)
 N0 = (
@@ -217,7 +219,7 @@ N0 = (
     0.0553413740781,
     0.00941837606125,
     13.4396677614,
-    None,
+    3.18797927873,
     5.72825867147e-05,
 )
 #: main sequence + giants only: genulens's SOURCE density (n0MSd, ...)
@@ -231,7 +233,7 @@ N0_MS = (
     0.0492007560133,
     0.00803877497343,
     11.9712163015,
-    None,
+    2.87786338496,
     4.77914710526e-05,
 )
 
@@ -239,11 +241,10 @@ N0_MS = (
 def log_number_densities(x, y, z, xp=np, luminous_only=False):
     """log number density (stars / pc^3) of each component at (x, y, z) pc:
     ``log n0[i] + log rhos[i]`` (genulens's ``rhoD_L``; ``luminous_only``
-    gives ``rhoD_S``'s main-sequence count instead).  NSD entry None."""
+    gives ``rhoD_S``'s main-sequence count instead)."""
     n0 = N0_MS if luminous_only else N0
     return [
-        None if s is None else np.log(n) + s
-        for n, s in zip(n0, log_component_shapes(x, y, z, xp))
+        np.log(n) + s for n, s in zip(n0, log_component_shapes(x, y, z, xp))
     ]
 
 
@@ -609,7 +610,7 @@ def log_vphi_density(v_phi, r_pc, z_pc, i, xp=np):
 
 def log_velocity_densities(x, y, z, vx, vy, vz, xp=np):
     """Normalized log density of the Galactocentric velocity (vx, vy, vz)
-    km/s per component (NSD entry None) at (x, y, z) pc: the density of
+    km/s per component at (x, y, z) pc: the density of
     what genulens's ``get_vxyz_ran`` draws, without its escape-speed
     rejection (550 / 600 km/s).
 
@@ -637,7 +638,7 @@ def log_velocity_densities(x, y, z, vx, vy, vz, xp=np):
         + _log_normal(vy - my, sig_y, xp)
         + _log_normal(vz, sig_z, xp)
     )
-    out.append(None)  # NSD
+    out.append(nsd_log_velocity(r, z, v_r, v_phi, vz, xp))
     out.append(
         _log_normal(v_r, SIG_SH[0], xp)
         + _log_normal(v_phi, SIG_SH[1], xp)
@@ -701,32 +702,79 @@ def line_of_sight_basis(ra_rad, dec_rad):
 #: the components a sight line outside genulens's NSD box carries, in
 #: COMPONENTS order (index into the 11)
 BRANCHES = (0, 1, 2, 3, 4, 5, 6, 7, 8, 10)
-#: the three-population label of each branch (galacticmodel's thin_disk /
-#: thick_disk / bulge), for the per-population inputs that are not yet
-#: ported per branch (the mass function and the age / [Fe/H] priors): the
-#: stellar halo borrows the thick disk's, the oldest population there is
-POPULATION_OF_BRANCH = (0, 0, 0, 0, 0, 0, 0, 1, 2, 1)
+#: ... and one inside it (|l| < 5, |b| < 2: ``nsd_active``)
+BRANCHES_NSD = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+#: the three-population label of each component (galacticmodel's
+#: thin_disk / thick_disk / bulge), for the inputs not yet ported per
+#: branch (the age / [Fe/H] priors): the stellar halo borrows the thick
+#: disk's (the oldest population there is), the NSD the bulge's
+POPULATION = {
+    0: 0,
+    1: 0,
+    2: 0,
+    3: 0,
+    4: 0,
+    5: 0,
+    6: 0,
+    7: 1,
+    8: 2,
+    9: 2,
+    10: 1,
+}
+POPULATION_OF_BRANCH = tuple(POPULATION[b] for b in BRANCHES)
+
+
+def branches_for(l_deg, b_deg):
+    """The components genulens simulates on this sight line."""
+    return BRANCHES_NSD if nsd_active(l_deg, b_deg) else BRANCHES
+
 
 # ln-spaced trapezoid points for the position normalizer (galacticmodel's
 # _POSITION_QUAD_POINTS rationale: ~0.7 pc steps at the bulge)
 _POSITION_QUAD_POINTS = 200001
 
 
-def log_total_number_density(d_pc, l_deg, b_deg):
-    """numpy: log sum over BRANCHES of n_b at distance(s) d_pc."""
+def log_source_weights(branches, d_pc, selection, xp=np):
+    """Per branch, the log weight genulens gives a SOURCE at d_pc relative
+    to the generic volume element D^2 (los_density_grid.cpp rhoD_S):
+    ``selection`` is ("sqrt_distance",) -- sqrt(D / 8 kpc), no D^2 -- or
+    ("luminosity_function", i_min, i_max, ai0, h) -- fLF_i(D)."""
+    if selection[0] == "sqrt_distance":
+        w = log_source_weight_sqrt(d_pc, xp)
+        return [w for _ in branches]
+    _, i_min, i_max, ai0, h = selection
+    return [
+        log_detect_fraction(b, d_pc, i_min, i_max, ai0, h, xp)
+        for b in branches
+    ]
+
+
+def log_total_number_density(d_pc, l_deg, b_deg, selection=None):
+    """numpy: log sum over the sight line's branches of n_b at d_pc; with a
+    source ``selection``, genulens's source weight n_MS,b w_S,b instead
+    (still per pc^3 of the D^2 volume element, which w_S compensates)."""
     d = np.maximum(np.asarray(d_pc, dtype=float), 1e-3)
     x, y, z = dlb_to_xyz(d, l_deg, b_deg)
-    dens = log_number_densities(x, y, z)
-    return np.logaddexp.reduce(np.stack([dens[i] for i in BRANCHES]), axis=0)
+    br = branches_for(l_deg, b_deg)
+    dens = log_number_densities(x, y, z, luminous_only=selection is not None)
+    terms = [dens[i] for i in br]
+    if selection is not None:
+        terms = [
+            t + w for t, w in zip(terms, log_source_weights(br, d, selection))
+        ]
+    return np.logaddexp.reduce(np.stack(terms), axis=0)
 
 
-def log_position_norm(lower_pc, upper_pc, l_deg, b_deg):
+def log_position_norm(lower_pc, upper_pc, l_deg, b_deg, selection=None):
     """numpy: log int_lower^upper sum_b n_b(d) d^2 dd along the sight line
     (trapezoid in ln d, integrand n d^3, peak factored out)."""
     lnd = np.linspace(
         np.log(float(lower_pc)), np.log(float(upper_pc)), _POSITION_QUAD_POINTS
     )
-    f = log_total_number_density(np.exp(lnd), l_deg, b_deg) + 3.0 * lnd
+    f = (
+        log_total_number_density(np.exp(lnd), l_deg, b_deg, selection)
+        + 3.0 * lnd
+    )
     peak = float(np.max(f))
     return float(np.log(np.trapezoid(np.exp(f - peak), lnd)) + peak)
 
@@ -816,9 +864,10 @@ def alive_fraction(branch, x):
     exact age mixture for the bar (the PDMF tables smooth both by
     pdmf.SMOOTH_DEX)."""
     m = 10.0 ** np.asarray(x, dtype=float)
-    if branch == 8:
-        w = _bar_age_weights()
-        die = np.array([d for _, d in MINIDIE_BAR])
+    if branch in (8, 9):
+        table = MINIDIE_BAR if branch == 8 else MINIDIE_NSD
+        w = _bar_age_weights() if branch == 8 else _nsd_age_weights()
+        die = np.array([d for _, d in table])
         return np.sum(w[:, None] * (m[None, :] < die[:, None]), axis=0)
     return (m < MINIDIE[branch]).astype(float)
 
@@ -846,12 +895,13 @@ class MassFunction:
 
     GROUPS = ("still", "NS", "BH")
 
-    def __init__(self, lower, upper, remnants=True):
+    def __init__(self, lower, upper, remnants=True, branches=BRANCHES):
         from . import pdmf
 
         lower = np.atleast_1d(np.asarray(lower, dtype=float))
         upper = np.atleast_1d(np.asarray(upper, dtype=float))
-        alive = {b: (lambda xx, b=b: alive_fraction(b, xx)) for b in BRANCHES}
+        self.branches = tuple(branches)
+        alive = {b: (lambda xx, b=b: alive_fraction(b, xx)) for b in branches}
         self.x, dens = pdmf.build_population_tables(
             _log_imf_table, float(lower.min()), float(upper.max()), alive=alive
         )
@@ -863,8 +913,12 @@ class MassFunction:
         self.log_imf_peak = float(np.max(_log_imf_table(self.x)))
         self.log_table = {g: [] for g in self.GROUPS}
         self.dark_frac = []
-        self.log_norm = np.empty((len(BRANCHES), n_star))
-        for j, b in enumerate(BRANCHES):
+        self.log_norm = np.empty((len(branches), n_star))
+        #: luminous objects only (a survey-selected SOURCE: genulens's n0MS
+        #: count), normalized over the luminous objects in the support
+        self.log_lum = []
+        self.log_norm_lum = np.empty((len(branches), n_star))
+        for j, b in enumerate(branches):
             d = dens[b]
             if remnants:
                 parts = {
@@ -884,10 +938,14 @@ class MassFunction:
                 self.log_table[g].append(np.log(parts[g] + floor))
             dark = total - d["lum"] if remnants else 0.0 * total
             self.dark_frac.append(dark / (total + floor))
+            self.log_lum.append(np.log(d["lum"] + floor))
             for k in range(n_star):
                 sel = (self.x >= lower[k]) & (self.x <= upper[k])
                 self.log_norm[j, k] = np.log(
                     np.trapezoid(imf[sel], self.x[sel])
+                )
+                self.log_norm_lum[j, k] = np.log(
+                    np.trapezoid(d["lum"][sel], self.x[sel])
                 )
 
 
@@ -921,7 +979,7 @@ def log_kicked_velocity(vx, vy, vz, mean, sigma_iso, kick, xp=np):
     )
 
 
-def kick_bases(x, y, z, xp=np):
+def kick_bases(x, y, z, xp=np, branches=BRANCHES):
     """(mean, sigma_iso) per branch (BRANCHES order) of the isotropic
     Gaussian a kicked remnant's velocity is convolved from: disk -- mean
     (v_R, v_phi, v_z) = (0, v_c(R) / facz, 0), dispersions (sigU, sigU /
@@ -937,5 +995,187 @@ def kick_bases(x, y, z, xp=np):
         out.append((disk_mean, (su * su * sw / np.sqrt(2.0)) ** (1.0 / 3.0)))
     (mx, my, _), (sx, sy, sz) = bar_mean_and_sigma(x, y, z, xp)
     out.append(((mx, my, 0.0), (sx * sy * sz) ** (1.0 / 3.0)))
+    m_phi, s_phi, s_r, s_z, _ = nsd_moments(r, z, xp)
+    out.append(
+        (
+            (-m_phi * y / r, m_phi * x / r, 0.0),
+            (s_phi * s_r * s_z) ** (1.0 / 3.0),
+        )
+    )
     out.append(((0.0, 0.0, 0.0), float(np.prod(SIG_SH) ** (1.0 / 3.0))))
-    return out
+    return [out[i] for i in branches]
+
+
+# ---------------------------------------------------------------------------
+# The nuclear stellar disk (genulens ND = 3: Sormani et al. 2021 moments)
+# ---------------------------------------------------------------------------
+NSD_FILE = Path(__file__).resolve().parent / "koshimoto21_nsd.npz"
+_NSD = None
+#: genulens's NSD support: R <= RenND - 30, |z| <= zenND - 20 (pc)
+NSD_R_EDGE, NSD_Z_EDGE = 970.0, 380.0
+#: width (pc) of the Gaussian roll-off the port puts beyond that edge, where
+#: genulens's density drops to zero (the table there is ~1e-9 of central)
+NSD_EDGE_SIGMA = 5.0
+#: the NSD's "N" rows of Minidie.dat (age Gyr -> turnoff Msun)
+MINIDIE_NSD = (
+    (5.0, 1.2837916613),
+    (6.0, 1.214597702),
+    (7.0, 1.1653949022),
+    (8.0, 1.1238201857),
+    (9.0, 1.0875971317),
+    (10.0, 1.0560716391),
+)
+NSD_AGE_MEAN, NSD_AGE_SIGMA = 7.0, 1.0  # StellarPopulationState mageND, sageND
+
+
+def _nsd_table():
+    global _NSD
+    if _NSD is None:
+        with np.load(NSD_FILE) as f:
+            _NSD = {k: f[k] for k in f.files}
+    return _NSD
+
+
+def _nsd_age_weights():
+    """genulens: tau ~ N(7, 1), row (int)(100 (tau + 0.5)) clamped to the
+    table, i.e. row k (age 5 + k) for tau in [4.5 + k, 5.5 + k), the end
+    rows taking the tails (event_sampler.cpp)."""
+    from scipy.special import ndtr
+
+    ages = np.array([a for a, _ in MINIDIE_NSD])
+    lo = np.r_[-np.inf, ages[1:] - 0.5]
+    hi = np.r_[ages[:-1] + 0.5, np.inf]
+    return ndtr((hi - NSD_AGE_MEAN) / NSD_AGE_SIGMA) - ndtr(
+        (lo - NSD_AGE_MEAN) / NSD_AGE_SIGMA
+    )
+
+
+def _nsd_bilinear(name, r, z, xp):
+    """genulens interp_xy on the NSD table (|z| rows, R columns), clamped to
+    the table."""
+    t = _nsd_table()
+    rg, zg, tab = t["r"], t["z"], t[name]
+    fz = xp.clip(xp.abs(z) / (zg[1] - zg[0]), 0.0, zg.size - 1 - 1e-9)
+    fr = xp.clip(r / (rg[1] - rg[0]), 0.0, rg.size - 1 - 1e-9)
+    if xp is np:
+        iz, ir = np.floor(fz).astype(int), np.floor(fr).astype(int)
+        tt = tab
+    else:
+        iz, ir = xp.floor(fz).astype("int64"), xp.floor(fr).astype("int64")
+        tt = xp.as_tensor_variable(tab)
+    a, b = fz - iz, fr - ir
+    return (
+        (1 - a) * (1 - b) * tt[iz, ir]
+        + (1 - a) * b * tt[iz, ir + 1]
+        + a * (1 - b) * tt[iz + 1, ir]
+        + a * b * tt[iz + 1, ir + 1]
+    )
+
+
+def nsd_log_rho(r, z, xp=np):
+    """ln of the NSD's tabulated mass density (Msun/pc^3), genulens's
+    rhos[9]; beyond genulens's edge, where it is 0, a Gaussian roll-off of
+    width NSD_EDGE_SIGMA keeps it finite and differentiable."""
+    edge = (xp.maximum(r - NSD_R_EDGE, 0.0) / NSD_EDGE_SIGMA) ** 2 + (
+        xp.maximum(xp.abs(z) - NSD_Z_EDGE, 0.0) / NSD_EDGE_SIGMA
+    ) ** 2
+    return _LN10 * _nsd_bilinear("log10_rho", r, z, xp) - 0.5 * edge
+
+
+def nsd_moments(r, z, xp=np):
+    """(mean v_phi, sig_phi, sig_R, sig_z, corr(R, z)) of the NSD at
+    (R, z), bilinear as genulens interpolates them (log sigmas)."""
+    return (
+        _nsd_bilinear("vphi", r, z, xp),
+        10.0 ** _nsd_bilinear("log10_sig_phi", r, z, xp),
+        10.0 ** _nsd_bilinear("log10_sig_r", r, z, xp),
+        10.0 ** _nsd_bilinear("log10_sig_z", r, z, xp),
+        _nsd_bilinear("cor_rz", r, z, xp),
+    )
+
+
+def nsd_log_velocity(r, z, v_r, v_phi, v_z, xp=np):
+    """genulens's NSD velocity: v_phi ~ N(m, sig_phi), v_R ~ N(0, sig_R),
+    v_z | v_R ~ N(rho sig_z / sig_R v_R, sig_z sqrt(1 - rho^2))."""
+    m, s_phi, s_r, s_z, rho = nsd_moments(r, z, xp)
+    return (
+        _log_normal(v_phi - m, s_phi, xp)
+        + _log_normal(v_r, s_r, xp)
+        + _log_normal(
+            v_z - rho * s_z / s_r * v_r,
+            s_z * xp.sqrt(xp.maximum(1.0 - rho * rho, 1e-12)),
+            xp,
+        )
+    )
+
+
+# ---------------------------------------------------------------------------
+# Source weighting (los_density_grid.cpp: rhoD_S)
+# ---------------------------------------------------------------------------
+LF_FILE = Path(__file__).resolve().parent / "koshimoto21_lf.npz"
+_LF = None
+#: genulens's default red-clump distance modulus (Nataf+16 as genulens
+#: codes it) and dust scale height
+DUST_SCALE_HEIGHT = 164.0
+
+
+def red_clump_distance_modulus(l_deg, b_deg):
+    l_signed = (l_deg + 180.0) % 360.0 - 180.0
+    return 14.3955 - 0.0239 * l_signed + 0.0122 * abs(b_deg) + 0.128
+
+
+def log_source_weight_sqrt(d_pc, xp=np):
+    """genulens's default (gammaDs = 0.5, no luminosity function): a source
+    at distance D weighs n_MS(D) sqrt(D / 8 kpc) -- with NO D^2 volume
+    element.  Returned as the log weight relative to the D^2 the
+    galactic prior's volume element already carries."""
+    return 0.5 * xp.log(d_pc / 8000.0) - 2.0 * xp.log(d_pc)
+
+
+def _lf_table():
+    global _LF
+    if _LF is None:
+        with np.load(LF_FILE) as f:
+            _LF = (f["mi"], f["cumu"])
+    return _LF
+
+
+def _lf_cdf(i, mag, xp):
+    """genulens fLF_detect's interpolation of component i's cumulative LF
+    at absolute magnitude ``mag`` (clamped to the table)."""
+    mi, cumu = _lf_table()
+    d = (mi[-1] - mi[0]) / (mi.size - 1)
+    f = xp.clip((mag - mi[0]) / d, 0.0, mi.size - 1 - 1e-9)
+    if xp is np:
+        k = np.floor(f).astype(int)
+        t = cumu[i]
+    else:
+        k = xp.floor(f).astype("int64")
+        t = xp.as_tensor_variable(cumu[i])
+    frac = f - k
+    return t[k + 1] * frac + t[k] * (1.0 - frac)
+
+
+def log_detect_fraction(i, d_pc, i_min, i_max, ai0, h_pc, xp=np):
+    """log fLF_i(D): the fraction of component i's main-sequence stars with
+    apparent I in [i_min, i_max] at distance D (genulens fLF_detect), with
+    genulens's extinction A_I(D) = ai0 (1 - exp(-D / h)) and its D + 0.1
+    pc distance modulus.  Floored strictly positive."""
+    ext = ai0 * (1.0 - xp.exp(-d_pc / h_pc)) + 5.0 * xp.log10(
+        0.1 * (d_pc + 0.1)
+    )
+    frac = _lf_cdf(i, i_max - ext, xp) - _lf_cdf(i, i_min - ext, xp)
+    return xp.log(xp.maximum(frac, 1e-300))
+
+
+def extinction_scale(
+    l_deg, b_deg, ai_rc, dm_rc=None, h_dust=DUST_SCALE_HEIGHT
+):
+    """(ai0, h): genulens's ExponentialDustExtinction for the sight line --
+    h = h_dust / (|sin b| + 1e-4), A_I(D) = ai0 (1 - exp(-D/h)) with
+    A_I(D_rc) = ai_rc at the red clump's distance."""
+    if dm_rc is None:
+        dm_rc = red_clump_distance_modulus(l_deg, b_deg)
+    h = h_dust / (abs(np.sin(b_deg / 180.0 * PI)) + 0.0001)
+    d_rc = 10.0 ** (0.2 * dm_rc) * 10.0
+    return ai_rc / (1.0 - np.exp(-d_rc / h)), h

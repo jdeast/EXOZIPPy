@@ -765,6 +765,13 @@ class MulensEvent(Component):
     # Lifecycle stages
     # ------------------------------------------------------------------
 
+    def selected_sources(self, system):
+        """The event's source is the star the survey selected (a flux-
+        limited detection): Component.selected_sources.  The primary
+        source's star; a second source in the same system is linked to it
+        and shares its position (star.md, 'Linked stars')."""
+        return [int(self.source_map[0])]
+
     def build_maps(self):
         """Stage 2: index maps for the event-level parameter chain.
 
