@@ -658,7 +658,7 @@ class GalacticModel(Component):
                 f"'Kroupa' was accepted but silently ignored before 2026-08."
             )
         self.imf = imf
-        model = self.config[0].get("model", "simplified")
+        model = self.config[0].get("model", "koshimoto21")
         if model not in self.SUPPORTED_MODELS:
             raise ValueError(
                 f"galacticmodel model {model!r} is not one of "
@@ -856,8 +856,8 @@ class GalacticModel(Component):
                 "accepts": list(cls.SUPPORTED_MODELS),
                 "required": False,
                 "doc": (
-                    "The Galactic model (default 'simplified' while the "
-                    "port is completed): 'koshimoto21' is a faithful port "
+                    "The Galactic model (default 'koshimoto21'): "
+                    "'koshimoto21' is a faithful port "
                     "of genulens (Koshimoto, Baba & Bennett 2021, ApJ 917, "
                     "78; github.com/nkoshimoto/genulens) -- seven thin-disk "
                     "age bins, thick disk, the E+E_X bar and the stellar "
@@ -865,8 +865,8 @@ class GalacticModel(Component):
                     "kinematics, bar streaming and dispersion gradients; "
                     "'simplified' is the earlier 3-population model, kept "
                     "for regression comparison and to be removed.  "
-                    "koshimoto21's source weighting and age / [Fe/H] "
-                    "priors are still the 3-population ones (galacticmodel.md)."
+                    "koshimoto21's age / [Fe/H] priors are still the "
+                    "3-population ones (galacticmodel.md)."
                 ),
             },
             {

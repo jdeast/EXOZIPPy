@@ -212,7 +212,9 @@ def _baade_system(present_day):
     from exozippy.system import System
 
     ra, dec = ppt._radec(1.0, -3.9)
-    config, params = ppt.build_config(ra, dec, present_day=present_day)
+    config, params = ppt.build_config(
+        ra, dec, present_day=present_day, model="simplified"
+    )
     system = System(config, user_params=params)
     system.prepare()
     return system, system.build_model()
@@ -225,7 +227,10 @@ def test_present_day_must_be_a_boolean():
     Then it raises rather than reading "false" as true.
     """
     with pytest.raises(ValueError, match="present_day must be true or false"):
-        gm.GalacticModel([{"present_day": "false"}], _DummyConfigManager())
+        gm.GalacticModel(
+            [{"model": "simplified", "present_day": "false"}],
+            _DummyConfigManager(),
+        )
 
 
 @pytest.mark.slow

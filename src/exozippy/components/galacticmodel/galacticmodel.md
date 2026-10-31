@@ -66,7 +66,7 @@ genulens's default source weighting is `sqrt(D_S / 8 kpc)` times the main-sequen
 
 ### What `model: koshimoto21` ports today (density and kinematics)
 
-`galacticmodel: {model: koshimoto21}` selects the port; the default is still `simplified` until its regression comparison against `simplified` is done, and `simplified` will then be removed. One spelling, case-sensitive; anything else raises.
+`galacticmodel: {model: koshimoto21}` is the DEFAULT (since port PR 4b); `model: simplified` keeps the earlier 3-population model only for regression comparison and will be removed. One spelling, case-sensitive; anything else raises.
 
 - **Branches.** Ten: the seven thin-disk age bins, the thick disk, the E+E_X bar and the stellar halo (`koshimoto21.BRANCHES`), each with genulens's shape (`calc_rho_each`) and its start-up normalization `n0` -- ALL objects, white dwarfs included, which is genulens's LENS density (`N0`; the main-sequence count `N0_MS` is its source density and waits for the source-weighting port). Positions are genulens's `Dlb2xyz` (Sgr A* origin, its tilted z), velocities its `(l, b)` projection with `K = 1000 / KS2MY` (`koshimoto21.line_of_sight_basis`; the `(pm_ra, pm_dec) -> (mu_l, mu_b)` rotation is astropy's).
 - **Velocity densities, each normalized** (so `evidence_log_norm` owes only the rv column's m/s Jacobian): disk `v_R ~ N(0, sigU(R))`, `v_z ~ N(0, sigW(R))` with the age-dependent dispersions at each bin's median age, and `v_phi` from genulens's Shu distribution function -- `calc_PRRg` ported exactly (12 digits against genulens), turned into a density in `v_phi` through the exact inverse of `L = v_c(R_g) R_g` on the piecewise-linear rotation curve, and normalized by a shipped `log Z(R, |z|)` table (`koshimoto21_shu_lognorm.npz`, `scripts/make_koshimoto21_tables.py`; within 0.7% of genulens's own normalization, bilinear interpolation error < 0.3%, worst at R < 1 kpc). Bar: genulens's Gaussian in Galactic Cartesian velocity with solid-body rotation, the streaming along the bar and `calc_sigvb`'s dispersions, projected without the x-y covariance as genulens does. Halo: zero-mean Gaussian in `(v_R, v_phi, v_z)`.
@@ -77,3 +77,15 @@ genulens's default source weighting is `sqrt(D_S / 8 kpc)` times the main-sequen
 - **Source weighting.** A star a component OBSERVED through a flux limit (`Component.selected_sources`; the microlensing event returns its source) takes genulens's SOURCE density instead of its lens density: the main-sequence count `N0_MS` times genulens's weight, which REPLACES the `D^2` volume element: `source_selection: sqrt_distance` (default; genulens's default, gammaDs = 0.5: `sqrt(D / 8 kpc)`, no `D^2`) or `luminosity_function` (genulens's AIrc mode: `D^2 fLF_b(D)`, the fraction of each branch's I-band luminosity function -- `koshimoto21_lf.npz`, printed by genulens's own make_LFs -- inside `source_i_range` given `source_ai_rc` and genulens's dust law; to 1e-10).  Its mass prior is the LUMINOUS part of its branch's PDMF, normalized over the luminous objects.  The sqrt weight drops `D^2` from the density, so a source's start logp moves by about `-2 ln D` (~ -18 nats at 8 kpc); the position normalizer (`evidence_log_norm`) integrates the same weighted density.
 - **Linked stars.** A member whose distance AND velocity are its root's (a binary companion: KMT-2021-BLG-1122L, ob09020, ob170114) contributes its mass term only, inside its root's branch; one with its own velocity, its full normalized term.  A partly linked velocity raises (its conditional has no closed form under the non-Gaussian disk kinematics).
 - **Compile cost:** the 8 disk components are one broadcast expression (`_DISK_COLS`), not 8 copies; still, the gradient graph takes ~1-2 min to C-compile on a cold PyTensor cache and a few seconds warm.
+
+**End-to-end against genulens (7.16.3, `examples/validation/prior_predictive_tE.py sample --model koshimoto21`).** NUTS on the lens + source prior with no light curve, Baade's window, 8000 draws (R-hat 1.009), against genulens's `survey` reference (gammaDs 0.5, REMNANT 1: exactly koshimoto21's defaults), rate-weighted q10 / q50 / q90:
+
+| | port | genulens |
+|---|---|---|
+| t_E (d) | 5.28 / 17.2 / 50.4 | 5.35 / 17.4 / 53.5 |
+| D_L (kpc) | 3.51 / 7.20 / 8.07 | 3.49 / 7.18 / 8.12 |
+| D_S (kpc) | 7.49 / 8.50 / 10.12 | 7.47 / 8.51 / 10.21 |
+| mu_rel (mas/yr) | 2.98 / 6.28 / 10.59 | 3.02 / 6.20 / 10.50 |
+| M_L (Msun) | 0.071 / 0.453 / 0.931 | 0.071 / 0.455 / 0.951 |
+
+The 0.9 kpc source-distance offset of the simplified model (review 1.7.3) is gone: it was genulens's `sqrt(D_S)` source weighting against our `D_S^2`, and the bar shape.  The port's mu_rel is heliocentric here (no light curve, no t0_par) where genulens's is geocentric at its default Earth velocity (genulens itself moves its t_E median by < 1% between opposite seasons' Earth velocities).  The prior still shows 14% divergent transitions (review 1.7.4), so that is not the simplified model's.

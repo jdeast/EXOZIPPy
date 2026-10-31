@@ -474,8 +474,12 @@ def build_config(
     rv_max_ms=1.0e6,
     lens_logmass_upper=None,
     present_day=None,
+    model=None,
 ):
     """Lens + source + galactic model, no light curve.
+
+    ``model`` selects the galactic model (``koshimoto21``, the genulens
+    port, or ``simplified``); None leaves the component's default.
 
     ``present_day`` sets the galacticmodel's present-day mass function
     (review 1.7.2: MIST turnoff + WD/NS/BH remnants, per population; on by
@@ -502,6 +506,8 @@ def build_config(
     }
     if present_day is not None:
         config["galacticmodel"][0]["present_day"] = bool(present_day)
+    if model is not None:
+        config["galacticmodel"][0]["model"] = model
     params = {}
     for star, d0 in (("Lens", 6000.0), ("Source", 8500.0)):
         params[f"star.{star}.ra"] = {"initval": ra, "sigma": 0.0}
@@ -543,6 +549,7 @@ def sample_prior(
     lens_logmass_upper=None,
     trace_path=None,
     present_day=None,
+    model=None,
 ):
     """Sample the EXOZIPPy prior on one sight line.
 
@@ -563,6 +570,7 @@ def sample_prior(
         dec,
         lens_logmass_upper=lens_logmass_upper,
         present_day=present_day,
+        model=model,
     )
     system = System(config, user_params=params)
     system.prepare()
@@ -643,6 +651,8 @@ def cmd_sample(args):
     )
     if args.present_day is False:
         tag = "imf_" + tag
+    if args.model is not None:
+        tag = f"{args.model}_" + tag
     cols, idata, names_v, wall = sample_prior(
         args.sightline,
         draws=args.draws,
@@ -654,6 +664,7 @@ def cmd_sample(args):
         lens_logmass_upper=args.lens_logmass_upper,
         trace_path=out_dir / f"exozippy_{tag}{args.sightline}_trace.nc",
         present_day=args.present_day,
+        model=args.model,
     )
     post = idata.posterior
 
@@ -1007,6 +1018,12 @@ def main(argv=None):
         help="galacticmodel present_day (review 1.7.2's PDMF; the model's "
         "default is on, --no-present-day restores the IMF as the "
         "present-day mass function for comparison)",
+    )
+    s.add_argument(
+        "--model",
+        choices=["koshimoto21", "simplified"],
+        default=None,
+        help="galacticmodel model (default: the component's default)",
     )
 
     m = sub.add_parser("mroz", help="build the Mroz 2017/2019 references")

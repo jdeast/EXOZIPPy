@@ -48,7 +48,7 @@
  },
  "terms": {
   "POT:galacticmodel.imf_prior": 0.0,
-  "POT:galacticmodel.kinematic_prior": 8.346620829389858,
+  "POT:galacticmodel.kinematic_prior": -14.115460958303983,
   "POT:gaussian_prior.star.pm_dec_sgra": -8.36614046211603e-25,
   "POT:gaussian_prior.star.pm_ra_sgra": -1.3380719056304634e-23,
   "POT:logit_uniform_prior.mulensinstrument.err_scale": -6.085586393799418,
@@ -94,5 +94,5 @@
   "RV:star.pm_ra_raw": -1.8378770664093453,
   "RV:star.rv_raw": -1.8378770664093453
  },
- "total_logp": -1232.6562725525978
+ "total_logp": -1255.1183543402917
 }

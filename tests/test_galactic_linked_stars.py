@@ -107,7 +107,8 @@ class _Sys:
 
 def _kin(stars):
     gm = GalacticModel(
-        [{"anchor_idx": 1, "present_day": False}], _DummyConfigManager()
+        [{"anchor_idx": 1, "model": "simplified", "present_day": False}],
+        _DummyConfigManager(),
     )
     with pm.Model() as model:
         gm.build_likelihood(model, _Sys(stars))
@@ -413,7 +414,9 @@ def _event_config(arch):
         "mulensevent": [{}],
         "lens": [{"body": "star.Lens", "name": "Lens"}],
         "source": sources,
-        "galacticmodel": [{"anchor_idx": 1, "present_day": False}],
+        "galacticmodel": [
+            {"anchor_idx": 1, "model": "simplified", "present_day": False}
+        ],
     }
 
 
