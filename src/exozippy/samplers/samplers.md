@@ -525,22 +525,44 @@ worth knowing before changing it:
   the same** -- it used to `close()` + `join()`, which was survivable only
   while nothing in that stage could wedge a worker.
 
-**The seed polish enforces it too, but nothing configures it yet (3.4.4).**
-`ptde.polish_seed_starts` and `polish.polish_raw_starts` take an
-`eval_timeout` with the same semantics as above, plus a `pool_recycler`
-callable -- `_common.recycle_pool`, supplied by whoever OWNS the pool, which
-for this stage is `polish_raw_starts`. The recycler is not a style choice:
-`polish_seed_starts` is handed a pool and does not know how many workers to
-fork, so the owner has to learn which object it now owns or its own teardown
-closes the corpse and leaks the live one. Both default to `None`, and
-**`run.py` passes neither**, so today's behaviour is unchanged: `sampler:
-eval_timeout:` is in `run.METHOD_ONLY_SAMPLER_KEYS` as a PTDE-family key, and
-`warn_method_only_sampler_keys` tells a `demc`/`demcz`/`nested` user it is
-IGNORED -- which honoring it in a stage that runs under every method would
-turn into a lie for a gradient-free model. That partition is review 2.3.6's
-ruling; re-opening it is its own change. What the polish gained regardless is
-the mid-batch heartbeat (see `run.md`), which needs no timeout to tell
-computing from hung.
+**The seed polish and the whitening probe enforce it too, on every method
+(reviews 3.4.4, 2.6.35, 2.6.41).** `ptde.polish_seed_starts` and
+`polish.polish_raw_starts` take an `eval_timeout` with the same semantics as
+above, plus a `pool_recycler` callable -- `_common.recycle_pool`, supplied by
+whoever OWNS the pool, which for this stage is `polish_raw_starts`. The
+recycler is not a style choice: `polish_seed_starts` is handed a pool and does
+not know how many workers to fork, so the owner has to learn which object it
+now owns or its own teardown closes the corpse and leaks the live one.
+
+`run.py` passes `sampler: eval_timeout:` to the pre-sampling polish
+(`polish_rounds`, which forwards it to every round and to its between-round
+probe), to the startup whitening probe (`prepare_whitening`) and to the
+hot-mode polish at wrap-up. It used to pass none, and OGLE-2013-BLG-0341
+(cannon, ~225 s per three-lens logp, 112 cores) is why that changed: the
+polish's `polish_timeout` DID fire, but the deadline only ends SEEDS -- it
+cannot write off a call already inside VBM -- so one straggler held the
+drain ~1 h past the budget, silent, at ~8.6 of 112 cores. With the per-call
+budget the straggler is scored -inf and the pool recycled like any other.
+The drain also has a heartbeat now (`PolishMonitor.heartbeat(draining=...)`):
+once every seed has stopped, each interval logs "every seed has stopped;
+draining N in-flight evaluation(s), the oldest running T", and says whether
+an `eval_timeout` will end the wait.
+
+**The config-vocabulary ruling this needed (2.3.6's partition).** The key
+stays in `run.METHOD_ONLY_SAMPLER_KEYS` as a PTDE-family key, because that is
+still true of the SAMPLER: nuts/demc/nested evaluate logp in-process or
+through their own machinery and cannot time a call out. But the polish and
+the probe now read it under every method, so the warning a non-PTDE user gets
+is narrowed through `run.METHOD_ONLY_KEYS_HONORED_ELSEWHERE`: "IGNORED by the
+sampler ... but the seed polish's DE engine and the startup whitening probe
+still bound every logp call by it, so it is not inert." Saying "IGNORED ...
+Remove it" there would be the 2.3.6 lie in reverse.
+
+**Setting it.** `eval_timeout` is per CALL, so on a minutes-per-logp model
+it must sit well above the slowest legitimate call, not above a typical one:
+a call written off in the probe costs that ELEMENT its measurement (below),
+and in the polish costs one proposal. On OGLE-2013-BLG-0341, ~225 s typical
+calls want something like `eval_timeout: 1800`.
 
 ## A NaN logp is a model bug, not a rejection (2.4.23, 2.4.22)
 

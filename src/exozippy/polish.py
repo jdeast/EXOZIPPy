@@ -465,7 +465,14 @@ class PolishMonitor:
 
     # --- the progress line ----------------------------------------------
 
-    def heartbeat(self, n_done=None, partial=None, opening=None, detail=None):
+    def heartbeat(
+        self,
+        n_done=None,
+        partial=None,
+        opening=None,
+        detail=None,
+        draining=None,
+    ):
         """One progress line, RATE-LIMITED to ``progress_interval_s``.
 
         Idempotent by construction: every caller shares the one clock, so
@@ -476,6 +483,12 @@ class PolishMonitor:
         still in flight with k of its m evaluations back, ``opening=(k, m)``
         the opening batch before any step exists, and ``detail`` a callable
         returning engine-specific text, called only when a line is written.
+        ``draining=(n, oldest_s, note)`` marks the tail after EVERY seed has
+        stopped, while ``n`` evaluations are still in flight (the oldest
+        ``oldest_s`` seconds old; ``note`` says what will end the wait).
+        That tail used to be silent: OGLE-2013-BLG-0341's polish logged
+        nothing for 10.75 h while one straggling call held it past its
+        budget (review 2.6.35).
         """
         if not self.progress_interval_s:
             return
@@ -484,6 +497,14 @@ class PolishMonitor:
             return
         self._t_last_log = now
         elapsed = fmt_duration(now - self.t_start)
+        if draining is not None:
+            n, oldest_s, note = draining
+            self.log.info(
+                f"{self.label}: every seed has stopped; draining {n} "
+                f"in-flight evaluation(s), the oldest running "
+                f"{fmt_duration(oldest_s)}; {note}  elapsed={elapsed}"
+            )
+            return
         if opening is not None:
             # No step exists yet, so there is no rate to extrapolate from.
             k, m = opening
@@ -843,7 +864,16 @@ def _de_engine(
         pool = None
         if n_proc > 1:
             _common.set_worker_globals(logp_fn)
-            pool = mp.Pool(processes=n_proc)
+            # FORK, explicitly -- the same context _common.create_pool and
+            # recycle_pool use.  The workers inherit the compiled logp
+            # through set_worker_globals; under the platform default (spawn
+            # on macOS, forkserver from Python 3.14 on Linux) they never
+            # see it, every evaluation raises "'NoneType' object is not
+            # callable" and is scored -inf, and the polish silently does
+            # nothing (found by PR #536's CI: "seed 0 lp -inf -> nan").
+            pool = mp.get_context("fork").Pool(
+                processes=n_proc, initializer=_common._worker_init
+            )
             logger.info(
                 f"Seed polish: DE engine on {n_proc} worker process(es), "
                 f"proposals pooled across all {n_seeds} seed(s), "
@@ -971,9 +1001,12 @@ def polish_raw_starts(
     the next batch.  It needs a pool (``cores > 1``), and the L-BFGS path
     ignores it -- scipy calls the gradient function in-process, where there
     is nothing to time out against.  It is a different thing from
-    ``deadline``, which bounds the whole polish.  **run.py does not
-    currently pass one**; see run.md for why that is a config-vocabulary
-    decision rather than an oversight.
+    ``deadline``, which bounds the whole polish: the deadline only ends
+    seeds, and cannot write off a call already inside the model, so without
+    ``eval_timeout`` one slow call holds the polish past its budget for as
+    long as it runs (review 2.6.35: ~10.75 h on OGLE-2013-BLG-0341).
+    run.py passes ``sampler: eval_timeout:`` here (polish_rounds), and
+    outputs/ledger.py's hot-mode polish passes it too.
 
     ``asynchronous`` (default True) selects the DE engine's ptde_async-style
     loop on a real pool -- one proposal in flight per population member,
@@ -1156,6 +1189,7 @@ def polish_rounds(
     tol=None,
     rng=None,
     timeout_s=DEFAULT_POLISH_TIMEOUT_S,
+    eval_timeout=None,
 ):
     """The pipeline's seed polish: polish, re-whiten, polish again, until a
     round stops paying (review 2.4.14, JDE ruling 2026-09-14 part 3) -- on
@@ -1210,7 +1244,10 @@ def polish_rounds(
     every other path.
 
     ``n_steps`` is the per-ROUND cap (resolve_polish_steps' value); ``cores``
-    the DE engine's worker grant.  Returns a summary dict: ``method``,
+    the DE engine's worker grant, and the between-round probe's.
+    ``eval_timeout`` (seconds, None = wait forever; ``sampler:
+    eval_timeout:``) bounds every logp call the DE engine and the
+    between-round probe make (reviews 2.6.35, 2.6.41).  Returns a summary dict: ``method``,
     ``rounds`` (one {seed index: gain} dict per round), ``reasons`` (the
     last round's {seed index: stop reason}), ``stop`` ("converged", "round
     cap" or "timeout") and ``wall_s``.
@@ -1244,6 +1281,7 @@ def polish_rounds(
             logp_fn=logp_fn,
             rng=rng,
             cores=cores,
+            eval_timeout=eval_timeout,
             engine=engine,
             deadline=deadline,
             budget_s=timeout_s,
@@ -1306,7 +1344,12 @@ def polish_rounds(
         system.recenter_whitening_anchor(model)
         if rewhiten:
             measure_and_whiten(
-                system, model, system.get_raw_start(model), logp_fn
+                system,
+                model,
+                system.get_raw_start(model),
+                logp_fn,
+                cores=cores,
+                eval_timeout=eval_timeout,
             )
         raw_all, idx_all = system.get_raw_starts(model)
         if list(idx_all) != list(seed_indices):

@@ -468,6 +468,9 @@ METHOD_ONLY_SAMPLER_KEYS = {
     "n_chains": _PTDE_METHODS,
     "adapt_ladder": _PTDE_METHODS,
     "de_mode_hop": _PTDE_METHODS,
+    # The SAMPLER half only: the seed polish (DE engine) and the startup
+    # whitening probe honor it on every method (reviews 2.6.35, 2.6.41),
+    # which is what METHOD_ONLY_KEYS_HONORED_ELSEWHERE says in the warning.
     "eval_timeout": _PTDE_METHODS,
     "swap_schedule": _PTDE_METHODS,
     "collect_rung_timing": _PTDE_METHODS,
@@ -522,6 +525,20 @@ ALL_METHOD_SAMPLER_KEYS = {
 }
 
 
+# Method-only keys that a stage OUTSIDE the sampler also reads on every
+# method.  The warning for these says the SAMPLER ignores the key and what
+# still honors it -- "IGNORED ... Remove it" would be false (review 2.6.35's
+# config-vocabulary ruling: `eval_timeout` reaches the seed polish and the
+# whitening probe whatever `method:` is, because a slow or hung logp call can
+# stall either of them on any method).
+METHOD_ONLY_KEYS_HONORED_ELSEWHERE = {
+    "eval_timeout": (
+        "the seed polish's DE engine and the startup whitening probe still "
+        "bound every logp call by it"
+    ),
+}
+
+
 def warn_method_only_sampler_keys(sampler_cfg, method):
     """Warn about keys the CHOSEN method does not consume.
 
@@ -555,6 +572,14 @@ def warn_method_only_sampler_keys(sampler_cfg, method):
         else:
             detail = f"every method except {' / '.join(ignored_by)} reads it"
             remedy = f"switch method away from: {', '.join(ignored_by)}"
+        elsewhere = METHOD_ONLY_KEYS_HONORED_ELSEWHERE.get(key)
+        if elsewhere is not None:
+            logger.warning(
+                f"{method}: sampler key '{key}' is IGNORED by the sampler -- "
+                f"{detail} while sampling -- but {elsewhere}, so it is not "
+                f"inert.  For the sampler to honor it too, {remedy}."
+            )
+            continue
         logger.warning(
             f"{method}: sampler key '{key}' is IGNORED -- {detail}. "
             f"Remove it, or {remedy}."
@@ -1100,6 +1125,11 @@ def _run_fit(config, gui, user_params=None):
                     # restarts instead.
                     rewhiten=measure_scales,
                     timeout_s=polish_timeout,
+                    # Per-call budget for the DE engine and the between-round
+                    # probe (reviews 2.6.35, 2.6.41): polish_timeout only ends
+                    # seeds and cannot write off a call already inside the
+                    # model.
+                    eval_timeout=eval_timeout,
                 )
                 raw_start = system.get_raw_start(model)
                 polished_start = True
@@ -1150,6 +1180,11 @@ def _run_fit(config, gui, user_params=None):
                 whitening_path,
                 trace_path,
                 reusing_trace=reusing_trace,
+                # The probe runs on the sampler's grant, every call under
+                # eval_timeout (review 2.6.41): serial it held a 112-core
+                # OGLE-2013-BLG-0341 job on one core for 12.85 h.
+                cores=cores,
+                eval_timeout=eval_timeout,
             )
             if whiten_report is not None:
                 # The rescale re-expressed a polished (nonzero) start in
@@ -1647,6 +1682,7 @@ def _run_fit(config, gui, user_params=None):
             seed_ledger,
             wrapup,
             cores=cores,
+            eval_timeout=eval_timeout,
             modes_cfg=modes_cfg,
             min_ess=min_ess,
             max_rhat=max_rhat,
@@ -1668,6 +1704,7 @@ def _wrap_up(
     wrapup,
     *,
     cores,
+    eval_timeout,
     modes_cfg,
     min_ess,
     max_rhat,
@@ -1778,6 +1815,9 @@ def _wrap_up(
             # Measured on examples/ob09020: 1 core of 36 busy for 38+
             # minutes on a single candidate.
             cores=cores,
+            # ...and the per-call budget, so one stuck candidate proposal
+            # cannot hang a finished fit's report (review 2.6.35).
+            eval_timeout=eval_timeout,
         )
         _persist_hot_search(trace_path, idata, seed_ledger, hot_status)
 

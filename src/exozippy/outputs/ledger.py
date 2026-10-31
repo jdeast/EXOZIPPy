@@ -864,6 +864,7 @@ def discover_hot_modes(
     polish_steps=150,
     cores=None,
     status=None,
+    eval_timeout=None,
 ):
     """Find posterior-suppressed modes in the thinned hot-rung draws.
 
@@ -1148,6 +1149,9 @@ def discover_hot_modes(
             # engine serial on one core of the machine the sampler had just
             # been using in full (review 6.11.3).
             cores=cores,
+            # sampler: eval_timeout, so a stuck proposal is written off
+            # rather than hanging the report (review 2.6.35).
+            eval_timeout=eval_timeout,
         )
         recs_all = build_seed_ledger(
             system,
