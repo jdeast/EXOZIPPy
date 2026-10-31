@@ -252,6 +252,20 @@ class Lens(Component):
                 return entry[field]
         return None
 
+    def _s_default_bound(self, field):
+        """defaults.yaml's s ``field``, checked to be 10**(log_s's)."""
+        defaults = self.config_manager.base_defaults["lens"]
+        s_default = float(defaults["s"][field])
+        log_default = float(defaults["log_s"][field])
+        if not np.isclose(10.0**log_default, s_default, rtol=1e-12):
+            raise RuntimeError(
+                f"mulensing/defaults.yaml: lens s {field} ({s_default}) "
+                f"must be 10**(log_s {field}) = {10.0**log_default}; a "
+                "user s bound is applied to log_s, and the two must "
+                "agree for resolve()'s widening warning on s to be true."
+            )
+        return s_default
+
     def _s_bound_entries(self):
         """Apply the user's lens.<k>.s lower/upper to the SAMPLED log_s.
 
@@ -290,19 +304,10 @@ class Lens(Component):
         on s and is not translated.
         """
         n = self.n_elements
-        defaults = self.config_manager.base_defaults["lens"]
         out = {"log_s": ("overrides", {}), "s": ("options", {})}
         logged = []
         for field in ("lower", "upper"):
-            s_default = float(defaults["s"][field])
-            log_default = float(defaults["log_s"][field])
-            if not np.isclose(10.0**log_default, s_default, rtol=1e-12):
-                raise RuntimeError(
-                    f"mulensing/defaults.yaml: lens s {field} ({s_default}) "
-                    f"must be 10**(log_s {field}) = {10.0**log_default}; a "
-                    "user s bound is applied to log_s, and the two must "
-                    "agree for resolve()'s widening warning on s to be true."
-                )
+            s_default = None  # read only when a bound is translated
             log_vals = np.full(n, np.nan)
             s_vals = np.full(n, np.nan)
             wrote_log_s = self.user_wrote_field("log_s", field)
@@ -326,6 +331,8 @@ class Lens(Component):
                         f"twice.  Keep one of them (an s bound is applied "
                         f"to log_s as log10)."
                     )
+                if s_default is None:
+                    s_default = self._s_default_bound(field)
                 log_vals[elem] = np.log10(val)
                 s_vals[elem] = s_default
                 logged.append(
