@@ -837,7 +837,9 @@ mulensinstrument:
     # exactly degenerate with it in ANY light curve, finite-source or not
     # (the light curve measures only the sum).  upper/initval are installed
     # per light curve from the MEDIAN OBSERVED flux (2x and 0.05x), since
-    # the file's flux zeropoint is arbitrary -- not from the bootstrapped
+    # the file's flux zeropoint is arbitrary (the upper as a modelling
+    # default a params-file upper may tighten or loosen, the start as a
+    # ranked hint) -- not from the bootstrapped
     # baseline, which moves with the seed and the topology and would make
     # this prior's width differ between fits of one light curve
     # (mulensing.md, "Priors that must not depend on the seed").

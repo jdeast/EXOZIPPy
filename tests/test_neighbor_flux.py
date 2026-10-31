@@ -44,7 +44,7 @@ def _kmt_workdir():
     return _WORKDIR
 
 
-def _load_kmt(constrain_blend_on=()):
+def _load_kmt(constrain_blend_on=(), extra_params=None):
     """Load the KMT-2019-BLG-1806 example config + params, optionally
     switching ``sed_constrains_blend: true`` on the named light curves."""
     import os
@@ -59,6 +59,7 @@ def _load_kmt(constrain_blend_on=()):
             config = yaml.safe_load(f)
         with open(config["parameter_file"]) as f:
             user_params = yaml.safe_load(f)
+        user_params.update(extra_params or {})
         for k in ("run", "prefix", "parameter_file", "sampler"):
             config.pop(k, None)
         for entry in config["mulensinstrument"]:
@@ -136,7 +137,7 @@ def test_gated_manifest_pins_and_scales(kmt_nb_system):
             continue
         assert not nb.element_is_sampled(i)
         assert nb.sigma[i] == 0.0
-        assert nb.initval[i] == 0.0  # NaN override leaves the default alone
+        assert nb.initval[i] == 0.0  # no hint: the defaults.yaml 0.0
     assert np.allclose(
         np.asarray(nb.upper, dtype=float), 2.0 * scale, rtol=1e-12, atol=0.0
     )
@@ -194,3 +195,95 @@ def test_blend_potential_matches_hand_formula(kmt_nb_system):
     # keeps resid >= 2.5*log10(f_lens/f_b) > 0).  Pin the support here so a
     # bounds edit cannot silently break that argument.
     assert float(np.atleast_1d(inst.neighbor_flux.lower)[i_on]) == 0.0
+
+
+def test_no_user_value_writes_nothing_and_ranks_the_start(kmt_nb_system):
+    """
+    Given the gated system and no user neighbor_flux entry,
+    When it is prepared,
+    Then the start is a ranked DERIVED_DATA hint (provenance, not an
+    "overrides" initval), nothing reached user_params, and the upper is a
+    manifest OPTION, not an override (review 2.1.26(b)).
+    """
+    from exozippy.config import PRECEDENCE_DERIVED_DATA
+
+    system, _, _ = kmt_nb_system
+    inst = system.mulensinstrument
+    cm = system.config_manager
+    i_on = list(inst.names).index("KMTC04")
+    path = f"{inst.prefix}.{i_on}.neighbor_flux"
+    assert cm.hint_ranks[path] == PRECEDENCE_DERIVED_DATA
+    # The engine's own inject-back of a solved start ({initval, derived})
+    # is expected; a bound in user_params would be a component write.
+    assert not any(
+        "upper" in v for k, v in cm.user_params.items() if "neighbor_flux" in k
+    )
+    entry = inst.manifest["neighbor_flux"]
+    assert "upper" not in (entry.get("overrides") or {})
+    assert "initval" not in (entry.get("overrides") or {})
+    assert len(entry["upper"]) == inst.n_elements
+
+
+@pytest.fixture(scope="module")
+def kmt_nb_user_system(kmt_nb_system):
+    """Given sed_constrains_blend on KMTC04 and KMTS04, and a params file
+    that LOOSENS KMTC04's upper (10x the median flux, past the 2x default)
+    and sets its start, and TIGHTENS KMTS04's upper (0.5x), provide
+    (system, median-flux scale)."""
+    import os
+
+    scale = np.asarray(
+        kmt_nb_system[0].mulensinstrument.flux_median_init, dtype=float
+    )
+    system = _load_kmt(
+        constrain_blend_on=("KMTC04", "KMTS04"),
+        extra_params={
+            "mulensinstrument.KMTC04.neighbor_flux": {
+                "upper": float(10.0 * scale[0]),
+                "initval": float(0.3 * scale[0]),
+            },
+            "mulensinstrument.KMTS04.neighbor_flux": {
+                "upper": float(0.5 * scale[1]),
+            },
+        },
+    )
+    cwd = os.getcwd()
+    os.chdir(_kmt_workdir())
+    try:
+        system.build_model()
+    finally:
+        os.chdir(cwd)
+    return system, scale
+
+
+def test_user_may_loosen_and_tighten_the_upper(kmt_nb_user_system):
+    """
+    Given the user bounds above,
+    When the model is built,
+    Then each user upper stands as written -- looser AND tighter than the
+    2x default -- while the element the user did not bound keeps 2x.  Under
+    the old "overrides" upper the loosened bound was clipped back to 2x.
+    """
+    system, scale = kmt_nb_user_system
+    names = list(system.mulensinstrument.names)
+    upper = np.asarray(
+        system.mulensinstrument.neighbor_flux.upper, dtype=float
+    )
+    assert names[:2] == ["KMTC04", "KMTS04"]
+    assert np.isclose(upper[0], 10.0 * scale[0], rtol=1e-12, atol=0.0)
+    assert np.isclose(upper[1], 0.5 * scale[1], rtol=1e-12, atol=0.0)
+    assert np.isclose(upper[2], 2.0 * scale[2], rtol=1e-12, atol=0.0)
+
+
+def test_user_start_beats_the_hint(kmt_nb_user_system):
+    """
+    Given a user initval on KMTC04 and none on KMTS04,
+    When the model is built,
+    Then KMTC04 starts at the user's value and KMTS04 at the 0.05x hint.
+    """
+    system, scale = kmt_nb_user_system
+    init = np.asarray(
+        system.mulensinstrument.neighbor_flux.initval, dtype=float
+    )
+    assert np.isclose(init[0], 0.3 * scale[0], rtol=1e-12, atol=0.0)
+    assert np.isclose(init[1], 0.05 * scale[1], rtol=1e-12, atol=0.0)
