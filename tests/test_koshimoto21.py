@@ -229,7 +229,9 @@ def test_pytensor_graph_matches_numpy_with_finite_gradient(points):
     terms = [d + v for d, v in zip(dens, velo) if d is not None]
     total = pt.sum(pt.logsumexp(pt.stack(terms), axis=0))
     f = pytensor.function(
-        [xs, vs], [pt.stack(terms), *pt.grad(total, [xs, vs])]
+        [xs, vs],
+        [pt.stack(terms), *pt.grad(total, [xs, vs])],
+        mode="FAST_COMPILE",  # no C compilation: fast on a cold CI cache
     )
     got, gx, gv = f(xyz, vel)
     dn = k21.log_number_densities(xyz[:, 0], xyz[:, 1], xyz[:, 2])
