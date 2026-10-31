@@ -31,6 +31,7 @@ from exozippy.components.orbit.bodies import (
 )
 from exozippy.components.star.position import probe_star_radec
 from exozippy.config import (
+    PRECEDENCE_DEFAULT,
     PRECEDENCE_DERIVED_DATA,
     PRECEDENCE_DERIVED_MIXED,
     PRECEDENCE_MULENS_LENS_DISTANCE,
@@ -844,17 +845,26 @@ class MulensEvent(Component):
         def murel_entry():
             if not fitmurel:
                 return {"expr_key": "default"}
-            # Sampled mode: start at 0 relative pm through the overrides
-            # channel (defaults.yaml deliberately carries no initval --
-            # the engine's default-armor would seed mu_rel = 0 into every
-            # config and break the t_E derivation chain), with a
-            # preliminary 1 mas/yr whitening scale.  The engine's mu_rel
-            # relation upgrades the start from any pm/t_E seeds.
-            return {"overrides": {"initval": [0.0]}}
+            # Sampled mode: no options; the start is the hint pushed below.
+            return None
 
         if fitmurel:
-            self.config_manager.add_scale_hint("mulensevent.0.mu_ra_rel", 1.0)
-            self.config_manager.add_scale_hint("mulensevent.0.mu_dec_rel", 1.0)
+            # Start at 0 relative pm as a ranked add_hint at
+            # PRECEDENCE_DEFAULT (review 2.1.26(d)): a modelling default,
+            # so a user initval beats it, any engine-solved value (from
+            # pm/t_E seeds) beats it, and the ledger reports it as a
+            # default -- not as the user's value or the data's.  It was an
+            # "overrides" initval, which reached resolve() but never the
+            # provenance ledger.  Pushed ONLY in this mode: defaults.yaml
+            # deliberately carries no initval, since the engine's
+            # default-armor would seed mu_rel = 0 into every config and
+            # break the t_E derivation chain.  Preliminary 1 mas/yr
+            # whitening scale.
+            for p in ("mu_ra_rel", "mu_dec_rel"):
+                self.config_manager.add_hint(
+                    f"mulensevent.0.{p}", 0.0, rank=PRECEDENCE_DEFAULT
+                )
+                self.config_manager.add_scale_hint(f"mulensevent.0.{p}", 1.0)
 
         # fitpirel (swap 2): sample log_pi_rel, derive pi_rel from it, and
         # the star component derives the lens distance (see star.py).
