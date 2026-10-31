@@ -164,9 +164,9 @@ mulensevent:
     # defaults.yaml initval is registered by the relaxation engine's
     # default-armor for EVERY config, and a mu_rel = 0 seed broke the
     # t_E = theta_E/mu_rel derivation chain everywhere (six-test suite
-    # regression, ezsuite 15362719).  The fitmurel start arrives through
-    # the manifest's overrides channel instead, which only exists when
-    # the mode is selected.
+    # regression, ezsuite 15362719).  The fitmurel start (0) arrives as a
+    # ranked add_hint at PRECEDENCE_DEFAULT instead, pushed by MulensEvent
+    # only when the mode is selected (review 2.1.26(d)).
     lower: -10000.0
     upper: 10000.0
     unit: "mas/yr"
