@@ -70,7 +70,7 @@ def test_model_is_an_enum_with_one_spelling():
     with pytest.raises(ValueError, match="koshimoto21"):
         GalacticModel([{"model": "Koshimoto21"}], _DummyConfigManager())
     gm = GalacticModel([{}], _DummyConfigManager())
-    assert gm.model == "simplified"
+    assert gm.model == "koshimoto21"
 
 
 def test_kinematic_prior_is_the_ported_mixture():
@@ -201,7 +201,9 @@ def test_simplified_mass_keys_raise_under_koshimoto21(key):
 
 def test_remnants_is_a_koshimoto21_key():
     with pytest.raises(ValueError, match="remnants is a key"):
-        GalacticModel([{"remnants": False}], _DummyConfigManager())
+        GalacticModel(
+            [{"model": "simplified", "remnants": False}], _DummyConfigManager()
+        )
 
 
 def test_heavy_bulge_lens_needs_remnants():
@@ -292,7 +294,8 @@ def test_luminosity_function_selection_needs_ai_rc():
         )
     with pytest.raises(ValueError, match="keys of model: koshimoto21"):
         GalacticModel(
-            [{"source_selection": "sqrt_distance"}], _DummyConfigManager()
+            [{"model": "simplified", "source_selection": "sqrt_distance"}],
+            _DummyConfigManager(),
         )
     stars = _ffp(_Stars([8300.0], [-6.0], [-0.5], [-30e3], [-0.3]))
     lp = _kin(
