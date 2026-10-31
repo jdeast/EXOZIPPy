@@ -58,9 +58,11 @@ def test_component_shapes_match_calc_rho_each(points):
             x, y, z = row["xyz"]
             shapes = k21.log_component_shapes(x, y, z)
             for i, log_rho in enumerate(shapes):
-                if log_rho is None:  # the NSD is tabulated
-                    continue
                 ref = row["rhos"][i]
+                if i == 9 and ref == 0.0:
+                    # NSD off on this sight line, or outside genulens's
+                    # table edge (the port's roll-off is not compared)
+                    continue
                 assert ref > 0.0, (name, row["D"], i)
                 # compared in logs: far from a component (rhos ~ 1e-30) the
                 # 12-digit rounding of the fixture's positions moves
@@ -95,7 +97,7 @@ def test_number_densities_match_genulens(points):
             for lum, key in ((False, "n"), (True, "nMS")):
                 logs = k21.log_number_densities(x, y, z, luminous_only=lum)
                 for i, ln in enumerate(logs):
-                    if ln is None:
+                    if row[key][i] == 0.0:  # the NSD, off here
                         continue
                     np.testing.assert_allclose(
                         ln,
@@ -303,3 +305,63 @@ def test_kicked_velocity_density_is_normalized():
         assert np.trapezoid(4 * np.pi * r**2 * np.exp(lp), r) == pytest.approx(
             1.0, abs=1e-4
         )
+
+
+# --- the NSD, the source weighting (port PR 4) -------------------------------
+
+
+def test_nsd_normalization_matches_genulens(points):
+    c = points["sight_lines"]["nsd"]["constants"]
+    assert k21.N0[9] == pytest.approx(c["n0ND"], rel=RTOL)
+    assert k21.N0_MS[9] == pytest.approx(c["n0MSND"], rel=RTOL)
+    assert points["sight_lines"]["nsd"]["sightline"]["ND"] == 3
+    assert k21.branches_for(0.3, -1.6) == k21.BRANCHES_NSD
+    assert k21.branches_for(1.0, -3.9) == k21.BRANCHES
+
+
+def test_nsd_kinematics_against_genulens_sampler(points):
+    """genulens's NSD velocities (bilinear Sormani+21 moments, Gaussian
+    with an R-z correlation, 600 km/s escape cut): the port's mean v_phi
+    and dispersion against 20000 draws of get_vxyz_ran."""
+    s = points["sight_lines"]["nsd"]
+    pos = {row["D"]: row["xyz"] for row in s["density"]}
+    n = 0
+    for v in s["velocity"]:
+        if v["comp"] != 9:
+            continue
+        x, y, z = pos[v["D"]]
+        m, s_phi, s_r, s_z, _ = k21.nsd_moments(np.hypot(x, y), z)
+        q = v["mc_q_vphi"]
+        assert m == pytest.approx(q[5], abs=0.05 * s_phi + 0.5)
+        assert s_phi == pytest.approx((q[7] - q[3]) / 2.0, rel=0.05)
+        n += 1
+    assert n >= 2
+
+
+def test_nsd_age_weights_are_a_distribution():
+    w = k21._nsd_age_weights()
+    assert w.sum() == pytest.approx(1.0, abs=1e-12)
+    assert w[2] == max(w)  # the 7 Gyr row
+
+
+def test_luminosity_function_selection_matches_fLF_detect(points):
+    """genulens's luminosity-function source selection (AIrc mode): the
+    fraction of each component with apparent I in [14, 21], its extinction
+    law and its D + 0.1 pc distance modulus, to fixture precision."""
+    s = points["sight_lines"]["baade_lf"]
+    sl = s["sightline"]
+    ai0, h = k21.extinction_scale(sl["l"], sl["b"], sl["AIrc"])
+    assert ai0 == pytest.approx(sl["AI0"], rel=RTOL)
+    assert h == pytest.approx(sl["hscale"], rel=RTOL)
+    for row in s["density"]:
+        for i in range(11):
+            got = k21.log_detect_fraction(i, row["D"], 14.0, 21.0, ai0, h)
+            np.testing.assert_allclose(got, np.log(row["fLF"][i]), atol=1e-10)
+
+
+def test_sqrt_distance_source_weight_is_genulens_default():
+    """genulens's default rhoD_S = n_MS sqrt(D / 8 kpc) with no D^2: the
+    weight relative to the volume element."""
+    d = np.array([1000.0, 8000.0, 12000.0])
+    got = k21.log_source_weight_sqrt(d) + 2.0 * np.log(d)
+    np.testing.assert_allclose(got, 0.5 * np.log(d / 8000.0), atol=1e-14)

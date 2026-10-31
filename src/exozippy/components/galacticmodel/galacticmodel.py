@@ -692,6 +692,7 @@ class GalacticModel(Component):
                 f"{remnants!r}."
             )
         self.remnants = remnants
+        self._parse_source_selection(model)
         self.anchor_idx = self.config[0].get("anchor_idx", 0)
         # Present-day mass function (review 1.7.2): an independent toggle,
         # orthogonal to the IMF choice (it evolves whichever IMF is
@@ -715,6 +716,59 @@ class GalacticModel(Component):
                     f"galacticmodel {key} must be true or false, got {val!r}."
                 )
             setattr(self, key, val)
+
+    SOURCE_SELECTIONS = ("sqrt_distance", "luminosity_function")
+
+    def _parse_source_selection(self, model):
+        """koshimoto21's source weighting (genulens's rhoD_S), an n-way MODEL
+        choice: sqrt_distance (genulens's default, gammaDs = 0.5: n_MS
+        sqrt(D / 8 kpc), no D^2) or luminosity_function (genulens's AIrc
+        mode: n_MS D^2 fLF(D), sources with apparent I in source_i_range
+        given A_I = source_ai_rc at the red clump)."""
+        cfg = self.config[0]
+        keys = (
+            "source_selection",
+            "source_i_range",
+            "source_ai_rc",
+            "source_dm_rc",
+        )
+        given = [k for k in keys if k in cfg]
+        if given and model != "koshimoto21":
+            raise ValueError(
+                f"galacticmodel {', '.join(given)}: keys of model: "
+                f"koshimoto21 (genulens's source weighting)."
+            )
+        sel = cfg.get("source_selection", "sqrt_distance")
+        if sel not in self.SOURCE_SELECTIONS:
+            raise ValueError(
+                f"galacticmodel source_selection {sel!r} is not one of "
+                f"{', '.join(self.SOURCE_SELECTIONS)} (case-sensitive)."
+            )
+        self.source_selection = sel
+        if sel == "luminosity_function":
+            if "source_ai_rc" not in cfg:
+                raise ValueError(
+                    "galacticmodel source_selection: luminosity_function "
+                    "needs source_ai_rc (the I-band extinction to the red "
+                    "clump, genulens's AIrc)."
+                )
+            i_range = cfg.get("source_i_range", [14.0, 21.0])
+            if len(i_range) != 2 or not i_range[0] < i_range[1]:
+                raise ValueError(
+                    f"galacticmodel source_i_range must be [I_min, I_max] "
+                    f"with I_min < I_max, got {i_range!r}."
+                )
+            self.source_i_range = (float(i_range[0]), float(i_range[1]))
+            self.source_ai_rc = float(cfg["source_ai_rc"])
+            dm = cfg.get("source_dm_rc")
+            self.source_dm_rc = None if dm is None else float(dm)
+        else:
+            extra = [k for k in keys[1:] if k in cfg]
+            if extra:
+                raise ValueError(
+                    f"galacticmodel {', '.join(extra)} apply to "
+                    f"source_selection: luminosity_function only."
+                )
 
     @property
     def prefix(self):
@@ -828,6 +882,47 @@ class GalacticModel(Component):
                     "with genulens's natal kicks (350 / 100 km/s).  false = "
                     "genulens's REMNANT 0: dead stars are discarded."
                 ),
+            },
+            {
+                "key": "source_selection",
+                "kind": "option",
+                "accepts": ["sqrt_distance", "luminosity_function"],
+                "required": False,
+                "doc": (
+                    "model: koshimoto21 only: how a survey-selected SOURCE "
+                    "star (Component.selected_sources: a microlensing "
+                    "event's source) is weighted, as genulens does it.  "
+                    "'sqrt_distance' (default, genulens's default): its "
+                    "main-sequence count times sqrt(D / 8 kpc), with no "
+                    "D^2 volume element.  'luminosity_function' (genulens's "
+                    "AIrc mode): main-sequence count times D^2 times the "
+                    "fraction of each population's luminosity function with "
+                    "apparent I in source_i_range (default [14, 21]), given "
+                    "source_ai_rc (required: A_I at the red clump) and "
+                    "optionally source_dm_rc (default Nataf+16 as genulens "
+                    "codes it)."
+                ),
+            },
+            {
+                "key": "source_i_range",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": "[I_min, I_max] for source_selection: luminosity_function.",
+            },
+            {
+                "key": "source_ai_rc",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": "A_I to the red clump (genulens AIrc), for luminosity_function.",
+            },
+            {
+                "key": "source_dm_rc",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": "Red-clump distance modulus (genulens DMrc), optional.",
             },
             {
                 "key": "anchor_idx",
@@ -1510,6 +1605,8 @@ class GalacticModel(Component):
         ra_rad = stars.ra.element_start(anchor)
         dec_rad = stars.dec.element_start(anchor)
         self._warn_if_anchor_coords_sampled(stars, ra_rad, dec_rad, anchor)
+        if self.model == "koshimoto21":
+            self._k21_sight_line(system, stars, ra_rad, dec_rad)
 
         # Shared with the start-value hints (physics.line_of_sight_basis):
         # the affine (pm_ra_cosdec, pm_dec, rv) -> galactocentric velocity map,
@@ -1687,11 +1784,9 @@ class GalacticModel(Component):
             # velocity frames.  The per-population inputs not yet ported per
             # branch (mass function, age/[Fe/H]) are mapped from each
             # branch's population (k21.POPULATION_OF_BRANCH).
-            log_dens, log_vel, r = self._k21_branch_terms(
-                stars, ra_rad, dec_rad
-            )
+            log_dens, log_vel, r = self._k21_branch_terms(stars)
             log_sig = [0.0] * len(log_dens)
-            parent = k21.POPULATION_OF_BRANCH
+            parent = tuple(k21.POPULATION[b] for b in self._k21_branches)
         else:
             log_dens = branch_log_number_densities(x, y, z, r)
         vphi_means = (
@@ -1755,6 +1850,13 @@ class GalacticModel(Component):
                 mass_terms = [mass_terms[j] for j in parent]
             if pop_terms is not None:
                 pop_terms = [pop_terms[j] for j in parent]
+            # the per-branch population terms, kept apart for the linked
+            # path (a member's velocity term is replaced, these are not)
+            self._k21_pop = [
+                pt.zeros_like(lv)
+                + (0.0 if pop_terms is None else pop_terms[j])
+                for j, lv in enumerate(log_vel)
+            ]
         if pop_terms is not None:
             # Per-star terms ride with the mass terms (a linked member's
             # entries are 0: its age/initfeh are not sampled).
@@ -1823,15 +1925,15 @@ class GalacticModel(Component):
         members = [k for k in range(n_star) if root_of[k] != k]
 
         if parent is not None and (members or vel_linked):
-            raise NotImplementedError(
-                f"[{self.prefix}] model: koshimoto21 does not yet support "
-                f"stars with hard-linked distances or velocities (star.md, "
-                f"'Linked stars'): its disk velocity density is not "
-                f"Gaussian, so the conditional densities the linked path "
-                f"builds do not apply.  Use model: simplified for this "
-                f"topology until it lands."
+            kinematic_penalty = self._k21_grouped_logp(
+                log_dens,
+                branch_logp,
+                volume_element,
+                velocity_jacobian,
+                root_of,
+                vel_linked,
             )
-        if not members and not vel_linked:
+        elif not members and not vel_linked:
             # Every star independent: exactly the expression this component
             # has always built (bit-identical start logp on every shipped
             # example).
@@ -1870,7 +1972,7 @@ class GalacticModel(Component):
                 if self._pdmf is None or parent is not None
                 else self._pdmf_offsets(pdmf_mask)
             ),
-            k21_los=self._k21_lb if parent is not None else None,
+            k21_los=self._k21_root_selection if parent is not None else None,
         )
         pm.Potential(f"{self.prefix}.kinematic_prior", kinematic_penalty)
 
@@ -1892,22 +1994,57 @@ class GalacticModel(Component):
             rank=20,
         )
 
-    def _k21_branch_terms(self, stars, ra_rad, dec_rad):
-        """koshimoto21's per-branch log number densities and NORMALIZED log
-        velocity densities, one per-star vector each, in k21.BRANCHES
-        order, plus the cylindrical radius (kpc) the population priors
-        read.  Positions are genulens's Dlb2xyz and velocities genulens's
-        (l, b) projection (koshimoto21.line_of_sight_basis), from the
-        anchor's sight line."""
+    def _k21_sight_line(self, system, stars, ra_rad, dec_rad):
+        """The genulens port's sight line: (l, b), the velocity map, the
+        components genulens simulates there (the NSD inside |l| < 5,
+        |b| < 2), and which stars are survey-selected sources
+        (Component.selected_sources) with their weighting."""
         l_deg, b_deg, m_np, v0_np = k21.line_of_sight_basis(ra_rad, dec_rad)
-        if k21.nsd_active(l_deg, b_deg):
-            raise NotImplementedError(
-                f"[{self.prefix}] the sight line (l, b) = ({l_deg:.3f}, "
-                f"{b_deg:.3f}) is inside genulens's nuclear-stellar-disk box "
-                f"(|l| < 5, |b| < 2); model: koshimoto21 does not port the "
-                f"NSD yet (galacticmodel.md).  Use model: simplified."
-            )
         self._k21_lb = (l_deg, b_deg)
+        self._k21_basis = (m_np, v0_np)
+        self._k21_branches = k21.branches_for(l_deg, b_deg)
+        n_star = int(np.atleast_1d(stars.distance.initval).size)
+        src = np.zeros(n_star, dtype=bool)
+        for comp in system.active_components.values():
+            for k in comp.selected_sources(system):
+                if not 0 <= int(k) < n_star:
+                    raise ValueError(
+                        f"[{self.prefix}] '{comp.prefix}' selected source "
+                        f"star {k}, but there are {n_star} stars."
+                    )
+                src[int(k)] = True
+        self._k21_src = src
+        if self.source_selection == "sqrt_distance":
+            self._k21_selection = ("sqrt_distance",)
+        else:
+            ai0, h = k21.extinction_scale(
+                l_deg, b_deg, self.source_ai_rc, self.source_dm_rc
+            )
+            self._k21_selection = (
+                "luminosity_function",
+                *self.source_i_range,
+                float(ai0),
+                float(h),
+            )
+        sel = self._k21_selection
+        self._k21_root_selection = lambda k: (
+            l_deg,
+            b_deg,
+            sel if src[k] else None,
+        )
+
+    def _k21_branch_terms(self, stars):
+        """koshimoto21's per-branch log number densities and NORMALIZED log
+        velocity densities, one per-star vector each, in the sight line's
+        branch order, plus the cylindrical radius (kpc) the population
+        priors read.  Positions are genulens's Dlb2xyz and velocities
+        genulens's (l, b) projection (koshimoto21.line_of_sight_basis).  A
+        survey-selected source takes genulens's SOURCE density instead
+        (main-sequence count times the source weight w_S, which replaces
+        the D^2 volume element: k21.log_source_weights)."""
+        l_deg, b_deg = self._k21_lb
+        m_np, v0_np = self._k21_basis
+        br = self._k21_branches
         d_pc = pt.maximum(stars.distance.value, 1e-3)
         d_kpc = d_pc / 1e3
         x, y, z = k21.dlb_to_xyz(d_pc, l_deg, b_deg, xp=pt)
@@ -1927,11 +2064,18 @@ class GalacticModel(Component):
         )
         self._k21_state = (x, y, z, vel)
         r_kpc = pt.sqrt(x * x + y * y + 1.0) / 1e3
-        return (
-            [dens[i] for i in k21.BRANCHES],
-            [velo[i] for i in k21.BRANCHES],
-            r_kpc,
-        )
+        log_dens = [dens[i] for i in br]
+        if self._k21_src.any():
+            s = self._k21_src.astype(float)
+            dens_ms = k21.log_number_densities(
+                x, y, z, xp=pt, luminous_only=True
+            )
+            w_s = k21.log_source_weights(br, d_pc, self._k21_selection, xp=pt)
+            log_dens = [
+                (1.0 - s) * d + s * (dens_ms[i] + w)
+                for d, i, w in zip(log_dens, br, w_s)
+            ]
+        return log_dens, [velo[i] for i in br], r_kpc
 
     def _build_k21_mass_function(self, stars):
         bounds = _sampled_bounds(stars.logmass)
@@ -1944,7 +2088,9 @@ class GalacticModel(Component):
         n_star = int(np.atleast_1d(stars.logmass.initval).size)
         lower = np.broadcast_to(np.atleast_1d(bounds[0]), (n_star,))
         upper = np.broadcast_to(np.atleast_1d(bounds[1]), (n_star,))
-        return k21.MassFunction(lower, upper, remnants=self.remnants)
+        return k21.MassFunction(
+            lower, upper, remnants=self.remnants, branches=self._k21_branches
+        )
 
     def _k21_mass_velocity_terms(self, x_mass, pdmf_mask, age_mask, log_vel):
         """Per branch, per star: log [PDMF x velocity density] of the
@@ -1955,25 +2101,31 @@ class GalacticModel(Component):
 
         (``still`` = luminous stars and white dwarfs, which keep the
         branch's velocity distribution; neutron stars and black holes carry
-        genulens's natal kicks, koshimoto21.log_kicked_velocity).  A star
-        whose AGE is sampled is luminous by its track: K21's IMF alone (its
-        alive condition is the track's).  A star off the stellar IMF (an FFP)
-        keeps the bare velocity density.  Arithmetic 0/1 weights on finite
-        terms -- no selection."""
+        genulens's natal kicks, koshimoto21.log_kicked_velocity).  A
+        survey-selected SOURCE is a luminous star (genulens draws sources
+        from n0MS): the luminous PDMF alone, normalized over the luminous
+        objects.  A star whose AGE is sampled is luminous by its track:
+        K21's IMF alone (its alive condition is the track's).  A star off
+        the stellar IMF (an FFP) keeps the bare velocity density.  Also
+        stores, per branch, the MASS-ONLY term (``_k21_mass_only``) a
+        member star whose whole velocity is its root's takes.  Arithmetic
+        0/1 weights on finite terms -- no selection."""
         mf = self._k21_mf
         x, y, z, vel = self._k21_state
         w = pdmf_mask.astype(float)
         a = (age_mask & pdmf_mask).astype(float)
-        bases = k21.kick_bases(x, y, z, xp=pt)
+        src = self._k21_src.astype(float)
+        bases = k21.kick_bases(x, y, z, xp=pt, branches=self._k21_branches)
         log_imf = k21.log_imf(x_mass, xp=pt) - mf.log_imf_peak
-        out = []
-        for j, b in enumerate(k21.BRANCHES):
+        out, mass_only = [], []
+        for j in range(len(self._k21_branches)):
             tab = {
                 g: interp_table(
                     mf.log_table[g][j], mf.x0, PDMF_GRID_DEX, x_mass
                 )
                 for g in mf.GROUPS
             }
+            log_lum = interp_table(mf.log_lum[j], mf.x0, PDMF_GRID_DEX, x_mass)
             mean, sig = bases[j]
             kicked = [
                 tab[g]
@@ -1985,11 +2137,80 @@ class GalacticModel(Component):
             mix = pm.math.logsumexp(
                 pt.stack([tab["still"] + log_vel[j], *kicked]), axis=0
             )
-            # mix - log_vel is the mass factor in the unkicked limit; the
-            # weights keep every element's term finite
-            mass = (1.0 - a) * (mix - log_vel[j]) + a * log_imf
-            out.append(log_vel[j] + w * (mass - mf.log_norm[j]))
+            total = pm.math.logsumexp(
+                pt.stack([tab[g] for g in mf.GROUPS]), axis=0
+            )
+            field = (
+                (1.0 - a) * (mix - log_vel[j]) + a * log_imf - mf.log_norm[j]
+            )
+            field_m = (1.0 - a) * total + a * log_imf - mf.log_norm[j]
+            source = (1.0 - a) * log_lum + a * log_imf - mf.log_norm_lum[j]
+            out.append(log_vel[j] + w * ((1.0 - src) * field + src * source))
+            mass_only.append(w * ((1.0 - src) * field_m + src * source))
+        self._k21_mass_only = mass_only
         return out
+
+    def _k21_grouped_logp(
+        self,
+        log_dens,
+        branch_logp,
+        volume_element,
+        velocity_jacobian,
+        root_of,
+        vel_linked,
+    ):
+        """The genulens port with linked stars: per group (a root and the
+        members sharing its position), ONE density at the root's position,
+        ONE volume element and ONE branch for the whole system:
+
+            log p_g = logsumexp_b [ log n_b(d_r) + sum_k T_b,k ] + 2 log d_r
+
+        A member whose velocity is entirely its root's (all three
+        coordinates hard-linked: a binary companion) contributes its MASS
+        term only; one with its own velocity contributes its full
+        (normalized) mass x velocity term and its own velocity Jacobian,
+        with the rv column's m/s -> km/s owed in-model so a member
+        integrates to exactly 1.  A partly linked velocity raises: the
+        disk's v_phi density is not Gaussian, so the conditional the
+        simplified model builds does not exist in closed form here."""
+        n_star = len(root_of)
+        roots = sorted(set(int(j) for j in root_of))
+        members = [k for k in range(n_star) if root_of[k] != k]
+        partial = {k: c for k, c in vel_linked.items() if len(c) != 3}
+        if partial or any(int(root_of[k]) == k for k in vel_linked):
+            raise NotImplementedError(
+                f"[{self.prefix}] model: koshimoto21 supports a linked star "
+                f"whose velocity is entirely its root's, or entirely its own; "
+                f"star(s) {sorted(partial) or sorted(vel_linked)} have a "
+                f"partly linked (or root-linked) velocity, whose conditional "
+                f"density has no closed form under genulens's non-Gaussian "
+                f"disk kinematics."
+            )
+        dens = [d for d in log_dens]
+        T = [bl - d for bl, d in zip(branch_logp, dens)]
+        J = velocity_jacobian
+        mass_only = getattr(self, "_k21_mass_only", None)
+        for k in members:
+            if k in vel_linked:
+                for b in range(len(T)):
+                    mo = 0.0 if mass_only is None else mass_only[b][k]
+                    # population terms (age/[Fe/H]) ride in T - the
+                    # velocity part; keep them, drop the velocity
+                    T[b] = pt.set_subtensor(T[b][k], mo + self._k21_pop[b][k])
+                J = pt.set_subtensor(J[k], 0.0)
+            else:
+                J = pt.set_subtensor(J[k], J[k] + _LOG_KMS_PER_MS)
+        W = np.zeros((len(roots), n_star))
+        for k in range(n_star):
+            W[roots.index(int(root_of[k])), k] = 1.0
+        W = pt.as_tensor_variable(W)
+        roots_idx = np.asarray(roots, dtype=np.int64)
+        group_branch = [d[roots_idx] + pt.dot(W, t) for d, t in zip(dens, T)]
+        return (
+            pt.sum(pm.math.logsumexp(pt.stack(group_branch), axis=0))
+            + pt.sum(volume_element[roots_idx])
+            + pt.sum(J)
+        )
 
     def _add_k21_remnant_probability(
         self, x_mass, log_dens, log_terms, pdmf_mask, age_mask
@@ -2009,7 +2230,7 @@ class GalacticModel(Component):
                 interp_table(
                     mf.dark_frac[j], mf.x0, PDMF_GRID_DEX, x_mass[idx]
                 )
-                for j in range(len(k21.BRANCHES))
+                for j in range(len(self._k21_branches))
             ]
         )
         pm.Deterministic(
@@ -2270,19 +2491,20 @@ class GalacticModel(Component):
                             min(k, np.size(bounds[1]) - 1)
                         ]
                     )
-                    if (lo, hi, offs) not in cache:
-                        cache[(lo, hi, offs)] = (
-                            k21.log_position_norm(lo, hi, *k21_los)
+                    key = (lo, hi, offs, k21_los(k) if k21_los else None)
+                    if key not in cache:
+                        cache[key] = (
+                            k21.log_position_norm(lo, hi, *k21_los(k))
                             if k21_los is not None
                             else log_position_norm(
                                 lo, hi, sun_xyz, los_hat, offsets=offs
                             )
                         )
-                    c = cache[(lo, hi, offs)]
+                    c = cache[key]
             else:
                 d0 = float(stars.distance.element_start(k))
                 log_n = (
-                    k21.log_total_number_density(d0, *k21_los)
+                    k21.log_total_number_density(d0, *k21_los(k))
                     if k21_los is not None
                     else _log_total_number_density(
                         d0, sun_xyz, los_hat, offsets=offs

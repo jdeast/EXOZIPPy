@@ -161,13 +161,16 @@ def test_prior_and_gradient_are_finite(remnants):
     assert all(np.all(np.isfinite(g)) for g in grads)
 
 
-def test_nsd_sight_line_raises():
-    sky = SkyCoord(l=0.3 * u.deg, b=-1.6 * u.deg, frame="galactic").icrs
-    stars = _stars()
+def test_nsd_sight_line_carries_the_nsd_branch():
+    """Inside genulens's NSD box the mixture has 11 branches; a star at the
+    Galactic center's distance there is mostly NSD."""
+    sky = SkyCoord(l=0.3 * u.deg, b=-0.3 * u.deg, frame="galactic").icrs
+    stars = _Stars([8160.0], [-6.0], [-0.5], [0.0], [-0.3])
     stars.ra = _MockParam(float(sky.ra.rad))
     stars.dec = _MockParam(float(sky.dec.rad))
-    with pytest.raises(NotImplementedError, match="nuclear-stellar-disk"):
-        _build(stars)
+    gm, model = _build(stars)
+    assert gm._k21_branches == k21.BRANCHES_NSD
+    assert np.isfinite(float(model["galacticmodel.kinematic_prior"].eval()))
 
 
 def test_position_normalizer_is_finite_and_ordered():
@@ -207,3 +210,126 @@ def test_heavy_bulge_lens_needs_remnants():
         return float(model["galacticmodel.kinematic_prior"].eval())
 
     assert lp(True) > lp(False) + 2.0
+
+
+class _Selector:
+    """A component that observed star ``k`` through a flux limit."""
+
+    prefix = "selector"
+
+    def __init__(self, k):
+        self.k = k
+
+    def initial_logmass(self, system):
+        return {}
+
+    def selected_sources(self, system):
+        return [self.k]
+
+
+def _ffp(stars):
+    n = stars.distance.initval.size
+    stars.ffp_mask = np.ones(n, dtype=bool)
+    stars.ffp_alpha = np.full(n, 0.96)
+    return stars
+
+
+def _kin(stars, selected=None, **cfg):
+    gm = GalacticModel(
+        [{"model": "koshimoto21", **cfg}], _DummyConfigManager()
+    )
+    system = _System(stars)
+    if selected is not None:
+        system.active_components = {"selector": _Selector(selected)}
+    with pm.Model() as model:
+        gm.build_likelihood(model, system)
+    return float(model["galacticmodel.kinematic_prior"].eval())
+
+
+def test_selected_source_takes_genulens_source_weight():
+    """A survey-selected source is weighted n_MS sqrt(D / 8 kpc) per branch
+    (genulens's default), not n D^2: the potential changes by exactly the
+    swap of those factors inside the mixture."""
+    stars = _ffp(_Stars([8300.0], [-6.0], [-0.5], [-30e3], [-0.3]))
+    lp_field = _kin(stars)
+    lp_src = _kin(stars, selected=0)
+    l_deg, b_deg, m, v0 = k21.line_of_sight_basis(_RA, _DEC)
+    d = 8300.0
+    x, y, z = k21.dlb_to_xyz(d, l_deg, b_deg)
+    cols = np.array(
+        [k21.K_KMS * -6.0 * d / 1e3, k21.K_KMS * -0.5 * d / 1e3, -30.0]
+    )
+    v = v0 + m @ cols
+    velo = k21.log_velocity_densities(x, y, z, *v)
+    n_all = k21.log_number_densities(x, y, z)
+    n_ms = k21.log_number_densities(x, y, z, luminous_only=True)
+    w = k21.log_source_weight_sqrt(d)
+    br = k21.BRANCHES
+    field = np.logaddexp.reduce(
+        [float(np.ravel(n_all[i] + velo[i])[0]) for i in br]
+    )
+    src = np.logaddexp.reduce(
+        [float(np.ravel(n_ms[i] + w + velo[i])[0]) for i in br]
+    )
+    assert lp_src - lp_field == pytest.approx(src - field, abs=1e-8)
+
+
+def test_luminosity_function_selection_needs_ai_rc():
+    with pytest.raises(ValueError, match="source_ai_rc"):
+        GalacticModel(
+            [
+                {
+                    "model": "koshimoto21",
+                    "source_selection": "luminosity_function",
+                }
+            ],
+            _DummyConfigManager(),
+        )
+    with pytest.raises(ValueError, match="keys of model: koshimoto21"):
+        GalacticModel(
+            [{"source_selection": "sqrt_distance"}], _DummyConfigManager()
+        )
+    stars = _ffp(_Stars([8300.0], [-6.0], [-0.5], [-30e3], [-0.3]))
+    lp = _kin(
+        stars,
+        selected=0,
+        source_selection="luminosity_function",
+        source_ai_rc=1.0,
+    )
+    assert np.isfinite(lp)
+
+
+def _link_all(stars, member, root):
+    spec = {
+        "hard": {
+            member: {
+                "intra_deps": [root],
+                "dep_paths": [f"star.{root}.distance"],
+            }
+        }
+    }
+    stars.distance.element_links = spec
+    for name in ("pm_ra", "pm_dec", "rv"):
+        getattr(stars, name).element_links = {
+            "hard": {member: {"intra_deps": [root], "dep_paths": []}}
+        }
+    return stars
+
+
+def test_fully_linked_member_adds_only_its_mass():
+    """A binary companion whose distance and velocity are its root's: one
+    density, one volume element, one velocity density for the system --
+    with both on the FFP mass function (no mass term), the prior is the
+    root's alone."""
+    one = _ffp(_Stars([4000.0], [-3.0], [-1.0], [10e3], [-0.5]))
+    two = _ffp(
+        _Stars(
+            [4000.0, 4000.0],
+            [-3.0, -3.0],
+            [-1.0, -1.0],
+            [10e3, 10e3],
+            [-0.5, -0.7],
+        )
+    )
+    _link_all(two, member=1, root=0)
+    assert _kin(two) == pytest.approx(_kin(one), abs=1e-9)
