@@ -729,3 +729,213 @@ def log_position_norm(lower_pc, upper_pc, l_deg, b_deg):
     f = log_total_number_density(np.exp(lnd), l_deg, b_deg) + 3.0 * lnd
     peak = float(np.max(f))
     return float(np.log(np.trapezoid(np.exp(f - peak), lnd)) + peak)
+
+
+# ---------------------------------------------------------------------------
+# The mass function: K21's IMF, genulens's turnoffs, remnants and kicks
+# ---------------------------------------------------------------------------
+#: K21's E+E_X best-fit broken power law dN/dM ~ M^alpha (IMFParameters):
+#: break masses (Msun) and slopes, on [IMF_MIN, IMF_MAX]
+IMF_M1, IMF_M2 = 0.859770466578045, 0.08
+IMF_ALPHA = (-2.32279457078378, -1.13449983242887, -0.175862190587576)
+IMF_MIN, IMF_MAX = 0.001, 120.0
+_LN10 = float(np.log(10.0))
+
+
+def log_imf(x, xp=np):
+    """log dN/dlog10(M) of K21's IMF (unnormalized), x = log10(M / Msun):
+    continuous and piecewise linear in x with DECREASING slopes (alpha + 1
+    = 0.824, -0.134, -1.323 per ln-mass), so it is exactly the minimum of
+    its three lines -- no branch selection.  genulens has no objects
+    outside [0.001, 120] Msun; ``pdmf`` tables put a floor there."""
+    a3, a2, a1 = IMF_ALPHA[2] + 1.0, IMF_ALPHA[1] + 1.0, IMF_ALPHA[0] + 1.0
+    x2, x1 = np.log10(IMF_M2), np.log10(IMF_M1)
+    low = a3 * _LN10 * (x - x2)
+    mid = a2 * _LN10 * (x - x2)
+    high = a2 * _LN10 * (x1 - x2) + a1 * _LN10 * (x - x1)
+    return xp.minimum(xp.minimum(low, mid), high)
+
+
+def _log_imf_table(x):
+    """numpy log IMF with genulens's [0.001, 120] Msun support (a 700-nat
+    drop outside it: the PDMF tables floor it)."""
+    inside = (x >= np.log10(IMF_MIN)) & (x <= np.log10(IMF_MAX))
+    return np.where(inside, log_imf(x), log_imf(x) - 700.0)
+
+
+#: genulens's turnoff mass (largest initial mass alive, Msun) per branch,
+#: from input_files/Minidie.dat (PARSEC v1.2S via CMD 3.3) at the age
+#: genulens uses: each thin-disk bin at its median age (medtauds, nearest
+#: 50-Myr row), the thick disk at 12 Gyr, the halo at 14 Gyr
+#: (event_sampler.cpp).  The bar's age is drawn per event (below).
+MINIDIE = {
+    0: 5.3151664734,
+    1: 2.7425796986,
+    2: 1.9923980236,
+    3: 1.5829007626,
+    4: 1.3345959187,
+    5: 1.1716736555,
+    6: 1.0536190271,
+    7: 0.8567695618,
+    10: 0.7761976123,
+}
+#: the bar's "B" rows of Minidie.dat: age (Gyr) -> turnoff (Msun)
+# fmt: off
+MINIDIE_BAR = (
+    (1.0, 2.3065266609), (1.5, 1.9999334812), (2.0, 1.7264221907),
+    (2.5, 1.5922399759), (3.0, 1.4965139627), (3.5, 1.4142400026),
+    (4.0, 1.3522768021), (4.5, 1.3033635616), (5.0, 1.2618246078),
+    (5.5, 1.2259132862), (6.0, 1.1946581602), (6.5, 1.168975234),
+    (7.0, 1.1455239058), (7.5, 1.1236175299), (8.0, 1.1036301851),
+    (8.5, 1.0850403309), (9.0, 1.0678446293), (9.5, 1.0517697334),
+    (10.0, 1.0366524458), (10.5, 1.0225354433), (11.0, 1.0092254877),
+    (11.5, 0.9966011047), (12.0, 0.9846860766), (12.5, 0.9733356237),
+    (13.0, 0.9625536203), (13.5, 0.952288866), (14.0, 0.9427683949),
+)
+# fmt: on
+BAR_AGE_MEAN, BAR_AGE_SIGMA = 9.0, 1.0  # StellarPopulationState mageB, sageB
+
+
+def _bar_age_weights():
+    """genulens draws the bar lens's age tau ~ N(9, 1) and reads Minidie at
+    the row (int)(2 tau + 0.5) * 50 (10-Myr units): the node a_k gets
+    tau in [a_k - 0.25, a_k + 0.25).  Exact weights of that finite mixture
+    (renormalized over the table: the mass beyond it is < 1e-15)."""
+    from scipy.special import ndtr
+
+    ages = np.array([a for a, _ in MINIDIE_BAR])
+    w = ndtr((ages + 0.25 - BAR_AGE_MEAN) / BAR_AGE_SIGMA) - ndtr(
+        (ages - 0.25 - BAR_AGE_MEAN) / BAR_AGE_SIGMA
+    )
+    return w / w.sum()
+
+
+def alive_fraction(branch, x):
+    """P(alive | log10 M_ini = x) in branch ``branch`` (COMPONENTS index):
+    genulens's ``M_ini < Minidie`` -- a step for a fixed-age branch, the
+    exact age mixture for the bar (the PDMF tables smooth both by
+    pdmf.SMOOTH_DEX)."""
+    m = 10.0 ** np.asarray(x, dtype=float)
+    if branch == 8:
+        w = _bar_age_weights()
+        die = np.array([d for _, d in MINIDIE_BAR])
+        return np.sum(w[:, None] * (m[None, :] < die[:, None]), axis=0)
+    return (m < MINIDIE[branch]).astype(float)
+
+
+#: natal kicks (BhKickParameters): fixed speed, isotropic direction, added
+#: to the LENS's velocity (event_sampler.cpp)
+KICK_NS, KICK_BH = 350.0, 100.0
+
+
+class MassFunction:
+    """K21's present-day mass function per branch, for a set of stars.
+
+    Per branch b (BRANCHES order) and star k: ``log_table[g][b]`` (g in
+    ``GROUPS``) the log density in x of the objects that keep the branch's
+    velocity distribution ("still": luminous stars and white dwarfs),
+    neutron stars and black holes (each kicked) -- floored, unnormalized --
+    and ``log_norm[b, k]`` the log of the IMF's integral over star k's
+    logmass support (genulens normalizes the IMF and turns each dead star
+    into ONE remnant, or with ``remnants=False`` discards it -- REMNANT 0
+    -- so the branch weight is n0 * F_alive there, exactly as genulens's
+    rejection makes it).  ``dark_frac[b]`` is P(dark | x) on the grid.
+    Built with pdmf.build_population_tables (the 0.02 dex smoothing and the
+    R18 / K08 initial-final mass relations are shared).
+    """
+
+    GROUPS = ("still", "NS", "BH")
+
+    def __init__(self, lower, upper, remnants=True):
+        from . import pdmf
+
+        lower = np.atleast_1d(np.asarray(lower, dtype=float))
+        upper = np.atleast_1d(np.asarray(upper, dtype=float))
+        alive = {b: (lambda xx, b=b: alive_fraction(b, xx)) for b in BRANCHES}
+        self.x, dens = pdmf.build_population_tables(
+            _log_imf_table, float(lower.min()), float(upper.max()), alive=alive
+        )
+        self.x0 = float(self.x[0])
+        n_star = max(lower.size, upper.size)
+        lower = np.broadcast_to(lower, (n_star,))
+        upper = np.broadcast_to(upper, (n_star,))
+        imf = np.exp(_log_imf_table(self.x) - np.max(_log_imf_table(self.x)))
+        self.log_imf_peak = float(np.max(_log_imf_table(self.x)))
+        self.log_table = {g: [] for g in self.GROUPS}
+        self.dark_frac = []
+        self.log_norm = np.empty((len(BRANCHES), n_star))
+        for j, b in enumerate(BRANCHES):
+            d = dens[b]
+            if remnants:
+                parts = {
+                    "still": d["lum"] + d["WD"],
+                    "NS": d["NS"],
+                    "BH": d["BH"],
+                }
+            else:
+                parts = {
+                    "still": d["lum"],
+                    "NS": 0 * d["NS"],
+                    "BH": 0 * d["BH"],
+                }
+            total = parts["still"] + parts["NS"] + parts["BH"]
+            floor = pdmf.FLOOR_REL * total.max()
+            for g in self.GROUPS:
+                self.log_table[g].append(np.log(parts[g] + floor))
+            dark = total - d["lum"] if remnants else 0.0 * total
+            self.dark_frac.append(dark / (total + floor))
+            for k in range(n_star):
+                sel = (self.x >= lower[k]) & (self.x <= upper[k])
+                self.log_norm[j, k] = np.log(
+                    np.trapezoid(imf[sel], self.x[sel])
+                )
+
+
+def log_kicked_velocity(vx, vy, vz, mean, sigma_iso, kick, xp=np):
+    """log density of v = v_base + kick * n, n isotropic, for an isotropic
+    Gaussian base N(mean, sigma_iso^2 I) -- closed form:
+
+        p(v) = (2 pi s^2)^(-3/2) s^2 / (2 k r) [e^{-(r-k)^2/2s^2}
+                                               - e^{-(r+k)^2/2s^2}],
+
+    r = |v - mean|, written as -(r-k)^2/2s^2 + log(-expm1(-2rk/s^2)) so it
+    is finite for every r > 0 (r has a strictly positive floor).  genulens
+    adds the kick to an anisotropic base (the disk's Shu DF, the bar's
+    Gaussian); the port replaces the base by an isotropic Gaussian of the
+    same mean and det-preserving dispersion (galacticmodel.md)."""
+    dx = vx - mean[0]
+    dy = vy - mean[1]
+    dz = vz - mean[2]
+    r = xp.sqrt(dx * dx + dy * dy + dz * dz + 1e-6)
+    s2 = sigma_iso * sigma_iso
+    # a constant sigma's log in numpy (pt.log of a float autocasts to
+    # float32)
+    log_s2 = np.log(s2) if np.isscalar(s2) else xp.log(s2)
+    return (
+        -1.5 * (np.log(2.0 * PI) + log_s2)
+        + log_s2
+        - np.log(2.0 * kick)
+        - xp.log(r)
+        - (r - kick) ** 2 / (2.0 * s2)
+        + xp.log(-xp.expm1(-2.0 * r * kick / s2))
+    )
+
+
+def kick_bases(x, y, z, xp=np):
+    """(mean, sigma_iso) per branch (BRANCHES order) of the isotropic
+    Gaussian a kicked remnant's velocity is convolved from: disk -- mean
+    (v_R, v_phi, v_z) = (0, v_c(R) / facz, 0), dispersions (sigU, sigU /
+    sqrt 2, sigW) (the epicyclic ratio of a flat rotation curve); bar --
+    its Gaussian; halo -- zero mean, its dispersions.  sigma_iso = the
+    geometric mean of the three."""
+    r = xp.sqrt(x * x + y * y + 1.0)
+    vc = rotation_curve(r, xp) / _facz(z, xp)
+    disk_mean = (-vc * y / r, vc * x / r, 0.0)
+    out = []
+    for i in range(8):
+        su, sw = disk_dispersions(r, i, xp)
+        out.append((disk_mean, (su * su * sw / np.sqrt(2.0)) ** (1.0 / 3.0)))
+    (mx, my, _), (sx, sy, sz) = bar_mean_and_sigma(x, y, z, xp)
+    out.append(((mx, my, 0.0), (sx * sy * sz) ** (1.0 / 3.0)))
+    out.append(((0.0, 0.0, 0.0), float(np.prod(SIG_SH) ** (1.0 / 3.0))))
+    return out
