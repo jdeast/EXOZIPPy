@@ -75,7 +75,7 @@
  },
  "terms": {
   "POT:galacticmodel.imf_prior": 0.0,
-  "POT:galacticmodel.kinematic_prior": 26.876788681158757,
+  "POT:galacticmodel.kinematic_prior": 1.0743476937699912,
   "POT:gaussian_prior.band.u1": 0.0,
   "POT:gaussian_prior.lens.xalpha": -0.4994888264500339,
   "POT:gaussian_prior.lens.yalpha": -0.0005111735499614135,
@@ -142,5 +142,5 @@
   "RV:star.pm_ra_raw": -1.8378770664093453,
   "RV:star.rv_raw": -1.8378770664093453
  },
- "total_logp": 26746.554723224468
+ "total_logp": 26720.75228223708
 }

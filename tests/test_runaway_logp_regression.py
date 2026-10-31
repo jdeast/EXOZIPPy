@@ -272,7 +272,14 @@ def _point(raw_dict):
 # middle and the term rises: +9.185 nats over the two instruments at
 # GOOD_RAW.  A CHANGE OF PRIOR, not of fit -- the light-curve sector is
 # untouched, and the chi2/N check below is unchanged at the same point.
-GOOD_EXPECTED_LP = 3410.7850
+#
+# 3410.7850 -> 3385.7755 when the galactic model's default became the
+# genulens port (model: koshimoto21, port PR 4b): only
+# galacticmodel.kinematic_prior moves (-25.01 nats at GOOD_RAW), mostly the
+# source losing its D^2 volume element to genulens's sqrt(D / 8 kpc) source
+# weight -- a change of the prior's density, not of fit; the light-curve
+# sector and the chi2/N check below are untouched.
+GOOD_EXPECTED_LP = 3385.7755
 
 
 def test_good_draw_logp_matches_deterministic_build(dc2018_128_logp):

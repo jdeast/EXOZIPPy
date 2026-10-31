@@ -222,7 +222,11 @@ def test_logmass_reports_the_imf_actually_applied(imf, expected):
     Then star.logmass is reported as that IMF, by name, and not as Uniform.
     """
     # Arrange
-    gm_config = [{"name": "gm"} if imf is None else {"name": "gm", "IMF": imf}]
+    gm_config = [
+        {"name": "gm", "model": "simplified"}
+        if imf is None
+        else {"name": "gm", "model": "simplified", "IMF": imf}
+    ]
 
     # Act
     star = _run_galacticmodel([{"name": "A"}], gm_config=gm_config)
@@ -246,7 +250,8 @@ def test_ffp_star_reports_the_ffp_mass_function_and_its_neighbour_the_imf():
     """
     # Arrange / Act
     star = _run_galacticmodel(
-        [{"name": "Source"}, {"name": "Lens", "mass_function": "ffp"}]
+        [{"name": "Source"}, {"name": "Lens", "mass_function": "ffp"}],
+        gm_config=[{"name": "gm", "model": "simplified"}],
     )
 
     # Assert

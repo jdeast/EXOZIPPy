@@ -250,6 +250,8 @@ def _system(model_root, mist=True, **gm_keys):
     # also swaps its age-marginalized PDMF term for the IMF (the luminous
     # joint), which is not what the marginal tests isolate.
     gm_keys.setdefault("present_day", False)
+    # the 3-population priors these tests pin are model: simplified's
+    gm_keys.setdefault("model", "simplified")
     from exozippy.system import System
 
     config = {

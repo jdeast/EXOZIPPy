@@ -427,9 +427,11 @@ def _pre_k21_bar_log_profile(x, y, z, r, xp=np):
 def _imf_as_present_day(cfg):
     """The presplit recording predates the present-day mass function
     (review 1.7.2), so it is replayed with the IMF as the present-day one --
-    the model it recorded."""
+    the model it recorded -- the 3-population (simplified) one."""
     gm = cfg["galacticmodel"]
-    (gm[0] if isinstance(gm, list) else gm)["present_day"] = False
+    block = gm[0] if isinstance(gm, list) else gm
+    block["model"] = "simplified"
+    block["present_day"] = False
 
 
 def test_ob161003_collapse_reconciles_against_the_presplit_recording():
