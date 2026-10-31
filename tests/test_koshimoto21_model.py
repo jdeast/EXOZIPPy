@@ -76,9 +76,12 @@ def test_model_is_an_enum_with_one_spelling():
 def test_kinematic_prior_is_the_ported_mixture():
     """The potential is logsumexp_b [log n_b + log p_b(v)] + 2 log d +
     2 log(K d) per star, built from koshimoto21's numpy functions in
-    genulens's frames (present_day off, so no mass term)."""
+    genulens's frames.  Both stars are on the FFP mass function, so the
+    kinematic potential carries no mass term."""
     stars = _stars()
-    _, model = _build(stars, present_day=False)
+    stars.ffp_mask = np.array([True, True])
+    stars.ffp_alpha = np.array([0.96, 0.96])
+    _, model = _build(stars)
     got = float(model["galacticmodel.kinematic_prior"].eval())
 
     l_deg, b_deg, m, v0 = k21.line_of_sight_basis(_RA, _DEC)
@@ -140,10 +143,10 @@ def test_velocity_frame_is_genulens_projection():
 
 
 @pytest.mark.slow  # compiles the gradient graph (~80 s on a cold cache)
-@pytest.mark.parametrize("present_day", [False, True])
-def test_prior_and_gradient_are_finite(present_day):
+@pytest.mark.parametrize("remnants", [False, True])
+def test_prior_and_gradient_are_finite(remnants):
     stars = _stars()
-    _, model = _build(stars, present_day=present_day)
+    _, model = _build(stars, remnants=remnants)
     pot = model["galacticmodel.kinematic_prior"]
     assert np.isfinite(float(pot.eval()))
     # gradient with respect to the star's coordinates, through the mock's
@@ -164,7 +167,7 @@ def test_nsd_sight_line_raises():
     stars.ra = _MockParam(float(sky.ra.rad))
     stars.dec = _MockParam(float(sky.dec.rad))
     with pytest.raises(NotImplementedError, match="nuclear-stellar-disk"):
-        _build(stars, present_day=False)
+        _build(stars)
 
 
 def test_position_normalizer_is_finite_and_ordered():
@@ -172,3 +175,35 @@ def test_position_normalizer_is_finite_and_ordered():
     a = k21.log_position_norm(1.0, 8000.0, l_deg, b_deg)
     b = k21.log_position_norm(1.0, 16000.0, l_deg, b_deg)
     assert np.isfinite(a) and b > a
+
+
+@pytest.mark.parametrize("key", ["IMF", "present_day"])
+def test_simplified_mass_keys_raise_under_koshimoto21(key):
+    with pytest.raises(ValueError, match="koshimoto21 carries K21"):
+        GalacticModel(
+            [
+                {
+                    "model": "koshimoto21",
+                    key: "chabrier" if key == "IMF" else True,
+                }
+            ],
+            _DummyConfigManager(),
+        )
+
+
+def test_remnants_is_a_koshimoto21_key():
+    with pytest.raises(ValueError, match="remnants is a key"):
+        GalacticModel([{"remnants": False}], _DummyConfigManager())
+
+
+def test_heavy_bulge_lens_needs_remnants():
+    """A 1.6 Msun object in the bulge: above the bar's turnoff at its
+    likely ages (~1.07 Msun at 9 Gyr), so with remnants it is mostly a
+    neutron star; genulens's REMNANT 0 discards it."""
+
+    def lp(remnants):
+        stars = _Stars([8300.0], [-6.0], [-0.5], [-30e3], [np.log10(1.6)])
+        _, model = _build(stars, remnants=remnants)
+        return float(model["galacticmodel.kinematic_prior"].eval())
+
+    assert lp(True) > lp(False) + 2.0

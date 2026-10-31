@@ -235,3 +235,71 @@ def test_pytensor_graph_matches_numpy_with_finite_gradient(points):
     want = np.array([d + v for d, v in zip(dn, vn) if d is not None])
     np.testing.assert_allclose(got, want, rtol=1e-10, atol=1e-8)
     assert np.all(np.isfinite(gx)) and np.all(np.isfinite(gv))
+
+
+# --- the mass function (port PR 3) -----------------------------------------
+
+
+def test_imf_is_k21s_broken_power_law(points):
+    """K21's IMF in log10 M equals genulens's grid density (store_IMF_nBs:
+    1000 log bins on [0.001, 120]) up to its normalization."""
+    m = points["mass"]
+    x = m["logMst"] + m["dlogM"] * 10 * np.arange(len(m["PlogM_every10"]))
+    diff = k21.log_imf(x) - np.log(m["PlogM_every10"])
+    np.testing.assert_allclose(diff - diff[0], 0.0, atol=1e-10)
+
+
+def test_turnoff_masses_are_genulens_rows(points):
+    """Each branch's turnoff is the Minidie.dat row genulens reads
+    (event_sampler.cpp): thin bins at their median age rounded to the
+    nearest 50 Myr row, thick disk 12 Gyr, halo 14 Gyr; the bar's rows."""
+    m = points["mass"]
+    ages, die = m["agesD"], m["MinidieD"]
+    for i in range(7):
+        ia = int(k21.MEDTAUDS[i] * 100 + 0.5)
+        ia = ia + (5 - ia % 5) if ia % 5 > 2 else ia - ia % 5
+        idx = (max(ia, 5) - ages[0]) // (ages[1] - ages[0])
+        assert k21.MINIDIE[i] == pytest.approx(die[idx], rel=RTOL)
+    assert k21.MINIDIE[7] == pytest.approx(die[-2], rel=RTOL)
+    assert k21.MINIDIE[10] == pytest.approx(die[-1], rel=RTOL)
+    np.testing.assert_allclose(
+        [a for a, _ in k21.MINIDIE_BAR], np.array(m["agesB"]) / 100.0
+    )
+    np.testing.assert_allclose(
+        [d for _, d in k21.MINIDIE_BAR], m["MinidieB"], rtol=RTOL
+    )
+
+
+def _imf_integral(lo, hi):
+    from scipy.integrate import quad
+
+    return quad(lambda x: np.exp(k21.log_imf(x)), lo, hi, limit=200)[0]
+
+
+@pytest.mark.parametrize("remnants", [True, False])
+def test_mass_function_counts(remnants):
+    """Per branch, over the default logmass support: with remnants every
+    born star is one object (the table integrates to the IMF's integral);
+    without, only the alive ones remain (F_alive, genulens's REMNANT 0),
+    to the 0.02-dex smoothing's precision."""
+    mf = k21.MassFunction([-9.0], [2.5], remnants=remnants)
+    lo, hi = np.log10(k21.IMF_MIN), np.log10(k21.IMF_MAX)
+    z = _imf_integral(lo, hi)
+    for j, b in enumerate(k21.BRANCHES):
+        total = sum(np.exp(mf.log_table[g][j]) for g in mf.GROUPS)
+        sel = (mf.x >= -9.0) & (mf.x <= 2.5)
+        count = np.trapezoid(total[sel], mf.x[sel]) / np.exp(mf.log_norm[j, 0])
+        if remnants:
+            assert count == pytest.approx(1.0, abs=2e-3), b
+        elif b != 8:
+            f_alive = _imf_integral(lo, np.log10(k21.MINIDIE[b])) / z
+            assert count == pytest.approx(f_alive, abs=2e-3), b
+
+
+def test_kicked_velocity_density_is_normalized():
+    r = np.linspace(1e-3, 1500.0, 300001)
+    for sig, kick in ((20.0, 350.0), (80.0, 100.0), (150.0, 350.0)):
+        lp = k21.log_kicked_velocity(r, 0.0 * r, 0.0 * r, (0, 0, 0), sig, kick)
+        assert np.trapezoid(4 * np.pi * r**2 * np.exp(lp), r) == pytest.approx(
+            1.0, abs=1e-4
+        )

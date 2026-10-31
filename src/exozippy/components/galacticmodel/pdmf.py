@@ -199,7 +199,7 @@ def _gaussian_kernel(sigma_dex, dx):
     return k / k.sum()
 
 
-def build_population_tables(log_imf, x_lo, x_hi):
+def build_population_tables(log_imf, x_lo, x_hi, alive=None):
     """Linear present-day densities of every population on one x grid.
 
     ``log_imf(x)`` is the (unnormalized) log IMF density in x = log10 M,
@@ -207,7 +207,9 @@ def build_population_tables(log_imf, x_lo, x_hi):
     is also the range of initial masses born.  Returns ``(x, dens)`` with
     ``dens[pop][kind]`` for kind in ("lum", "WD", "NS", "BH"), each a linear
     density in x on the padded grid ``x`` (smoothed, not floored, not
-    normalized).
+    normalized).  ``alive`` ({name: f(x) -> P(alive | x)}) replaces the
+    MIST-turnoff populations (the genulens port passes its own turnoffs,
+    koshimoto21.py); ``dens`` is then keyed by its names.
     """
     n = int(round((x_hi - x_lo + 2 * PAD_DEX) / GRID_DEX)) + 1
     x = x_lo - PAD_DEX + GRID_DEX * np.arange(n)
@@ -246,9 +248,15 @@ def build_population_tables(log_imf, x_lo, x_hi):
     if np.any(hv & (p_ns < 1.0) & (m_bh <= NS_MASS_RANGE[1])):
         raise ValueError("an R18 BH mass below the NS maximum")
 
+    if alive is None:
+        alive = {
+            pop: (lambda xx, p=pop: alive_fraction(p, xx))
+            for pop in POPULATIONS
+        }
+    alive_fns = alive
     dens = {}
-    for pop in POPULATIONS:
-        alive = alive_fraction(pop, x)
+    for pop, alive_fn in alive_fns.items():
+        alive = alive_fn(x)
         dead_w = imf * (1.0 - alive) * GRID_DEX  # objects per grid cell
         wd_d = deposit(
             np.where(wd, 0.109 * m_ini + 0.394, 1.0), np.where(wd, dead_w, 0)

@@ -667,6 +667,31 @@ class GalacticModel(Component):
                 f"Bennett 2021), 'simplified' the 3-population model."
             )
         self.model = model
+        # koshimoto21 carries K21's IMF and genulens's present-day mass
+        # function (its bar normalization and every n0 are DERIVED from
+        # them), so the simplified model's mass keys do not apply; its own
+        # switch is genulens's REMNANT (default on, JDE 2026-10-30).
+        if model == "koshimoto21":
+            given = [k for k in ("IMF", "present_day") if k in self.config[0]]
+            if given:
+                raise ValueError(
+                    f"galacticmodel {', '.join(given)} is a key of model: "
+                    f"simplified; model: koshimoto21 carries K21's IMF and "
+                    f"genulens's present-day mass function (use 'remnants' "
+                    f"to drop the dark remnants, genulens's REMNANT 0)."
+                )
+        remnants = self.config[0].get("remnants", True)
+        if "remnants" in self.config[0] and model != "koshimoto21":
+            raise ValueError(
+                "galacticmodel remnants is a key of model: koshimoto21 "
+                "(model: simplified's is present_day)."
+            )
+        if not isinstance(remnants, bool):
+            raise ValueError(
+                f"galacticmodel remnants must be true or false, got "
+                f"{remnants!r}."
+            )
+        self.remnants = remnants
         self.anchor_idx = self.config[0].get("anchor_idx", 0)
         # Present-day mass function (review 1.7.2): an independent toggle,
         # orthogonal to the IMF choice (it evolves whichever IMF is
@@ -786,8 +811,22 @@ class GalacticModel(Component):
                     "kinematics, bar streaming and dispersion gradients; "
                     "'simplified' is the earlier 3-population model, kept "
                     "for regression comparison and to be removed.  "
-                    "koshimoto21's mass function and source weighting are "
-                    "still the 3-population ones (galacticmodel.md)."
+                    "koshimoto21's source weighting and age / [Fe/H] "
+                    "priors are still the 3-population ones (galacticmodel.md)."
+                ),
+            },
+            {
+                "key": "remnants",
+                "kind": "option",
+                "accepts": [True, False],
+                "required": False,
+                "doc": (
+                    "model: koshimoto21 only (genulens's REMNANT; default "
+                    "true): stars above their branch's PARSEC turnoff become "
+                    "white dwarfs (Kalirai+2008), neutron stars or black "
+                    "holes (Raithel+2018), neutron stars and black holes "
+                    "with genulens's natal kicks (350 / 100 km/s).  false = "
+                    "genulens's REMNANT 0: dead stars are discarded."
                 ),
             },
             {
@@ -1147,7 +1186,18 @@ class GalacticModel(Component):
             )
             imf_text = "Chabrier (2003) IMF in log10 M (lognormal + m^-1.3)"
 
-        if pdmf_mask is not None and pdmf_mask.any():
+        if self.model == "koshimoto21":
+            imf_latex = (
+                r"Koshimoto et al. (2021) present-day mass function "
+                r"(genulens: K21 IMF, PARSEC turnoff"
+                + (r", WD/NS/BH remnants)" if self.remnants else ")")
+            )
+            imf_text = (
+                "Koshimoto+2021 present-day mass function (genulens: K21 "
+                "IMF, PARSEC turnoff"
+                + (", WD/NS/BH remnants)" if self.remnants else ")")
+            )
+        elif pdmf_mask is not None and pdmf_mask.any():
             imf_latex = (
                 imf_latex.replace(" in $\\log_{10} M$", "")
                 + r" evolved to a present-day mass function per Galactic "
@@ -1219,6 +1269,28 @@ class GalacticModel(Component):
             else r"\citet{Chabrier:2003} system"
         )
         imf_names = [nm for nm, f in zip(star_names, mask) if not f]
+        if imf_names and self.model == "koshimoto21":
+            prose.add(
+                r"The mass of each star on the stellar mass function "
+                r"followed the present-day mass function of "
+                r"\citet{Koshimoto:2021} as implemented in genulens: their "
+                r"broken-power-law initial mass function, truncated at each "
+                r"population's main-sequence turnoff from the PARSEC "
+                r"isochrones \citep{Bressan:2012}"
+                + (
+                    r", with the dead stars turned into white dwarfs "
+                    r"\citep{Kalirai:2008} and neutron stars and black holes "
+                    r"\citep{Raithel:2018} that received natal kicks of 350 "
+                    r"and 100\,km\,s$^{-1}$"
+                    if self.remnants
+                    else ""
+                )
+                + r", inside the Galactic-population mixture.",
+                section="priors",
+                key=f"{self.prefix}.imf",
+                rank=10,
+            )
+            imf_names = []
         if imf_names:
             target = (
                 "each modeled star"
@@ -1558,8 +1630,12 @@ class GalacticModel(Component):
         # example).
         pdmf_mask = self._pdmf_mask(stars, ffp_mask)
         self._pdmf = None
+        self._k21_mf = None
         if pdmf_mask.any():
-            self._pdmf = self._build_pdmf(stars)
+            if self.model == "koshimoto21":
+                self._k21_mf = self._build_k21_mass_function(stars)
+            else:
+                self._pdmf = self._build_pdmf(stars)
             imf_logp = (1.0 - pdmf_mask.astype(float)) * imf_logp
 
         pm.Potential(f"{self.prefix}.imf_prior", pt.sum(imf_logp))
@@ -1647,6 +1723,16 @@ class GalacticModel(Component):
         if age_mask.any() or feh_mask.any():
             pop_terms = self._population_branch_terms(
                 stars, r, age_mask, feh_mask
+            )
+        if self._k21_mf is not None:
+            # genulens's present-day mass function per branch, with the
+            # neutron stars' and black holes' kicked velocity densities: the
+            # mass and the velocity are no longer separable.
+            log_vel = self._k21_mass_velocity_terms(
+                birth_logmass, pdmf_mask, age_mask, log_vel
+            )
+            self._add_k21_remnant_probability(
+                birth_logmass, log_dens, log_vel, pdmf_mask, age_mask
             )
         if self._pdmf is not None:
             # Per branch: the star's PDMF term (normalized over its own
@@ -1839,11 +1925,95 @@ class GalacticModel(Component):
         velo = k21.log_velocity_densities(
             x, y, z, vel[:, 0], vel[:, 1], vel[:, 2], xp=pt
         )
+        self._k21_state = (x, y, z, vel)
         r_kpc = pt.sqrt(x * x + y * y + 1.0) / 1e3
         return (
             [dens[i] for i in k21.BRANCHES],
             [velo[i] for i in k21.BRANCHES],
             r_kpc,
+        )
+
+    def _build_k21_mass_function(self, stars):
+        bounds = _sampled_bounds(stars.logmass)
+        if bounds is None:
+            raise ValueError(
+                f"[{self.prefix}] model: koshimoto21 needs finite "
+                f"star.logmass lower/upper bounds to normalize its mass "
+                f"function; none could be read."
+            )
+        n_star = int(np.atleast_1d(stars.logmass.initval).size)
+        lower = np.broadcast_to(np.atleast_1d(bounds[0]), (n_star,))
+        upper = np.broadcast_to(np.atleast_1d(bounds[1]), (n_star,))
+        return k21.MassFunction(lower, upper, remnants=self.remnants)
+
+    def _k21_mass_velocity_terms(self, x_mass, pdmf_mask, age_mask, log_vel):
+        """Per branch, per star: log [PDMF x velocity density] of the
+        genulens port, normalized over the star's logmass support:
+
+            log[ phi_still(x) p_b(v) + phi_NS(x) p_NS,b(v)
+                 + phi_BH(x) p_BH,b(v) ] - log Z_b
+
+        (``still`` = luminous stars and white dwarfs, which keep the
+        branch's velocity distribution; neutron stars and black holes carry
+        genulens's natal kicks, koshimoto21.log_kicked_velocity).  A star
+        whose AGE is sampled is luminous by its track: K21's IMF alone (its
+        alive condition is the track's).  A star off the stellar IMF (an FFP)
+        keeps the bare velocity density.  Arithmetic 0/1 weights on finite
+        terms -- no selection."""
+        mf = self._k21_mf
+        x, y, z, vel = self._k21_state
+        w = pdmf_mask.astype(float)
+        a = (age_mask & pdmf_mask).astype(float)
+        bases = k21.kick_bases(x, y, z, xp=pt)
+        log_imf = k21.log_imf(x_mass, xp=pt) - mf.log_imf_peak
+        out = []
+        for j, b in enumerate(k21.BRANCHES):
+            tab = {
+                g: interp_table(
+                    mf.log_table[g][j], mf.x0, PDMF_GRID_DEX, x_mass
+                )
+                for g in mf.GROUPS
+            }
+            mean, sig = bases[j]
+            kicked = [
+                tab[g]
+                + k21.log_kicked_velocity(
+                    vel[:, 0], vel[:, 1], vel[:, 2], mean, sig, speed, xp=pt
+                )
+                for g, speed in (("NS", k21.KICK_NS), ("BH", k21.KICK_BH))
+            ]
+            mix = pm.math.logsumexp(
+                pt.stack([tab["still"] + log_vel[j], *kicked]), axis=0
+            )
+            # mix - log_vel is the mass factor in the unkicked limit; the
+            # weights keep every element's term finite
+            mass = (1.0 - a) * (mix - log_vel[j]) + a * log_imf
+            out.append(log_vel[j] + w * (mass - mf.log_norm[j]))
+        return out
+
+    def _add_k21_remnant_probability(
+        self, x_mass, log_dens, log_terms, pdmf_mask, age_mask
+    ):
+        """``galacticmodel.p_remnant`` for the genulens port: the branch
+        responsibilities (density x mass x velocity) times each branch's
+        dark fraction at the star's mass.  Reporting only."""
+        idx = np.nonzero(pdmf_mask)[0]
+        mf = self._k21_mf
+        stacked = pt.stack([d + t for d, t in zip(log_dens, log_terms)])[
+            :, idx
+        ]
+        resp = pt.exp(stacked - pm.math.logsumexp(stacked, axis=0))
+        lum_only = age_mask[idx].astype(float)
+        dark = (1.0 - lum_only) * pt.stack(
+            [
+                interp_table(
+                    mf.dark_frac[j], mf.x0, PDMF_GRID_DEX, x_mass[idx]
+                )
+                for j in range(len(k21.BRANCHES))
+            ]
+        )
+        pm.Deterministic(
+            f"{self.prefix}.p_remnant", pt.sum(resp * dark, axis=0)
         )
 
     # ------------------------------------------------------------------
