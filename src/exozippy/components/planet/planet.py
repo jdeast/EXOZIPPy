@@ -876,8 +876,8 @@ class Planet(Component):
 
         A coordinate that is ON BY DEFAULT must not throw away a constraint
         the user wrote, and `sigma: 0` on an element the flip makes DERIVED
-        is dropped (with a warning) -- the orbit's `_pin_blocks_default` rule,
-        for the same reason.  Read in the two spellings that survive
+        cannot hold (it raises, `_raise_derived_mass_pin`) -- the orbit's
+        `_pin_blocks_default` rule, for the same reason.  Read in the two spellings that survive
         `standardize_param_names` (indexed, and the broadcast that covers
         every element), as `Orbit._user_pinned` does.
         """
@@ -920,24 +920,33 @@ class Planet(Component):
         )
 
     def _reconcile_mass_user_params(self):
-        """Move a user's ``sigma: 0`` from planet.mass onto log_q, and reject
-        a stale log_q entry in linear mode.
+        """Check the user's planet.mass / log_q entries against the coordinate
+        each planet samples.  READ-ONLY on ``user_params`` (CLAUDE.md).
 
-        In log_q mode planet.mass is derived, and sigma=0 on a derived
-        parameter is a no-op that only emits a warning -- so a user pinning a
-        planet's mass would silently get a free one.  Fixing the sampled
-        coordinate instead is exactly equivalent.  Bounds are deliberately
-        NOT translated: they are absolute masses and the host mass is not
-        known here, and a derived parameter's bounds already become soft
-        barriers on the physical value, which is the semantics we want.
+        * ``sigma: 0`` on planet.mass where the mass is DERIVED (log_q or
+          m sin i is sampled) RAISES, naming the sampled coordinate to pin.
+          A pin on a derived parameter cannot hold it fixed, and moving the
+          user's pin onto another parameter for them -- what this method did
+          until review 2.1.26(e) -- rewrote their params behind their back:
+          the moved log_q pin then read as a user entry in the ledger,
+          ``export_solution`` and the startup table (JDE 2026-10-31: "we
+          should never move a user pin").  A sigma > 0 is a real prior and
+          works on the derived node as a potential, so it is left alone.
+          Bounds are not a pin either: on a derived mass they become soft
+          barriers on the physical value, the semantics wanted.
+        * A non-positive mass initval in log_q mode raises (unrepresentable).
+        * A ``planet.<i>.log_q`` entry on a planet that does not sample log_q
+          raises (a stale mkparam restart file).
         """
         up = self.config_manager.user_params
         for i in range(self.n_elements):
             mass_key, log_q_key = f"planet.{i}.mass", f"planet.{i}.log_q"
+            mode = self.mass_parameterizations[i]
+            if mode != "linear" and self._user_pinned_mass(i):
+                self._raise_derived_mass_pin(i, mode)
 
             # Per planet, because the coordinate is: a stale log_q entry is
             # only stale for the planets that do not sample log_q.
-            mode = self.mass_parameterizations[i]
             if mode != "log_q":
                 if log_q_key in up:
                     raise ValueError(
@@ -968,20 +977,42 @@ class Planet(Component):
                     "what you want."
                 )
 
-            if entry.get("sigma") is None:
-                continue
-            # sigma > 0 is a real prior and needs no help: a derived
-            # parameter gets its Gaussian potential on the physical value.
-            if float(entry["sigma"]) != 0.0:
-                continue
+    def _raise_derived_mass_pin(self, index, mode):
+        """RAISE for a user ``sigma: 0`` on planet ``index``'s DERIVED mass.
 
-            entry.pop("sigma")
-            log_entry = up.setdefault(log_q_key, {})
-            log_entry["sigma"] = 0.0
-            logger.info(
-                f"'{mass_key}' sigma=0: holding the planet mass fixed by "
-                f"fixing the sampled '{log_q_key}' instead."
+        Names the parameter and the remedy; never moves the pin (see
+        ``_reconcile_mass_user_params``).  The default coordinate already
+        avoids m sin i when the mass is pinned (``_resolve_mass_parameterization``),
+        so reaching here means log_q (explicit, a lens body, or no signed
+        observable) or an explicit ``fitmsini: true``.
+        """
+        name = self.names[index]
+        if mode == "log_q":
+            what = "log10(m_p/m_host) ('log_q')"
+            remedy = (
+                f"Pin the sampled coordinate instead -- "
+                f"'{self.prefix}.{name}.log_q: {{initval: <log10(m_p/m_host)>, "
+                f"sigma: 0}}', both masses in one unit -- or set "
+                f"'fitlogq: false' on planet '{name}' to sample the linear "
+                "mass, and pin that."
             )
+        elif mode == "msini":
+            what = "m sin i ('msini')"
+            remedy = (
+                f"Drop 'fitmsini: true' (or set it false) on planet '{name}' "
+                "to sample the linear mass, and pin that.  Pinning msini "
+                "would not fix the mass, which is msini / sin i."
+            )
+        else:
+            raise ValueError(
+                f"[{self.prefix}.{name}] _raise_derived_mass_pin called for "
+                f"mass coordinate {mode!r}, which samples the mass itself."
+            )
+        raise ValueError(
+            f"'{self.prefix}.{name}.mass' has 'sigma: 0', but planet "
+            f"'{name}' samples {what} and DERIVES its mass, so a pin on "
+            f"planet.mass cannot hold it fixed. {remedy}"
+        )
 
     def _mass_constrained(self, system):
         """Per planet: does RV or astrometric data measure its orbit?
@@ -1677,10 +1708,27 @@ class Planet(Component):
                 f"where nearly every mass from Saturn to the hydrogen-burning "
                 f"limit predicts the same radius and the regime breaks are "
                 f"kinks.  The mass, and everything derived from it, is "
-                f"unlikely to mix under NUTS.  Pin it ({self.prefix}.{nm}."
-                f"mass: {{initval: <value>, sigma: 0}}) or give it a prior "
-                f"(mu/sigma)."
+                f"unlikely to mix under NUTS.  {self._chen_pin_advice(p)} "
+                f"or give the mass a prior (mu/sigma)."
             )
+
+    def _chen_pin_advice(self, index):
+        """The pin to recommend: on the SAMPLED mass coordinate, because a
+        sigma: 0 on a derived planet.mass raises (2.1.26(e))."""
+        nm = self.names[index]
+        mode = self.mass_parameterizations[index]
+        if mode == "linear":
+            return f"Pin it ({self.prefix}.{nm}.mass: {{initval: <value>, sigma: 0}})"
+        if mode == "log_q":
+            return (
+                f"Pin its sampled coordinate ({self.prefix}.{nm}.log_q: "
+                f"{{initval: <log10(m_p/m_host)>, sigma: 0}}; or set "
+                f"'fitlogq: false' and pin {self.prefix}.{nm}.mass)"
+            )
+        return (
+            f"Pin its sampled coordinate ({self.prefix}.{nm}.msini: "
+            f"{{initval: <value>, sigma: 0}})"
+        )
 
     CHEN_TABLE_NOTE = r"Derived from \citet{Chen:2017}"
 

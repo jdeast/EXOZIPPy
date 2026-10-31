@@ -18,7 +18,7 @@ from exozippy.ephemeris import observer_position_at_reception
 from exozippy.outputs.prose import get_collector
 from exozippy.skyframe import observer_sky_offset
 
-from ..parameterization import mode_manifest, pin_unselected
+from ..parameterization import merge_options, mode_manifest, pin_unselected
 from ..sed.magsys import AB, parse_magsys
 from . import mmplot, peakfind
 from .physics import (
@@ -2303,7 +2303,19 @@ class MulensInstrument(Instrument):
             # the selected elements' initval scale with the light curve's
             # flux, the same reasoning as _scale_flux_amplitudes: the file's
             # flux zeropoint is arbitrary.  Pinned elements keep the
-            # defaults.yaml 0.0 (NaN initval = leave alone).
+            # defaults.yaml 0.0 (no hint).
+            #
+            # Two channels, by what the user must be able to do (config.md,
+            # "three channels"; review 2.1.26(b)).  The upper bound is a
+            # MODELLING DEFAULT, not a validity limit -- the likelihood is
+            # fine past it -- so it is an option WITH A GAP: NaN on every
+            # element the user bounded (user_wrote_field), so a params-file
+            # upper may tighten OR loosen it.  It used to go through
+            # "overrides", which clips (min(user, component)), so a user
+            # could not widen the prior.  The start is a ranked add_hint,
+            # not an "overrides" initval: the ledger, initval_source and the
+            # startup table then report where it came from.  With no user
+            # value both resolve to exactly what they did before.
             #
             # The scale is the MEDIAN OBSERVED FLUX, not the bootstrapped
             # baseline f_total_init.  The upper bound is the prior's support,
@@ -2322,14 +2334,14 @@ class MulensInstrument(Instrument):
             ]
             if any(nb_selected):
                 entry = pin_unselected(self.n_elements, nb_selected)
-                overrides = dict(entry.get("overrides") or {})
                 scale = self._neighbor_flux_scale(f_total_init)
-                overrides["upper"] = (2.0 * scale).tolist()
-                overrides["initval"] = [
-                    (0.05 * float(sc) if sel else float("nan"))
-                    for sc, sel in zip(scale, nb_selected)
-                ]
-                entry["overrides"] = overrides
+                upper = np.where(
+                    self.user_wrote_field("neighbor_flux", "upper"),
+                    np.nan,
+                    2.0 * scale,
+                )
+                if np.isfinite(upper).any():
+                    entry = merge_options(entry, upper=upper.tolist())
                 self.manifest["neighbor_flux"] = entry
                 # Preliminary whitening scale on the light curve's own flux
                 # scale (the defaults.yaml 0.1 is meaningless against an
@@ -2338,6 +2350,11 @@ class MulensInstrument(Instrument):
                 # scale; this only seeds it.
                 for i, sel in enumerate(nb_selected):
                     if sel:
+                        self.config_manager.add_hint(
+                            f"{self.prefix}.{i}.neighbor_flux",
+                            0.05 * float(scale[i]),
+                            rank=PRECEDENCE_DERIVED_DATA,
+                        )
                         self.config_manager.add_scale_hint(
                             f"{self.prefix}.{i}.neighbor_flux",
                             0.1 * float(scale[i]),

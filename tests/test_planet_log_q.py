@@ -9,6 +9,7 @@ log_q: the magnification model clips q to [1e-9, 100], so q <= 0 is
 meaningless there no matter what else measures the orbit.
 """
 
+import copy
 import logging
 
 import numpy as np
@@ -252,23 +253,64 @@ def test_an_explicit_per_planet_mix_is_honored():
     assert modes == ["linear", "log_q"]
 
 
-def test_fixed_mass_translates_to_log_q():
+@pytest.mark.parametrize("key", ["planet.0.mass", "planet.mass"])
+def test_pin_on_derived_log_q_mass_raises_with_the_remedy(key):
     """
-    Given a user pinning planet.mass with sigma=0 in log_q mode,
+    Given a user pinning planet.mass with sigma=0 (indexed or broadcast)
+    on a planet that samples log_q,
     When the mass coordinate is resolved,
-    Then the pin moves onto the sampled log_q -- sigma=0 on a derived
-    parameter is a silent no-op.
+    Then it RAISES naming the parameter and the sampled coordinate to pin,
+    and user_params is untouched -- a user pin is never moved (review
+    2.1.26(e); it used to be popped and re-written onto log_q).
+    """
+    up = {key: {"initval": 1.0, "sigma": 0.0}}
+    before = copy.deepcopy(up)
+    with pytest.raises(ValueError) as err:
+        _mode([{"name": "b"}], user_params=up, transit=object())
+    msg = str(err.value)
+    assert "'planet.b.mass' has 'sigma: 0'" in msg
+    assert "DERIVES its mass" in msg
+    assert "'planet.b.log_q: {initval:" in msg
+    assert "'fitlogq: false'" in msg
+    assert up == before
+
+
+def test_pin_on_derived_msini_mass_raises_with_the_remedy():
+    """
+    Given an explicit fitmsini: true planet whose mass the user pinned,
+    When the mass coordinate is resolved,
+    Then it raises naming the flag to drop (pinning msini would not fix the
+    mass, so it is not offered).
     """
     up = {"planet.0.mass": {"initval": 1.0, "sigma": 0.0}}
-    assert _mode([{"name": "b"}], user_params=up, transit=object()) == "log_q"
+    with pytest.raises(ValueError, match="Drop 'fitmsini: true'"):
+        _mode(
+            [{"name": "b", "fitmsini": True}],
+            user_params=up,
+            rvinstrument=_FakeRV([0]),
+            orbit=_ONE_PLANET_ORBIT,
+        )
 
-    assert "sigma" not in up["planet.0.mass"]
-    assert up["planet.0.log_q"]["sigma"] == 0.0
+
+def test_pin_on_sampled_linear_mass_is_accepted():
+    """The precedence the other way: where the mass IS the sampled
+    coordinate the pin is an ordinary pin -- no raise, nothing rewritten."""
+    up = {"planet.0.mass": {"initval": 1.0, "sigma": 0.0}}
+    before = copy.deepcopy(up)
+    mode = _mode(
+        [{"name": "b"}],
+        user_params=up,
+        rvinstrument=_FakeRV([0]),
+        transit=object(),
+        orbit=_ONE_PLANET_ORBIT,
+    )
+    assert mode == "linear"
+    assert up == before
 
 
 def test_positive_sigma_on_mass_is_left_alone():
-    """A real Gaussian prior on the mass works on the derived node; only the
-    sigma=0 pin needs moving."""
+    """A real Gaussian prior on the mass works on the derived node; only a
+    sigma=0 pin is refused."""
     up = {"planet.0.mass": {"initval": 1.0, "sigma": 0.1}}
     _mode([{"name": "b"}], user_params=up, transit=object())
 
@@ -572,15 +614,33 @@ def test_log_q_relation_is_inert_in_linear_mode():
     )
 
 
-def test_fixed_mass_really_pins_the_sampled_element():
+def test_pin_on_derived_mass_by_name_raises_at_prepare():
     """
-    Given planet.b.mass sigma=0 written the way a user writes it (by name),
-    When the model is built in log_q mode,
-    Then log_q is not sampled -- i.e. the translation survives the
-    name-to-index standardization and reaches the built Parameter.
+    Given planet.b.mass sigma=0 written the way a user writes it (by name)
+    on a lens planet, which samples log_q,
+    When the system is prepared,
+    Then it raises naming the sampled coordinate -- the check survives the
+    name-to-index standardization.
+    """
+    system = System(
+        _binary_config(),
+        user_params=_binary_params(
+            {"planet.b.mass": {"initval": 1.0, "sigma": 0.0}}
+        ),
+    )
+    with pytest.raises(ValueError, match=r"'planet\.b\.log_q: \{initval:"):
+        system.prepare()
+
+
+def test_the_remedy_pins_the_sampled_element():
+    """
+    Given the remedy the raise names -- planet.b.log_q sigma=0, by name,
+    When the model is built,
+    Then log_q is not sampled, and the pin is the USER's own entry (nothing
+    was written into user_params on their behalf).
     """
     system, model = _build(
-        extra_params={"planet.b.mass": {"initval": 1.0, "sigma": 0.0}}
+        extra_params={"planet.b.log_q": {"initval": -2.5, "sigma": 0.0}}
     )
 
     assert not np.any(np.atleast_1d(system.planet.log_q.is_sampled))

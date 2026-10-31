@@ -35,7 +35,9 @@ def _build(radius_entries, n_planets=1, star_radius=None):
     names = ["b", "c"][:n_planets]
     config = {
         "star": [{"name": "A", "mist": False}],
-        "planet": [{"name": nm} for nm in names],
+        # fitlogq: false -> planet.mass is the SAMPLED coordinate, so its
+        # sigma: 0 pin holds (a pin on a derived mass raises, 2.1.26(e)).
+        "planet": [{"name": nm, "fitlogq": False} for nm in names],
         "orbit": [
             {"name": nm, "primary": ["A"], "companion": [nm]} for nm in names
         ],
