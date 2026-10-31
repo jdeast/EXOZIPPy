@@ -9,7 +9,8 @@ tests check what that check cannot see: that the BUILT models agree,
 parameter by parameter and element by element, on the bounds, prior centres,
 widths, barrier scales and roles of everything they share -- including
 neighbor_flux, whose bound the component used to take from the
-seed-dependent flux bootstrap.
+seed-dependent flux bootstrap (now sampled as neighbor_fraction on the
+physical [0, 1], with no flux scale at all).
 
 The event is synthetic (a PSPL in the full release's lc/ulwdc1_NNN layout,
 magnitudes, inside the shipped Roman ephemeris), so the test needs no
@@ -248,6 +249,7 @@ def test_built_models_share_every_shared_element(built):
         "source.u0te",
         "mulensinstrument.err_scale",
         "mulensinstrument.log_f_total",
+        "mulensinstrument.neighbor_fraction",
         "mulensinstrument.neighbor_flux",
         "star.av",
     ):
@@ -260,22 +262,19 @@ def test_built_models_share_every_shared_element(built):
 
 
 @pytest.mark.slow  # four prepare + build_model passes (~70 s)
-def test_neighbor_flux_bound_is_the_data_median(built, gen):
+def test_neighbor_fraction_support_is_physical(built, gen):
     """
     Given the four built architectures (whose flux bootstraps differ: a
     second source and a companion change the decomposition),
-    When neighbor_flux's upper bound is read,
-    Then it is 2x the median observed flux of each light curve in all four.
+    When neighbor_fraction's bounds are read,
+    Then they are exactly [0, 1] in all four -- the physical support of
+    neighbor_flux = neighbor_fraction * f_blend, with no flux scale that a
+    seed or a topology could move.
     """
     for arch, system in built.items():
-        inst = system.mulensinstrument
-        med = np.asarray(inst.flux_median_init, dtype=float)
-        assert np.allclose(
-            np.asarray(inst.neighbor_flux.upper),
-            2.0 * med,
-            rtol=1e-12,
-            atol=0.0,
-        )
+        frac = system.mulensinstrument.neighbor_fraction
+        assert np.all(np.asarray(frac.lower, dtype=float) == 0.0), arch
+        assert np.all(np.asarray(frac.upper, dtype=float) == 1.0), arch
 
 
 @pytest.mark.slow  # four prepare + build_model passes (~70 s)

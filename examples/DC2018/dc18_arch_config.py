@@ -36,9 +36,10 @@ THE CANONICAL PRIOR SET (examples/DC2018/README.md, "Architecture configs"):
     likelihood           Gaussian (no hogg mixture: the challenge's noise is
                          simulated Gaussian); --hogg turns the mixture back
                          on, with out_scale capped at 10x the median error
-    neighbor_flux        uniform [0, 2 x median data flux] -- set by the
-                         component itself (mulensinstrument.py,
-                         _neighbor_flux_scale), no longer by the seed
+    neighbor_flux        neighbor_fraction uniform [0, 1], neighbor_flux =
+                         neighbor_fraction * f_blend -- the physical
+                         support, set by the component itself (no flux
+                         scale, so nothing a seed or topology can move)
     zeropoint            AB (magsys: AB), mu = the layout's zeropoint,
                          sigma hypot(0.02, grey) on W149, Z087 linked to it
                          with 0.02*sqrt(2) on the difference

@@ -717,6 +717,20 @@ def calc_f_blend(log_f_total, q_source):
 
 
 @register_physics
+def calc_neighbor_flux(neighbor_fraction, f_blend):
+    """Neighbor third light from its fraction of the blend.
+
+    The support is exactly the physical one, ``[0, f_blend]``: every other
+    contributor to the blend is non-negative.  A negative ``f_blend``
+    (``q_source > 1``) leaves no room for third light, so the flux is 0
+    there.  The ``maximum`` enters the blend tie linearly (``f_lens +
+    neighbor_flux`` with ``f_lens > 0``), never under a sqrt or a log, so its
+    zero gradient on the clamped side multiplies nothing infinite.
+    """
+    return neighbor_fraction * pt.maximum(f_blend, 0.0)
+
+
+@register_physics
 def calc_zeropoint(m_source_pred, f_source, flux_zp):
     """Photometric zeropoint of one light curve's own flux system.
 

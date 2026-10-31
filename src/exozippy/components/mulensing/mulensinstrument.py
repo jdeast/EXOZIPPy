@@ -18,7 +18,11 @@ from exozippy.ephemeris import observer_position_at_reception
 from exozippy.outputs.prose import get_collector
 from exozippy.skyframe import observer_sky_offset
 
-from ..parameterization import merge_options, mode_manifest, pin_unselected
+from ..parameterization import (
+    merge_overrides,
+    mode_manifest,
+    pin_unselected,
+)
 from ..sed.magsys import AB, parse_magsys
 from . import mmplot, peakfind
 from .physics import (
@@ -573,11 +577,6 @@ class MulensInstrument(Instrument):
         # system to a magnitude, which is what an sed: block needs.
         self._dia_zp = {}
         self.q_flux_init = []  # per-instrument f_s2/f_s1 (binary source)
-        # Per-file median of the observed flux (the file's own flux system),
-        # a property of the DATA alone -- unlike fs_init, which is the flux
-        # bootstrap's baseline and so moves with the seed geometry and the
-        # model topology.  neighbor_flux's bound reads it (see there).
-        self.flux_median_init = []
         blocks = self._concat_blocks()
 
         # n_elements, not star_map: this is stage 1, and the source
@@ -720,10 +719,6 @@ class MulensInstrument(Instrument):
             if fmt not in ("flux", "dia"):
                 f, e = mag_to_flux(f, e)
 
-            ok = np.isfinite(f) & np.isfinite(e) & (e > 0)
-            self.flux_median_init.append(
-                float(np.median(f[ok])) if np.any(ok) else float("nan")
-            )
             per_file.append((t, f, e, df))
 
         # THE BUILT-IN PEAK FINDER (8.4.9).  Runs HERE, after pass 1, so it
@@ -2299,91 +2294,44 @@ class MulensInstrument(Instrument):
             # Roman-fidelity sims violate in 80% of events (unrelated
             # line-of-sight stars dominate the blend; the lens supplies a
             # median 15% of it) -- into the correct inequality
-            # f_blend >= f_lens_pred, positivity doing the work.  upper and
-            # the selected elements' initval scale with the light curve's
-            # flux, the same reasoning as _scale_flux_amplitudes: the file's
-            # flux zeropoint is arbitrary.  Pinned elements keep the
-            # defaults.yaml 0.0 (no hint).
+            # f_blend >= f_lens_pred.
             #
-            # Two channels, by what the user must be able to do (config.md,
-            # "three channels"; review 2.1.26(b)).  The upper bound is a
-            # MODELLING DEFAULT, not a validity limit -- the likelihood is
-            # fine past it -- so it is an option WITH A GAP: NaN on every
-            # element the user bounded (user_wrote_field), so a params-file
-            # upper may tighten OR loosen it.  It used to go through
-            # "overrides", which clips (min(user, component)), so a user
-            # could not widen the prior.  The start is a ranked add_hint,
-            # not an "overrides" initval: the ledger, initval_source and the
-            # startup table then report where it came from.  With no user
-            # value both resolve to exactly what they did before.
+            # Sampled as neighbor_fraction on [0, 1] and derived as
+            # neighbor_flux = neighbor_fraction * max(f_blend, 0)
+            # (review 2.1.26(b), JDE 2026-10-31: "the physics binds").  The
+            # support is then EXACTLY the physical one -- the neighbor light
+            # is part of the blend and every other contributor is
+            # non-negative -- with no number in it: no flux scale, so nothing
+            # read from the data or the seed, and a proper, finite prior.  It
+            # replaced a uniform on [0, 2 x median observed flux], whose
+            # width was arbitrary and which, integrated against the tie,
+            # weighted f_blend by its own size (mulensing.md).
             #
-            # The scale is the MEDIAN OBSERVED FLUX, not the bootstrapped
-            # baseline f_total_init.  The upper bound is the prior's support,
-            # and the bootstrap's baseline is a function of the seed
-            # geometry and the topology (it solves F = f_s A + f_b at the
-            # seeded t_0/u_0/t_E, and a binary or a second source changes
-            # A) -- so the same event fit as 1L1S, 1L2S and 2L1S, or from two
-            # different seeds, got a different uniform width on this
-            # parameter, i.e. a different prior normalization, which makes
-            # their evidences incomparable by an arbitrary log(span ratio).
-            # The median is a property of the data alone.  A file whose
-            # median is not positive (difference imaging with a negative
-            # baseline) falls back to the bootstrap, as before.
+            # Channels (config.md, "three channels"): [0, 1] are VALIDITY
+            # limits (past them a modeled star carries negative light), so
+            # they go through "overrides" -- a params-file bound may tighten
+            # them, and a looser one is clipped back with resolve's warning.
+            # Unselected light curves are pinned at 0 (no third light;
+            # sigma 0 and initval 0 through "overrides", so a user who wants
+            # one back still wins).  The selected start is the defaults.yaml
+            # 0.5, the middle of the support.
             nb_selected = [
                 bool(c.get("sed_constrains_blend", False)) for c in self.config
             ]
             if any(nb_selected):
-                entry = pin_unselected(self.n_elements, nb_selected)
-                scale = self._neighbor_flux_scale(f_total_init)
-                upper = np.where(
-                    self.user_wrote_field("neighbor_flux", "upper"),
-                    np.nan,
-                    2.0 * scale,
+                n = self.n_elements
+                overrides = {"lower": [0.0] * n, "upper": [1.0] * n}
+                if not all(nb_selected):
+                    overrides["initval"] = [
+                        np.nan if sel else 0.0 for sel in nb_selected
+                    ]
+                entry = merge_overrides(
+                    pin_unselected(n, nb_selected), overrides
                 )
-                if np.isfinite(upper).any():
-                    entry = merge_options(entry, upper=upper.tolist())
-                self.manifest["neighbor_flux"] = entry
-                # Preliminary whitening scale on the light curve's own flux
-                # scale (the defaults.yaml 0.1 is meaningless against an
-                # arbitrary flux zeropoint, and a scale >> span trips the
-                # on-the-bound nudge).  The startup probe measures the real
-                # scale; this only seeds it.
-                for i, sel in enumerate(nb_selected):
-                    if sel:
-                        self.config_manager.add_hint(
-                            f"{self.prefix}.{i}.neighbor_flux",
-                            0.05 * float(scale[i]),
-                            rank=PRECEDENCE_DERIVED_DATA,
-                        )
-                        self.config_manager.add_scale_hint(
-                            f"{self.prefix}.{i}.neighbor_flux",
-                            0.1 * float(scale[i]),
-                        )
+                self.manifest["neighbor_fraction"] = entry
+                self.manifest["neighbor_flux"] = "default"
 
             self._seed_source_star_from_flux(system)
-
-    def _neighbor_flux_scale(self, f_total_init):
-        """Per-file flux scale of ``neighbor_flux``'s bound and start.
-
-        The data median (``flux_median_init``) where it is a positive finite
-        number, else the bootstrapped baseline ``f_total_init`` with a
-        warning naming the file -- see the call site for why the median.
-        """
-        boot = np.asarray(f_total_init, dtype=float)
-        med = np.asarray(
-            getattr(self, "flux_median_init", None) or [np.nan] * boot.size,
-            dtype=float,
-        )
-        good = np.isfinite(med) & (med > 0)
-        for i in np.flatnonzero(~good):
-            logger.warning(
-                f"{self.prefix}.{self.names[i]}: the median observed flux "
-                f"({med[i]:.4g}) is not positive, so neighbor_flux is scaled "
-                f"by the bootstrapped baseline ({boot[i]:.4g}) instead -- "
-                "which depends on the seed geometry, so its bound may differ "
-                "between fits of this light curve."
-            )
-        return np.where(good, med, boot)
 
     # Main-sequence dwarf locus for source seeding, from the shared
     # Mamajek-table reader (components/star/mamajek.py).
@@ -3313,7 +3261,10 @@ class MulensInstrument(Instrument):
             # potential.  With it, positivity makes the tie one-sided: a
             # blend BRIGHTER than the lens is absorbed by f_nb, a blend
             # FAINTER than the lens still costs -- "the blend must contain
-            # at least the lens's light".
+            # at least the lens's light".  f_nb = neighbor_fraction *
+            # max(f_blend, 0) <= f_blend, so the residual is
+            # 2.5*log10(f_lens/f_blend + neighbor_fraction) wherever
+            # f_blend > 0.
             # m_inst = flux_zp - 2.5*log10(f) (flux_system_zp): a dia file's
             # flux is in units of its reference.  Added only where nonzero,
             # so every other light curve's graph is unchanged.
