@@ -1708,10 +1708,27 @@ class Planet(Component):
                 f"where nearly every mass from Saturn to the hydrogen-burning "
                 f"limit predicts the same radius and the regime breaks are "
                 f"kinks.  The mass, and everything derived from it, is "
-                f"unlikely to mix under NUTS.  Pin it ({self.prefix}.{nm}."
-                f"mass: {{initval: <value>, sigma: 0}}) or give it a prior "
-                f"(mu/sigma)."
+                f"unlikely to mix under NUTS.  {self._chen_pin_advice(p)} "
+                f"or give the mass a prior (mu/sigma)."
             )
+
+    def _chen_pin_advice(self, index):
+        """The pin to recommend: on the SAMPLED mass coordinate, because a
+        sigma: 0 on a derived planet.mass raises (2.1.26(e))."""
+        nm = self.names[index]
+        mode = self.mass_parameterizations[index]
+        if mode == "linear":
+            return f"Pin it ({self.prefix}.{nm}.mass: {{initval: <value>, sigma: 0}})"
+        if mode == "log_q":
+            return (
+                f"Pin its sampled coordinate ({self.prefix}.{nm}.log_q: "
+                f"{{initval: <log10(m_p/m_host)>, sigma: 0}}; or set "
+                f"'fitlogq: false' and pin {self.prefix}.{nm}.mass)"
+            )
+        return (
+            f"Pin its sampled coordinate ({self.prefix}.{nm}.msini: "
+            f"{{initval: <value>, sigma: 0}})"
+        )
 
     CHEN_TABLE_NOTE = r"Derived from \citet{Chen:2017}"
 

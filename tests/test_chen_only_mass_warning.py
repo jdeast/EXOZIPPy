@@ -97,6 +97,9 @@ def test_a_transit_only_jupiter_warns_at_build(data, caplog):
     assert "[planet.b]" in msg
     assert "unlikely to mix" in msg
     assert "sigma: 0" in msg and "mu/sigma" in msg
+    # The pin it recommends is on the SAMPLED coordinate (log_q here): a pin
+    # on the derived planet.mass would raise.
+    assert "planet.b.log_q:" in msg
 
 
 def test_a_small_transit_only_planet_is_not_warned(data):
@@ -121,7 +124,9 @@ def test_rv_reading_the_mass_silences_it(data):
 @pytest.mark.parametrize(
     "extra",
     [
-        {"planet.b.mass": {"initval": 1.0, "sigma": 0}},
+        # The default transit-only coordinate is log_q, so planet.mass is
+        # derived and a sigma: 0 on it raises (2.1.26(e)): pin log_q.
+        {"planet.b.log_q": {"initval": -3.0, "sigma": 0}},
         {"planet.b.mass": {"initval": 1.0, "mu": 1.0, "sigma": 0.3}},
     ],
     ids=["pinned", "prior"],
