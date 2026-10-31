@@ -762,6 +762,11 @@ def grid_search(
     t_start = time.time()
     own_pool = pool is None
     if own_pool:
+        # The platform-default start method is fine HERE, and only because
+        # the workers get their state through initializer/initargs rather
+        # than from a module global: spawn (macOS) and forkserver (Linux,
+        # Python 3.14) deliver initargs, but inherit no runtime global
+        # (review 2.6.42; tests/test_pool_start_method.py).
         pool = mp.Pool(
             ncpu, initializer=_init_worker, initargs=(curves, pspl, spec)
         )

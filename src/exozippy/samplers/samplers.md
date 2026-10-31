@@ -426,6 +426,27 @@ the draw phase, which is the same window `n_accept`/`n_propose` report on.
 Both samplers log the hop acceptance at wrap-up through one
 `_common.log_mode_hop_summary`, so the message cannot drift again.
 
+## Every pool forks explicitly, or hands its workers their state (2.6.42)
+
+`mp.Pool(...)` takes the platform's DEFAULT start method: fork on Linux up to
+Python 3.13, but **spawn on macOS and forkserver on Linux from 3.14**. A spawn
+or forkserver worker re-imports the module and inherits none of the parent's
+runtime globals, so a pool whose workers read the compiled logp out of a
+module global (`_PTDE_LOGP_FN`, nested's `_NB`) finds nothing there: every
+evaluation raises, the caller scores it -inf or floors it, and the stage
+silently does nothing. That shipped twice -- the DE seed polish was a no-op for
+every macOS user until #536, and the nested sampler's workers died on
+`_NB["bridge"]` -- and Linux CI below 3.14 cannot see it, because there the
+default IS fork.
+
+So a pool either goes through `_common.create_pool` / `recycle_pool` (or
+otherwise names `mp.get_context("fork")`), or passes everything its workers
+need through `initializer` / `initargs` / task arguments, as the microlensing
+grid search does. Never a bare `mp.Pool` or `ProcessPoolExecutor` whose
+workers read a global the parent set at runtime. `tests/test_pool_start_method.py`
+runs each pool with the process default switched to forkserver and asserts
+finite results; a new pool belongs there.
+
 ## `cores`: one rule, and `None` means AUTO
 
 `_common.default_cores()` is the single definition of "how many cores does a
