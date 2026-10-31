@@ -220,18 +220,24 @@ def test_heavy_bulge_lens_needs_remnants():
 
 
 class _Selector:
-    """A component that observed star ``k`` through a flux limit."""
+    """A component that observed star ``k`` through a flux limit (and, when
+    ``binary`` is given, treats star ``binary`` as a single lens whose mass
+    may be an unresolved binary's)."""
 
     prefix = "selector"
 
-    def __init__(self, k):
+    def __init__(self, k, binary=None):
         self.k = k
+        self.binary = binary
 
     def initial_logmass(self, system):
         return {}
 
     def selected_sources(self, system):
         return [self.k]
+
+    def unresolved_binary_lenses(self, system):
+        return {} if self.binary is None else {self.binary: self.k}
 
 
 def _ffp(stars):
@@ -341,3 +347,35 @@ def test_fully_linked_member_adds_only_its_mass():
     )
     _link_all(two, member=1, root=0)
     assert _kin(two) == pytest.approx(_kin(one), abs=1e-9)
+
+
+def test_binaries_change_only_the_unresolved_lens_mass_term():
+    """binaries: true (genulens's BINARY 1) swaps the lens's luminous mass
+    function for the effective binary-lens density; it is a koshimoto21
+    key and a boolean."""
+    with pytest.raises(ValueError, match="binaries is a key"):
+        GalacticModel(
+            [{"model": "simplified", "binaries": True}], _DummyConfigManager()
+        )
+    with pytest.raises(ValueError, match="binaries must be"):
+        GalacticModel([{"binaries": "yes"}], _DummyConfigManager())
+
+    def lp(binaries):
+        stars = _Stars(
+            [6000.0, 8300.0],
+            [-3.0, -6.0],
+            [-1.0, -0.5],
+            [10e3, -30e3],
+            [-0.3, 0.0],
+        )
+        gm = GalacticModel([{"binaries": binaries}], _DummyConfigManager())
+        system = _System(stars)
+        system.active_components = {"sel": _Selector(1, binary=0)}
+        with pm.Model() as model:
+            gm.build_likelihood(model, system)
+        return float(model["galacticmodel.kinematic_prior"].eval())
+
+    on, off = lp(True), lp(False)
+    assert np.isfinite(on) and on != off
+    # a 0.5 Msun lens: binaries move its mass density by a modest amount
+    assert abs(on - off) < 1.0

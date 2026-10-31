@@ -491,6 +491,16 @@ class Component(ABC):
         selects nothing; the microlensing event returns its source."""
         return []
 
+    def unresolved_binary_lenses(self, system):
+        """Stage 7: ``{lens star index: source star index}`` for each star
+        this component treats as ONE lens whose mass may be an unresolved
+        binary's (a single-lens microlensing event).  A population prior
+        that models binaries (galacticmodel's genulens port, ``binaries:
+        true``: genulens's BINARY 1) replaces that star's luminous mass
+        function by the effective lens mass a binary system presents at
+        the event's Einstein-radius scale.  The default names none."""
+        return {}
+
     # Attribute names holding something that BELONGS TO ONE BUILD: a
     # pytensor node the component stashed, or a function compiled against
     # one.  ``System.build_model`` clears every one of them before stage 5,

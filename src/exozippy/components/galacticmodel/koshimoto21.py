@@ -917,6 +917,9 @@ class MassFunction:
         #: luminous objects only (a survey-selected SOURCE: genulens's n0MS
         #: count), normalized over the luminous objects in the support
         self.log_lum = []
+        #: white dwarfs alone (with binaries on, the luminous part of
+        #: "still" is replaced by the binary-lens density)
+        self.log_wd = []
         self.log_norm_lum = np.empty((len(branches), n_star))
         for j, b in enumerate(branches):
             d = dens[b]
@@ -939,6 +942,7 @@ class MassFunction:
             dark = total - d["lum"] if remnants else 0.0 * total
             self.dark_frac.append(dark / (total + floor))
             self.log_lum.append(np.log(d["lum"] + floor))
+            self.log_wd.append(np.log(d["WD"] + floor))
             for k in range(n_star):
                 sel = (self.x >= lower[k]) & (self.x <= upper[k])
                 self.log_norm[j, k] = np.log(
@@ -1179,3 +1183,152 @@ def extinction_scale(
     h = h_dust / (abs(np.sin(b_deg / 180.0 * PI)) + 0.0001)
     d_rc = 10.0 ** (0.2 * dm_rc) * 10.0
     return ai_rc / (1.0 - np.exp(-d_rc / h)), h
+
+
+# ---------------------------------------------------------------------------
+# Binary lenses (genulens BINARY 1: event_sampler.cpp "Binary system",
+# model/mass_function.cpp BinaryLensSampler)
+# ---------------------------------------------------------------------------
+BINARY_FILE = Path(__file__).resolve().parent / "koshimoto21_binary.npz"
+_BINARY = None
+#: the binary table's grids: x_eff = log10 of the lens mass the event sees,
+#: r0 = sqrt(kappa pi_rel) D_L in AU / sqrt(Msun) (the physical Einstein
+#: radius of a 1 Msun lens)
+BINARY_X = np.arange(-3.0, 1.1 + 1e-9, 0.01)
+BINARY_LOG_R0 = np.arange(-1.5, 2.5 + 1e-9, 0.05)
+KAPPA = 8.1439  # genulens kKappa, mas / Msun
+
+
+def _binary_draws(n, rng):
+    """Monte Carlo of genulens's binary-lens recipe for a luminous primary
+    of mass M (sampled uniformly in log10 M over the alive range, so each
+    branch reweights by its IMF x alive): per draw, the case weights (no
+    companion; companion drawn below / above the mean separation), the
+    companion's q, the projected separation and the blending thresholds,
+    for both choices of which body is "lens 1" (genulens picks body 1 with
+    probability sqrt(M1) / (sqrt(M1) + sqrt(M2)); weights here)."""
+    x = rng.uniform(np.log10(IMF_MIN), np.log10(max(MINIDIE.values())), n)
+    m = 10.0**x
+    mult = np.minimum(0.196 + 0.255 * m, 1.0)
+    out = []
+    for coeff in (-1.0, 1.0):
+        if coeff < 0:
+            gamma = np.clip(1.16 - 2.79 * np.log10(m), 0.0, 4.0)
+        else:
+            gamma = np.where(
+                m >= 0.344, 0.0, np.clip(-3.09 - 6.67 * np.log10(m), 0.0, 4.0)
+            )
+        t = 0.1 ** (gamma + 1.0)
+        q = ((1.0 - t) * rng.uniform(size=n) + t) ** (1.0 / (gamma + 1.0))
+        mla = np.clip(0.57 + 1.02 * m, 0.6, 1.7)
+        sla = np.clip(1.61 + 1.15 * np.log10(m), 0.3, 1.8)
+        log_a = mla + coeff * np.abs(rng.standard_normal(n)) * sla
+        a_perp = np.sqrt(1.0 - rng.uniform(size=n) ** 2) * 10.0**log_a
+        u0 = rng.uniform(size=n)
+        p1 = np.sqrt(m) / (np.sqrt(m) + np.sqrt(m * q))
+        for first_is_primary in (True, False):
+            m1 = m if first_is_primary else m * q
+            m2 = m * q if first_is_primary else m
+            qt = m2 / m1
+            tmp = qt / u0
+            f_l = (np.sqrt(tmp + 1.0) + np.sqrt(tmp)) * np.sqrt(m1)
+            tmp2 = np.where(qt > 1.0, 1.0 / qt / u0, tmp)
+            f_s = (
+                (np.sqrt(tmp2 + 1.0) - np.sqrt(tmp2))
+                * np.sqrt(m1 + m2)
+                * np.where(
+                    qt > 1.0, np.sqrt(1.0 + 1.0 / qt), np.sqrt(1.0 + qt)
+                )
+            )
+            w = 0.5 * mult * (p1 if first_is_primary else 1.0 - p1)
+            out.append((w, a_perp, f_l, f_s, np.log10(m1), np.log10(m1 + m2)))
+    return x, 1.0 - mult, out
+
+
+def binary_tables(branches=BRANCHES_NSD, n=2_000_000, seed=20211):
+    """numpy: per branch, log of genulens's EFFECTIVE luminous-lens density
+    in x_eff on (BINARY_X x BINARY_LOG_R0): IMF x alive primaries, single
+    (prob 1 - mult) or with a companion that is either resolved WIDE (the
+    event sees body 1 alone: a_perp > f_L r0), blended CLOSE (the total
+    mass: a_perp < f_S r0) or REJECTED (a detectable binary; dropped, as
+    genulens's retry drops it).  Same unit as MassFunction's tables
+    (IMF / its peak), 0.02-dex smoothing.  scripts/make_koshimoto21_tables.py
+    writes it (Monte Carlo, ``n`` primaries: a few-% noise in the far
+    tails, below the smoothing in the bulk)."""
+    from .pdmf import FLOOR_REL, SMOOTH_DEX, _gaussian_kernel
+
+    rng = np.random.default_rng(seed)
+    x, w_single, pairs = _binary_draws(n, rng)
+    dx = BINARY_X[1] - BINARY_X[0]
+    edges = np.r_[BINARY_X - 0.5 * dx, BINARY_X[-1] + 0.5 * dx]
+    imf = np.exp(log_imf(x) - log_imf(np.log10(IMF_M2)))
+    span = np.log10(max(MINIDIE.values())) - np.log10(IMF_MIN)
+    kernel = _gaussian_kernel(SMOOTH_DEX, dx)
+    out = np.empty((len(branches), BINARY_X.size, BINARY_LOG_R0.size))
+    for j, b in enumerate(branches):
+        base = imf * alive_fraction(b, x) * span / n  # density per sample
+        single = np.histogram(x, edges, weights=base * w_single)[0] / dx
+        for k, lr0 in enumerate(BINARY_LOG_R0):
+            r0 = 10.0**lr0
+            h = single.copy()
+            for w, a_perp, f_l, f_s, x1, x12 in pairs:
+                wide = a_perp > f_l * r0
+                close = a_perp < f_s * r0
+                h += (
+                    np.histogram(x1[wide], edges, weights=(base * w)[wide])[0]
+                    / dx
+                )
+                h += (
+                    np.histogram(x12[close], edges, weights=(base * w)[close])[
+                        0
+                    ]
+                    / dx
+                )
+            h = np.convolve(h, kernel, mode="same")
+            out[j, :, k] = np.log(h + FLOOR_REL * h.max())
+    return out
+
+
+def _binary_table():
+    global _BINARY
+    if _BINARY is None:
+        with np.load(BINARY_FILE) as f:
+            _BINARY = {
+                "branches": tuple(int(b) for b in f["branches"]),
+                "log_dens": f["log_dens"],
+            }
+    return _BINARY
+
+
+def log_r0(d_l_pc, d_s_pc, xp=np):
+    """log10 of sqrt(kappa pi_rel) D_L [AU / sqrt(Msun)]: the physical
+    Einstein radius of a 1 Msun lens, the scale genulens's blending
+    thresholds compare a binary's projected separation to.  pi_rel is
+    floored strictly positive (the source-behind-lens barrier is soft)."""
+    pirel = xp.maximum(1000.0 / d_l_pc - 1000.0 / d_s_pc, 1e-6)
+    return 0.5 * xp.log10(KAPPA * pirel) + xp.log10(d_l_pc / 1000.0)
+
+
+def log_binary_lens_density(branch, x_eff, lr0, xp=np):
+    """Bilinear in (x_eff, log r0) on the shipped table, clamped."""
+    tab = _binary_table()
+    t = tab["log_dens"][tab["branches"].index(branch)]
+    dx = BINARY_X[1] - BINARY_X[0]
+    dr = BINARY_LOG_R0[1] - BINARY_LOG_R0[0]
+    fx = xp.clip((x_eff - BINARY_X[0]) / dx, 0.0, BINARY_X.size - 1 - 1e-9)
+    fr = xp.clip(
+        (lr0 - BINARY_LOG_R0[0]) / dr, 0.0, BINARY_LOG_R0.size - 1 - 1e-9
+    )
+    if xp is np:
+        ix, ir = np.floor(fx).astype(int), np.floor(fr).astype(int)
+        tt = t
+    else:
+        ix, ir = xp.floor(fx).astype("int64"), xp.floor(fr).astype("int64")
+        tt = xp.as_tensor_variable(t)
+    a, b = fx - ix, fr - ir
+    return (
+        (1 - a) * (1 - b) * tt[ix, ir]
+        + a * (1 - b) * tt[ix + 1, ir]
+        + (1 - a) * b * tt[ix, ir + 1]
+        + a * b * tt[ix + 1, ir + 1]
+    )

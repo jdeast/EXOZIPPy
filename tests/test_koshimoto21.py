@@ -367,3 +367,34 @@ def test_sqrt_distance_source_weight_is_genulens_default():
     d = np.array([1000.0, 8000.0, 12000.0])
     got = k21.log_source_weight_sqrt(d) + 2.0 * np.log(d)
     np.testing.assert_allclose(got, 0.5 * np.log(d / 8000.0), atol=1e-14)
+
+
+# --- binaries (port PR 5) ----------------------------------------------------
+
+
+def test_binary_table_conserves_systems():
+    """Per branch and Einstein-radius scale, the effective binary-lens
+    density integrates to the luminous systems minus the rejected
+    (detectable) binaries -- between 85% and 100% of the single-star
+    luminous count, as genulens's single / wide / close fractions imply --
+    and each system is counted once (never more than the luminous count)."""
+    mf = k21.MassFunction([-9.0], [2.5], branches=k21.BRANCHES_NSD)
+    tab = k21._binary_table()
+    for j, b in enumerate(k21.BRANCHES_NSD):
+        lum = np.exp(mf.log_lum[j] + mf.log_imf_peak)
+        n_lum = np.trapezoid(lum, mf.x)
+        t = np.exp(tab["log_dens"][tab["branches"].index(b)])
+        for k_r in (10, 40, 70):
+            n_bin = np.trapezoid(t[:, k_r], k21.BINARY_X)
+            assert 0.85 < n_bin / n_lum <= 1.01, (b, k_r, n_bin / n_lum)
+
+
+def test_binary_lens_density_interpolates_the_table():
+    tab = k21._binary_table()
+    t = tab["log_dens"][tab["branches"].index(8)]
+    got = k21.log_binary_lens_density(
+        8, k21.BINARY_X[100], k21.BINARY_LOG_R0[30]
+    )
+    assert got == pytest.approx(float(t[100, 30]), abs=1e-6)
+    # pi_rel floor keeps r0 finite for a source in front of the lens
+    assert np.isfinite(k21.log_r0(8000.0, 7000.0))
