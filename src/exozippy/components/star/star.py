@@ -1536,6 +1536,21 @@ class Star(Component):
         self.murel_traj_map = np.zeros(n, dtype=int)
         return {"expr_key": {"from_mulens_pirel": [int(l_idx)]}}
 
+    def logmass_derived_elements(self, system):
+        """Star indices whose logmass is DERIVED rather than sampled.
+
+        Today only the ``fitthetae: true`` host (``_logmass_thetae_entry``).
+        Public for ``Planet``, which applies a user's ``planet.mass`` pin to
+        log_q only when the host's sampled logmass is pinned (review
+        2.1.26(e)); a pin on a derived logmass would hold nothing.  Pure in
+        effect: the entry's map attributes are recomputed, identically, by
+        this component's own stage 3.
+        """
+        entry = self._logmass_thetae_entry(system)
+        if entry is None:
+            return set()
+        return {int(i) for idx in entry["expr_key"].values() for i in idx}
+
     def _logmass_thetae_entry(self, system):
         """expr_key flip for `fitthetae: true` (swap 3): the HOST star's
         logmass derived from the sampled log_theta_E (through lens.theta_E)

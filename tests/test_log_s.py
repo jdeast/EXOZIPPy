@@ -11,6 +11,8 @@ primary and companion j is ELEMENT j+1, so the binary's separation is
 lens.1.log_s (equivalently lens.b.log_s, the companion body's name).
 """
 
+import logging
+
 import numpy as np
 import pytensor
 import pytest
@@ -132,25 +134,75 @@ def test_user_s_initval_seeds_log_s_start(default_s_system):
 
 
 def test_user_s_bounds_translate_to_log_s():
-    """Given a params entry setting lens.s lower/upper, when the Lens component
-    registers, then the bounds are moved onto log_s as log10(bound) and removed
-    from the s entry."""
-    system, _ = _build(
-        {"initval": 1.0, "init_scale": 0.01, "lower": 0.5, "upper": 5.0}
-    )
+    """Given a params entry setting lens.s lower/upper (tighter than the
+    default), when the model is built, then log_s takes log10(bound) as its
+    hard bound, the derived s keeps its (inert) defaults barrier rather than
+    taking the user's bound a second time, and user_params is untouched --
+    no log_s entry is invented and the s entry keeps its bounds (review
+    2.1.26(f); this used to pop them and write log_s bounds there)."""
+    entry = {"initval": 1.0, "init_scale": 0.01, "lower": 0.5, "upper": 5.0}
+    params = _binary_params(dict(entry))
+    system = System(_binary_config(), user_params=params)
+    up = system.config_manager.user_params
+    system.prepare()
+    system.build_model()
 
     np.testing.assert_allclose(
-        np.atleast_1d(system.lens.log_s.lower)[1], np.log10(0.5), atol=1e-6
+        np.atleast_1d(system.lens.log_s.lower)[1], np.log10(0.5), atol=1e-12
     )
     np.testing.assert_allclose(
-        np.atleast_1d(system.lens.log_s.upper)[1], np.log10(5.0), atol=1e-6
+        np.atleast_1d(system.lens.log_s.upper)[1], np.log10(5.0), atol=1e-12
     )
+    # The derived s keeps the defaults.yaml [0.1, 10] barrier, which lies
+    # outside the user's tighter hard bound: no second barrier at 0.5/5.
+    assert np.atleast_1d(system.lens.s.lower)[1] == 0.1
+    assert np.atleast_1d(system.lens.s.upper)[1] == 10.0
 
     # The user wrote 'lens.b.s'; standardization folded it onto the
     # companion's ELEMENT index, which is 1 (element 0 is the primary).
-    up_s = system.config_manager.user_params.get("lens.1.s")
-    assert "lower" not in up_s
-    assert "upper" not in up_s
+    assert up["lens.1.s"]["lower"] == 0.5
+    assert up["lens.1.s"]["upper"] == 5.0
+    sol = system.config_manager.export_solution(
+        derived_params=system.derived_elements()
+    )["parameters"]
+    assert sol["lens.b.log_s"]["provenance"]["label"] != "user"
+
+
+def test_a_widening_s_bound_behaves_like_a_widening_log_s_bound(caplog):
+    """A user bound never widens a defaults.yaml limit (review 2.1.6), and an
+    s bound is no exception: s upper 20 (past the default 10) leaves log_s's
+    hard bound at 1, s keeps its default barrier, and the user is told, in
+    their own spelling, that the bound was NOT applied."""
+    with caplog.at_level(logging.WARNING):
+        system, _ = _build({"initval": 1.0, "init_scale": 0.01, "upper": 20.0})
+    assert np.atleast_1d(system.lens.log_s.upper)[1] == 1.0
+    assert np.atleast_1d(system.lens.s.upper)[1] == 10.0
+    assert any(
+        "[lens.1.s] user upper=20 WIDENS" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_a_user_log_s_bound_alone_is_untouched():
+    """The precedence the other way: with no s bound, the user's own log_s
+    bound reaches log_s unchanged and s keeps its defaults."""
+    params = _binary_params({"initval": 1.0, "init_scale": 0.01})
+    params["lens.b.log_s"] = {"upper": 0.5}
+    system = System(_binary_config(), user_params=params)
+    system.prepare()
+    system.build_model()
+    assert np.atleast_1d(system.lens.log_s.upper)[1] == 0.5
+    assert np.atleast_1d(system.lens.s.upper)[1] == 10.0
+
+
+def test_one_bound_on_both_s_and_log_s_raises():
+    """The same bound stated on s and on log_s is two statements of one
+    quantity: it raises rather than silently picking one."""
+    params = _binary_params({"initval": 1.0, "upper": 5.0})
+    params["lens.b.log_s"] = {"upper": 0.5}
+    system = System(_binary_config(), user_params=params)
+    with pytest.raises(ValueError, match="one bound stated"):
+        system.prepare()
 
 
 def test_nonpositive_s_bound_raises():

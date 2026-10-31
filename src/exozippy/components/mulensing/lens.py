@@ -26,7 +26,11 @@ from exozippy.components.orbit.bodies import (
     orbit_types,
     parse_orbit_bodies,
 )
-from exozippy.components.parameterization import mode_manifest
+from exozippy.components.parameterization import (
+    merge_options,
+    merge_overrides,
+    mode_manifest,
+)
 from exozippy.config import PRECEDENCE_DEFAULT, user_entry
 from exozippy.constants import DAYS_PER_YEAR
 from exozippy.outputs.prose import get_collector
@@ -234,45 +238,110 @@ class Lens(Component):
     # Helpers
     # ------------------------------------------------------------------
 
-    def _translate_s_bounds_to_log_s(self):
-        """Rewrite user-supplied lens.<j+1>.s lower/upper bounds onto log_s.
-
-        s is a derived parameter (s = 10**log_s); the sampling bounds live
-        on log_s.  Companion slot j is LENS ELEMENT j+1 -- element 0 is the
-        masked primary, whose entries would be warn-dropped, so targeting
-        it here would silently lose the user's bound.
-        Keys are already standardized to lens.<i>.<param> form.
-        """
+    def _user_s_bound(self, elem, field):
+        """The user's own ``lens`` s ``field`` for element ``elem``, from
+        the most specific of the three spellings, or None."""
         up = self.config_manager.user_params
-        for j in range(self.n_companions):
-            if self.companion_motion[j] == "keplerian":
-                continue  # no log_s: s is derived from the orbit (C24)
-            elem = j + 1
-            entry = user_entry(up, f"lens.{elem}.s")
-            if entry is None:
-                continue
-            if "lower" not in entry and "upper" not in entry:
-                continue
-            log_key = f"lens.{elem}.log_s"
-            log_entry = user_entry(up, log_key)
-            if log_entry is None:
-                log_entry = {}
-            for bound in ("lower", "upper"):
-                if bound not in entry:
+        for key in (
+            f"lens.{elem}.s",
+            f"lens.{self.names[elem]}.s",
+            "lens.s",
+        ):
+            entry = user_entry(up, key)
+            if entry is not None and entry.get(field) is not None:
+                return entry[field]
+        return None
+
+    def _s_bound_entries(self):
+        """Apply the user's lens.<k>.s lower/upper to the SAMPLED log_s.
+
+        s = 10**log_s is derived, so a bound the user wrote on s can only
+        hold as a hard bound on log_s.  log10 is monotonic, so the
+        translation is unambiguous and is applied as a convenience (JDE
+        2026-10-31), WITHOUT touching ``user_params`` (CLAUDE.md; review
+        2.1.26(f) -- this used to pop the user's s bounds and write log_s
+        bounds into ``user_params``, so the ledger, ``export_solution`` and
+        mkparam reported a log_s bound nobody wrote and lost the s bound the
+        user did).  Returns ``{param: (channel, {field: per-element list})}``
+        with NaN on every element left alone:
+
+        * log_s takes log10(user bound) through "overrides".  That channel
+          combines a bound as the TIGHTER of it and the defaults.yaml one --
+          exactly what the same number written by the user on log_s gets,
+          since a user bound never widens a defaults.yaml limit (review
+          2.1.6) -- so the start is what the old user_params write produced.
+          A user who also bounds log_s itself on that element has stated
+          one bound twice: that raises, so no override ever clips a user
+          log_s bound (whose clip warning would blame a "component-computed
+          validity bound").
+        * s, the derived element, must not take the user's bound as well --
+          a soft barrier on top of the hard one (double counting).  An
+          OPTION puts back its defaults.yaml bound on those elements, the
+          barrier it had before the user wrote anything.  A user s bound
+          WIDER than the default is not applied to log_s either (the
+          tighter bound wins), and ``resolve()``'s "WIDENS the defaults.yaml"
+          warning for s says so in the user's own spelling; that warning is
+          truthful only because s's defaults bounds are 10**log_s's, which
+          is checked here.
+
+        Companion slot j is LENS ELEMENT j+1; element 0, the masked
+        primary, has no s.  A keplerian-mode companion has no log_s (s is
+        derived from the orbit, C24), so a bound there stays a soft barrier
+        on s and is not translated.
+        """
+        n = self.n_elements
+        defaults = self.config_manager.base_defaults["lens"]
+        out = {"log_s": ("overrides", {}), "s": ("options", {})}
+        logged = []
+        for field in ("lower", "upper"):
+            s_default = float(defaults["s"][field])
+            log_default = float(defaults["log_s"][field])
+            if not np.isclose(10.0**log_default, s_default, rtol=1e-12):
+                raise RuntimeError(
+                    f"mulensing/defaults.yaml: lens s {field} ({s_default}) "
+                    f"must be 10**(log_s {field}) = {10.0**log_default}; a "
+                    "user s bound is applied to log_s, and the two must "
+                    "agree for resolve()'s widening warning on s to be true."
+                )
+            log_vals = np.full(n, np.nan)
+            s_vals = np.full(n, np.nan)
+            wrote_log_s = self.user_wrote_field("log_s", field)
+            for j in range(self.n_companions):
+                if self.companion_motion[j] == "keplerian":
                     continue
-                val = float(entry.pop(bound))
+                elem = j + 1
+                val = self._user_s_bound(elem, field)
+                if val is None:
+                    continue
+                val = float(val)
                 if val <= 0.0:
                     raise ValueError(
-                        f"lens.{elem}.s {bound} bound must be positive "
-                        f"(s > 0); got {val}."
+                        f"lens.{self.names[elem]}.s {field} bound must be "
+                        f"positive (s > 0); got {val}."
                     )
-                log_entry[bound] = float(np.log10(val))
-            up[log_key] = log_entry
+                if wrote_log_s[elem]:
+                    raise ValueError(
+                        f"lens.{self.names[elem]}: both 's' and 'log_s' "
+                        f"carry a '{field}' bound -- one bound stated "
+                        f"twice.  Keep one of them (an s bound is applied "
+                        f"to log_s as log10)."
+                    )
+                log_vals[elem] = np.log10(val)
+                s_vals[elem] = s_default
+                logged.append(
+                    f"lens.{self.names[elem]}.s {field} {val:g} -> "
+                    f"log_s {field} {log_vals[elem]:.4f}"
+                )
+            if np.isfinite(log_vals).any():
+                out["log_s"][1][field] = log_vals.tolist()
+                out["s"][1][field] = s_vals.tolist()
+        if logged:
             logger.info(
-                f"Translated lens.{elem}.s bound(s) to log_s "
-                f"(log10): {log_key} = "
-                f"{{{', '.join(f'{b}: {log_entry[b]:.4f}' for b in ('lower', 'upper') if b in log_entry)}}}."
+                "Applying your s bound(s) to the sampled log_s (s = "
+                f"10**log_s): {'; '.join(logged)}.  Your params entries are "
+                "unchanged."
             )
+        return {k: v for k, v in out.items() if v[1]}
 
     @property
     def prefix(self):
@@ -404,11 +473,6 @@ class Lens(Component):
 
     def register_parameters(self, system):
         """Stage 3: the per-body manifest (masked primary)."""
-        # s is derived from the sampled log_s; move any user s bounds onto
-        # log_s before the manifest/relaxation engine run.  A companion in
-        # keplerian orbital-motion mode has no log_s (skipped inside).
-        self._translate_s_bounds_to_log_s()
-
         if self.n_companions >= 1:
             # Seed alpha hints (degrees, user unit) from user xalpha/yalpha
             # entries so inspect_start can display alpha before the
@@ -560,6 +624,17 @@ class Lens(Component):
             self.manifest = mode_manifest(
                 modes, table, options=options, where=self.prefix
             )
+            # s is derived from the sampled log_s: a user s bound is applied
+            # to log_s, never written into user_params (review 2.1.26(f)).
+            for param, (channel, fields) in self._s_bound_entries().items():
+                if channel == "overrides":
+                    self.manifest[param] = merge_overrides(
+                        self.manifest[param], fields
+                    )
+                else:
+                    self.manifest[param] = merge_options(
+                        self.manifest[param], **fields
+                    )
         else:
             # A single point lens: no per-body geometry exists at all.
             self.manifest = {}
