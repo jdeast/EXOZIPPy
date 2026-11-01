@@ -358,12 +358,14 @@ class _ProbeProgress:
     an ETA at the element rate so far.  Nothing is logged by a probe that
     finishes inside the first interval; one that logged at least once also
     logs its closing total, so the last line of a slow probe is never a
-    stale "in progress".
+    stale "in progress".  ``label`` names the caller ("Whitening probe",
+    "Seed ledger").
     """
 
-    def __init__(self, total, where):
+    def __init__(self, total, where, label="Whitening probe"):
         self.total = int(total)
         self.where = where
+        self.label = label
         self.t0 = time.monotonic()
         self.last = self.t0
         self.n_lines = 0
@@ -386,7 +388,7 @@ class _ProbeProgress:
             eta = "ETA unknown (no element finished yet)"
         flight = "" if n_in_flight is None else f", {n_in_flight} in flight"
         logger.info(
-            f"Whitening probe: {n_done}/{self.total} element(s) done, "
+            f"{self.label}: {n_done}/{self.total} element(s) done, "
             f"{n_evals} logp evaluation(s){flight} ({self.where}), "
             f"elapsed {elapsed:.0f} s, {eta}."
         )
@@ -394,6 +396,13 @@ class _ProbeProgress:
     def finish(self, n_evals):
         if self.n_lines:
             self.beat(self.total, n_evals, force=True)
+
+
+# What the whitening pass does with an element whose probe timed out; the
+# seed ledger passes its own sentence (probe_points' ``timeout_note``).
+_WHITEN_TIMEOUT_NOTE = (
+    "it keeps its preliminary (declared or propagated) scale."
+)
 
 
 def _probe_elements(
@@ -411,14 +420,58 @@ def _probe_elements(
 
     Returns {(key, i): (scale_or_None, method, grad_nats)} -- _probe_element's
     triple -- or _TIMED_OUT for an element abandoned on `eval_timeout`.
+    The one-center case of probe_points, which holds the serial/pool rule.
+    """
+    res = probe_points(
+        [raw_start],
+        [map_lp],
+        logp_fn,
+        [(0, key, i) for key, i in elems],
+        t_logp,
+        probe_kw,
+        cores=cores,
+        eval_timeout=eval_timeout,
+    )
+    return {(key, i): r for (_c, key, i), r in res.items()}
+
+
+def probe_points(
+    centers,
+    center_lps,
+    logp_fn,
+    elems,
+    t_logp,
+    probe_kw,
+    *,
+    cores=1,
+    eval_timeout=None,
+    label="Whitening probe",
+    name_of=None,
+    timeout_note=_WHITEN_TIMEOUT_NOTE,
+):
+    """Probe every (center, key, flat_index) in ``elems``.
+
+    ``centers`` is a list of raw-point dicts and ``center_lps`` their logp;
+    element (c, key, i) is the curvature probe of ``centers[c][key].flat[i]``
+    around ``centers[c]`` (the whitening pass has one center, the seed
+    ledger one per seed: review 2.6.43).  Returns {(c, key, i):
+    (scale_or_None, method, grad_nats)} -- _probe_element's triple -- or
+    _TIMED_OUT for an element abandoned on `eval_timeout`.
 
     Serial (in this process) when the resolved grant is one core, or when
-    the logp is cheap (``t_logp``, the start's own evaluation, below
+    the logp is cheap (``t_logp``, a center's own evaluation, below
     PROBE_POOL_MIN_LOGP_S) and no `eval_timeout` asks for enforcement;
     otherwise on a pool (_probe_on_pool).  Both drive the same coroutine per
-    element, so their results are bit-identical.
+    element, so their results are bit-identical.  ``label`` heads the log
+    lines, ``name_of(e)`` names an element in them (default "key[i]") and
+    ``timeout_note`` says what the caller does with a timed-out element.
     """
     from .samplers import _common
+
+    if name_of is None:
+
+        def name_of(e):
+            return f"{e[1]}[{e[2]}]"
 
     if cores is None or cores <= 0:
         cores = _common.default_cores()
@@ -429,34 +482,61 @@ def _probe_elements(
     )
     if want_pool:
         return _probe_on_pool(
-            raw_start,
+            centers,
+            center_lps,
             logp_fn,
             elems,
-            map_lp,
             probe_kw,
             cores=int(cores),
             eval_timeout=eval_timeout,
+            label=label,
+            name_of=name_of,
+            timeout_note=timeout_note,
         )
 
-    progress = _ProbeProgress(len(elems), "serial, 1 core")
+    progress = _ProbeProgress(len(elems), "serial, 1 core", label)
     n_evals = [0]
     results = {}
-    for n_done, (key, i) in enumerate(elems):
+    # ONE scratch copy per center, reused for every probe of it: the slot is
+    # perturbed, evaluated and restored (in a finally, so a raising logp
+    # cannot leave it dirty for the next element) -- the same float the
+    # pool path's fresh copy holds (center + step), at a fraction of the
+    # copying.
+    scratch = {}
+    for n_done, e in enumerate(elems):
+        c, key, i = e
+        if c not in scratch:
+            scratch[c] = {k: v.copy() for k, v in centers[c].items()}
+        probe = scratch[c]
+        lp_c = center_lps[c]
 
-        def eval_delta(step, key=key, i=i):
-            probe = {k: v.copy() for k, v in raw_start.items()}
-            probe[key].flat[i] += step
+        def eval_delta(step, probe=probe, key=key, i=i, lp_c=lp_c):
+            saved = probe[key].flat[i]
+            probe[key].flat[i] = saved + step
             n_evals[0] += 1
-            return map_lp - float(logp_fn(probe))
+            try:
+                return lp_c - float(logp_fn(probe))
+            finally:
+                probe[key].flat[i] = saved
 
-        results[(key, i)] = _probe_element(eval_delta, **probe_kw)
+        results[e] = _probe_element(eval_delta, **probe_kw)
         progress.beat(n_done + 1, n_evals[0])
     progress.finish(n_evals[0])
     return results
 
 
 def _probe_on_pool(
-    raw_start, logp_fn, elems, map_lp, probe_kw, *, cores, eval_timeout
+    centers,
+    center_lps,
+    logp_fn,
+    elems,
+    probe_kw,
+    *,
+    cores,
+    eval_timeout,
+    label,
+    name_of,
+    timeout_note,
 ):
     """The pooled probe: every element's search in flight at once.
 
@@ -482,25 +562,23 @@ def _probe_on_pool(
     from .samplers import _common
 
     _common.set_worker_globals(logp_fn)
-    pool, n_workers = _common.create_pool(
-        cores, 2 * len(elems), "Whitening probe", logger
-    )
+    pool, n_workers = _common.create_pool(cores, 2 * len(elems), label, logger)
     if pool is None:  # pragma: no cover - create_pool returns None only
-        # for one worker, which _probe_elements already routed serially.
+        # for one worker, which probe_points already routed serially.
         raise RuntimeError(
-            f"Whitening probe: create_pool gave no pool for cores={cores} "
+            f"{label}: create_pool gave no pool for cores={cores} "
             f"and {len(elems)} element(s)"
         )
-    timeout_note = (
+    timeout_msg = (
         f", each logp call under eval_timeout={float(eval_timeout):g}s"
         if eval_timeout is not None
         else " (no eval_timeout: a hung call is not written off)"
     )
     logger.info(
-        f"Whitening probe: {len(elems)} element(s) on {n_workers} worker "
-        f"process(es){timeout_note}."
+        f"{label}: {len(elems)} element(s) on {n_workers} worker "
+        f"process(es){timeout_msg}."
     )
-    progress = _ProbeProgress(len(elems), f"{n_workers} workers")
+    progress = _ProbeProgress(len(elems), f"{n_workers} workers", label)
 
     results = {}
     gens = {}
@@ -522,8 +600,8 @@ def _probe_on_pool(
         ready.extend((e, st) for st in steps)
 
     def _submit(e, st):
-        key, i = e
-        probe = {k: v.copy() for k, v in raw_start.items()}
+        c, key, i = e
+        probe = {k: v.copy() for k, v in centers[c].items()}
         probe[key].flat[i] += st
         seq[0] += 1
         sid = seq[0]
@@ -555,14 +633,12 @@ def _probe_on_pool(
         }
         if not stale:
             return
-        for (key, i), st in stale.items():
-            e = (key, i)
+        for e, st in stale.items():
             logger.warning(
-                f"Whitening probe: a logp call for {key}[{i}] exceeded "
+                f"{label}: a logp call for {name_of(e)} exceeded "
                 f"eval_timeout={float(eval_timeout):g}s (raw step "
                 f"{st:+.6g} from the start); abandoning that element's "
-                f"probe -- it keeps its preliminary (declared or "
-                f"propagated) scale."
+                f"probe -- {timeout_note}"
             )
             results[e] = _TIMED_OUT
             gens.pop(e).close()
@@ -578,8 +654,8 @@ def _probe_on_pool(
         ready.clear()
         ready.extend(survivors + rest)
         logger.warning(
-            "Whitening probe: recycling the worker pool -- a hung worker "
-            "never rejoins it on its own."
+            f"{label}: recycling the worker pool -- a hung worker never "
+            f"rejoins it on its own."
         )
         pool = _common.recycle_pool(pool, n_workers)
 
@@ -604,15 +680,15 @@ def _probe_on_pool(
                         # error here is the pool's plumbing failing, which
                         # nothing downstream can repair.
                         raise RuntimeError(
-                            f"Whitening probe: the worker pool failed on "
-                            f"{meta[0][0]}[{meta[0][1]}]: "
+                            f"{label}: the worker pool failed on "
+                            f"{name_of(meta[0])}: "
                             f"{type(exc).__name__}: {exc}"
                         ) from exc
                     e, st, _t0 = meta
                     n_evals[0] += 1
                     if e in waiting:
                         steps, got = waiting[e]
-                        got[st] = map_lp - float(lp)
+                        got[st] = center_lps[e[0]] - float(lp)
                         if len(got) == len(steps):
                             del waiting[e]
                             _advance(e, [got[x] for x in steps])

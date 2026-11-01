@@ -571,7 +571,7 @@ def _posterior_matrix(idata, layout, D):
     return X
 
 
-def _batch_logp(model, layout, points):
+def _batch_logp(model, layout, points, cores=None):
     """logp (jacobian=True) at each row of points (M, D) via fork pool.
 
     jacobian=True gives the density over the unconstrained raw space -- the
@@ -594,7 +594,15 @@ def _batch_logp(model, layout, points):
     _EV_LP_FN = logp_fn
     _EV_LAYOUT = eval_layout
 
-    n_workers = max(1, min(mp.cpu_count(), M))
+    # The sampler's core grant, never mp.cpu_count(): on a shared node that
+    # is the node's CPUs, not the job's, and every worker forks AFTER the
+    # trace is loaded -- the multi-GB-per-worker wrap-up blowup run.py's
+    # _compute_lp_from_model documents (review 2.3.9; this pool was missed,
+    # found by the 2.6.43 wrap-up audit).  cores=None is the AUTO grant.
+    from ..samplers._common import default_cores
+
+    grant = default_cores() if cores is None else max(1, int(cores))
+    n_workers = max(1, min(grant, M))
     if n_workers == 1 or M < 64:
         _off, vals = _ev_eval_block((points, 0))
         return vals
@@ -674,6 +682,7 @@ def estimate_mode_evidences(
     unsupported_max=DEFAULT_UNSUPPORTED_MAX,
     seed=20260712,
     log_norm=None,
+    cores=None,
 ):
     """Estimate each mode's local evidence by bridge sampling.
 
@@ -697,6 +706,8 @@ def estimate_mode_evidences(
         DEFAULT_UNSUPPORTED_MAX).  Those draws are counted and kept as
         zero-density draws either way -- they are never dropped.
     seed : RNG seed for reproducible proposal draws.
+    cores : the worker grant for the logp pool (None: the AUTO grant,
+        samplers._common.default_cores); never the node's CPU count.
     log_norm : float, optional -- the constant (nats) that normalizes the
         model logp's prior terms, ``System.evidence_log_norm()``.  Added to
         every mode's bridge lnZ, so the reported lnZ is the NORMALIZED log
@@ -801,7 +812,7 @@ def estimate_mode_evidences(
 
     if all_points:
         stacked = np.vstack(all_points)
-        logp_all = _batch_logp(model, layout, stacked)
+        logp_all = _batch_logp(model, layout, stacked, cores=cores)
     else:
         logp_all = np.zeros(0)
 
