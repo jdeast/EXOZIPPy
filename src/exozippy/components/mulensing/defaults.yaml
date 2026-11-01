@@ -824,6 +824,31 @@ mulensinstrument:
   # facility -- unit conversion, the LaTeX table, links, bound_scale -- works
   # on it.  Override per light curve in params.yaml; sigma must be nonzero
   # (an exact zeropoint would make f_source deterministic given the SED).
+  neighbor_fraction:
+    # Third light as a FRACTION of the blend: neighbor_flux (below) =
+    # neighbor_fraction * max(f_blend, 0).  Sampled ONLY on light curves with
+    # `sed_constrains_blend: true` -- with the tie off, f_blend is already
+    # free and a neighbor term is exactly degenerate with it in ANY light
+    # curve, finite-source or not (the light curve measures only the sum).
+    # [0, 1] is the PHYSICAL support, not a modelling choice: the neighbor
+    # light is part of the blend and every other contributor (the lens, a
+    # companion, any modeled star) is non-negative, so 0 <= neighbor_flux <=
+    # f_blend exactly.  Uniform on it is the conditional prior with no number
+    # in it; it replaced a uniform on [0, 2 x median flux] in flux units,
+    # whose width was arbitrary and which, integrated against the tie,
+    # weighted the blend by its own size (mulensing.md, "neighbor_flux").
+    # Both bounds are also validity limits through the manifest "overrides"
+    # channel: a params-file bound may tighten them, and a looser one is
+    # clipped back with a warning.  Unselected light curves are pinned at 0
+    # (no third light).  0.5 is only a start: the middle of the support.
+    lower: 0.0
+    upper: 1.0
+    initval: 0.5
+    init_scale: 0.1
+    unit: ""
+    internal_unit: ""
+    description: "Neighbor fraction of the blend flux"
+    latex: f_{\rm nb}/f_b
   neighbor_flux:
     # Third light: blend flux NOT supplied by any modeled star, in the data
     # file's own flux system.  Exists because the blend-tie assumption
@@ -831,26 +856,22 @@ mulensinstrument:
     # resolution: across the 44 Roman-fidelity DC2018 events the lens star
     # supplies a median 15% of the blend, and unrelated line-of-sight stars
     # dominate it in 80% of events.  With this term the tie becomes the
-    # physically correct inequality f_blend >= f_lens (positivity does the
-    # work).  Sampled ONLY on light curves with `sed_constrains_blend: true`
-    # -- with the tie off, f_blend is already free and a neighbor term is
-    # exactly degenerate with it in ANY light curve, finite-source or not
-    # (the light curve measures only the sum).  upper/initval are installed
-    # per light curve from the MEDIAN OBSERVED flux (2x and 0.05x), since
-    # the file's flux zeropoint is arbitrary (the upper as a modelling
-    # default a params-file upper may tighten or loosen, the start as a
-    # ranked hint) -- not from the bootstrapped
-    # baseline, which moves with the seed and the topology and would make
-    # this prior's width differ between fits of one light curve
-    # (mulensing.md, "Priors that must not depend on the seed").
-    lower: 0.0
-    upper: 1.0e+30
-    initval: 0.0
-    init_scale: 0.1
+    # physically correct inequality f_blend >= f_lens.  DERIVED from
+    # neighbor_fraction (above), so its support is exactly [0, f_blend]
+    # (0 where f_blend <= 0, i.e. q_source > 1: no room for third light).
+    # The max() enters linearly (f_lens + neighbor_flux, with f_lens > 0),
+    # never under a sqrt or log, so its zero gradient on the clamped side is
+    # harmless.  A params-file lower/upper here is a soft barrier on the
+    # derived value (a user prior, in flux units); a start seeds nothing --
+    # seed neighbor_fraction instead.
     unit: ""
     internal_unit: ""
     description: "Neighbor blend flux"
     latex: f_{\rm nb}
+    expressions:
+      default:
+        func_name: "calc_neighbor_flux"
+        deps: [ "neighbor_fraction", "f_blend" ]
 
   zeropoint:
     # No `initval:` key, like every other DERIVED parameter in this file

@@ -10,6 +10,10 @@ a neighbor term is exactly degenerate with it (the light curve measures only
 the sum, finite-source or not).  With the tie on, positivity of the neighbor
 flux converts the tie from the equality ``f_blend = f_lens_pred`` into the
 physically correct inequality ``f_blend >= f_lens_pred``.
+
+It is sampled as ``neighbor_fraction`` on [0, 1] and derived as
+``neighbor_fraction * max(f_blend, 0)``, so its support is exactly the
+physical ``[0, f_blend]`` with no flux scale in it (review 2.1.26(b)).
 """
 
 from pathlib import Path
@@ -100,47 +104,92 @@ def test_no_gate_no_parameter():
     """
     Given the shipped KMT config (no sed_constrains_blend anywhere),
     When the system is prepared,
-    Then neighbor_flux is not declared at all -- the parameter only exists
-    where the blend tie makes it identifiable.
+    Then neither neighbor_fraction nor neighbor_flux is declared -- the
+    parameter only exists where the blend tie makes it identifiable.
     """
     system = _load_kmt()
+    assert "neighbor_fraction" not in system.mulensinstrument.manifest
     assert "neighbor_flux" not in system.mulensinstrument.manifest
 
 
-def test_gated_manifest_pins_and_scales(kmt_nb_system):
+def test_gated_manifest_support_is_physical(kmt_nb_system):
     """
     Given sed_constrains_blend on KMTC04 only,
     When the model is built,
-    Then neighbor_flux element 0 is sampled and elements 1-2 are pinned at
-    the defaults.yaml 0.0, and upper/initval scale with each light curve's
-    MEDIAN OBSERVED flux -- a property of the data, not of the bootstrap's
-    seed-dependent baseline (fs_init), so the same light curve gets the same
-    prior support whatever the seed or the model topology.
+    Then neighbor_fraction element 0 is sampled on exactly [0, 1] -- the
+    physical support, with no flux scale read from the data or the seed --
+    from the middle of it, elements 1-2 are pinned at 0 (no third light),
+    and neighbor_flux is DERIVED (review 2.1.26(b)).
     """
     system, model, point = kmt_nb_system
     inst = system.mulensinstrument
-    nb = inst.neighbor_flux
-    scale = np.asarray(inst.flux_median_init, dtype=float)
-    # Non-vacuity: the median and the bootstrap genuinely differ here, so
-    # the assertions below say which one the bound reads.
-    assert not np.allclose(
-        scale, np.asarray(inst.fs_init, dtype=float), rtol=1e-6, atol=0.0
-    )
-
+    frac = inst.neighbor_fraction
     i_on = list(inst.names).index("KMTC04")
-    assert nb.element_is_sampled(i_on)
-    assert np.isclose(
-        nb.initval[i_on], 0.05 * scale[i_on], rtol=1e-12, atol=0.0
-    )
+    assert frac.element_is_sampled(i_on)
+    assert float(frac.lower[i_on]) == 0.0
+    assert float(frac.upper[i_on]) == 1.0
+    assert float(frac.initval[i_on]) == 0.5
     for i in range(inst.n_elements):
         if i == i_on:
             continue
-        assert not nb.element_is_sampled(i)
-        assert nb.sigma[i] == 0.0
-        assert nb.initval[i] == 0.0  # no hint: the defaults.yaml 0.0
-    assert np.allclose(
-        np.asarray(nb.upper, dtype=float), 2.0 * scale, rtol=1e-12, atol=0.0
-    )
+        assert not frac.element_is_sampled(i)
+        assert frac.sigma[i] == 0.0
+        assert frac.initval[i] == 0.0
+    # Derived: no value variable of its own, only neighbor_fraction's.
+    names = {v.name for v in model.value_vars}
+    assert not any("neighbor_flux" in n for n in names)
+    assert any("neighbor_fraction" in n for n in names)
+    entry = inst.manifest["neighbor_fraction"]
+    assert "upper" not in {k for k in entry if k != "overrides"}
+    assert entry["overrides"]["upper"] == [1.0] * inst.n_elements
+    assert entry["overrides"]["lower"] == [0.0] * inst.n_elements
+
+
+def test_neighbor_flux_is_fraction_of_blend(kmt_nb_system):
+    """
+    Given the gated system at its start,
+    When neighbor_flux is evaluated,
+    Then it is neighbor_fraction * f_blend on the sampled element and 0 on
+    the pinned ones -- so neighbor_flux <= f_blend holds exactly.
+    """
+    system, model, point = kmt_nb_system
+    inst = system.mulensinstrument
+    i_on = list(inst.names).index("KMTC04")
+    f_b = np.atleast_1d(_eval(model, inst.f_blend.value, point))
+    f_nb = np.atleast_1d(_eval(model, inst.neighbor_flux.value, point))
+    frac = np.atleast_1d(_eval(model, inst.neighbor_fraction.value, point))
+    assert f_b[i_on] > 0
+    assert np.isclose(f_nb[i_on], frac[i_on] * f_b[i_on], rtol=1e-12)
+    assert np.isclose(frac[i_on], 0.5, rtol=1e-12)
+    for i in range(inst.n_elements):
+        if i != i_on:
+            assert f_nb[i] == 0.0
+
+
+def test_calc_neighbor_flux_negative_blend_and_gradient():
+    """
+    Given a negative f_blend (q_source > 1: no room for third light),
+    When calc_neighbor_flux and its gradient are evaluated,
+    Then the flux is 0 and every gradient entry is finite -- the max()
+    enters linearly, so its clamped side multiplies nothing infinite (the
+    where-trap rule in CLAUDE.md).
+    """
+    import pytensor.tensor as pt
+
+    from exozippy.components.mulensing.physics import calc_neighbor_flux
+
+    frac = pt.dscalar("frac")
+    fb = pt.dscalar("fb")
+    out = calc_neighbor_flux(frac, fb)
+    f_lens = 0.3
+    logp = -0.5 * (2.5 * pt.log10((f_lens + out) / pt.maximum(fb, 1e-30))) ** 2
+    fn = pytensor.function([frac, fb], [out, *pytensor.grad(logp, [frac, fb])])
+    val, g_frac, g_fb = fn(0.7, -2.0)
+    assert val == 0.0
+    assert np.isfinite(g_frac) and np.isfinite(g_fb)
+    val, g_frac, g_fb = fn(0.7, 2.0)
+    assert np.isclose(val, 1.4)
+    assert np.isfinite(g_frac) and np.isfinite(g_fb)
 
 
 def test_blend_potential_matches_hand_formula(kmt_nb_system):
@@ -182,69 +231,30 @@ def test_blend_potential_matches_hand_formula(kmt_nb_system):
     f_nb = float(
         np.atleast_1d(_eval(model, inst.neighbor_flux.value, point))[i_on]
     )
-    assert f_nb > 0  # the scaled initval, not the pinned default
+    assert f_nb > 0  # the sampled start, not the pinned 0
 
     f_lens = 10 ** (-0.4 * (m_pred - zp))
     resid = 2.5 * np.log10(max(f_lens + f_nb, 1e-30) / max(f_b, 1e-30))
     expected = -0.5 * (resid / 0.2) ** 2
     assert np.isclose(got, expected, rtol=1e-10), (got, expected)
 
-    # One-sidedness is then algebra on the matched formula: a blend brighter
-    # than the lens prediction is absorbed exactly by f_nb = f_b - f_lens >= 0,
-    # while a blend fainter than the lens prediction cannot be (f_nb >= 0
-    # keeps resid >= 2.5*log10(f_lens/f_b) > 0).  Pin the support here so a
-    # bounds edit cannot silently break that argument.
-    assert float(np.atleast_1d(inst.neighbor_flux.lower)[i_on]) == 0.0
-
-
-def test_no_user_value_writes_nothing_and_ranks_the_start(kmt_nb_system):
-    """
-    Given the gated system and no user neighbor_flux entry,
-    When it is prepared,
-    Then the start is a ranked DERIVED_DATA hint (provenance, not an
-    "overrides" initval), nothing reached user_params, and the upper is a
-    manifest OPTION, not an override (review 2.1.26(b)).
-    """
-    from exozippy.config import PRECEDENCE_DERIVED_DATA
-
-    system, _, _ = kmt_nb_system
-    inst = system.mulensinstrument
-    cm = system.config_manager
-    i_on = list(inst.names).index("KMTC04")
-    path = f"{inst.prefix}.{i_on}.neighbor_flux"
-    assert cm.hint_ranks[path] == PRECEDENCE_DERIVED_DATA
-    # The engine's own inject-back of a solved start ({initval, derived})
-    # is expected; a bound in user_params would be a component write.
-    assert not any(
-        "upper" in v for k, v in cm.user_params.items() if "neighbor_flux" in k
-    )
-    entry = inst.manifest["neighbor_flux"]
-    assert "upper" not in (entry.get("overrides") or {})
-    assert "initval" not in (entry.get("overrides") or {})
-    assert len(entry["upper"]) == inst.n_elements
-
 
 @pytest.fixture(scope="module")
 def kmt_nb_user_system(kmt_nb_system):
     """Given sed_constrains_blend on KMTC04 and KMTS04, and a params file
-    that LOOSENS KMTC04's upper (10x the median flux, past the 2x default)
-    and sets its start, and TIGHTENS KMTS04's upper (0.5x), provide
-    (system, median-flux scale)."""
+    that TIGHTENS KMTC04's neighbor_fraction upper (0.5) and sets its start,
+    and tries to LOOSEN KMTS04's upper (2.0, past the physical 1), provide
+    the prepared and built system."""
     import os
 
-    scale = np.asarray(
-        kmt_nb_system[0].mulensinstrument.flux_median_init, dtype=float
-    )
     system = _load_kmt(
         constrain_blend_on=("KMTC04", "KMTS04"),
         extra_params={
-            "mulensinstrument.KMTC04.neighbor_flux": {
-                "upper": float(10.0 * scale[0]),
-                "initval": float(0.3 * scale[0]),
+            "mulensinstrument.KMTC04.neighbor_fraction": {
+                "upper": 0.5,
+                "initval": 0.3,
             },
-            "mulensinstrument.KMTS04.neighbor_flux": {
-                "upper": float(0.5 * scale[1]),
-            },
+            "mulensinstrument.KMTS04.neighbor_fraction": {"upper": 2.0},
         },
     )
     cwd = os.getcwd()
@@ -253,37 +263,62 @@ def kmt_nb_user_system(kmt_nb_system):
         system.build_model()
     finally:
         os.chdir(cwd)
-    return system, scale
+    return system
 
 
-def test_user_may_loosen_and_tighten_the_upper(kmt_nb_user_system):
+def test_user_may_tighten_but_not_loosen(kmt_nb_user_system):
     """
     Given the user bounds above,
     When the model is built,
-    Then each user upper stands as written -- looser AND tighter than the
-    2x default -- while the element the user did not bound keeps 2x.  Under
-    the old "overrides" upper the loosened bound was clipped back to 2x.
+    Then the tighter upper stands, the looser one is clipped back to the
+    physical 1 (the validity-limit channel; resolve warns, naming it), and
+    the element the user did not bound keeps 1.
     """
-    system, scale = kmt_nb_user_system
+    system = kmt_nb_user_system
     names = list(system.mulensinstrument.names)
-    upper = np.asarray(
-        system.mulensinstrument.neighbor_flux.upper, dtype=float
-    )
     assert names[:2] == ["KMTC04", "KMTS04"]
-    assert np.isclose(upper[0], 10.0 * scale[0], rtol=1e-12, atol=0.0)
-    assert np.isclose(upper[1], 0.5 * scale[1], rtol=1e-12, atol=0.0)
-    assert np.isclose(upper[2], 2.0 * scale[2], rtol=1e-12, atol=0.0)
+    upper = np.asarray(
+        system.mulensinstrument.neighbor_fraction.upper, dtype=float
+    )
+    assert upper[0] == 0.5
+    assert upper[1] == 1.0
+    assert upper[2] == 1.0
 
 
-def test_user_start_beats_the_hint(kmt_nb_user_system):
+def test_loosening_warns(caplog):
+    """
+    Given a params-file neighbor_fraction upper past 1,
+    When the system is prepared,
+    Then resolve warns that the user bound was not applied (the stricter,
+    physical bound wins).
+    """
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        _load_kmt(
+            constrain_blend_on=("KMTC04",),
+            extra_params={
+                "mulensinstrument.KMTC04.neighbor_fraction": {"upper": 2.0}
+            },
+        )
+    msgs = [
+        r.getMessage()
+        for r in caplog.records
+        if "neighbor_fraction" in r.getMessage()
+        and "user upper=2" in r.getMessage()
+    ]
+    assert msgs, [r.getMessage() for r in caplog.records][-20:]
+
+
+def test_user_start_beats_the_default(kmt_nb_user_system):
     """
     Given a user initval on KMTC04 and none on KMTS04,
     When the model is built,
-    Then KMTC04 starts at the user's value and KMTS04 at the 0.05x hint.
+    Then KMTC04 starts at the user's value and KMTS04 at the 0.5 default.
     """
-    system, scale = kmt_nb_user_system
     init = np.asarray(
-        system.mulensinstrument.neighbor_flux.initval, dtype=float
+        kmt_nb_user_system.mulensinstrument.neighbor_fraction.initval,
+        dtype=float,
     )
-    assert np.isclose(init[0], 0.3 * scale[0], rtol=1e-12, atol=0.0)
-    assert np.isclose(init[1], 0.05 * scale[1], rtol=1e-12, atol=0.0)
+    assert np.isclose(init[0], 0.3, rtol=1e-12, atol=0.0)
+    assert np.isclose(init[1], 0.5, rtol=1e-12, atol=0.0)

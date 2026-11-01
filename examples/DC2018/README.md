@@ -128,7 +128,7 @@ events (`dccv` in the answer key, 93 of 293) are refused unless `--allow-cv`;
 | `log_f_total` | log10(median data flux) +/- 2 dex, per band | all |
 | `err_scale` | uniform [0.5, 2] | all |
 | likelihood | Gaussian; `--hogg` restores the mixture (out_scale <= 10x median error) | all |
-| `neighbor_flux` | uniform [0, 2 x median data flux] (set by the component) | all |
+| `neighbor_flux` | `neighbor_fraction` uniform [0, 1], `neighbor_flux = neighbor_fraction * f_blend` (the physical support; set by the component) | all |
 | `zeropoint` | `magsys: AB`; W149 N(layout zeropoint, hypot(0.02, grey)), Z087 linked to it, 0.02 sqrt(2) on the difference | all |
 | stars, SED | `dc18_sweep_config.py`'s recipe (av from the clump colour, lens feh N(0, 0.5), torres / mann / mamajek, galactic model on the source) | all |
 | `source.Source.rho` | defaults.yaml soft cap 10 (FFPs can exceed 1); report-only on 1L1S | 1L1S, 1L1S_fs |
