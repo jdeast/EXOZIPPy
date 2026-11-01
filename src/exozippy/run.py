@@ -1237,7 +1237,16 @@ def _run_fit(config, gui, user_params=None):
 
             try:
                 seed_ledger = build_seed_ledger(
-                    system, model, raw_starts, seed_indices
+                    system,
+                    model,
+                    raw_starts,
+                    seed_indices,
+                    # The sampler's grant and per-call budget (review
+                    # 2.6.43): serial in this process, the ledger held
+                    # OGLE-2013-BLG-0341's 112-core jobs 19.5 h at ~225 s
+                    # per logp, silent and untimed.
+                    cores=cores,
+                    eval_timeout=eval_timeout,
                 )
             except Exception:
                 logger.warning(
@@ -1856,6 +1865,8 @@ def _wrap_up(
         == "evidence",
         seed_ledger=seed_ledger,
         hot_status=hot_status,
+        # The bridge's logp pool takes the sampler's grant (2.6.43 audit).
+        cores=cores,
     )
 
     # A posterior piled against a component's modelling cap (the hogg

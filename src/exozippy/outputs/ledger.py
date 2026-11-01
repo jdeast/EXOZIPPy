@@ -229,7 +229,16 @@ def hot_search_from_json(blob):
     return ledger_from_json(json.dumps(data["ledger"])), data["status"]
 
 
-def build_seed_ledger(system, model, raw_starts, seed_indices, logp_fn=None):
+def build_seed_ledger(
+    system,
+    model,
+    raw_starts,
+    seed_indices,
+    logp_fn=None,
+    *,
+    cores=1,
+    eval_timeout=None,
+):
     """Measure a Laplace record for every (polished) seed start.
 
     ``raw_starts``/``seed_indices`` are get_raw_starts' output in the
@@ -237,47 +246,84 @@ def build_seed_ledger(system, model, raw_starts, seed_indices, logp_fn=None):
     n_seeds x n_elements x O(15) logp evaluations -- the model is whitened,
     so the curvature brackets land immediately.
 
+    ``cores`` / ``eval_timeout`` choose where those evaluations run, by the
+    whitening probe's rule (whitening.probe_points): serial in this process
+    for one core or a cheap logp, otherwise every seed's every element in
+    flight at once on a worker pool, each call under ``eval_timeout``
+    (review 2.6.43: serial, this held OGLE-2013-BLG-0341's 112-core jobs
+    19.5 h at ~225 s per logp with no progress line).  The records are
+    bit-identical either way.  An element whose probe timed out records a
+    width of 1 raw unit -- what any failed probe here records -- and a
+    WARNING names the seed and element.
+
     Returns a list of SeedRecord ordered like ``raw_starts``.
     """
-    from ..whitening import _probe_element
+    import time
+
+    from ..whitening import _TIMED_OUT, probe_points
 
     if logp_fn is None:
         logp_fn = model.compile_logp()
 
     lookup = {p.label: p for p in system.get_all_parameters()}
-    records = []
-    for s, center in enumerate(raw_starts):
-        lp0 = float(logp_fn(center))
+    centers = [
+        {k: np.array(v, dtype=float, copy=True) for k, v in c.items()}
+        for c in raw_starts
+    ]
+    # Each seed's own logp, in this process: n_seeds calls (the points the
+    # polish already evaluated), and the slowest of them decides serial vs
+    # pool exactly as the start's evaluation does for the whitening probe.
+    lps = []
+    t_logp = 0.0
+    for center in centers:
+        t0 = time.monotonic()
+        lps.append(float(logp_fn(center)))
+        t_logp = max(t_logp, time.monotonic() - t0)
 
+    elems = [
+        (s, key, i)
+        for s, center in enumerate(centers)
+        for key, val in center.items()
+        for i in range(val.size)
+    ]
+    if centers:
+        logger.info(
+            f"Seed ledger: probing {len(elems)} element(s) across "
+            f"{len(centers)} seed(s) for their curvature widths..."
+        )
+
+    def _name(e):
+        return f"seed {int(seed_indices[e[0]])} {e[1]}[{e[2]}]"
+
+    results = probe_points(
+        centers,
+        lps,
+        logp_fn,
+        elems,
+        t_logp,
+        {},
+        cores=cores,
+        eval_timeout=eval_timeout,
+        label="Seed ledger",
+        name_of=_name,
+        timeout_note=(
+            "its ledger width is recorded as 1 raw unit (the whitened "
+            "scale), as for any failed probe."
+        ),
+    )
+
+    records = []
+    for s, center in enumerate(centers):
+        lp0 = lps[s]
         raw_scales = {}
         log_sigma_sum = 0.0
-        # ONE scratch copy of the whole center, reused for every probe.
-        # _probe_element's bracket+bisect ladder calls eval_delta dozens of
-        # times per element, and this used to rebuild the entire center dict
-        # on every one of them -- for a perturbation of a single slot.  The
-        # slot is restored after each evaluation instead, so the scratch is
-        # always the unperturbed center on entry, exactly as a fresh copy
-        # was.  (The restore is in a finally: a non-finite logp is a normal
-        # outcome here -- _probe_element reads a wall inside +/-s as
-        # past-target -- and an exception must not leave the scratch dirty
-        # for the next element.)
-        probe = {
-            k: np.array(v, dtype=float, copy=True) for k, v in center.items()
-        }
         for key, val in center.items():
-            n = np.asarray(val).size
-            sc = np.ones(n)
-            for i in range(n):
-
-                def eval_delta(step, key=key, i=i):
-                    saved = probe[key].flat[i]
-                    probe[key].flat[i] = saved + step
-                    try:
-                        return lp0 - float(logp_fn(probe))
-                    finally:
-                        probe[key].flat[i] = saved
-
-                scale, _method, _g = _probe_element(eval_delta)
+            sc = np.ones(val.size)
+            for i in range(val.size):
+                res = results[(s, key, i)]
+                if res is _TIMED_OUT:
+                    continue
+                scale, _method, _g = res
                 if scale is not None and np.isfinite(scale):
                     sc[i] = scale
             raw_scales[key] = sc.reshape(np.shape(val))
@@ -1158,6 +1204,8 @@ def discover_hot_modes(
             model,
             polished_all,
             list(range(next_index, next_index + len(polished_all))),
+            cores=cores,
+            eval_timeout=eval_timeout,
         )
     else:
         recs_all = []
