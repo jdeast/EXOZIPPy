@@ -1288,7 +1288,9 @@ def _mixed_bounded_unbounded_model(sigma_on_unbounded):
     return model, p
 
 
-@pytest.mark.parametrize("sigma_on_unbounded", [2.0, np.nan])
+# Only the sigma case: an unbounded element with NO sigma has no stated prior
+# and build_pymc refuses it (review 1.2.10, tests/test_no_stated_prior.py).
+@pytest.mark.parametrize("sigma_on_unbounded", [2.0])
 def test_mixed_bounded_unbounded_vector_gradient_is_finite(sigma_on_unbounded):
     """
     Given a vector parameter mixing a logit-bounded element with an element

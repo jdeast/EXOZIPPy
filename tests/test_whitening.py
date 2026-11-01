@@ -741,9 +741,9 @@ def test_whitening_persistence_round_trip(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_unbounded_no_sigma_posterior_invariant_under_rescale():
-    """Given a sampled element with INFINITE bounds and no sigma -- so
-    nothing cancels its raw N(0,1) and that raw prior IS its prior,
+def test_unbounded_sigma_posterior_invariant_under_rescale():
+    """Given a sampled element with INFINITE bounds and a sigma -- so its raw
+    N(0,1) IS its prior N(mu, sigma),
     When set_whitening applies a probe-measured multiplier,
     Then the logp as a function of the PHYSICAL value is unchanged.
 
@@ -752,7 +752,9 @@ def test_unbounded_no_sigma_posterior_invariant_under_rescale():
     m*init_scale) -- and m is measured from the data, so the prior width
     became data-dependent.  The neighbouring unbounded-WITH-sigma case was
     already excluded for exactly this reason; the guard was written as "has
-    an explicit sigma" instead of "the raw N(0,1) is the prior".
+    an explicit sigma" instead of "the raw N(0,1) is the prior".  Since
+    review 1.2.10 the no-sigma element raises at build (no stated prior), so
+    the unbounded-with-sigma element is the one non-logit case left to pin.
     """
     # Arrange
     p = Parameter(
@@ -761,6 +763,8 @@ def test_unbounded_no_sigma_posterior_invariant_under_rescale():
         init_scale=1.0,
         lower=-np.inf,
         upper=np.inf,
+        mu=0.0,
+        sigma=1.0,
     )
     with pm.Model() as model:
         p.build_pymc()
@@ -784,7 +788,7 @@ def test_unbounded_no_sigma_posterior_invariant_under_rescale():
     )
 
 
-def test_unbounded_no_sigma_scale_is_reported_not_applied():
+def test_unbounded_sigma_scale_is_reported_not_applied():
     """Given the same element,
     When set_whitening runs,
     Then the shared linear scale is untouched and the measured value comes
@@ -797,6 +801,8 @@ def test_unbounded_no_sigma_scale_is_reported_not_applied():
         init_scale=1.0,
         lower=-np.inf,
         upper=np.inf,
+        mu=0.0,
+        sigma=1.0,
     )
     with pm.Model():
         p.build_pymc()

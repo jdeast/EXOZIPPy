@@ -90,9 +90,9 @@ def derived_constraint_message(field, sources=None):
 # persisted whitening all key on).  What that raw coordinate's density is
 # depends on the element's path:
 #
-#   * NON-LOGIT elements (fewer than two finite bounds): x = mu + scale*raw,
-#     and raw ~ N(0, 1) IS the prior -- N(mu, sigma), or N(initval,
-#     init_scale) with no sigma.  They keep exactly that density.
+#   * NON-LOGIT elements (fewer than two finite bounds, admitted only with a
+#     sigma -- review 1.2.10): x = mu + sigma*raw, and raw ~ N(0, 1) IS the
+#     prior N(mu, sigma).  They keep exactly that density.
 #   * LOGIT elements (two finite bounds): the prior is U(lower, upper), and
 #     section C's `logit_uniform_prior.<label>` potential supplies all of it:
 #     the Jacobian log(q(1-q)) of the sigmoid (plus the saturation guard past
@@ -1823,6 +1823,60 @@ class Parameter:
             "refuses.\n" + advice
         )
 
+    def _no_prior_message(self, offenders, inits, lowers, uppers):
+        """Render the fatal 'sampled element with no stated prior' error.
+
+        A sampled element needs two finite bounds (uniform prior, logit
+        path) or a ``sigma > 0`` (explicit Gaussian).  Anything else used to
+        fall through to a linear path whose raw N(0,1) made the prior
+        N(initval, init_scale) -- centered on a start value, with a width
+        from defaults.yaml: a prior nobody stated (review 1.2.10).  Values
+        are reported in the USER unit; the missing side(s) are named.
+        """
+
+        def user_units(val, i):
+            return self.from_internal(val, index=i)
+
+        def bound(val, i):
+            return f"{user_units(val, i):.10g}" if np.isfinite(val) else "none"
+
+        unit = self._unit_suffix()
+        lines = []
+        for i in offenders:
+            src = self._element_initval_source(i)
+            missing = [
+                f
+                for f, b in (("lower", lowers[i]), ("upper", uppers[i]))
+                if not np.isfinite(b)
+            ]
+            lines.append(
+                f"  {self.get_display_label(int(i))}: start "
+                f"{user_units(inits[i], i):.10g}{unit}, lower "
+                f"{bound(lowers[i], i)}, upper {bound(uppers[i], i)}{unit}, "
+                f"no sigma (start value from: {src}; missing: "
+                f"{' and '.join(missing)})"
+            )
+        where = (
+            f" (params file: {self.source_file})" if self.source_file else ""
+        )
+        return (
+            f"Sampled parameter with no stated prior{where}:\n"
+            + "\n".join(lines)
+            + "\n"
+            + "Every sampled element needs either two finite bounds (a "
+            "uniform prior on [lower, upper]) or a 'sigma' > 0 (an explicit "
+            "Gaussian prior). Without either, the only prior left would be "
+            "one nobody stated -- EXOZIPPy used to center a Gaussian on the "
+            "START value with the defaults.yaml init_scale as its width, "
+            "which silently biased the fit toward wherever it began; it now "
+            "refuses.\n"
+            "Fix: add the missing 'lower'/'upper' for this element to your "
+            "params file, or give it a 'sigma' (with a 'mu') to state a "
+            "Gaussian prior. If every fit of this parameter needs the bound, "
+            "the parameter's entry in the component's defaults.yaml should "
+            "carry it at its physical or code-validity limit."
+        )
+
     def _element_expression_specs(self, expr_raw, n_elements):
         """``(per-element specs, whole-vector expression)`` for this build.
 
@@ -1952,13 +2006,14 @@ class Parameter:
             sigma sets the whitening scale.
           - Unbounded with sigma > 0: raw ~ N(0,1), val = mu + sigma * raw.
             The raw prior IS the Gaussian; no separate potential needed.
-          - Unbounded with NO sigma: linear, val = initval + init_scale * raw.
-            Its raw N(0,1) is kept here too, so this element's prior IS
-            N(initval, init_scale).  build_pymc warns about it (see
-            implicit_prior_idx below), because it is the one case where
-            init_scale is a modeling statement rather than conditioning.
+          - Not two finite bounds and NO sigma: RAISES (no_prior_idx below,
+            review 1.2.10).  The linear path's raw N(0,1) would make the
+            prior N(initval, init_scale) -- centered on a start value, a
+            prior nobody stated.  A single finite bound WITH a sigma takes
+            the Gaussian path above, its bound enforced by section B's soft
+            barrier.
 
-        Raw variables are N(0,1) on the two linear paths and flat on the
+        Raw variables are N(0,1) on the linear path and flat on the
         logit one. init_scale is always in physical units;
         for logit params it is converted to logit-space internally via the
         Jacobian and affects only tuning/conditioning, never the posterior --
@@ -1966,7 +2021,7 @@ class Parameter:
         U(lower, upper) for ANY scale, and it is
         why the startup whitening rescale is provably posterior-preserving
         THERE.  The claim is scoped to that branch and does not extend to the
-        two linear ones above, where the raw N(0,1) is the prior itself; so
+        linear (sigma) one above, where the raw N(0,1) is the prior itself; so
         on a logit element init_scale is only PRELIMINARY (the whitening
         scales live in pytensor.shared variables, and set_whitening()
         replaces them in place with the probe-measured posterior scales
@@ -2386,9 +2441,9 @@ class Parameter:
         gaussian_mus = np.copy(inits)
         gaussian_scales = np.copy(scales)
 
-        # Sampled elements with neither two finite bounds nor a sigma: their
-        # prior is their raw N(0,1), i.e. N(initval, init_scale).
-        implicit_prior_idx = []
+        # Sampled elements with neither two finite bounds nor a sigma: fatal
+        # (no stated prior), collected so the error lists every one.
+        no_prior_idx = []
 
         for i in range(n_elements):
             if not is_sampled[i]:
@@ -2476,26 +2531,15 @@ class Parameter:
                 gaussian_mus[i] = mus[i] if has_mu else inits[i]
                 gaussian_scales[i] = sigmas[i]
             else:
-                # No two finite bounds and no sigma: fall back to linear with
-                # N(0,1).  That raw density is kept (_raw_logp), so this element's
-                # prior IS N(initval, init_scale) -- the one place where
-                # init_scale is a posterior term rather than pure
-                # conditioning.  set_whitening therefore refuses to rescale
-                # it (a data-measured multiplier would make the prior width
-                # data-dependent), so say so once per parameter.
-                gaussian_mus[i] = inits[i]
-                gaussian_scales[i] = scales[i]
-                implicit_prior_idx.append(i)
+                # No two finite bounds and no sigma: no stated prior.  The
+                # linear path's raw N(0,1) would make it N(initval,
+                # init_scale) -- a stealth prior centered on the start
+                # (review 1.2.10, JDE 2026-11-01: raise).
+                no_prior_idx.append(i)
 
-        if implicit_prior_idx:
-            logger.warning(
-                f"Parameter '{self.label}': element(s) {implicit_prior_idx} "
-                f"are sampled with no finite lower/upper pair and no sigma, "
-                f"so their prior is N(initval, init_scale) from defaults -- "
-                f"init_scale is a real prior width here, and the whitening "
-                f"probe deliberately leaves it alone. Give the element two "
-                f"finite bounds (uniform prior) or a sigma (explicit "
-                f"Gaussian prior) to state the prior yourself."
+        if no_prior_idx:
+            raise ValueError(
+                self._no_prior_message(no_prior_idx, inits, lowers, uppers)
             )
 
         # 4. BUILD RAW VARIABLES
@@ -3737,9 +3781,9 @@ class Parameter:
         first, which is what a tool or a test may legitimately do -- but it
         is no longer what carries the production path.)
         Elements whose raw N(0,1) IS the prior -- every NON-LOGIT element,
-        i.e. anything without two finite bounds -- are never touched.  Their
-        scale is the prior width (sigma when one was given, init_scale when
-        the bounds are infinite and none was), not a whitening choice; only
+        i.e. anything without two finite bounds, which build_pymc admits
+        only with a sigma -- are never touched.  Their scale is the prior
+        width sigma, not a whitening choice; only
         the logit branch's raw coordinate is flat (its prior is section C's
         Jacobian), and only there is the rescale provably posterior-preserving.  Non-finite
         or non-positive entries (a failed probe) leave that element's scale
@@ -3787,9 +3831,9 @@ class Parameter:
             else:
                 # NON-LOGIT elements are never rescaled.  Their raw N(0,1)
                 # is kept (only logit raws are flat, _raw_logp), so
-                # the raw prior IS this element's prior: N(mu, sigma) when a
-                # sigma was given, N(initval, init_scale) when the bounds are
-                # infinite and no sigma was.  The multiplier is measured from
+                # the raw prior IS this element's prior, N(mu, sigma) (a
+                # sampled element with neither two finite bounds nor a sigma
+                # is refused by build_pymc, review 1.2.10).  The multiplier is measured from
                 # the data, so rescaling would make the prior WIDTH
                 # data-dependent -- circular, and a violation of the
                 # "posterior provably unchanged" invariant that only holds

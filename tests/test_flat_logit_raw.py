@@ -175,7 +175,8 @@ def test_a_nan_raw_still_poisons_logp(flat_leaf):
 def test_a_mixed_vector_keeps_the_normal_on_its_non_logit_element():
     """
     Given one parameter vector with a logit element and an unbounded element
-      whose prior is its raw N(0, 1) (no sigma: N(initval, init_scale)),
+      whose stated prior N(5, 0.3) is its raw N(0, 1) (an unbounded element
+      with no sigma is refused, review 1.2.10),
     When the RV's own log density is evaluated,
     Then it is -0.5*raw**2 on the unbounded element only, plus the kept
       -ln sqrt(2 pi) per element; the logit element's raw contributes
@@ -189,6 +190,8 @@ def test_a_mixed_vector_keeps_the_normal_on_its_non_logit_element():
         lower=[0.0, -np.inf],
         upper=[10.0, np.inf],
         init_scale=[0.1, 0.3],
+        mu=[np.nan, 5.0],
+        sigma=[np.nan, 0.3],
     )
     with pm.Model() as model:
         p.build_pymc()
@@ -206,7 +209,7 @@ def test_a_mixed_vector_keeps_the_normal_on_its_non_logit_element():
 
 def test_an_all_non_logit_vector_is_still_a_plain_normal():
     """
-    Given a parameter with no logit element,
+    Given a parameter with no logit element (unbounded, with a sigma),
     When it is built,
     Then its raw RV is the same pm.Normal(0, 1) it always was, so such
       parameters are unchanged bit for bit.
@@ -217,6 +220,8 @@ def test_an_all_non_logit_vector_is_still_a_plain_normal():
         init_scale=0.5,
         lower=-np.inf,
         upper=np.inf,
+        mu=1.0,
+        sigma=0.5,
     )
     with pm.Model() as model:
         p.build_pymc()
@@ -235,7 +240,7 @@ def test_every_nuts_backend_samples_the_flat_raw(backend):
     """
     Given a logit element under a N(3, 0.5) likelihood (its flat raw plus
       Jacobian is a uniform prior, far wider than the likelihood) and an
-      unbounded element whose prior is its raw N(0, 1), i.e. N(1, 0.5),
+      unbounded element whose stated prior is N(1, 0.5) -- its raw N(0, 1),
     When it is sampled with each NUTS backend (pymc with two worker
       processes, so the model is shipped to them; nutpie; numpyro and
       blackjax through JAX),
@@ -258,6 +263,8 @@ def test_every_nuts_backend_samples_the_flat_raw(backend):
         lower=-np.inf,
         upper=np.inf,
         init_scale=0.5,
+        mu=1.0,
+        sigma=0.5,
     )
     with pm.Model():
         x = px.build_pymc()
