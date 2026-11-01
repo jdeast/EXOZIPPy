@@ -24,11 +24,9 @@ uniform prior is section C's Jacobian for any scale, so the scale affects
 conditioning alone.  It is
 exactly the set set_whitening rescales.  Every NON-logit element (anything
 without two finite bounds) is left untouched, because there the raw N(0,1) IS
-the prior: N(mu, sigma) when a sigma was given, and N(initval, init_scale)
-when the bounds are infinite and no sigma was -- the one place init_scale is
-a posterior term rather than conditioning, and one a data-measured multiplier
-would turn into a data-dependent prior width.  build_pymc warns when it builds
-such an element.  So the invariant holds for the pass as a whole, but only
+the prior N(mu, sigma) (build_pymc refuses a sampled element with neither two
+finite bounds nor a sigma, review 1.2.10), and a data-measured multiplier
+would turn it into a data-dependent prior width.  So the invariant holds for the pass as a whole, but only
 because the branch it does not hold for is never rescaled.
 
 After the rescale, every raw direction costs ~0.5 nats per unit step: the
