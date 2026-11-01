@@ -88,7 +88,7 @@ dependencies = [
     "dynesty>=3.1.0,<4.0.0",
     "ultranest>=4.5.0,<5.0.0",
     "matplotlib>=3.11.1,<4.0.0",
-    "astropy>=7.2.0,<8.0.0",
+    "astropy>=7.2.3,<8.0.0",
     # celerite v1 used to be pinned here. It was imported nowhere in the tree
     # (the GP terms all come from celerite2) and was the ONLY dependency
     # blocking Python 3.14 -- its wheels stop at cp312, so even 3.13 was
