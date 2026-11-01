@@ -647,6 +647,158 @@ def test_the_remedy_pins_the_sampled_element():
     assert "planet.log_q_raw" not in [v.name for v in model.free_RVs]
 
 
+# A pin on planet.mass with the host's sampled logmass pinned too: log_q is
+# then a fixed number, so the pin is applied to log_q (review 2.1.26(e), JDE
+# 2026-10-31 "when a user's fixed parameter unambiguously propagates to a
+# sampled parameter, we can apply it directly").  lens.b.q is the companion's
+# derived mass ratio, so its seed is dropped: both masses fix it.
+_MASS_PIN = {"initval": 2.0, "sigma": 0}
+_HOST_PIN = {"initval": float(np.log10(0.5)), "sigma": 0}
+
+
+def _pinned_params(extra=None):
+    p = _binary_params(
+        {
+            "planet.b.mass": dict(_MASS_PIN),
+            "star.Lens.logmass": dict(_HOST_PIN),
+        }
+    )
+    p.pop("lens.b.q")
+    p.update(extra or {})
+    return p
+
+
+def _start_logp(system, model):
+    return float(model.compile_logp()(system.get_raw_start(model)))
+
+
+def test_mass_pin_with_pinned_host_is_applied_to_log_q(caplog):
+    """
+    Given planet.b.mass sigma: 0 on a log_q planet whose host logmass is
+    pinned,
+    When the model is built,
+    Then log_q is fixed at log10(m_p/m_host) (unit conversion by the engine,
+    not by hand), the derived mass reproduces the user's 2 M_J, the build
+    says so at INFO and does NOT warn that the pin is a no-op, and the
+    user's planet.mass entry is what export_solution reports -- log_q is
+    "solved", never a user entry.
+    """
+    import astropy.units as u
+
+    params = _pinned_params()
+    with caplog.at_level(logging.INFO):
+        system = System(_binary_config(), user_params=params)
+        system.prepare()
+        model = system.build_model()
+
+    log_q = system.planet.log_q
+    assert not np.any(np.atleast_1d(log_q.is_sampled))
+    mp = (2.0 * u.jupiterMass).to_value(u.solMass)
+    np.testing.assert_allclose(
+        np.atleast_1d(log_q.initval)[0], np.log10(mp / 0.5), rtol=1e-12
+    )
+    mass_fn = pytensor.function(
+        model.value_vars,
+        model.replace_rvs_by_values([system.planet.mass.value]),
+        on_unused_input="ignore",
+    )
+    start = system.get_raw_start(model)
+    (mass,) = mass_fn(*[start[v.name] for v in model.value_vars])
+    np.testing.assert_allclose(np.atleast_1d(mass)[0], mp, rtol=1e-10)
+
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("the pin is applied to 'planet.b.log_q'" in m for m in msgs)
+    assert not any(
+        "planet.mass" in m and "no effect on a derived" in m for m in msgs
+    )
+
+    up = system.config_manager.user_params
+    assert up["planet.0.mass"]["initval"] == 2.0
+    assert up["planet.0.mass"]["sigma"] == 0
+    export = system.config_manager.export_solution(
+        derived_params=system.derived_elements(),
+        manifest_overrides=system.manifest_overrides(),
+    )["parameters"]
+    assert export["planet.b.mass"]["provenance"]["label"] == "user"
+    assert export["planet.b.mass"]["fixed"] is True
+    assert export["planet.b.log_q"]["provenance"]["label"] == "solved"
+    assert export["planet.b.log_q"]["fixed"] is True
+
+
+def test_mass_pin_beside_a_user_log_q_pin_raises():
+    """Two statements of one quantity (a mass pin and log_q's own value) are
+    not reconciled for the user."""
+    params = _pinned_params(
+        {"planet.b.log_q": {"initval": -2.5, "sigma": 0.0}}
+    )
+    system = System(_binary_config(), user_params=params)
+    with pytest.raises(ValueError, match="two statements"):
+        system.prepare()
+
+
+def test_mass_pin_with_a_sampled_host_still_raises():
+    """The ambiguous case: with the host mass sampled, the mass pin fixes
+    neither log_q nor the host alone, so it raises with the remedy."""
+    params = _pinned_params()
+    params.pop("star.Lens.logmass")
+    system = System(_binary_config(), user_params=params)
+    with pytest.raises(ValueError, match="host star's logmass is pinned too"):
+        system.prepare()
+
+
+def test_translated_mass_pin_round_trips_through_mkparam(tmp_path):
+    """
+    Given the translated pin,
+    When mkparam writes a restart file from a trace of that model,
+    Then the file carries the user's own planet.mass and host logmass pins,
+    invents no log_q entry, and a restart from it builds the same model
+    (same start logp, log_q still fixed).
+    """
+    import yaml
+    from test_mkparam_roundtrip import _fabricate_trace
+
+    from exozippy.mkparam import write_param_file
+
+    config = _binary_config()
+    params = _pinned_params()
+    system = System(copy.deepcopy(config), user_params=copy.deepcopy(params))
+    system.prepare()
+    model = system.build_model()
+    logp0 = _start_logp(system, model)
+
+    trace = _fabricate_trace(system, model, tmp_path / "trace.nc")
+    out = write_param_file(
+        copy.deepcopy(config),
+        base_dir=str(tmp_path),
+        trace_path=str(trace),
+        output_path=str(tmp_path / "restart.params.yaml"),
+        user_params=copy.deepcopy(params),
+    )
+    with open(out) as fh:
+        written = yaml.safe_load(fh)
+
+    assert written["planet.b.mass"] == _MASS_PIN
+    assert written["star.Lens.logmass"]["sigma"] == 0
+    assert not any("log_q" in k for k in written)
+
+    # The fabricated trace nudged every sampled start; the restart is
+    # judged on the MODEL it builds, so rebuild from the user's starts with
+    # only the written pins swapped in.
+    restart = copy.deepcopy(params)
+    restart["planet.b.mass"] = written["planet.b.mass"]
+    restart["star.Lens.logmass"] = written["star.Lens.logmass"]
+    system2 = System(copy.deepcopy(config), user_params=restart)
+    system2.prepare()
+    model2 = system2.build_model()
+    assert not np.any(np.atleast_1d(system2.planet.log_q.is_sampled))
+    assert _start_logp(system2, model2) == logp0
+    # And the written file as a whole builds (every entry reloads).
+    system3 = System(copy.deepcopy(config), user_params=written)
+    system3.prepare()
+    system3.build_model()
+    assert not np.any(np.atleast_1d(system3.planet.log_q.is_sampled))
+
+
 def test_export_reports_the_real_derivation_not_the_yaml_block():
     """
     Given planet.mass now carries an expressions block used only in log_q

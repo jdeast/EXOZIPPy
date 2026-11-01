@@ -6,6 +6,7 @@ import pytensor.tensor as pt
 
 from exozippy.components.component import Component, in_topology
 from exozippy.components.parameterization import (
+    merge_options,
     merge_overrides,
     mode_manifest,
     pin_unselected,
@@ -488,6 +489,7 @@ class Planet(Component):
             mass_entries["msini"] = self._msini_bounds_override(
                 mass_entries["msini"]
             )
+        mass_entries = self._mass_pin_entries(mass_entries)
 
         # Insertion order is load-bearing, so it is preserved exactly: graph.py
         # registers the build-order nodes in manifest order, and that order is
@@ -869,15 +871,17 @@ class Planet(Component):
             )
 
         self.mass_parameterizations = modes
-        self._reconcile_mass_user_params()
+        self._reconcile_mass_user_params(system)
 
     def _user_pinned_mass(self, index):
         """Did the user pin planet `index`'s mass (sigma: 0)?
 
         A coordinate that is ON BY DEFAULT must not throw away a constraint
         the user wrote, and `sigma: 0` on an element the flip makes DERIVED
-        cannot hold (it raises, `_raise_derived_mass_pin`) -- the orbit's
-        `_pin_blocks_default` rule, for the same reason.  Read in the two spellings that survive
+        cannot hold by itself (it is applied to log_q when that is
+        unambiguous, and raises otherwise, `_reconcile_mass_user_params`) --
+        the orbit's `_pin_blocks_default` rule, for the same reason.  Read
+        in the two spellings that survive
         `standardize_param_names` (indexed, and the broadcast that covers
         every element), as `Orbit._user_pinned` does.
         """
@@ -919,31 +923,42 @@ class Planet(Component):
             entry, {"lower": lower.tolist(), "upper": upper.tolist()}
         )
 
-    def _reconcile_mass_user_params(self):
+    def _reconcile_mass_user_params(self, system):
         """Check the user's planet.mass / log_q entries against the coordinate
         each planet samples.  READ-ONLY on ``user_params`` (CLAUDE.md).
 
-        * ``sigma: 0`` on planet.mass where the mass is DERIVED (log_q or
-          m sin i is sampled) RAISES, naming the sampled coordinate to pin.
-          A pin on a derived parameter cannot hold it fixed, and moving the
-          user's pin onto another parameter for them -- what this method did
-          until review 2.1.26(e) -- rewrote their params behind their back:
-          the moved log_q pin then read as a user entry in the ledger,
-          ``export_solution`` and the startup table (JDE 2026-10-31: "we
-          should never move a user pin").  A sigma > 0 is a real prior and
-          works on the derived node as a potential, so it is left alone.
-          Bounds are not a pin either: on a derived mass they become soft
-          barriers on the physical value, the semantics wanted.
+        * ``sigma: 0`` on planet.mass where the mass is DERIVED is a pin on a
+          quantity nothing samples.  Where it propagates UNAMBIGUOUSLY to the
+          sampled coordinate it is applied there as a convenience (JDE
+          2026-10-31): a log_q planet whose host's sampled logmass the user
+          also pinned has log_q = log10(m_p/m_host) a fixed number, so log_q
+          is pinned through the manifest "overrides" channel and the engine
+          solves its value from the user's mass and the host's
+          (``self._mass_pin_on_log_q``, applied by ``_mass_pin_entries``).
+          The user's own entry stays exactly as written -- the ledger,
+          ``export_solution`` and mkparam report the planet.mass pin, and no
+          log_q user entry is invented.  Every other case RAISES naming the
+          coordinate to pin (``_raise_derived_mass_pin``): with the host mass
+          sampled the pin fixes neither log_q nor the host alone, and m sin i
+          is not m.  A sigma > 0 is a real prior and works on the derived
+          node as a potential, so it is left alone; bounds are not a pin
+          either (soft barriers on the physical value).
         * A non-positive mass initval in log_q mode raises (unrepresentable).
         * A ``planet.<i>.log_q`` entry on a planet that does not sample log_q
           raises (a stale mkparam restart file).
         """
         up = self.config_manager.user_params
+        self._mass_pin_on_log_q = np.zeros(self.n_elements, dtype=bool)
         for i in range(self.n_elements):
             mass_key, log_q_key = f"planet.{i}.mass", f"planet.{i}.log_q"
             mode = self.mass_parameterizations[i]
             if mode != "linear" and self._user_pinned_mass(i):
-                self._raise_derived_mass_pin(i, mode)
+                if mode == "log_q" and self._log_q_pin_is_unambiguous(
+                    system, i
+                ):
+                    self._mass_pin_on_log_q[i] = True
+                else:
+                    self._raise_derived_mass_pin(i, mode)
 
             # Per planet, because the coordinate is: a stale log_q entry is
             # only stale for the planets that do not sample log_q.
@@ -977,6 +992,97 @@ class Planet(Component):
                     "what you want."
                 )
 
+        for i in np.nonzero(self._mass_pin_on_log_q)[0]:
+            name = self.names[i]
+            logger.info(
+                f"'{self.prefix}.{name}.mass' sigma: 0 -- planet '{name}' "
+                f"samples log_q = log10(m_p/m_host) and its host's logmass "
+                f"is pinned too, so the pin is applied to "
+                f"'{self.prefix}.{name}.log_q' (solved from the two masses). "
+                "Your params entry is unchanged."
+            )
+
+    def _log_q_pin_is_unambiguous(self, system, index):
+        """Does planet ``index``'s planet.mass pin fix its sampled log_q?
+
+        Only when the host mass is itself a fixed number: the user pinned
+        the host's SAMPLED logmass (``sigma: 0`` with a numeric initval --
+        a link is an expression, not a number) and gave the planet mass a
+        numeric initval.  Then log_q = log10(m_p/m_host) is determined.  A
+        user log_q initval or sigma beside the mass pin is a second
+        statement of one quantity, and raises.  Each user value carries its
+        own unit; the number is solved in internal units by the relaxation
+        engine, so no conversion is written here.
+        """
+        star = system.active_components.get("star")
+        if star is None:
+            return False
+        host = int(self.star_map[index])
+        if host not in star.user_pinned_stars("logmass"):
+            return False
+        if host in star.logmass_derived_elements(system):
+            return False
+        up = self.config_manager.user_params
+
+        def most_specific(keys):
+            for key in keys:
+                entry = user_entry(up, key)
+                if entry is not None:
+                    return entry
+            return None
+
+        host_entry = most_specific(
+            (
+                f"star.{host}.logmass",
+                f"star.{star.names[host]}.logmass",
+                "star.logmass",
+            )
+        )
+        mass_entry = most_specific(
+            (
+                f"planet.{index}.mass",
+                f"planet.{self.names[index]}.mass",
+                "planet.mass",
+            )
+        )
+        for entry in (host_entry, mass_entry):
+            if not isinstance(entry.get("initval"), (int, float, list)):
+                return False
+
+        name = self.names[index]
+        for key in (f"planet.{index}.log_q", f"planet.{name}.log_q"):
+            entry = user_entry(up, key)
+            if entry is not None and ("initval" in entry or "sigma" in entry):
+                raise ValueError(
+                    f"'{self.prefix}.{name}.mass' is pinned (sigma: 0) and "
+                    f"'{key}' sets log_q's own initval/sigma: two statements "
+                    "of one quantity.  Keep one of them."
+                )
+        return True
+
+    def _mass_pin_entries(self, mass_entries):
+        """Apply the translated planet.mass pins (``_mass_pin_on_log_q``):
+        ``sigma: 0`` on those log_q elements through "overrides" (NaN leaves
+        the others alone; a pin of a coordinate the user did not write, the
+        channel config.md names for it), and ``pin_held_by`` on the derived
+        mass so its build does not warn that the user's sigma: 0 is a
+        no-op."""
+        pinned = self._mass_pin_on_log_q
+        if not pinned.any():
+            return mass_entries
+        out = dict(mass_entries)
+        out["log_q"] = merge_overrides(
+            out["log_q"], {"sigma": np.where(pinned, 0.0, np.nan).tolist()}
+        )
+        out["mass"] = merge_options(
+            out["mass"],
+            pin_held_by=[
+                f"{self.prefix}.{nm}.log_q" if p else None
+                for nm, p in zip(self.names, pinned)
+            ],
+        )
+        return out
+
     def _raise_derived_mass_pin(self, index, mode):
         """RAISE for a user ``sigma: 0`` on planet ``index``'s DERIVED mass.
 
@@ -994,7 +1100,10 @@ class Planet(Component):
                 f"'{self.prefix}.{name}.log_q: {{initval: <log10(m_p/m_host)>, "
                 f"sigma: 0}}', both masses in one unit -- or set "
                 f"'fitlogq: false' on planet '{name}' to sample the linear "
-                "mass, and pin that."
+                "mass, and pin that.  (A planet.mass pin, with a numeric "
+                "initval, is applied to log_q for you only when the host "
+                "star's logmass is pinned too, so that log_q is a fixed "
+                "number.)"
             )
         elif mode == "msini":
             what = "m sin i ('msini')"

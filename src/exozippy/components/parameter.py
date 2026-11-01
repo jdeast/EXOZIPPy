@@ -1010,6 +1010,14 @@ class Parameter:
     # resolved to; set it where the other parameterization DEFINES the value
     # (u2 == 0 exactly under a linear limb-darkening law).
     inactive_value: Optional[Number] = None
+    # Per element, the SAMPLED coordinate whose pin holds this DERIVED
+    # element constant, where a component applied the user's `sigma: 0` on
+    # the derived element to that coordinate (an unambiguous translation,
+    # JDE 2026-10-31; today only Planet's planet.mass -> log_q, review
+    # 2.1.26(e)).  None, or None on an element, means no such translation:
+    # a `sigma: 0` there is the no-op build_pymc warns about.  The user's
+    # own entry is never rewritten; this only says the pin is honored.
+    pin_held_by: Optional[list] = None
 
     # If expression is provided, parameter becomes deterministic (pm.Deterministic).
     # You can pass expression at build time too.
@@ -2175,7 +2183,28 @@ class Parameter:
         # effect on derived params.  The sentence lives in
         # `derived_constraint_message` because check_user_starts says the
         # same thing about `initval` (review 2.3.17).
-        if np.any(is_derived & (sigmas == 0)):
+        if (
+            self.pin_held_by is not None
+            and len(self.pin_held_by) != n_elements
+        ):
+            raise ValueError(
+                f"Parameter '{self.label}': pin_held_by has "
+                f"{len(self.pin_held_by)} entries for {n_elements} elements."
+            )
+        held = np.array(
+            [
+                bool(self.pin_held_by is not None and self.pin_held_by[i])
+                for i in range(n_elements)
+            ],
+            dtype=bool,
+        )
+        if np.any(held & ~(is_derived & (sigmas == 0))):
+            raise ValueError(
+                f"Parameter '{self.label}': pin_held_by names elements "
+                f"{np.nonzero(held & ~(is_derived & (sigmas == 0)))[0].tolist()}"
+                " that are not derived elements with sigma: 0."
+            )
+        if np.any(is_derived & (sigmas == 0) & ~held):
             logger.warning(
                 f"Parameter '{self.label}': "
                 + derived_constraint_message("sigma=0")
