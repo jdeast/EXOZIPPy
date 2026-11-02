@@ -38,3 +38,31 @@ updates:
         # Majors stay separate: those are the ones that need a human reading
         # a changelog, not a grouped bump alongside twelve patch releases.
         update-types: ["minor", "patch"]
+    # The platform-pinned packages are never Dependabot's to move. pyproject
+    # pins numba and numpy per platform (numba>=0.65.1 everywhere except
+    # Intel macOS, which is held at numba 0.62.1 / numpy<2.4 because that is
+    # where numba's x86_64 macOS wheels end), so poetry.lock carries TWO
+    # entries for each, one per marker -- and llvmlite and numpy-typing-compat
+    # follow them with two entries of their own. Dependabot's resolver has
+    # collapsed those pairs into one unmarked entry three times: #232
+    # (silently downgraded numba to 0.62.1 on every platform), #550 and
+    # #551. tests/test_lock_platform_pins.py catches it, and Python 3.14
+    # fails to install (llvmlite 0.45.1 has no cp314 wheel).
+    #
+    # These rules stop Dependabot from PROPOSING a bump of these four, which
+    # must be done by hand with the local poetry (`poetry update --lock
+    # numba numpy`) and checked against the pin test. They do NOT stop the
+    # collapse: #551 bumped astropy alone and still rewrote the numba/numpy
+    # entries, because Dependabot re-resolves the whole lock to apply any
+    # bump. When a grouped PR fails test_lock_platform_pins, close it and
+    # land the same bumps manually (`poetry update --lock <pkgs>`, never a
+    # bare `poetry update`), as was done for #550/#551.
+    #
+    # The single-marker platform deps (jax/jaxlib/numpyro/blackjax off Intel
+    # macOS, mkl on Windows, qtpy/pyqt6 on Linux) have one lock entry each,
+    # so there is no pair to collapse and they stay eligible.
+    ignore:
+      - dependency-name: "numba"
+      - dependency-name: "llvmlite"
+      - dependency-name: "numpy"
+      - dependency-name: "numpy-typing-compat"
