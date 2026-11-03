@@ -1,35 +1,25 @@
-"""Present-day mass function (PDMF) of each Galactic population (review 1.7.2).
+"""Present-day mass function building blocks (review 1.7.2), shared with the
+genulens port.
 
-The galacticmodel's mass prior used to apply the IMF to every star as if it
-were the mass function TODAY: every star ever born still alive and luminous.
-A microlensing lens is whatever object is there now -- stars below its
+A microlensing lens is whatever object is there TODAY: stars below their
 population's turnoff, and the dark remnants (white dwarfs, neutron stars,
-black holes) of everything heavier.  This module builds, per population
-(thin disk, thick disk, bulge), the normalized present-day density in
-x = log10(M / Msun):
+black holes) of everything heavier.  ``build_population_tables`` turns an
+IMF and, per branch, a turnoff P(alive | M_ini) into the linear present-day
+densities in x = log10(M / Msun):
 
     phi_b(x) = phi_b^lum(x) + phi_b^dark(x)
     phi_b^lum(x)  = IMF(x) * P_b(alive | x)
-    P_b(alive | M_ini) = int g_b(T) [T < tau(M_ini, [Fe/H]_b)] dT
     phi_b^dark(x) = sum_type int IMF(x_ini) (1 - P_b(alive | x_ini))
                     P(type | M_ini) delta(x - log10 m_type(M_ini)) dx_ini
 
-with the age MARGINALIZED over the population's age distribution g_b(T) at
-build time, which is exact for the mass prior and leaves one fixed 1-D table
-per population.  The prescriptions are genulens's (Koshimoto, Baba & Bennett
-2021, ApJ 917, 78 = K21; and its source, model/mass_function.cpp), which in
-turn are PopSyCLE's (Lam et al. 2020, ApJ 889, 31, App. C):
+The turnoffs are the caller's: ``koshimoto21.MassFunction`` passes genulens's
+PARSEC ``Minidie`` turnoffs per branch.  (Until review 1.7.6 the removed
+3-population model also built its own tables here, from MIST lifetimes with
+the age marginalized over each population's age distribution.)  The
+initial-final mass relations are genulens's (Koshimoto, Baba & Bennett 2021,
+ApJ 917, 78 = K21; its model/mass_function.cpp), which in turn are
+PopSyCLE's (Lam et al. 2020, ApJ 889, 31, App. C):
 
-  * ages: populations.py's (review 1.7.5; the same distributions the
-    per-star age prior uses): thin disk star formation ~ exp(-(10 Gyr -
-    T) / 7 Gyr) over 0-10 Gyr (genulens's wtSFR, i.e. more old stars;
-    0.1 Gyr logistic edge); thick disk 12 +/- 1 Gyr (K21's single age
-    given a width); bulge Gaussian 9 +/- 1 Gyr;
-  * turnoff: from OUR MIST v2.5 grid's lifetimes (``mist_lifetimes.csv``,
-    scripts/make_mist_lifetimes.py), at one [Fe/H] per population, each
-    population's MDF mean (``populations.POPULATION_FEH``: thin 0, thick
-    -0.78, bulge +0.04); genulens uses PARSEC isochrones instead, a few %
-    apart in M_die;
   * white dwarfs (M_ini < 9 Msun): Kalirai et al. 2008,
     M_WD = 0.109 M_ini + 0.394;
   * neutron stars and black holes (M_ini >= 9): Raithel, Sukhbold & Ozel
@@ -40,36 +30,21 @@ turn are PopSyCLE's (Lam et al. 2020, ApJ 889, 31, App. C):
 
 Smoothness: everything is built on a 1e-3 dex grid and the LINEAR densities
 are convolved with a Gaussian of ``SMOOTH_DEX`` (0.02 dex, the design's
-kernel) before taking the log, so the thick disk's single-age turnoff step,
-the white-dwarf upper edge (1.375 Msun) and the R18 bin edges become erf
-ramps 0.02 dex wide rather than cliffs.  A branch density never reaches
-zero: ``FLOOR_REL`` (1e-20 of the branch's peak) keeps the log finite where
-a population has no objects at all (e.g. a 3 Msun object in the 12 Gyr thick
-disk, between its neutron stars and its black holes).  That floor is for
-finiteness only -- the mixture over populations is what keeps heavy masses
-reachable (the young thin disk and the remnants): rope, not gates.
+kernel) before taking the log, so a single-age turnoff step, the white-dwarf
+upper edge (1.375 Msun) and the R18 bin edges become erf ramps 0.02 dex wide
+rather than cliffs.  The caller floors the log (``FLOOR_REL``, 1e-20 of the
+branch's peak) so it stays finite where a branch has no objects at all;
+that floor is for finiteness only -- the mixture over branches is what
+keeps heavy masses reachable (the young thin disk and the remnants): rope,
+not gates.
 
 The tables are numbers; the graph only interpolates them linearly in x
 (``interp_table``), so the gradient is a finite difference of adjacent table
 entries everywhere: no branch selection, no pt.where, no radicand.
-
-Out of scope here (review 1.7.2 ruling, JDE 2026-10-29): remnant natal kicks
-(the dark branch shares its population's kinematics), remnant LIGHT (8.10.7:
-a lens's blend tie still charges a luminous relation's light whatever its
-mass), binaries, giant-branch mass loss, a metallicity spread within a
-population.
 """
-
-from functools import lru_cache
-from pathlib import Path
 
 import numpy as np
 import pytensor.tensor as pt
-
-# The age distributions and the per-population turnoff metallicity are
-# populations.py's -- ONE definition shared with the per-star age and [Fe/H]
-# priors (review 1.7.5).
-from .populations import POPULATION_FEH, POPULATIONS, age_cdf
 
 # ---- initial-final mass relations ------------------------------------
 #: Kalirai et al. 2008 white dwarfs below this initial mass (genulens
@@ -102,48 +77,6 @@ SMOOTH_DEX = 0.02
 PAD_DEX = 0.3
 #: Relative density floor per population (finiteness only; see docstring).
 FLOOR_REL = 1e-20
-
-LIFETIMES_CSV = Path(__file__).resolve().parent / "mist_lifetimes.csv"
-
-
-@lru_cache(maxsize=1)
-def _lifetime_table():
-    """(log10 M_ini, [Fe/H] values, log10 lifetime [Gyr] (n_mass, n_feh))."""
-    with open(LIFETIMES_CSV) as fh:
-        header = [ln for ln in fh if ln.startswith("#")][-1]
-    cols = header.lstrip("# ").strip().split(",")
-    if cols[0] != "mass":
-        raise ValueError(f"{LIFETIMES_CSV}: unexpected header {cols}")
-    fehs = np.array([float(c.split("feh")[1]) for c in cols[1:]])
-    data = np.loadtxt(LIFETIMES_CSV, delimiter=",", comments="#")
-    return np.log10(data[:, 0]), fehs, data[:, 1:]
-
-
-def log10_lifetime_gyr(logm_ini, feh):
-    """log10 MIST lifetime (Gyr) at initial log10 mass(es), one [Fe/H].
-
-    Linear in log M between tracks and in [Fe/H] between grid metallicities.
-    Below the grid's 0.1 Msun the lifetime is held at 0.1 Msun's (> 1e3
-    Gyr: alive at any Galactic age); above its top mass, at the top track's.
-    """
-    logm, fehs, table = _lifetime_table()
-    if not fehs[0] <= feh <= fehs[-1]:
-        raise ValueError(
-            f"[Fe/H] = {feh} is outside the MIST lifetime table "
-            f"[{fehs[0]}, {fehs[-1]}] ({LIFETIMES_CSV.name})"
-        )
-    j = min(np.searchsorted(fehs, feh, side="right") - 1, fehs.size - 2)
-    f = (feh - fehs[j]) / (fehs[j + 1] - fehs[j])
-    col = (1.0 - f) * table[:, j] + f * table[:, j + 1]
-    return np.interp(logm_ini, logm, col)
-
-
-def alive_fraction(population, logm_ini):
-    """P_b(alive | M_ini): the fraction of population b's stars of this
-    initial mass still on their track today, age marginalized over the
-    population's age distribution (populations.age_cdf at the lifetime)."""
-    tau = 10.0 ** log10_lifetime_gyr(logm_ini, POPULATION_FEH[population])
-    return age_cdf(population, tau)
 
 
 def _p_ns(m_ini):
@@ -199,17 +132,16 @@ def _gaussian_kernel(sigma_dex, dx):
     return k / k.sum()
 
 
-def build_population_tables(log_imf, x_lo, x_hi, alive=None):
-    """Linear present-day densities of every population on one x grid.
+def build_population_tables(log_imf, x_lo, x_hi, alive):
+    """Linear present-day densities of every branch on one x grid.
 
     ``log_imf(x)`` is the (unnormalized) log IMF density in x = log10 M,
     numpy; ``[x_lo, x_hi]`` the union of the stars' logmass supports, which
-    is also the range of initial masses born.  Returns ``(x, dens)`` with
-    ``dens[pop][kind]`` for kind in ("lum", "WD", "NS", "BH"), each a linear
-    density in x on the padded grid ``x`` (smoothed, not floored, not
-    normalized).  ``alive`` ({name: f(x) -> P(alive | x)}) replaces the
-    MIST-turnoff populations (the genulens port passes its own turnoffs,
-    koshimoto21.py); ``dens`` is then keyed by its names.
+    is also the range of initial masses born; ``alive`` ({name: f(x) ->
+    P(alive | x)}) the turnoff of each branch (koshimoto21.py passes
+    genulens's).  Returns ``(x, dens)`` with ``dens[name][kind]`` for kind
+    in ("lum", "WD", "NS", "BH"), each a linear density in x on the padded
+    grid ``x`` (smoothed, not floored, not normalized).
     """
     n = int(round((x_hi - x_lo + 2 * PAD_DEX) / GRID_DEX)) + 1
     x = x_lo - PAD_DEX + GRID_DEX * np.arange(n)
@@ -248,11 +180,6 @@ def build_population_tables(log_imf, x_lo, x_hi, alive=None):
     if np.any(hv & (p_ns < 1.0) & (m_bh <= NS_MASS_RANGE[1])):
         raise ValueError("an R18 BH mass below the NS maximum")
 
-    if alive is None:
-        alive = {
-            pop: (lambda xx, p=pop: alive_fraction(p, xx))
-            for pop in POPULATIONS
-        }
     alive_fns = alive
     dens = {}
     for pop, alive_fn in alive_fns.items():
@@ -290,74 +217,6 @@ def build_population_tables(log_imf, x_lo, x_hi, alive=None):
             "BH": np.convolve(bh_d, kernel, mode="same"),
         }
     return x, dens
-
-
-class PresentDayMassFunction:
-    """The per-population log PDMF tables for one set of stars.
-
-    ``log_imf`` is the IMF's numpy log density in x (unnormalized is fine);
-    ``bounds`` the (lower, upper) logmass support of each star (arrays).
-    Exposes, per population b (POPULATIONS order):
-
-      ``log_table[b]``    log phi_b on the grid (floored, unnormalized)
-      ``dark_frac[b]``    phi_b^dark / phi_b on the grid, in [0, 1]
-      ``log_norm[b, k]``  log int phi_b over star k's support
-      ``log_lum_frac[b, k]`` log of the LUMINOUS fraction of that integral
-      ``log_imf_peak``    the log IMF's maximum on the grid (the tables'
-                          IMF unit)
-    """
-
-    def __init__(self, log_imf, lower, upper):
-        lower = np.atleast_1d(np.asarray(lower, dtype=float))
-        upper = np.atleast_1d(np.asarray(upper, dtype=float))
-        if not (np.all(np.isfinite(lower)) and np.all(np.isfinite(upper))):
-            raise ValueError(
-                "the present-day mass function needs finite star.logmass "
-                f"bounds; got lower={lower}, upper={upper}"
-            )
-        self.x, dens = build_population_tables(
-            log_imf, float(lower.min()), float(upper.max())
-        )
-        #: The tables' IMF is exp(log_imf(x) - log_imf_peak): a star whose
-        #: AGE is sampled takes log_imf(x) - log_imf_peak - log_norm[b, k]
-        #: (the luminous joint IMF x g_b(T); galacticmodel, review 1.7.5).
-        self.log_imf_peak = float(np.max(log_imf(self.x)))
-        self.x0 = float(self.x[0])
-        self.dens = dens
-        n_star = max(lower.size, upper.size)
-        lower = np.broadcast_to(lower, (n_star,))
-        upper = np.broadcast_to(upper, (n_star,))
-        self.log_table = []
-        self.dark_frac = []
-        self.log_norm = np.empty((len(POPULATIONS), n_star))
-        self.log_lum_frac = np.empty((len(POPULATIONS), n_star))
-        for b, pop in enumerate(POPULATIONS):
-            d = dens[pop]
-            dark = d["WD"] + d["NS"] + d["BH"]
-            total = d["lum"] + dark
-            total = total + FLOOR_REL * total.max()
-            self.log_table.append(np.log(total))
-            self.dark_frac.append(dark / total)
-            for k in range(n_star):
-                sel = (self.x >= lower[k]) & (self.x <= upper[k])
-                z = np.trapezoid(total[sel], self.x[sel])
-                z_lum = np.trapezoid(d["lum"][sel], self.x[sel])
-                self.log_norm[b, k] = np.log(z)
-                self.log_lum_frac[b, k] = np.log(z_lum / z)
-
-    def log_density_np(self, b, x, k=0):
-        """numpy log phi_b(x), normalized over star k's support."""
-        return np.interp(x, self.x, self.log_table[b]) - self.log_norm[b, k]
-
-    def type_fractions(self, b, x):
-        """{type: P(type | x, population b)} on numpy x, type in lum/WD/NS/BH."""
-        d = self.dens[POPULATIONS[b]]
-        tot = d["lum"] + d["WD"] + d["NS"] + d["BH"]
-        tot = tot + FLOOR_REL * tot.max()
-        return {
-            t: np.interp(x, self.x, d[t] / tot)
-            for t in ("lum", "WD", "NS", "BH")
-        }
 
 
 def interp_table(table, x0, dx, x):

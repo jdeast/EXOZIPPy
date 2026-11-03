@@ -13,7 +13,7 @@ https://github.com/nkoshimoto/genulens (GPLv3).
   of its multiplicity / mass-ratio / separation recipe and its blending
   thresholds (``koshimoto21.binary_tables``).
 - with ``--genulens ROOT`` (a genulens checkout built with CMake, as
-  scripts/make_genulens_fixture.py describes):
+  scripts/make_genulens_points.py describes):
   - ``koshimoto21_nsd.npz``: genulens's input_files/NSD_moments.dat (the
     nuclear stellar disk's density and velocity moments from the
     Sormani et al. 2021 distribution function), as arrays on its (|z|, R)

@@ -171,8 +171,9 @@ adjusted by their sum; every other term replayed bit-identical before the
 edit.  Total moves: DC2018_128 x3 +0.2124, KMT-2019-BLG-1806 x3 +0.5202,
 OGLE_0383LD +0.2139, ob07224 +0.2426, ob08092 +0.2267, ob09020 +0.4107,
 ob140939 +0.2652, ob140939_today +0.3578, ob161003 +0.4590, ob170114
--0.6682.  The presplit ob161003 recording replays with `present_day:
-false`, the model it recorded.
+-0.6682.  The presplit ob161003 recording was made under the 3-population
+Galactic model, removed in review 1.7.6, so its two galacticmodel terms are
+accepted as moved there (test_mulens_acceptance_b.py, _GALACTIC_TERMS).
 """
 
 import glob

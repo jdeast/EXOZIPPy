@@ -9,9 +9,9 @@ numbers, evaluated by genulens's functions -- to
 ``tests/fixtures/genulens_points.json``.  No genulens source is copied into
 EXOZIPPy.
 
-Where ``scripts/make_genulens_fixture.py`` records genulens's Monte Carlo
-EVENT distributions (a distribution-level check), this records the model
-itself at fixed points, so a port can be compared term by term:
+This records the model itself at fixed points, so a port can be compared
+term by term (genulens's Monte Carlo EVENT distributions are compared by the
+review 7.16.3 prior-predictive harness instead):
 
 - ``constants``: the population normalizations genulens derives at start-up
   (disk ``rho0d``/``n0d``/``n0MSd``, bar ``rho0b``/``n0MSb``/``n0b`` from its
@@ -32,8 +32,13 @@ itself at fixed points, so a port can be compared term by term:
 - ``mass`` (once, top level): the broken-power-law IMF grid, the PARSEC turnoff tables
   (``Minidie``), and the initial-final mass relation (mean and Monte Carlo).
 
-Build genulens with CMake as ``scripts/make_genulens_fixture.py`` describes,
-then
+Build genulens (C++ compiler, CMake, GSL; the Python extension is not
+needed):
+
+    cmake -S genulens -B genulens/build -DGENULENS_BUILD_PYTHON=OFF
+    cmake --build genulens/build --target genulens
+
+(With GCC 8, add ``-DCMAKE_CXX_STANDARD_LIBRARIES=-lstdc++fs``.)  Then
 
     python scripts/make_genulens_points.py /path/to/genulens
 

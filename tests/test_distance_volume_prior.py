@@ -32,7 +32,7 @@ def _build_star(config=None, params=("distance",), user_params=None):
     """Build Star parameters through the full config -> model pipeline.
 
     Returns (star, model, system) with ``system`` a stub carrying only the
-    topology dict ``_galactic_imf`` consults.
+    topology dict ``_has_galacticmodel`` consults.
     """
     config = config or {"star": [{"name": "A"}]}
     cm = ConfigManager(dict(user_params or {}), system_config=config)

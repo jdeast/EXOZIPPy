@@ -103,36 +103,15 @@ DAYS_PER_YEAR = 365.25
 # is a convention that can silently stop matching the tables.
 SIGMA_1 = math.erf(1.0 / math.sqrt(2.0))
 
-# --- 5. BULGE CONSTANTS ---
-# Bar density: Koshimoto, Baba & Bennett 2021's E+E_X model (their best
-# fit; genulens model/parameters.hpp defaults DensityParameters, model 5 +
-# add_x 5), review 1.7.3.  physics.bar_log_profile is the formula.  Until
-# 2026-10 the bar was a plain ellipsoid exp(-r_s/2) with "Zhu+17" axes
-# (1.590, 0.424, 0.424) kpc at 25 deg -- an e-folding length of 3.2 kpc
-# along the bar, against K21's ~0.9 kpc boxy main bar -- which put
-# microlensing sources ~0.9 kpc too far (D_S median 9.6 vs genulens 8.7 kpc
-# at Baade's window).
-BULGE_BAR_ANGLE = np.radians(27.0)  # bar axis vs the Sun-GC line (thetaD)
-BULGE_DENSITY_X_0 = 0.930623146993329  # kpc, main bar x0
-BULGE_DENSITY_Y_0 = 0.370784386649364  # kpc, main bar y0
-BULGE_DENSITY_Z_0 = 0.239547516030578  # kpc, main bar z0
-BULGE_DENSITY_C1 = 1.20011972384328  # boxiness in (x, y)
-BULGE_DENSITY_C2 = 4.09326795684828  # boxiness of (R_s, z)
-# X-shape: two exp(-r_s) lobes sheared by +/- B_ZX * z in x_bar.
-BULGE_X_X_0 = 0.278027059842233  # kpc
-BULGE_X_Y_0 = 0.176318528789193  # kpc
-BULGE_X_Z_0 = 0.286791941602401  # kpc
-BULGE_X_C1 = 1.3087131258784
-BULGE_X_C2 = 2.21745322869032
-BULGE_X_B_ZX = 1.37774815817195  # x shear per unit z
-BULGE_X_FRACTION = 1.43975636704683  # f_X, amplitude of each lobe vs main bar
-BULGE_X_RC = 1.30163829617294  # kpc, the X-shape's own cylindrical cutoff
-BULGE_GAMMA = -2.0  # see Koshimoto and Bennett 2020 Sec. 3.4
-# Outer cylindrical cutoff of the bar (genulens: Rc, srob).  Beyond
-# R = BULGE_RC the bar density is multiplied by a Gaussian of width
-# BULGE_RC_WIDTH in R (the X-shape's beyond BULGE_X_RC).
-BULGE_RC = 2.63178535429573  # in kpc, Koshimoto+ 2021 E+E_X Rc (genulens rc)
-BULGE_RC_WIDTH = 0.5  # in kpc (genulens srob)
+# --- 5. GALACTIC KINEMATIC CONSTANTS (start values and the background) ---
+# The galactic model is the genulens port (components/galacticmodel/
+# koshimoto21.py), which carries genulens's own constants.  What is left here
+# are the three-population kinematics of the model it replaced (removed in
+# review 1.7.6 with its bar, disk and IMF constants): the mean rotation of
+# each population, which galacticmodel/physics.expected_proper_motion uses
+# for proper-motion START values, and the bulge dispersions, whose
+# azimuthal one sets the unresolved background's proper-motion prior width
+# (components/background/background.py).
 BULGE_VELOCITY_SIGMA_1 = (
     120.0  # in km/s, basedon on Koshimoto & Bennett 2020 tab. 1
 )
@@ -145,70 +124,14 @@ BULGE_VELOCITY_SIGMA_3 = (
 BULGE_ROTATION_ANGULAR_VELOCITY = (
     50.0  # in km/s/kpc, basedon on Koshimoto & Bennett 2020 tab. 1
 )
-
-# --- 6. DISK CONSTANTS ---
-# Thin disk structure from Koshimoto, Bennett & Suzuki 2021 (genulens):
-# Rd = 2.6 kpc with the density held CONSTANT inside R = 5.3 kpc (their
-# DISK=2 "hole"/plateau -- the inner disk does not keep rising toward
-# the GC), vertical exp with 325 pc (their age bins span 61-445 pc
-# sech^2; one exp layer is our simplification).
-DISK_SCALE_LENGTH = 2.6  # in kpc, thin disk Rd (genulens Rd[1])
-DISK_RDBREAK = 5.3  # in kpc, density flat inside this R (genulens Rdbreak)
-DISK_SCALE_HEIGHT = 0.325  # in kpc, thin disk vertical scale
-# Thick disk (genulens Rd[2], zd[7]): exp in both R (same plateau) and z.
-THICK_DISK_SCALE_LENGTH = 2.2  # in kpc
-THICK_DISK_SCALE_HEIGHT = 0.903  # in kpc
-# Disk kinematics: the analytic (non-Shu) branch genulens itself provides
-# (its B14disk mode, Bennett et al. 2014): mean rotation and fixed
-# dispersions per component.  These replace the old "rough guess"
-# (220; 30,30,30).
+# Thin and thick disk mean rotation: the analytic (non-Shu) branch genulens
+# itself provides (its B14disk mode, Bennett et al. 2014).
 DISK_ROTATION_VELOCITY = 218.0  # in km/s, thin disk mean v_phi
-DISK_VELOCITY_SIGMA_U = 39.9  # in km/s, thin disk radial
-DISK_VELOCITY_SIGMA_V = 27.9  # in km/s, thin disk azimuthal
-DISK_VELOCITY_SIGMA_W = 19.1  # in km/s, thin disk vertical
 THICK_DISK_ROTATION_VELOCITY = 170.0  # in km/s (asymmetric drift included)
-THICK_DISK_VELOCITY_SIGMA_U = 67.0  # in km/s
-THICK_DISK_VELOCITY_SIGMA_V = 51.0  # in km/s
-THICK_DISK_VELOCITY_SIGMA_W = 42.0  # in km/s
-KROUPA_IMF_SLOPE = -1.3  # Kroupa IMF (mass range typical for lenses)
-SALPETER_IMF_SLOPE = -2.35  # Salpeter IMF
-
-# Chabrier (2003) SYSTEM IMF, PASP 115, 763, Table 1.  It is PIECEWISE, and
-# all five numbers below are needed to state it:
-#
-#   dN/dlog m ~ exp(-(log m - log Mc)^2 / (2 sigma^2))     m <= 1 Msun
-#   dN/dlog m ~ m^-x                                       m >  1 Msun
-#
-# The lognormal segment alone shipped as "the Chabrier IMF" until 2026-08
-# (review 3.7.1), applied over the whole [-9, 2.5] dex support.  It steepens
-# without limit above the peak -- its slope in log mass is -(x - log Mc)/
-# sigma^2, i.e. -2.02 nats/dex at 1 Msun and -5.10 at 10 -- so every massive
-# star was over-penalized relative to the IMF the label named, and the error
-# GREW with mass.  Not only a massive-lens concern: the imf_prior is one
-# pt.sum over the whole star vector, sources included, and bulge source stars
-# sit near 1 Msun.
-CHABRIER_LOG_MC = math.log10(0.22)  # dex(solMass), lognormal centre
-CHABRIER_SIGMA = 0.57  # dex, lognormal width
-CHABRIER_HIGH_MASS_SLOPE = 1.3  # x in dN/dlog m ~ m^-x above the match
-CHABRIER_MATCH_LOGMASS = 0.0  # dex, where the two segments meet (1 Msun)
-# 10%-90% width of the smoothing ramp between the two segments, in dex.  The
-# true IMF is only C0 continuous at the match -- the slope JUMPS from -2.02 to
-# -1.3*ln10 = -2.99 nats/dex -- so a faithful piecewise form has a logp kink
-# there, the same class of thing as the SHO kernel's Q = 1/2 switch.  Blending
-# across a width D deviates from the exact piecewise form by roughly
-# D * 0.97 / 8, so 0.2 dex costs ~0.02 nats.  Against that, Chabrier's own
-# high-mass exponent is uncertain at x = 1.3 +/- 0.3, i.e. +/-0.69 nats/dex of
-# slope, ~0.7 nats across a decade -- 30x larger.  The smoothing is free at
-# the IMF's own accuracy and cannot be the limiting error.
-CHABRIER_BLEND_WIDTH_DEX = 0.2
-# Hydrogen-burning minimum mass at ~solar composition (Chabrier & Baraffe
-# 2000, ARA&A 38, 337).  Composition-dependent -- ~0.072 Msun at solar
-# metallicity, rising toward ~0.09 Msun in metal-poor material -- and 0.075 is
-# the round value the low-mass literature uses.  It is also already this
-# codebase's stellar low-mass boundary (components/mann applies Mann+2015/2019
-# over 0.075-0.7 Msun), so one number serves both.  Below it an object is a
-# brown dwarf, not a star, and a STELLAR IMF has no claim on it.
-HYDROGEN_BURNING_LIMIT = 0.075  # solMass
+# genulens's inner thin-disk plateau radius (Rdbreak): the thin-disk
+# metallicity gradient of the population [Fe/H] prior is flat inside it
+# (galacticmodel/populations.py).
+DISK_RDBREAK = 5.3  # in kpc
 
 # Free-floating-planet mass function, Sumi et al. 2023 (AJ 166, 108;
 # arXiv:2303.08280), from the MOA-II 9-year survey toward the Galactic bulge.
@@ -232,37 +155,12 @@ HYDROGEN_BURNING_LIMIT = 0.075  # solMass
 FFP_MASS_FUNCTION_SLOPE = 0.96  # alpha_4, the exponent of dN/dlog M ~ M^-alpha
 FFP_MASS_FUNCTION_MIN_MEARTH = 0.33  # lowest mass Sumi+2023 fit, in M_Earth
 
-# --- 7. SUN CONSTANTS ---
+# --- 6. SUN CONSTANTS ---
 SUN_GC_DISTANCE = 8.16  # in kpc (genulens/Koshimoto+21 R0 = 8160 pc)
 SUN_Z_OFFSET = 0.025  # in kpc, Sun's height above the plane (genulens zsun)
 # Solar velocity in the galactocentric frame, genulens convention
 # (vxsun toward the GC, vysun in the rotation direction, vzsun up):
 SUN_GALCEN_V = (10.0, 243.0, 7.0)  # in km/s
-
-# --- 8. GALACTIC POPULATION NUMBER DENSITIES (stars/pc^3, MS+BD) ---
-# Branch weights for the disk/thick/bulge mixture in
-# components/galacticmodel.  These are genulens's own NUMBER-density
-# channel (n0MS* in its run_context.hpp) -- the channel it uses to decide
-# which population a star belongs to -- so no mean-stellar-mass caveat
-# applies.  Only ratios matter for the mixture; the absolute scale is
-# arbitrary but kept physical for auditability.
-#
-# Thin disk local (R0, midplane): sum of the 7 thin-disk age bins' n0MSd.
-DISK_LOCAL_NUMBER_DENSITY = 0.1633
-# Thick disk local: n0MSd[7].
-THICK_DISK_LOCAL_NUMBER_DENSITY = 7.91e-3
-# Bar central (of the MAIN bar; physics.bar_log_profile is 0 there and the
-# X-shape adds its own lobes on top): derived with genulens's VVV-box
-# budget applied to the bar profile (K21 E+E_X with its cutoffs, as
-# physics.bar_log_profile writes it):
-#   rho0b = (frho0b * M_VVV(P17) - M_disk_in_box) / int_box(profile)
-#         = (0.839015 * 1.32e10 - 1.312e9) / 2.3409e9 pc^3
-#         = 4.170 Msun/pc^3   (Portail+ 2017 box |xb|<2.2,|yb|<1.4,|z|<1.2)
-#   n0   = rho0b * fb_MS * m2nb_MS = rho0b * (1.62/2.07) / 0.227943
-# (3.60 with the pre-1.7.3 exp(-r_s/2) ellipsoid, whose box integral was
-# 9.307e9 pc^3.)  Pinned by tests/test_galactic_model.py, which recomputes
-# the integral.
-BULGE_CENTRAL_NUMBER_DENSITY = 14.32
 
 # IAU 2015, Resolution B2 zero point values
 LSUN = 1 * u.Lsun

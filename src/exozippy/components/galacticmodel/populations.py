@@ -1,38 +1,33 @@
 """Age and metallicity distributions of the Galactic populations (review 1.7.5).
 
 THE one definition of each population's age distribution g_b(T) and
-metallicity distribution function (MDF) p_b([Fe/H]), for the three branches
-of the galacticmodel mixture (thin disk, thick disk, bulge/bar).  Two
-consumers read it, and they must agree (review 1.7.5's consistency rule):
-
-  * ``pdmf.py`` -- the present-day mass function marginalizes each
-    population's age distribution at build time (``age_cdf``), and takes its
-    one turnoff metallicity per population from the MDF's mean
-    (``POPULATION_FEH``);
-  * ``galacticmodel.build_likelihood`` -- a star under the galactic model
-    whose ``age`` / ``initfeh`` is SAMPLED (in practice a star on an
-    evolutionary track) gets ``log g_b(age)`` and ``log p_b(initfeh)`` inside
-    the branch mixture, each normalized over the star's own support, so the
-    branch weights stay the physical number densities.
+metallicity distribution function (MDF) p_b([Fe/H]), for three Galactic
+populations (thin disk, thick disk, bulge/bar).  ``galacticmodel.
+build_likelihood`` reads it: a star under the galactic model whose ``age`` /
+``initfeh`` is SAMPLED (in practice a star on an evolutionary track) gets
+``log g_b(age)`` and ``log p_b(initfeh)`` inside the branch mixture, each
+normalized over the star's own support, so the branch weights stay the
+physical number densities.  Each of genulens's branches takes its
+population's distributions (``koshimoto21.POPULATION``) until they are
+ported per branch (galacticmodel.md).
 
 Each density is written ONCE for both backends (``xp=np`` for the
-normalizers and the PDMF, ``xp=pt`` for the graph), as
-``branch_log_number_densities`` and ``chabrier_logmass_logp`` are.
+normalizers, ``xp=pt`` for the graph).
 
 Ages (Gyr), on [0, AGE_MAX_GYR]:
 
   * thin disk: star formation ~ exp(-(10 Gyr - T) / 7 Gyr) over 0-10 Gyr --
     genulens's wtSFR (Koshimoto, Baba & Bennett 2021, ApJ 917, 78 = K21,
-    after Bovy 2017's tSFR = 7 Gyr), which is what #526's PDMF used.  K21
-    splits it into 7 age bins with their own scale heights; our one-layer
-    thin disk has one age distribution everywhere.  The 10 Gyr edge is a
+    after Bovy 2017's tSFR = 7 Gyr).  K21 splits it into 7 age bins with
+    their own scale heights; this prior has one thin-disk age distribution
+    everywhere.  The 10 Gyr edge is a
     LOGISTIC ramp of scale ``THIN_AGE_EDGE_GYR`` (0.1 Gyr; 10-90% over 0.44
     Gyr) rather than a step, so the per-star density is differentiable;
     K21's step is the zero-width limit.
   * thick disk: Gaussian 12 +/- 1 Gyr.  K21 (after Robin et al. 2014) uses
     a single 12 Gyr age; a delta cannot be a per-star density, so we give it
     the same 1 Gyr width K21 gives the bulge.  This is OUR choice (stated
-    here and in star.md); it smears the thick disk's turnoff by ~0.05 Msun.
+    here and in star.md).
   * bulge/bar: Gaussian 9 +/- 1 Gyr (K21, after Koshimoto et al. 2020).
 
   All three are truncated to [0, AGE_MAX_GYR], the age of the Universe
@@ -44,8 +39,8 @@ Metallicity distribution functions ([Fe/H], dex):
     the solar-neighborhood MDF, whose peak is at solar; Casagrande et al.
     2011, A&A 530, A138), centered on solar at R0 with the Cepheid radial
     gradient -0.060 dex/kpc (Genovali et al. 2014, A&A 566, A37).  The
-    gradient acts between R = 5.3 kpc (``DISK_RDBREAK``, where the density
-    model's inner plateau begins) and R = 15 kpc and is held flat outside
+    gradient acts between R = 5.3 kpc (``DISK_RDBREAK``, genulens's inner
+    thin-disk plateau) and R = 15 kpc and is held flat outside
     (smooth hinges, 50 pc wide): +0.17 dex in the inner disk, -0.41 beyond
     15 kpc.
   * thick disk: Gaussian -0.78 +/- 0.30 dex (Robin et al. 2003, A&A 409,
@@ -76,7 +71,7 @@ import pytensor.tensor as pt
 from ...constants import DISK_RDBREAK, SUN_GC_DISTANCE
 from .physics import hinge
 
-#: Branch order (galacticmodel.BRANCHES, pdmf.POPULATIONS).
+#: Population order (galacticmodel.BRANCHES).
 POPULATIONS = ("thin_disk", "thick_disk", "bulge")
 
 #: Age of the Universe (Gyr): the support of every age distribution and
@@ -105,19 +100,9 @@ THICK_FEH_SIGMA = 0.30
 #: Hill et al. 2011 Table 5 (1-D [Fe/H]): (weight, mean, sigma).
 BULGE_FEH_COMPONENTS = ((0.45, -0.30, 0.25), (0.55, 0.32, 0.11))
 
-#: The one turnoff metallicity per population the PDMF's MIST lifetimes use:
-#: each MDF's mean (the thin disk's at R0).  The thick disk's -0.78 puts its
-#: 12 Gyr dying mass at 0.856 Msun, genulens's Minidie.dat value (0.857).
-POPULATION_FEH = {
-    "thin_disk": THIN_FEH_AT_R0,
-    "thick_disk": THICK_FEH_MEAN,
-    "bulge": float(sum(w * m for w, m, _ in BULGE_FEH_COMPONENTS)),
-}
-
 _LOG_SQRT_2PI = 0.5 * float(np.log(2.0 * np.pi))
 
-#: Quadrature for the per-star normalizers and the PDMF's age CDF: the
-#: sharpest feature is the 0.1 Gyr logistic edge, ~150 steps wide here.
+#: Quadrature for the per-star normalizers: the sharpest feature is the 0.1 Gyr logistic edge, ~150 steps wide here.
 _AGE_QUAD_POINTS = 20001
 _FEH_QUAD_POINTS = 20001
 
@@ -168,21 +153,10 @@ def log_age_norm(population, lower, upper):
     return out
 
 
-def age_cdf(population, age_gyr):
-    """CDF of g_b on [0, AGE_MAX_GYR] at numpy age(s): the PDMF's
-    P_b(alive | M_ini) = age_cdf(b, tau(M_ini))."""
-    grid = np.linspace(0.0, AGE_MAX_GYR, _AGE_QUAD_POINTS)
-    f = np.exp(log_age_density(population, grid, xp=np))
-    cdf = np.concatenate(
-        [[0.0], np.cumsum(0.5 * (f[1:] + f[:-1]) * np.diff(grid))]
-    )
-    return np.interp(age_gyr, grid, cdf / cdf[-1])
-
-
 def thin_disk_feh_mean(r_kpc, xp=pt):
     """Thin-disk MDF center at cylindrical radius R (kpc): the gradient
     between THIN_FEH_R_INNER and THIN_FEH_R_OUTER, flat outside, with the
-    density model's own C-infinity hinge (50 pc) at both ends."""
+    C-infinity hinge (physics.hinge, 50 pc) at both ends."""
     r_in = THIN_FEH_R_INNER + hinge(r_kpc - THIN_FEH_R_INNER, xp)
     r_eff = THIN_FEH_R_OUTER - hinge(THIN_FEH_R_OUTER - r_in, xp)
     return THIN_FEH_AT_R0 + THIN_FEH_GRADIENT * (r_eff - SUN_GC_DISTANCE)

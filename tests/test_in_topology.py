@@ -9,8 +9,8 @@ disagreements sat exactly where a partially constructed system lives:
   but whose ``config`` lacked the key never consulted the second;
 * ``Orbit._topology`` and ``Orbit.register_parameters``' inline check never
   consulted ``config_manager.system_config`` at all;
-* only ``Star._galactic_imf`` looked at ``active_components``, the one holder
-  carrying a BUILT instance.
+* only ``Star._galactic_imf`` (now ``Star._has_galacticmodel``) looked at
+  ``active_components``, the one holder carrying a BUILT instance.
 
 ``components.component.in_topology`` is the union, and these tests are about
 the chain rather than about any one caller -- a sixth re-derivation is what
@@ -105,7 +105,7 @@ def test_config_manager_system_config_is_consulted_even_when_config_exists():
     checked both.
     """
     # Arrange
-    block = {"IMF": "Salpeter"}
+    block = {"anchor_idx": 1}
     system = _Holder(
         config={"star": []},
         config_manager=_ConfigManager({"galacticmodel": block}),

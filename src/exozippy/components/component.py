@@ -56,7 +56,8 @@ def in_topology(system, name):
       both but whose ``config`` lacked the key never consulted the second.
     * ``Orbit._topology`` and ``Orbit.register_parameters``' inline check
       consulted ``config_manager.system_config`` not at all.
-    * Only ``Star._galactic_imf`` looked at ``active_components`` first, which
+    * Only ``Star._galactic_imf`` (now ``_has_galacticmodel``) looked at
+      ``active_components`` first, which
       is the sole holder that carries the BUILT instance.
 
     The chain here is the union, in the order of decreasing authority:
@@ -73,12 +74,12 @@ def in_topology(system, name):
 
     Returns the first hit, or ``None``.  Truthiness is the common use
     (``if in_topology(system, "sed")``), and the value is there for the
-    caller that wants the instance (``Star._galactic_imf`` reads its
-    ``IMF:``).  **An empty config block is a real answer** -- ``sed: {}`` is
+    caller that wants the instance.  **An empty config block is a real answer** -- ``sed: {}`` is
     a system WITH an SED -- so this returns the block itself and callers must
     test ``is not None``, not truthiness, when an empty block matters.  The
-    two shipped callers that care (``_galactic_imf``, ``structure_consumers``)
-    read a key off it or only need the boolean, so both are safe with either.
+    two shipped callers that care (``_has_galacticmodel``,
+    ``structure_consumers``) only need the boolean or read a key off it, so
+    both are safe with either.
 
     A module function rather than only a ``System`` method because every
     caller is a component holding a ``system`` that may be a test double;
