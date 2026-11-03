@@ -93,7 +93,7 @@ def cdf_figure(port_dir, gen_dir, out_dir, run):
         fm = stats.weighted_ecdf(cols[qty], wm, x)
         f20 = stats.weighted_ecdf(g20[qty], g20["wtj"], x)
         ax, rx = axes[0, j], axes[1, j]
-        ax.plot(x, fp, color=PORT, ls="-", label="EXOZIPPy (port)")
+        ax.plot(x, fp, color=PORT, ls="-", label="EXOZIPPy")
         ax.plot(x, fg, color=GEN, ls="--", label="genulens (plain)")
         rx.plot(x, 100 * (fp - fg), color=GEN, ls="-", lw=1.0, label="plain")
         rx.plot(
@@ -122,7 +122,7 @@ def cdf_figure(port_dir, gen_dir, out_dir, run):
     fig.suptitle(
         f"{run}  (l, b) = ({sl['l']:.2f}, {sl['b']:.2f})"
         + ("  binary lenses" if binaries else "")
-        + f"   port ESS {n_p:.3g}, genulens n_eff {n_gp:.3g}",
+        + f"   EXOZIPPy ESS {n_p:.3g}, genulens n_eff {n_gp:.3g}",
         y=1.0,
     )
     _save(fig, out_dir, f"cdf_{run}")
@@ -174,9 +174,9 @@ def summary_figure(results, out_dir):
                 ax.set_ylabel(LABEL[qty])
             if row == 0:
                 ax.set_title(
-                    "port vs plain genulens"
+                    "EXOZIPPy vs plain genulens"
                     if name == "plain"
-                    else "port (bin-edge support) vs genulens Dmax 20 kpc"
+                    else "EXOZIPPy (bin-edge support) vs genulens Dmax 20 kpc"
                 )
     for ax in axes[-1]:
         ax.set_xticks(range(len(runs)))
@@ -191,7 +191,7 @@ def summary_figure(results, out_dir):
         bbox_to_anchor=(0.5, -0.03),
     )
     fig.supylabel(
-        "port / genulens - 1 (%)   [grey band: +/-1%]", x=0.0, fontsize=8
+        "EXOZIPPy / genulens - 1 (%)   [grey band: +/-1%]", x=0.0, fontsize=8
     )
     _save(fig, out_dir, "summary_quantiles")
     plt.close(fig)
@@ -206,8 +206,9 @@ def ogle_figure(port_dir, gen_dir, results, out_dir):
     ncol = 4
     nrow = int(np.ceil(n / ncol))
     fig, axes = plt.subplots(
-        nrow, ncol, figsize=(7.2, 1.75 * nrow), sharex=True, sharey=True
+        nrow, ncol, figsize=(7.2, 2.1 * nrow), sharex=True, sharey=True
     )
+    fig.subplots_adjust(hspace=0.45)
     axes = np.atleast_1d(axes).ravel()
     x = np.geomspace(0.3, 400, 400)
     for ax, run in zip(axes, runs):
@@ -257,13 +258,10 @@ def ogle_figure(port_dir, gen_dir, results, out_dir):
         ax.set_xscale("log")
         ax.set_xlim(0.5, 300)
         ax.set_ylim(0, 1)
-        ax.text(
-            0.04,
-            0.95,
+        # In the title, clear of the curves.
+        ax.set_title(
             f"{o['reference'].split()[1]} ({o['reference'].split()[0][4:]})\n"
             f"KS D = {o['port']['ks_D']:.3f}, p = {o['port']['ks_p']:.2g}",
-            transform=ax.transAxes,
-            va="top",
             fontsize=6.5,
         )
     for ax in axes[n:]:
@@ -272,7 +270,7 @@ def ogle_figure(port_dir, gen_dir, results, out_dir):
         ax.set_xlabel(LABEL["t_E"])
     for i in range(0, n, ncol):
         axes[i].set_ylabel("CDF")
-    axes[min(3, n - 1)].legend(loc="lower right", frameon=False)
+    axes[min(1, n - 1)].legend(loc="lower right", frameon=False)
     _save(fig, out_dir, "ogle_tE")
     plt.close(fig)
 
