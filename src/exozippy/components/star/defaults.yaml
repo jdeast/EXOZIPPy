@@ -12,10 +12,8 @@ star:
     # may only ever be TIGHTENED -- raise it here and FFP lenses become
     # unmodelable with no user-side recourse.  What makes such a body plausible
     # is the mass PRIOR, not the bound: give that star 'mass_function: ffp'
-    # (galacticmodel.ffp_logmass_logp).  Note the deliberate asymmetry --
-    # IMF: Salpeter raises this floor to the hydrogen-burning limit because a
-    # STELLAR IMF has no claim below it, while the FFP mass function leaves it
-    # alone because sub-stellar masses are exactly its domain.
+    # (galacticmodel.ffp_logmass_logp), which leaves this floor alone because
+    # sub-stellar masses are exactly its domain.
     lower: -9.0
     upper: 2.5
     initval: 0.0

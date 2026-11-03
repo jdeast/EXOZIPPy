@@ -1,14 +1,17 @@
-"""The galactic model's frame, pinned to an external reference.
+"""The start-value frame (physics.py), pinned to an external reference.
 
-The kinematic prior evaluates a velocity Gaussian in galactocentric polar
-coordinates, so it needs a position and a velocity IN THE SAME FRAME.  Until
-2026-10 it had two (review 1.7.1): positions were built by hand with the Sun
+The start-value hints (physics.expected_proper_motion) work in galactocentric
+polar coordinates, so they need a position and a velocity IN THE SAME FRAME.
+The likelihood is the genulens port, whose own frame is pinned in
+test_koshimoto21.py.  Until 2026-10 this frame -- then the likelihood's too,
+under the 3-population model removed in review 1.7.6 -- had two (review
+1.7.1): positions were built by hand with the Sun
 at x = +R0 while the velocities came from astropy's Galactocentric frame,
 which puts the Sun at x = -R0, so ``v_x`` entered ``v_r`` and ``v_phi`` with
 the wrong sign -- an exactly circular orbit at 4 kpc toward the bulge got
-v_r = +47 km/s.  The co-rotation tests in test_galactic_model.py compare
-log-density MARGINS through the mixture, whose hotter branches absorbed the
-error, so they passed throughout.
+v_r = +47 km/s.  The co-rotation tests of the time compared log-density
+MARGINS through the mixture, whose hotter branches absorbed the error, so
+they passed throughout.
 
 Every test here instead checks a computed QUANTITY against astropy (or
 closed-form physics) to float precision.  The model frame is astropy's
@@ -19,12 +22,9 @@ positions and velocities alike -- see the physics.py module docstring.
 
 import astropy.units as u
 import numpy as np
-import pymc as pm
 import pytest
 from astropy.coordinates import ICRS, Galactic, SkyCoord
-from test_galactic_model import _make_gm, _MockParam, _MockSystem
 
-from exozippy.components.galacticmodel import galacticmodel as gm_mod
 from exozippy.components.galacticmodel.physics import (
     GALACTOCENTRIC_FRAME,
     MODEL_FRAME_MIRROR,
@@ -112,16 +112,6 @@ def _model_polar(ra, dec, d_kpc, pm_ra, pm_dec, rv_kms):
     v = _model_velocity(basis, d_kpc, pm_ra, pm_dec, rv_kms)
     v_r, v_phi = polar_velocity(x, y, r, v[0], v[1])
     return v_r, v_phi, v[2], r
-
-
-def _polar_to_astropy(xyz_astropy, v_rad, v_co, v_z):
-    """Velocity (astropy axes) with radial-outward ``v_rad``, ``v_co``
-    along the Sun's sense of rotation and vertical ``v_z``."""
-    x, y = xyz_astropy[0], xyz_astropy[1]
-    big_r = np.hypot(x, y)
-    e_r = np.array([x, y, 0.0]) / big_r
-    e_c = np.array([y, -x, 0.0]) / big_r
-    return v_rad * e_r + v_co * e_c + np.array([0.0, 0.0, v_z])
 
 
 def _corotating(xyz_astropy, speed):
@@ -365,59 +355,7 @@ def test_velocity_map_is_astropy_and_round_trips():
 
 
 # ---------------------------------------------------------------------------
-# 5. Mirror symmetry of the axisymmetric branches
-# ---------------------------------------------------------------------------
-
-
-def _kinematic_lp_at(ra, dec, d_kpc, pm_ra, pm_dec, rv_kms):
-    gm = _make_gm()
-    system = _MockSystem()
-    system.star.ra = _MockParam(ra)
-    system.star.dec = _MockParam(dec)
-    system.star.distance = _MockParam(d_kpc * 1e3)
-    system.star.pm_ra = _MockParam(pm_ra)
-    system.star.pm_dec = _MockParam(pm_dec)
-    system.star.rv = _MockParam(rv_kms * 1e3)
-    with pm.Model() as model:
-        gm.build_likelihood(model, system)
-    return float(model["galacticmodel.kinematic_prior"].eval())
-
-
-def test_disk_kinematic_prior_is_mirror_symmetric(monkeypatch):
-    """
-    Given the disk branches alone (the bar is not axisymmetric, so its
-      density is switched off: log n_bulge -> -inf to double precision),
-    When a star at (R, phi, z) with polar velocity (v_R, v_phi, v_z) is
-      compared with its mirror image at (R, -phi, z) with the SAME polar
-      velocity -- l -> -l about the frame's own center, each built in
-      astropy and observed from the Sun,
-    Then the kinematic logp is identical (1e-9 nats): the thin and thick
-      disks are axisymmetric, so nothing in the frame may tell the two
-      apart.
-    """
-    monkeypatch.setattr(gm_mod, "BULGE_CENTRAL_NUMBER_DENSITY", 1e-300)
-    rng = np.random.default_rng(5)
-    for l_deg, b_deg, d_kpc in (
-        (6.65, 3.71, 2.5),
-        (30, -3, 4.0),
-        (5, 0, 12.0),
-        (90, 3, 1.0),
-    ):
-        xyz = _astropy_galcen(l_deg, b_deg, d_kpc)
-        polar = rng.normal(0, 40, 3) + [0.0, DISK_ROTATION_VELOCITY, 0.0]
-        twin = xyz * np.array([1.0, -1.0, 1.0])
-        lps = []
-        for p in (xyz, twin):
-            ra, dec, d, pm_ra, pm_dec, rv = _observe(
-                p, _polar_to_astropy(p, *polar)
-            )
-            assert d == pytest.approx(d_kpc, rel=1e-12)
-            lps.append(_kinematic_lp_at(ra, dec, d, pm_ra, pm_dec, rv))
-        assert lps[0] == pytest.approx(lps[1], abs=1e-9, rel=0), (l_deg, lps)
-
-
-# ---------------------------------------------------------------------------
-# 6. Sense of rotation
+# 5. Sense of rotation
 # ---------------------------------------------------------------------------
 
 

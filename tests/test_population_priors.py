@@ -1,16 +1,15 @@
 """Population-conditional age and [Fe/H] priors (review 1.7.5).
 
 galacticmodel/populations.py is the ONE definition of each Galactic
-population's age distribution and metallicity distribution function; the
-present-day mass function marginalizes the ages, and a star whose age /
-initfeh is sampled takes them inside the thin/thick/bulge mixture.  These
-tests pin: each population's marginal against its literature inputs; that
-the PDMF's alive fraction is exactly the shared age distribution's CDF;
-finite C and JAX gradients of the mixture over the whole (age, [Fe/H], R)
-range; and, through a System build with a synthetic MIST grid, that the
-mixture marginal is the density-weighted mix of the per-population
-distributions, that both booleans switch it, and that a star with no
-sampled age is untouched.
+population's age distribution and metallicity distribution function; a star
+whose age / initfeh is sampled takes them inside the galactic model's branch
+mixture (each of genulens's branches carrying its population's
+distributions, koshimoto21.POPULATION).  These tests pin: each population's
+marginal against its literature inputs; finite C and JAX gradients of the
+mixture over the whole (age, [Fe/H], R) range; and, through a System build
+with a synthetic MIST grid, that the mixture marginal is the density-weighted
+mix of the per-population distributions, that both booleans switch it, and
+that a star with no sampled age is untouched.
 """
 
 import numpy as np
@@ -20,7 +19,8 @@ import pytest
 
 from conftest import _DummyConfigManager, write_synthetic_mist_grid
 from exozippy.components.galacticmodel import galacticmodel as gm
-from exozippy.components.galacticmodel import pdmf, populations
+from exozippy.components.galacticmodel import koshimoto21 as k21
+from exozippy.components.galacticmodel import populations
 from exozippy.components.galacticmodel.populations import (
     AGE_MAX_GYR,
     POPULATIONS,
@@ -85,7 +85,6 @@ def test_each_mdf_matches_its_inputs():
     assert mean == pytest.approx(w1 * m1 + w2 * m2, abs=1e-9)
     var = w1 * (s1**2 + m1**2) + w2 * (s2**2 + m2**2) - mean**2
     assert sd == pytest.approx(np.sqrt(var), abs=1e-9)
-    assert populations.POPULATION_FEH["bulge"] == pytest.approx(0.041)
 
     p = np.exp(populations.log_feh_density("thick_disk", f, xp=np))
     assert _moments(f, p) == pytest.approx((-0.78, 0.30), abs=1e-9)
@@ -98,47 +97,6 @@ def test_each_mdf_matches_its_inputs():
     ):
         p = np.exp(populations.log_feh_density("thin_disk", f, r, xp=np))
         assert _moments(f, p) == pytest.approx((center, 0.2), abs=2e-3), r
-
-
-def test_pdmf_alive_fraction_is_the_shared_age_cdf():
-    """
-    Given the PDMF's age-marginalized alive fraction (review 1.7.2),
-    When it is compared with a direct quadrature of the SAME age
-      distribution the per-star prior uses, up to each mass's lifetime,
-    Then they agree for every population -- one definition, two consumers.
-    """
-    logm = np.linspace(-0.2, 0.6, 41)
-    t = np.linspace(0.0, AGE_MAX_GYR, 400001)
-    for pop in POPULATIONS:
-        tau = 10 ** pdmf.log10_lifetime_gyr(
-            logm, populations.POPULATION_FEH[pop]
-        )
-        pdf = _age_pdf(pop, t)
-        direct = [np.trapezoid(pdf[t <= tt], t[t <= tt]) for tt in tau]
-        assert pdmf.alive_fraction(pop, logm) == pytest.approx(
-            direct, abs=2e-4
-        ), pop
-
-
-def test_thick_disk_turnoff_matches_genulens():
-    """
-    Given the thick disk's turnoff metallicity, its MDF mean (-0.78),
-    When its 12 Gyr dying mass is read off the MIST lifetimes,
-    Then it is genulens's Minidie.dat value, 0.857 Msun, to 0.01.
-    """
-    from scipy.optimize import brentq
-
-    lm = brentq(
-        lambda x: (
-            pdmf.log10_lifetime_gyr(
-                x, populations.POPULATION_FEH["thick_disk"]
-            )
-            - np.log10(12.0)
-        ),
-        -0.3,
-        0.3,
-    )
-    assert 10**lm == pytest.approx(0.857, abs=0.01)
 
 
 def _mixture(t, f, r):
@@ -186,34 +144,6 @@ def test_mixture_gradient_finite_everywhere(mode):
         assert np.all(np.isfinite(np.asarray(arr)))
 
 
-@pytest.mark.parametrize("mode", ["FAST_RUN", "JAX"])
-def test_bar_density_gradient_finite_on_its_axes(mode):
-    """
-    Given K21's E+E_X bar density (review 1.7.3), whose boxy radius has
-      |x|^C1 terms that a naive abs would make singular on the bar's axes,
-    When the three branch log densities and their gradient are evaluated on
-      a grid through the exact Galactic center, the bar's axes, the
-      X-shape's shear planes and both cylindrical cutoffs,
-    Then every value and gradient is finite on the C and JAX backends.
-    """
-    if mode == "JAX":
-        pytest.importorskip("jax")
-    xv, yv, zv = pt.dvector("x"), pt.dvector("y"), pt.dvector("z")
-    r = pt.sqrt(xv**2 + yv**2 + 1e-6)
-    lp = pt.logsumexp(
-        pt.stack(gm.branch_log_number_densities(xv, yv, zv, r)), axis=0
-    )
-    g = pytensor.grad(pt.sum(lp), [xv, yv, zv])
-    fn = pytensor.function([xv, yv, zv], [lp, *g], mode=mode)
-    th = np.radians(27.0)
-    s = np.array([-3.0, -1.3, -0.5, -1e-9, 0.0, 1e-9, 0.5, 1.3, 2.7, 8.0])
-    xb, yb, z = np.meshgrid(s, s, np.array([-0.5, -1e-9, 0.0, 0.3]))
-    x = xb * np.cos(th) - yb * np.sin(th)
-    y = xb * np.sin(th) + yb * np.cos(th)
-    for arr in fn(x.ravel(), y.ravel(), z.ravel()):
-        assert np.all(np.isfinite(np.asarray(arr)))
-
-
 def test_thin_disk_support_check_refuses_a_support_the_mdf_misses():
     """
     Given an initfeh support far above every thin-disk center,
@@ -246,12 +176,6 @@ def model_root(tmp_path_factory):
 
 
 def _system(model_root, mist=True, **gm_keys):
-    # present_day off unless asked: with it on, a star whose age is sampled
-    # also swaps its age-marginalized PDMF term for the IMF (the luminous
-    # joint), which is not what the marginal tests isolate.
-    gm_keys.setdefault("present_day", False)
-    # the 3-population priors these tests pin are model: simplified's
-    gm_keys.setdefault("model", "simplified")
     from exozippy.system import System
 
     config = {
@@ -296,36 +220,36 @@ def _kin_vs(system, model, name, values):
     return np.array([fn({**start, "x": np.array([v])}) for v in values])
 
 
+def _mix_fit(basis, dens):
+    """Responsibilities r with dens = basis @ r, and the max residual."""
+    resp, *_ = np.linalg.lstsq(basis, dens, rcond=None)
+    return resp, np.max(np.abs(basis @ resp - dens))
+
+
 @pytest.mark.slow
 def test_mixture_marginal_is_the_density_weighted_mix(model_root):
     """
     Given a MIST star at 8 kpc toward Baade's window, under the galactic
-      model with only the age (then only the [Fe/H]) prior on,
+      model with only the [Fe/H] (then only the age) prior on,
     When the kinematic potential is scanned in that coordinate,
-    Then exp(it - the prior-off potential) is sum_b r_b g_b(T) with
-      responsibilities r_b >= 0 that sum to 1 (solved from three ages and
-      checked at the rest -- the branch weights are the model's own
-      density x kinematics), the bulge carries most of the weight, and the
-      marginal integrates to 1 over the support.
+    Then exp(it - the prior-off potential) integrates to 1 over the
+      [Fe/H] support and is sum_p r_p p_p(initfeh | R), responsibilities
+      r_p >= 0 summing to 1 (the branch weights are the model's own
+      density x kinematics x mass, each of genulens's branches carrying its
+      population's MDF), bulge-dominated; and the normalized age marginal
+      is the mix of the population age distributions with the same
+      properties.
+
+    The age scan is compared in SHAPE only (normalized numerically): a star
+    whose age is sampled also swaps its age-marginalized present-day mass
+    term for K21's IMF (the luminous joint, galacticmodel.md), so the
+    prior-off model is not its normalizer.  The [Fe/H] prior has no such
+    swap, so its normalization is checked exactly.
     """
     off_sys, off = _system(
         model_root, population_age=False, population_feh=False
     )
     base = _kin_vs(off_sys, off, "distance", [8000.0])[0]
-
-    sys_a, m_a = _system(model_root, population_feh=False)
-    lo_t, hi_t = (
-        float(np.atleast_1d(b)[0])
-        for b in (sys_a.star.age.lower, sys_a.star.age.upper)
-    )
-    t = np.linspace(lo_t, hi_t, 1401)
-    dens = np.exp(_kin_vs(sys_a, m_a, "age", t) - base)
-    assert np.trapezoid(dens, t) == pytest.approx(1.0, abs=1e-4)
-    g = np.stack([_age_pdf(pop, t, lo_t, hi_t) for pop in POPULATIONS], axis=1)
-    resp, *_ = np.linalg.lstsq(g, dens, rcond=None)
-    assert np.all(resp > -1e-6) and resp.sum() == pytest.approx(1, abs=1e-5)
-    assert np.max(np.abs(g @ resp - dens)) < 1e-6 * dens.max() + 1e-9
-    assert resp[2] > 0.5  # bulge-dominated at 8 kpc
 
     sys_f, m_f = _system(model_root, population_age=False)
     lo, hi = (
@@ -335,31 +259,42 @@ def test_mixture_marginal_is_the_density_weighted_mix(model_root):
     f = np.linspace(lo, hi, 1201)
     dens_f = np.exp(_kin_vs(sys_f, m_f, "initfeh", f) - base)
     assert np.trapezoid(dens_f, f) == pytest.approx(1.0, abs=1e-4)
-    # The same responsibilities mix the (truncated, renormalized) MDFs.
-    r8 = float(
-        np.hypot(*_star_xy(sys_f))  # the star's Galactocentric R
-    )
+    r_kpc = _star_r_kpc(sys_f)
     mdf = []
     for pop in POPULATIONS:
-        p = np.exp(populations.log_feh_density(pop, f, r8, xp=np))
+        p = np.exp(populations.log_feh_density(pop, f, r_kpc, xp=np))
         mdf.append(p / np.trapezoid(p, f))
-    assert (
-        np.max(np.abs(np.stack(mdf, 1) @ resp - dens_f)) < 1e-3 * dens_f.max()
+    resp_f, resid = _mix_fit(np.stack(mdf, 1), dens_f)
+    assert np.all(resp_f > -1e-6)
+    assert resp_f.sum() == pytest.approx(1, abs=1e-4)
+    assert resid < 1e-3 * dens_f.max()
+    assert resp_f[2] > 0.5  # bulge-dominated at 8 kpc
+
+    sys_a, m_a = _system(model_root, population_feh=False)
+    lo_t, hi_t = (
+        float(np.atleast_1d(b)[0])
+        for b in (sys_a.star.age.lower, sys_a.star.age.upper)
     )
+    t = np.linspace(lo_t, hi_t, 1401)
+    kin = _kin_vs(sys_a, m_a, "age", t)
+    dens = np.exp(kin - kin.max())
+    dens = dens / np.trapezoid(dens, t)
+    g = np.stack([_age_pdf(pop, t, lo_t, hi_t) for pop in POPULATIONS], axis=1)
+    resp, resid = _mix_fit(g, dens)
+    assert np.all(resp > -1e-6) and resp.sum() == pytest.approx(1, abs=1e-5)
+    assert resid < 1e-6 * dens.max() + 1e-9
+    assert resp[2] > 0.5
 
 
-def _star_xy(system):
-    from exozippy.components.galacticmodel.physics import (
-        galactic_xyz,
-        line_of_sight_basis,
-    )
-
+def _star_r_kpc(system):
+    """The star's Galactocentric cylindrical radius as the model computes
+    it (genulens's Dlb2xyz, the port's smoothed radius)."""
     st = system.star
-    _, _, sun, los = line_of_sight_basis(
+    l_deg, b_deg, _, _ = k21.line_of_sight_basis(
         st.ra.element_start(0), st.dec.element_start(0)
     )
-    x, y, _ = galactic_xyz(st.distance.element_start(0) / 1e3, sun, los)
-    return x, y
+    x, y, _ = k21.dlb_to_xyz(st.distance.element_start(0), l_deg, b_deg)
+    return float(np.sqrt(x * x + y * y + 1.0) / 1e3)
 
 
 @pytest.mark.slow

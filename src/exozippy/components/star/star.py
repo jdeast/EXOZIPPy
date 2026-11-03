@@ -18,7 +18,6 @@ from exozippy.config import PRECEDENCE_DERIVED_USER, user_entry
 from exozippy.constants import (
     FFP_MASS_FUNCTION_MIN_MEARTH,
     FFP_MASS_FUNCTION_SLOPE,
-    HYDROGEN_BURNING_LIMIT,
     MSUN_TO_MEARTH,
 )
 from exozippy.manifest import interpret_manifest_entry, normalize_selector
@@ -41,7 +40,7 @@ def _microlensing_only_star_indices(system):
     """Star indices that are exclusively a microlensing source body.
 
     The mulensing physics reads a source star's DISTANCE, proper motion and
-    sky position, and its MASS only through the IMF prior -- never its
+    sky position, and its MASS only through the mass prior -- never its
     teff or feh, and its radius only under ``finite_source`` (rho's deps
     include ``star.radius[source_map]``; see mulensing/defaults.yaml).  A
     source-only star's mass therefore has no likelihood term of its own,
@@ -108,12 +107,12 @@ StarConsumer = namedtuple("StarConsumer", "label param star")
 class Star(Component):
     # Which mass prior each star draws from.  "imf" (the default, and what
     # every config written before this key existed gets) means the stellar
-    # initial mass function chosen by the galacticmodel block's `IMF:` key;
-    # "ffp" means the free-floating-planet mass function, i.e.
-    # galacticmodel.ffp_logmass_logp.
+    # mass function of the galacticmodel block (genulens's present-day mass
+    # function, built on K21's IMF); "ffp" means the free-floating-planet
+    # mass function, i.e. galacticmodel.ffp_logmass_logp.
     #
-    # Why PER STAR and not a galacticmodel-level key: the IMF potential is a
-    # plain sum over the whole star.logmass vector, lens and source alike, and
+    # Why PER STAR and not a galacticmodel-level key: the mass prior covers
+    # the whole star.logmass vector, lens and source alike, and
     # the system this exists for -- an FFP lens crossing a bulge SOURCE star
     # -- needs a different mass prior on each.  Putting the choice on the star
     # block keeps it next to the mass it describes, next to the other
@@ -156,14 +155,15 @@ class Star(Component):
                 "required": False,
                 "doc": (
                     "Which mass prior this star draws from (default 'imf'). "
-                    "'imf' is the stellar initial mass function selected by "
-                    "the galacticmodel block's IMF: key.  'ffp' is the "
+                    "'imf' is the galacticmodel block's stellar mass "
+                    "function (genulens's present-day mass function on "
+                    "K21's IMF).  'ffp' is the "
                     "free-floating-planet mass function of Sumi et al. 2023 "
                     "(a power law in log mass, dN/dlogM ~ M^-0.96), for a "
                     "microlensing lens that is a free-floating planet -- "
                     "such a lens must be declared as a 'star' block with a "
                     "low logmass, and this is what keeps it from also being "
-                    "charged the stellar IMF.  The choice is per star, so a "
+                    "charged the stellar mass function.  The choice is per star, so a "
                     "stellar source and an FFP lens can each get the right "
                     "prior.  The slope is tunable with the dict form, "
                     "'mass_function: {kind: ffp, alpha: 0.96}' (alpha is the "
@@ -257,8 +257,8 @@ class Star(Component):
                 raise ValueError(
                     f"{name}: mass_function '{kind}' is not implemented.  "
                     f"Supported: {', '.join(self.MASS_FUNCTIONS)} ('imf' = "
-                    f"the stellar IMF chosen by the galacticmodel block's "
-                    f"IMF: key, the default; 'ffp' = the free-floating-"
+                    f"the galacticmodel block's stellar mass function, the "
+                    f"default; 'ffp' = the free-floating-"
                     f"planet mass function of Sumi et al. 2023, a power law "
                     f"in log mass).  To add another, implement it alongside "
                     f"galacticmodel.ffp_logmass_logp."
@@ -304,11 +304,8 @@ class Star(Component):
     def _warn_ffp_logmass_bound(self):
         """Tell the user that the FFP support's lower edge is their call.
 
-        NOT a floor.  The Salpeter branch raises star.logmass's bound because
-        a *stellar* IMF below the hydrogen-burning limit is outside its domain
-        of validity -- that is a correctness fix.  Here the sub-stellar range
-        IS the domain, so clamping it would gate the very models this mass
-        function exists to express.  The support stays at defaults.yaml's
+        NOT a floor.  The sub-stellar range IS this mass function's domain,
+        so clamping it would gate the very models it exists to express.  The support stays at defaults.yaml's
         [-9, 2.5] dex and the user gets the information to choose.
 
         Fired only where the bound is still the default: a user who has set
@@ -790,104 +787,36 @@ class Star(Component):
             f"{{mu: ..., sigma: ...}}'."
         )
 
-    def _galactic_imf(self, system):
-        """(galacticmodel present?, its IMF name) as (bool, str or None).
+    def _has_galacticmodel(self, system):
+        """Is there a galacticmodel in this topology?
 
         ``in_topology`` prefers the instantiated component and falls back to
         the raw config, so the answer does not depend on whether
-        galacticmodel happens to have been built before the stars -- a missed
-        lookup here would silently drop a mass-prior floor, which is the one
-        failure mode the floors exist to prevent.  What is left here is the
-        only part that is this caller's own: reading ``IMF:`` off whichever
-        of the two shapes came back.
+        galacticmodel happens to have been built before the stars.  An
+        EMPTY raw list is treated as no galacticmodel, which is the
+        historical answer here and the conservative one -- there is no
+        instance to draw a prior from.  (Contrast the plain topology
+        question, where an empty block is a real answer; a premature
+        `evolutionarymodel: {}` is tested.)
         """
         found = in_topology(system, "galacticmodel")
         if found is None:
-            return False, None
-
-        imf = getattr(found, "imf", None)
-        if imf is None:
-            # A raw config block: a list of instances, or (defensively) one
-            # bare dict.  GalacticModel itself rejects more than one, so
-            # config[0] is the whole story.  An EMPTY list is treated as no
-            # galacticmodel, which is the historical answer here and the
-            # conservative one -- there is no instance to draw an IMF from.
-            # (Contrast the plain topology question, where an empty block is
-            # a real answer; a premature `evolutionarymodel: {}` is tested.)
-            if isinstance(found, (list, tuple)):
-                if not found:
-                    return False, None
-                found = found[0]
-            imf = (found or {}).get("IMF", "chabrier")
-        return True, str(imf).lower()
-
-    def _salpeter_logmass_floor(self, imf):
-        """Lower bound to impose on logmass under a power-law IMF, or None.
-
-        defaults.yaml keeps logmass's floor at an unphysical -9 dex on
-        purpose: a planetary-mass LENS has to be declared as a star (see
-        Lens._validate_bodies, whose two guards advertise exactly that
-        workaround).  Under the default Chabrier lognormal that floor is
-        inert -- the prior density at -9 dex is ~exp(-107), so the bound is a
-        safety rail nothing ever touches.
-
-        Under IMF: Salpeter it stops being a rail and becomes the answer.
-        The power law rises toward low mass without limit, at
-        (1 - 2.35) * ln10 = 3.11 nats per dex, so it accumulates ~26 nats of
-        preference between the Chabrier peak and -9 dex; whatever the data
-        allow, the posterior piles against the floor.  A stellar IMF also
-        simply does not apply below the hydrogen-burning limit -- that is a
-        brown dwarf, with its own (poorly constrained) mass function.
-
-        So under Salpeter the floor is raised to the hydrogen-burning limit.
-        NOTE this is not a claim that a single Salpeter power law is accurate
-        down to there: Salpeter (1955) fit ~0.4-10 Msun, and the real IMF
-        flattens below ~0.5 Msun, which is precisely why Kroupa and Chabrier
-        exist.  Everything below ~0.5 Msun is extrapolation.  The
-        hydrogen-burning limit is the honest floor for a *stellar* IMF, and
-        it keeps the M-dwarf population that dominates real microlensing
-        lenses inside the prior -- truncating at Salpeter's own 0.4 Msun
-        calibration limit would exclude most actual lenses and make the prior
-        actively wrong for the science case it is there to serve.
-
-        Contrast the FFP mass function, which gets NO automatic floor (see
-        _warn_ffp_logmass_bound).  The distinction is domain of validity, not
-        taste: a stellar IMF below the hydrogen-burning limit is being applied
-        outside its domain, which is a correctness problem, whereas the
-        sub-stellar range IS the FFP relation's domain and its lower cutoff is
-        an ordinary prior choice that belongs to the user.
-        """
-        if imf != "salpeter":
-            return None
-        return float(np.log10(HYDROGEN_BURNING_LIMIT))
+            return False
+        if isinstance(found, (list, tuple)) and not found:
+            return False
+        return True
 
     def _logmass_manifest_entry(self, system):
-        """Manifest entry for logmass: the power-law IMF floor, where it
-        applies, plus the FFP advisory.
+        """Manifest entry for logmass: ``None`` (a plain free parameter),
+        after the FFP advisories.
 
-        Returns ``None`` (a plain free parameter, byte-for-byte the
-        pre-2026-08 model) unless some star draws a power-law stellar IMF.
-
-        The floor goes through the manifest's "overrides" channel, NOT its
-        ordinary options.  Options are merged OVER the resolved config
-        (``{**cfg, **options}``), which would replace a user's tighter bound
-        with the looser floor -- i.e. silently LOWER a bound the user raised.
-        Overrides instead go through ConfigManager.resolve's ``apply_value``,
-        which for the "lower" key keeps ``max(current, new)`` (and ``min``
-        for "upper").  The user's own params go through that same
-        ``apply_value``, so the result is exactly ``max(user_lower, floor)``
-        regardless of which is applied first: a user bound above the floor
-        survives untouched, and a user bound below it is raised to the floor.
-        That last case is deliberate -- asking for Salpeter and for support
-        below the hydrogen-burning limit is incoherent, and "bounds may only
-        be tightened" is the house rule the same max() enforces everywhere.
-
-        The override is per element (NaN = "leave this one alone"), because
-        the mass function is per star: a star that opted into the FFP mass
-        function is not drawing the stellar IMF and must not inherit its
-        hydrogen-burning floor -- that is the whole point of selecting it.
+        Until review 1.7.6 this also carried the hydrogen-burning floor that
+        ``IMF: Salpeter`` imposed on star.logmass; the key went with the
+        removed ``model: simplified`` (galacticmodel raises on it), so no
+        star draws a power-law stellar IMF any more and nothing raises the
+        defaults.yaml floor.
         """
-        has_gm, imf = self._galactic_imf(system)
+        has_gm = self._has_galacticmodel(system)
 
         if self.ffp_mask.any() and not has_gm:
             names = ", ".join(
@@ -905,56 +834,7 @@ class Star(Component):
 
         if has_gm:
             self._warn_ffp_logmass_bound()
-
-        floor = self._salpeter_logmass_floor(imf) if has_gm else None
-        if floor is None:
-            return None
-
-        # NaN leaves an element alone; only the stars actually drawing the
-        # stellar IMF get the floor.
-        floors = np.where(self.ffp_mask, np.nan, floor)
-        if not np.any(np.isfinite(floors)):
-            return None
-
-        # Warn only where the floor actually moves the bound: resolve() gives
-        # the bound as it stands now (defaults, already merged with any user
-        # entry), in user units -- logmass's user and internal units are both
-        # dex(solMass), so no conversion is involved.
-        cfg = self.config_manager.resolve(
-            self.prefix,
-            "logmass",
-            shape=(self.n_elements,),
-            names=self.names,
-        )
-        current = cfg.get("lower")
-        for i in range(self.n_elements):
-            if not np.isfinite(floors[i]):
-                continue
-            old = None if current is None else float(np.atleast_1d(current)[i])
-            if old is not None and old >= floor:
-                continue
-            old_txt = (
-                "unbounded"
-                if old is None
-                else f"{old:g} dex ({10.0**old:.3g} solMass)"
-            )
-            logger.warning(
-                f"[{self.prefix}] IMF: Salpeter -- raising the lower bound on "
-                f"{self.prefix}.{self.names[i]}.logmass from {old_txt} to "
-                f"{floor:.4f} dex ({HYDROGEN_BURNING_LIMIT:g} solMass, the "
-                f"hydrogen-burning limit), because a power-law IMF rises "
-                f"toward low mass without limit (+3.11 nats/dex) so an "
-                f"unphysically low floor becomes the answer rather than a "
-                f"safety rail, and a stellar IMF does not apply to "
-                f"sub-stellar objects.  To avoid this, use the default "
-                f"IMF: chabrier (a lognormal, calibrated across the "
-                f"sub-stellar range), set a HIGHER lower bound yourself "
-                f"if you want a different floor -- this bound can be "
-                f"tightened but not loosened -- or, for a genuinely "
-                f"sub-stellar lens, give that star "
-                f"'mass_function: ffp', whose support is not clamped."
-            )
-        return {"overrides": {"lower": floors.tolist()}}
+        return None
 
     #: What a star in an orbit group shares with its group's anchor (JDE
     #: 2026-10-26: "if we make it some kind of orbit (even static), that
@@ -1250,7 +1130,7 @@ class Star(Component):
         neighbors = [i for i in range(self.n_elements) if i not in bodies]
         if not neighbors:
             return
-        has_gm, _imf = self._galactic_imf(system)
+        has_gm = self._has_galacticmodel(system)
         if has_gm:
             logger.info(
                 f"[{self.prefix}] neighbor star(s) "
@@ -1598,15 +1478,11 @@ class Star(Component):
         # Reset per build (System may prepare more than once).
         self.position_roots = {}
 
-        # 1. Get the stellar parameters we always want.  logmass may carry a
-        # power-law-IMF floor (None otherwise, i.e. a plain free parameter).
+        # 1. Get the stellar parameters we always want.  logmass is a plain
+        # free parameter unless fitthetae flips its expr_key.
         logmass_entry = self._logmass_manifest_entry(system)
         thetae_entry = self._logmass_thetae_entry(system)
         if thetae_entry is not None:
-            # Merge the fitthetae expr_key flip into the IMF-floor entry
-            # (both are dicts of disjoint keys; the floor's per-element
-            # "overrides" apply to the still-sampled elements, and a bound
-            # on the derived host element degrades to a soft barrier).
             logmass_entry = {**(logmass_entry or {}), **thetae_entry}
 
         self.manifest = {
@@ -1978,7 +1854,7 @@ class Star(Component):
            gradient.
 
         Returns 0.0 (unnormalized, with a warning) when the bounds cannot be
-        read as finite floats, matching the IMF normalizers: a constant can
+        read as finite floats, matching the FFP normalizer: a constant can
         never change the sampling, so it is not worth failing a fit over.
         """
         bounds = sampled_bounds(self.distance)
@@ -2061,7 +1937,7 @@ class Star(Component):
             # lens, galacticmodel or astrometry) -- nothing to weight.
             return
 
-        has_galacticmodel, _ = self._galactic_imf(system)
+        has_galacticmodel = self._has_galacticmodel(system)
         if has_galacticmodel:
             logger.debug(
                 f"[{self.prefix}] galacticmodel present -- deferring the "

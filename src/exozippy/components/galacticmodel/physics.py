@@ -1,18 +1,22 @@
-"""Numpy side of the galactic kinematic model.
+"""Numpy start-value layer of the galactic model: the frame and the mean
+proper motion of each population.
 
-``GalacticModel.build_likelihood`` evaluates the kinematic prior symbolically,
-but the *mean* of that prior is also wanted in plain numpy, early, as a start
-value: the relaxation engine has to seed ``star.pm_ra``/``star.pm_dec`` before
-any PyMC node exists (stage 3), and with nothing better to go on it used to
-leave both at their defaults.yaml value and let one of them absorb whatever the
-``t_E`` constraint implied -- which is how the direction of relative proper
-motion ended up arbitrary (see issue #93).
+The *mean* of the kinematic prior is wanted in plain numpy, early, as a
+start value: the relaxation engine has to seed ``star.pm_ra``/``star.pm_dec``
+before any PyMC node exists (stage 3), and with nothing better to go on it
+used to leave both at their defaults.yaml value and let one of them absorb
+whatever the ``t_E`` constraint implied -- which is how the direction of
+relative proper motion ended up arbitrary (see issue #93).  The consumers are
+``mulensing/mulensevent.py`` and ``background/background.py``.
 
-The line-of-sight basis here is the *same* code the likelihood uses; the
-likelihood calls ``line_of_sight_basis`` and wraps the result in tensors, so
-there is one implementation rather than two that can drift.
+The likelihood itself is the genulens port (``koshimoto21.py``, its own
+``line_of_sight_basis`` and ``Dlb2xyz`` positions).  The means here are the
+three-population rotation centers of the model the port replaced (thin disk
+218 km/s, thick disk 170 km/s, bulge Omega r; that model, ``model:
+simplified``, was removed in review 1.7.6): a start value, not the prior, so
+they only have to land the start in the right basin.
 
-Sign/unit conventions, all matching the likelihood:
+Sign/unit conventions:
 
 - ``pm_ra`` means mu_alpha * cos(delta) (astropy's ``pm_ra_cosdec``), in mas/yr.
   The model treats ``star.pm_ra`` as that quantity throughout.
@@ -20,22 +24,20 @@ Sign/unit conventions, all matching the likelihood:
   every position.
 - Distances in this module are kpc unless the name says ``_pc``.
 
-The model frame (ONE frame for positions AND velocities; review 1.7.1):
+The frame (ONE frame for positions AND velocities; review 1.7.1):
 astropy's ``Galactocentric`` frame as configured in ``GALACTOCENTRIC_FRAME``
 (origin at Sgr A*, R0/z_sun/v_sun from constants.py), with the x axis
 MIRRORED so that x points from the Galactic center toward the Sun.  That is
 genulens's convention (Koshimoto et al. 2021, ``Dlb2xyz`` with
 ``CenSgrA = 1``): Sun at x ~ +R0, y toward l = 90 deg, z toward the NGP, and
-the Sun's velocity (vx, vy, vz)sun = (-10, 243, 7) km/s.  The density model
-(bar angle, disk profiles) is written in that convention, so the mirror
-keeps it unchanged, and the Sun at +x moving +y makes the planar angular
-momentum ``x v_y - y v_x`` POSITIVE for co-rotation -- the ``v_phi`` sign
-``polar_velocity`` uses.  Positions and velocities are BOTH read off
-astropy and mirrored by ``MODEL_FRAME_MIRROR``; until 2026-10 the positions
-were built by hand in the mirrored convention while the velocities were
-astropy's unmirrored ones, so ``v_x`` entered ``v_r``/``v_phi`` with the
-wrong sign (an exactly circular orbit at 4 kpc toward the bulge got
-v_r = +47 km/s).
+the Sun's velocity (vx, vy, vz)sun = (-10, 243, 7) km/s.  The Sun at +x
+moving +y makes the planar angular momentum ``x v_y - y v_x`` POSITIVE for
+co-rotation -- the ``v_phi`` sign ``polar_velocity`` uses.  Positions and
+velocities are BOTH read off astropy and mirrored by ``MODEL_FRAME_MIRROR``;
+until 2026-10 the positions were built by hand in the mirrored convention
+while the velocities were astropy's unmirrored ones, so ``v_x`` entered
+``v_r``/``v_phi`` with the wrong sign (an exactly circular orbit at 4 kpc
+toward the bulge got v_r = +47 km/s).
 """
 
 import astropy.units as u
@@ -43,23 +45,7 @@ import numpy as np
 from astropy.coordinates import CartesianDifferential, Galactocentric, SkyCoord
 
 from ...constants import (
-    BULGE_BAR_ANGLE,
-    BULGE_DENSITY_C1,
-    BULGE_DENSITY_C2,
-    BULGE_DENSITY_X_0,
-    BULGE_DENSITY_Y_0,
-    BULGE_DENSITY_Z_0,
-    BULGE_RC,
-    BULGE_RC_WIDTH,
     BULGE_ROTATION_ANGULAR_VELOCITY,
-    BULGE_X_B_ZX,
-    BULGE_X_C1,
-    BULGE_X_C2,
-    BULGE_X_FRACTION,
-    BULGE_X_RC,
-    BULGE_X_X_0,
-    BULGE_X_Y_0,
-    BULGE_X_Z_0,
     DISK_ROTATION_VELOCITY,
     K_VEL_CONVERSION,
     SUN_GALCEN_V,
@@ -69,13 +55,10 @@ from ...constants import (
 )
 
 # The one galactocentric frame for positions AND velocities (mirrored in x
-# by MODEL_FRAME_MIRROR below), with the density model's R0/z_sun
-# (genulens: R0 = 8160 pc, zsun = 25 pc, vsun = (10, 243, 7) km/s
+# by MODEL_FRAME_MIRROR below), with genulens's R0/z_sun
+# (R0 = 8160 pc, zsun = 25 pc, vsun = (10, 243, 7) km/s
 # toward-GC/rotation/up).  Astropy's default Galactocentric (R0 = 8.122 kpc)
-# would be a different frame from the densities'.
-#
-# Defined here rather than in galacticmodel.py so this module stays the numpy
-# layer that the pytensor layer imports, not the other way round.
+# would be a different frame from genulens's.
 GALACTOCENTRIC_FRAME = Galactocentric(
     galcen_distance=SUN_GC_DISTANCE * u.kpc,
     z_sun=SUN_Z_OFFSET * u.kpc,
@@ -164,73 +147,9 @@ def line_of_sight_basis(ra_rad, dec_rad):
 
 def hinge(t, xp=np):
     """Smooth max(t, 0) (C-infinity), transition width ~50 pc in kpc units --
-    keeps the density plateaus/cutoffs (and the thin-disk metallicity
-    gradient's ends) differentiable.  Pure arithmetic: ``xp`` is np or pt."""
+    keeps the thin-disk metallicity gradient's ends (populations.py)
+    differentiable.  Pure arithmetic: ``xp`` is np or pt."""
     return 0.5 * (t + xp.sqrt(t * t + 0.0025))
-
-
-def _smooth_abs(u, xp):
-    # |u| with a 1e-6 (in units of the scale length) rounding at 0, so the
-    # super-ellipsoid powers below have a finite gradient on every axis.
-    return xp.sqrt(u * u + 1e-12)
-
-
-def _super_ellipsoid(xn, yn, zn, c1, c2, xp):
-    """K21's boxy radius ((|x|^c1 + |y|^c1)^(c2/c1) + |z|^c2)^(1/c2) of
-    normalized coordinates (genulens calc_rhoB)."""
-    a = _smooth_abs(xn, xp) ** c1 + _smooth_abs(yn, xp) ** c1
-    return (a ** (c2 / c1) + _smooth_abs(zn, xp) ** c2) ** (1.0 / c2)
-
-
-def bar_log_profile(x, y, z, r, xp=np):
-    """log of the bar's density relative to its central value: Koshimoto,
-    Baba & Bennett 2021's E+E_X bar (genulens's default model 5 with the
-    X-shape, ``calc_rhoB``), review 1.7.3.
-
-    Main bar: exp(-r_s), r_s the boxy super-ellipsoid radius with axes
-    (x0, y0, z0) and exponents (C1, C2), in the bar frame rotated by
-    BULGE_BAR_ANGLE from the Sun-GC line; X-shape: two exp(-r_s) lobes
-    sheared by +/- b_zX z in x_bar, amplitude f_X.  Each is multiplied by
-    the Gaussian cylindrical cutoff beyond its own R_c (width 0.5 kpc,
-    genulens's srob) -- written with the smooth ``hinge``, so it is
-    C-infinity where genulens's ``if (R >= Rc)`` is C1.  The sum is formed
-    with logaddexp (three finite terms, no selection).
-
-    ``x, y, z`` model-frame kpc, ``r`` the smoothed cylindrical radius.
-    Pure arithmetic: ``xp`` is np or pt.
-    """
-    cos_bar = np.cos(BULGE_BAR_ANGLE)
-    sin_bar = np.sin(BULGE_BAR_ANGLE)
-    xb = x * cos_bar + y * sin_bar
-    yb = -x * sin_bar + y * cos_bar
-    main = (
-        -_super_ellipsoid(
-            xb / BULGE_DENSITY_X_0,
-            yb / BULGE_DENSITY_Y_0,
-            z / BULGE_DENSITY_Z_0,
-            BULGE_DENSITY_C1,
-            BULGE_DENSITY_C2,
-            xp,
-        )
-        - 0.5 * (hinge(r - BULGE_RC, xp) / BULGE_RC_WIDTH) ** 2
-    )
-    x_cut = (
-        np.log(BULGE_X_FRACTION)
-        - 0.5 * (hinge(r - BULGE_X_RC, xp) / BULGE_RC_WIDTH) ** 2
-    )
-    lobes = [
-        x_cut
-        - _super_ellipsoid(
-            (xb + sign * BULGE_X_B_ZX * z) / BULGE_X_X_0,
-            yb / BULGE_X_Y_0,
-            z / BULGE_X_Z_0,
-            BULGE_X_C1,
-            BULGE_X_C2,
-            xp,
-        )
-        for sign in (-1.0, 1.0)
-    ]
-    return xp.logaddexp(main, xp.logaddexp(lobes[0], lobes[1]))
 
 
 def galactic_xyz(dist_kpc, sun_xyz, los_hat):
@@ -239,9 +158,8 @@ def galactic_xyz(dist_kpc, sun_xyz, los_hat):
     ``sun_xyz + dist_kpc * los_hat`` with both vectors from
     ``line_of_sight_basis``: astropy's Galactocentric position, x mirrored
     (Sun at x ~ +R0, z = +z_sun at d = 0, origin at Sgr A*) -- genulens's
-    ``Dlb2xyz`` orientation with ``CenSgrA = 1``.  Pure arithmetic, so the
-    same function serves numpy (the hints, the normalizer) and pytensor
-    tensors (the likelihood).
+    ``Dlb2xyz`` orientation with ``CenSgrA = 1``.  Pure arithmetic: numpy
+    and pytensor alike.
     """
     x = sun_xyz[0] + dist_kpc * los_hat[0]
     y = sun_xyz[1] + dist_kpc * los_hat[1]
@@ -252,8 +170,7 @@ def galactic_xyz(dist_kpc, sun_xyz, los_hat):
 def polar_velocity(x, y, r, v_x, v_y):
     """Planar ``(v_r, v_phi)`` km/s of a model-frame velocity at ``(x, y)``.
 
-    ``r`` is the cylindrical radius the caller uses (the likelihood passes
-    its smoothed ``sqrt(x^2 + y^2 + 1e-6)``).  In the model frame (x
+    ``r`` is the cylindrical radius the caller uses.  In the model frame (x
     mirrored; module docstring) ``v_phi`` is positive for co-rotation.  Pure
     arithmetic: numpy and pytensor alike.
     """
@@ -265,12 +182,10 @@ def polar_velocity(x, y, r, v_x, v_y):
 
 
 def mean_polar_velocity(r_kpc, population):
-    """Mean ``(v_r, v_phi, v_z)`` km/s of one kinematic branch.
+    """Mean ``(v_r, v_phi, v_z)`` km/s of one population, for a start value.
 
-    Every branch in the likelihood is a Gaussian centred on zero radial and
-    vertical motion plus a rotational term, so the mean is exactly the centre
-    of that Gaussian -- read straight off ``log_vel_thin`` / ``log_vel_thick`` /
-    ``log_vel_bulge``.
+    Zero radial and vertical motion plus a rotational term: the rotation
+    centers of the three-population model (module docstring).
     """
     if population == "thin_disk":
         return 0.0, DISK_ROTATION_VELOCITY, 0.0
@@ -285,14 +200,14 @@ def mean_polar_velocity(r_kpc, population):
 
 
 def expected_proper_motion(ra_rad, dec_rad, distance_pc, population):
-    """Mean proper motion under the kinematic prior, in mas/yr.
+    """Mean proper motion of a population (a start value), in mas/yr.
 
     Inverts ``v_gal = v0 + M_rot @ [v_alpha, v_delta, v_rad]`` at the branch's
     mean velocity.  Returns ``(pm_ra_cosdec, pm_dec, rv_kms)``.
 
-    This is the prior's *mean*, not a draw: it is a start value, and the
-    dispersions (which are large -- tens of km/s) are what the prior itself
-    contributes during sampling.
+    This is a *mean*, not a draw: it is a start value, and the dispersions
+    (which are large -- tens of km/s) are what the prior itself contributes
+    during sampling.
     """
     dist_kpc = float(distance_pc) / 1e3
     if not dist_kpc > 0:

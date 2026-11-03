@@ -185,25 +185,53 @@ def test_position_normalizer_is_finite_and_ordered():
     assert np.isfinite(a) and b > a
 
 
-@pytest.mark.parametrize("key", ["IMF", "present_day"])
-def test_simplified_mass_keys_raise_under_koshimoto21(key):
-    with pytest.raises(ValueError, match="koshimoto21 carries K21"):
-        GalacticModel(
-            [
-                {
-                    "model": "koshimoto21",
-                    key: "chabrier" if key == "IMF" else True,
-                }
-            ],
-            _DummyConfigManager(),
-        )
+def test_model_simplified_raises_saying_it_was_removed():
+    """
+    Given a config still naming the removed 3-population model,
+    When the galacticmodel is built,
+    Then it raises, saying simplified was removed and naming koshimoto21 --
+      no silent translation to the port (review 1.7.6).
+    """
+    with pytest.raises(ValueError, match="simplified was removed") as exc:
+        GalacticModel([{"model": "simplified"}], _DummyConfigManager())
+    assert "koshimoto21" in str(exc.value)
 
 
-def test_remnants_is_a_koshimoto21_key():
-    with pytest.raises(ValueError, match="remnants is a key"):
-        GalacticModel(
-            [{"model": "simplified", "remnants": False}], _DummyConfigManager()
-        )
+@pytest.mark.parametrize(
+    "key, value", [("IMF", "chabrier"), ("present_day", True)]
+)
+def test_removed_simplified_keys_raise_naming_the_key(key, value):
+    """
+    Given a key that existed only for the removed model: simplified,
+    When the galacticmodel is built (with or without model: spelled out),
+    Then it raises naming the key and the removed model.
+    """
+    for cfg in ({key: value}, {"model": "koshimoto21", key: value}):
+        with pytest.raises(ValueError, match=f"'{key}'") as exc:
+            GalacticModel([cfg], _DummyConfigManager())
+        assert "removed model: simplified" in str(exc.value)
+
+
+def test_spelled_out_koshimoto21_builds_the_default():
+    """
+    Given one config that spells out model: koshimoto21 and one that omits
+      the key,
+    When both build the same stars,
+    Then the kinematic prior is identical (the key stays accepted so
+      existing configs keep working).
+    """
+    _, spelled = _build(_stars())
+    gm = GalacticModel([{}], _DummyConfigManager())
+    with pm.Model() as default:
+        gm.build_likelihood(default, _System(_stars()))
+    assert float(spelled["galacticmodel.kinematic_prior"].eval()) == float(
+        default["galacticmodel.kinematic_prior"].eval()
+    )
+
+
+def test_remnants_must_be_a_boolean():
+    with pytest.raises(ValueError, match="remnants must be"):
+        GalacticModel([{"remnants": "false"}], _DummyConfigManager())
 
 
 def test_heavy_bulge_lens_needs_remnants():
@@ -298,11 +326,6 @@ def test_luminosity_function_selection_needs_ai_rc():
             ],
             _DummyConfigManager(),
         )
-    with pytest.raises(ValueError, match="keys of model: koshimoto21"):
-        GalacticModel(
-            [{"model": "simplified", "source_selection": "sqrt_distance"}],
-            _DummyConfigManager(),
-        )
     stars = _ffp(_Stars([8300.0], [-6.0], [-0.5], [-30e3], [-0.3]))
     lp = _kin(
         stars,
@@ -351,12 +374,7 @@ def test_fully_linked_member_adds_only_its_mass():
 
 def test_binaries_change_only_the_unresolved_lens_mass_term():
     """binaries: true (genulens's BINARY 1) swaps the lens's luminous mass
-    function for the effective binary-lens density; it is a koshimoto21
-    key and a boolean."""
-    with pytest.raises(ValueError, match="binaries is a key"):
-        GalacticModel(
-            [{"model": "simplified", "binaries": True}], _DummyConfigManager()
-        )
+    function for the effective binary-lens density; it is a boolean."""
     with pytest.raises(ValueError, match="binaries must be"):
         GalacticModel([{"binaries": "yes"}], _DummyConfigManager())
 
