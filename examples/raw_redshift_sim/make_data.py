@@ -17,7 +17,9 @@ model the fit uses), plus Gaussian noise:
                  / [gamma_o (1 + rho.beta_o)]
 
 with the observatory state from astropy (builtin ephemeris) at the
-flux-weighted exposure midpoint (JD_UTC, column 1).  Epochs are random
+flux-weighted exposure midpoint (JD_UTC, column 1), and the reflex at the
+star's EMISSION time (its own light-travel time across the orbit,
+t_emit = t_B - Z_star(t_emit)/c).  Epochs are random
 nights with the star above 35 deg and the Sun below -12 deg.
 
     python make_data.py          # rewrites Gaia4like.{HPF,NEID,FIES}.rv
@@ -62,11 +64,12 @@ def gamma_truth(name):
     return c * ((1.0 + ZERO_POINTS[name] / c) * (1.0 + TRUTH["rv"] / c) - 1.0)
 
 
-def keplerian_rv(t):
+def keplerian_rv(t, tc=None):
     """The star's line-of-sight reflex (m/s) at BJD_TDB ``t``, in
     EXOZIPPy's convention: K [cos(f + omega_*) + e cos omega_*], with the
     conjunction tc at f = 90 deg - omega_*."""
-    P, e, K, tc = TRUTH["period"], TRUTH["ecc"], TRUTH["K"], TRUTH["tc"]
+    P, e, K = TRUTH["period"], TRUTH["ecc"], TRUTH["K"]
+    tc = TRUTH["tc"] if tc is None else tc
     w = np.radians(TRUTH["omega"])
     f0 = 0.5 * np.pi - w
     E0 = 2.0 * np.arctan(np.sqrt((1 - e) / (1 + e)) * np.tan(0.5 * f0))
@@ -79,6 +82,36 @@ def keplerian_rv(t):
         np.sqrt(1 + e) * np.sin(0.5 * E), np.sqrt(1 - e) * np.cos(0.5 * E)
     )
     return K * (np.cos(f + w) + e * np.cos(w))
+
+
+def star_los_position(t, tc=None):
+    """The star's reflex displacement AWAY from the observer (m) at
+    target-frame time ``t``: K sqrt(1 - e^2)/n (r/a) sin(f + omega_*),
+    whose time derivative is ``keplerian_rv``."""
+    P, e, K = TRUTH["period"], TRUTH["ecc"], TRUTH["K"]
+    tc = TRUTH["tc"] if tc is None else tc
+    w = np.radians(TRUTH["omega"])
+    f0 = 0.5 * np.pi - w
+    E0 = 2.0 * np.arctan(np.sqrt((1 - e) / (1 + e)) * np.tan(0.5 * f0))
+    tp = tc - (E0 - e * np.sin(E0)) * P / (2.0 * np.pi)
+    M = 2.0 * np.pi * (np.asarray(t) - tp) / P
+    E = M.copy()
+    for _ in range(60):
+        E = E - (E - e * np.sin(E) - M) / (1.0 - e * np.cos(E))
+    f = 2.0 * np.arctan2(
+        np.sqrt(1 + e) * np.sin(0.5 * E), np.sqrt(1 - e) * np.cos(0.5 * E)
+    )
+    n = 2.0 * np.pi / (P * 86400.0)
+    return K * np.sqrt(1 - e**2) / n * (1 - e * np.cos(E)) * np.sin(f + w)
+
+
+def emission_time(t_bary, tc=None):
+    """The star's emission time for light reaching the barycenter at
+    ``t_bary``: t_emit = t_bary - Z(t_emit)/c, by fixed point."""
+    t = np.array(t_bary, dtype=float)
+    for _ in range(8):
+        t = t_bary - star_los_position(t, tc) / 299792458.0 / 86400.0
+    return t
 
 
 def night_times(site, n, rng):
@@ -102,10 +135,11 @@ def night_times(site, n, rng):
     return np.sort(np.array(out))
 
 
-def predict(name, jd_utc, reflex=True, star=None):
+def predict(name, jd_utc, reflex=True, star=None, tc=None):
     """The noise-free c*z_meas (m/s) at JD_UTC ``jd_utc`` for site
     ``name``; ``star`` overrides the truth's (ra, dec, pm_ra, pm_dec,
-    parallax, rv) in internal units."""
+    parallax, rv) in internal units; ``tc`` the TARGET-frame conjunction
+    (default the truth's -- see the README on tc vs tc_target)."""
     import astropy.units as u
     from astropy.coordinates import EarthLocation
     from astropy.time import Time
@@ -136,9 +170,11 @@ def predict(name, jd_utc, reflex=True, star=None):
         star,
         TRUTH["epoch"],
         z0=z0,
-        v_reflex=(lambda tb: (keplerian_rv(tb), None, None))
-        if reflex
-        else None,
+        v_reflex=(
+            (lambda tb: (keplerian_rv(emission_time(tb, tc), tc), None, None))
+            if reflex
+            else None
+        ),
     )
     return cz, t_bary, t_tdb, obs
 

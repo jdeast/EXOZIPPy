@@ -4,6 +4,9 @@
 velocities (the default) or as raw measured redshifts whose barycentric correction the
 model computes itself (`data_format: raw_redshift`).
 
+Why an instrument should publish raw `c z` at all, the metadata a release must carry and
+the file layout EXOZIPPy reads are in `docs/raw_redshift_data.md`.
+
 Read this before changing what an RV file means, the RV model's time argument, the
 instrument offset `gamma`, or the barycentric-correction module `redshift.py`. Related:
 `src/exozippy/components/instrument.md` (the shared reader, detrending, GP and robust
@@ -108,8 +111,23 @@ In the graph, functions of the fitted parameters (`redshift.star_geometry`,
   `t_B = t_o + (|X| - |X - r_o|)/c` (with its curvature term; written as
   `(2 X.r_o - r_o.r_o)/(|X| + |X - r_o|)` so it does not cancel). The Shapiro DELAY
   (< 0.1 ms) is not modeled;
+- **the star's own light-travel time**: the reflex light leaves the star at its EMISSION
+  time `t_emit = t_B - Z_star(t_emit)/c`, with `Z_star` the star's line-of-sight reflex
+  displacement summed over EVERY orbit it is a body of (`-(M_c/M) z` on an orbit's
+  primary side, `+(M_p/M) z` on its companion side in `ltt.py`'s toward-observer `z`;
+  a Taylor orbit's own `Z`). `RVInstrument._emission_time` builds it through
+  `components/ltt.py`'s one implementation (`line_of_sight_kinematics` per orbit, the
+  summed kinematics through `solve_delay`), and `Orbit._ltt_reporting_mask` counts a raw
+  file as a retarding consumer of every orbit of its star, so `tc` stays the observed
+  conjunction and `tc_target` the target-frame one, as with transits. The effect is
+  `~K^2/c`: 0.43 mm/s peak (0.20 mm/s RMS) for the Gaia-4-like example, 3 cm/s for a
+  K = 3 km/s, 3-day brown dwarf or M-dwarf companion, 3 m/s at K = 30 km/s and 53 m/s on
+  the secondary of a 1.0 + 0.3 Msun 3-day binary (`tests/test_raw_redshift_orbits.py`).
+  `light_travel_time: false` on a raw file turns it off. The CORRECTED-velocity path does
+  not retard the reflex (it evaluates the orbit at the BJD_TDB tag), which is the same
+  omission; it is left as it is, byte-identical, and recorded as an open item;
 - **the star's total velocity** `beta_* = beta_sys + v_reflex / c`, with every orbit's
-  reflex evaluated at `t_B` through the same `_rv_model` columns a corrected file reads
+  reflex evaluated at `t_emit` through the same `_rv_model` columns a corrected file reads
   (Keplerian and Taylor, `orbit.md`): the line-of-sight part along `r0_hat` (the orbit's
   Z axis), and -- where the system models the orbit's sky orientation (`bigomega`, i.e.
   astrometry is present) -- the transverse part from `Orbit.state_vectors` scaled to the
@@ -166,6 +184,35 @@ of any one instrument is not, and is not claimed.
   with the builtin (erfa) ephemeris**, the default, which the committed test uses. And
   the inverse: barycorrpy, given the redshifts this model PREDICTS for a companion-free
   star, recovers a constant velocity to < 1 cm/s peak-to-peak.
+- **Against the TEMPO comparison set published with WE14** (informational: everything
+  here is below barycorrpy's own ~0.2 mm/s precision, and nothing in this mode waits on
+  it) (tau Ceti from the CTIO
+  1.5-m, 6097 epochs 2000-2015, TEMPO2 in `-tempo1` prediction mode with DE405; WE14
+  sec. 5.1 and its online table, as redistributed in barycorrpy's repository as
+  `barycorrpy/data/New_tempo_check.txt`): this model and barycorrpy agree with each
+  other to 0.002 mm/s and differ from TEMPO identically, by 0.33 mm/s RMS (mean -0.10
+  mm/s), with DE405 or DE430 alike. That residual is WE14's sidereal-day signature
+  (0.37 mm/s amplitude), and it is **polar motion**: recomputing the observatory velocity
+  without polar motion removes the sidereal term entirely (amplitude 0.37 -> 0.013 mm/s,
+  RMS 0.33 -> 0.15 mm/s), so TEMPO's `-tempo1` prediction mode leaves polar motion out,
+  and this model and barycorrpy keep it (it is real: ~0.3 mm/s at CTIO). What remains is
+  white (point-to-point scatter equals the RMS, 0.14 mm/s), plus six epochs within a day
+  of the 2005, 2008 and 2012 leap seconds (up to 2.5 mm/s, TEMPO's side). Ruled out, each
+  measured against the residual: the TDB/TCB scale `L_B = 1.55e-8` on the velocity (the
+  fitted coefficient is -1.2e-9; applying `1 +/- L_B` makes the RMS worse, 0.42/0.45
+  mm/s); IAU 1976/1980 precession-nutation with GST94 in place of IAU 2006/2000A (0.01
+  mm/s); UT1 = UTC (6.5 mm/s, far worse); the Moon, Venus, Mars, Mercury, Uranus and
+  Neptune potentials (a constant 0.064 mm/s, which moves the mean -0.099 -> -0.035 mm/s
+  and leaves the RMS unchanged -- absorbed by any zero point, so not added); `v^2/c^2`,
+  annual, semiannual, lunar and Jupiter-period terms (none reduces the RMS by more than
+  0.003 mm/s). The comparison script is `scripts/compare_tempo_zb.py`; the table itself
+  is not committed (it is redistributed under barycorrpy's GPL-3.0, this repository is
+  BSD-3), so the script takes its path.
+- **Multi-orbit composition** (`tests/test_raw_redshift_orbits.py`): two planets around one
+  star with the outer one on a Jacobi orbit (primary group `[A, b]`), and a binary
+  observed in its secondary's light, each against an independent numpy composition of
+  the star's velocity from the orbits' elements, with its own retardation solve: < 0.1
+  mm/s and < 1 mm/s.
 - **Recovery** on the simulated example (`examples/raw_redshift_sim`): the likelihood's
   graph reproduces the numpy forward model that made the data to < 1 mm/s at the truth;
   a MAP fit recovers K, P and the three zero points; C and JAX gradients are finite and
@@ -226,6 +273,9 @@ WE14).
 5. The astrometry's own track is still the linear tangent-plane model; moving it onto
    `redshift.star_geometry`'s 3-D motion would add the astrometric perspective terms
    (mas-level for Barnard's star over a decade) and is not part of this mode.
+7. The corrected-velocity path (`data_format: rv`) also evaluates the reflex at the
+   BJD_TDB tag, without the star's own light-travel time (`~K^2/c`); left unchanged and
+   byte-identical here, for a separate decision.
 6. Default ephemeris `builtin` (0.27 cm/s against DE430); `time_ephemeris: de440` is
    one key away.
 

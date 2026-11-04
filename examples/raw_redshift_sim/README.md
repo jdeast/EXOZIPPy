@@ -13,7 +13,12 @@ m/s) and the planet (P = 571 d, e = 0.35, omega_* = 210 deg, K = 330 m/s, tc =
 random nights 2023-2025 with the star above 35 deg, from McDonald (HPF), Kitt Peak (NEID)
 and Roque de los Muchachos (FIES): barycentric velocities from -22.4 to +23.2 km/s.
 
-Each file holds the flux-weighted exposure midpoint in JD_UTC, `c * z_meas` in m/s (the
+`make_data.py`'s `tc` is the TARGET-frame conjunction. Because a raw file retards the
+orbit, the fit's `orbit.b.tc` is the OBSERVED (virtual transit) time and its
+`tc_target` the target-frame one, as for a transit fit, so the fitted `tc` sits the
+planet's light travel (hundreds of seconds) from the value in `make_data.py`. The reflex
+is evaluated at the star's emission time (its own light-travel time across
+the orbit, 0.4 mm/s here). Each file holds the flux-weighted exposure midpoint in JD_UTC, `c * z_meas` in m/s (the
 redshift against the template before any barycentric correction) and its error; the
 config reads them with `data_format: raw_redshift`, `time_frame: jd`, `time_scale: utc`,
 the site as `observer_location` and `epoch: 2457389.0` for the star's astrometric
@@ -22,7 +27,8 @@ redshifts constrain only each instrument's `(1 + z0_i)(1 + rv/c)`, which the fit
 as that instrument's `gamma`.
 
 The model, its validation against barycorrpy and what a corrected-RV fit would miss on
-this system are in `src/exozippy/components/rvinstrument/rvinstrument.md`.
+this system are in `src/exozippy/components/rvinstrument/rvinstrument.md`; why to publish
+raw `c z`, and what a release should carry, in `docs/raw_redshift_data.md`.
 
     python make_data.py                 # regenerate the data (deterministic seed)
     exozippy raw_redshift_sim.yaml      # fit

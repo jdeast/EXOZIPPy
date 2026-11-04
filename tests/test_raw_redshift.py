@@ -425,14 +425,24 @@ def test_the_likelihood_is_the_forward_model_at_the_truth(example):
     When the likelihood's model node is evaluated there,
     Then it equals the numpy forward model that simulated the data (before
       noise) to < 1 mm/s -- the residual is the start's logit round trip.
+      The numpy model is handed the graph's TARGET-frame conjunction: a raw
+      file retards the orbit, so the fitted `tc` is the OBSERVED (virtual
+      transit) time, tc_target plus the planet's light travel
+      (Orbit._ltt_reporting_mask), hundreds of seconds here.
     """
     system, model, start = example
     rvi = system.rvinstrument
     mod = _at(system, model, start, rvi._rv_model_data_node) * rvi._rv_factor()
+    tc_target = float(
+        _at(system, model, start, system.orbit.tc_target.value)[0]
+    )
+    assert abs(tc_target - MD.TRUTH["tc"]) * 86400.0 > 100.0
     truth = np.concatenate(
         [
             MD.predict(
-                name, np.loadtxt(EXAMPLE / f"Gaia4like.{name}.rv")[:, 0]
+                name,
+                np.loadtxt(EXAMPLE / f"Gaia4like.{name}.rv")[:, 0],
+                tc=tc_target,
             )[0]
             for name in MD.SITES
         ]

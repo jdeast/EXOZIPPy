@@ -3290,6 +3290,19 @@ class Orbit(Component):
 
         rv_cfg = cfg.get("rvinstrument", []) or []
         name_to_idx = {n: i for i, n in enumerate(self.names)}
+        # A raw-redshift RV file retards EVERY orbit its star is a body of
+        # (RVInstrument._emission_time): the observed star's reflex light
+        # leaves it at its own retarded time.  Corrected files do not.
+        rvi = (getattr(system, "active_components", None) or {}).get(
+            "rvinstrument"
+        )
+        if rvi is not None and any(
+            raw and ltt_on
+            for raw, ltt_on in zip(rvi.raw, rvi.light_travel_time)
+        ):
+            for star in sorted({int(x) for x in rvi.star_ndx}):
+                for o_idx, _role in self.star_membership(star):
+                    mask[int(o_idx)] = 1.0
         for entry in rv_cfg:
             o_name = entry.get("rm")
             if o_name and bool(entry.get("light_travel_time", True)):

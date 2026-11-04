@@ -532,13 +532,16 @@ class RVInstrument(Instrument):
             )
         return stated[0]
 
-    def _check_raw_rv_prior(self):
+    def _check_raw_rv_prior(self, system):
         """star.rv must carry a prior: the data constrain only each
         instrument's product (1 + gamma_i/c) = (1 + z0_i)(1 + rv/c)
         (rvinstrument.md, "What the data constrain"), so without one rv
         is flat over +/-c, and at a relativistic rv the terms that DO
         read it alone (gamma_*, the perspective stretch) are nonsense."""
+        # A star in an orbit group shares its anchor's systemic rv
+        # (Star.ORBIT_LINKED_PARAMS), so the prior lives on the anchor.
         s = int(self.star_ndx[0])
+        s = int(system.star.orbit_anchors(system).get(s, s))
         r = self.config_manager.resolve("star", "rv", element=s)
         # A Gaussian (star/defaults.yaml gives rv no sigma, so any sigma is
         # the user's), or bounds that confine rv to |rv| < 0.01 c: either
@@ -593,6 +596,72 @@ class RVInstrument(Instrument):
             v_e = v_e + VY[:, 0] * frac
         return v_n * SOLRAD_PER_DAY_TO_MPS, v_e * SOLRAD_PER_DAY_TO_MPS
 
+    def _emission_time(self, system, t_bary):
+        """The star's EMISSION time for light reaching the barycenter at
+        ``t_bary``: retarded by the star's own reflex displacement along
+        the line of sight, summed over EVERY orbit it is a body of,
+        ``t_emit = t_bary - Z_star(t_emit)/c`` with Z away from the
+        observer -- the same retardation ``components/ltt.py`` applies to
+        transits and RM, through its one implementation
+        (``line_of_sight_kinematics`` per Keplerian orbit, the summed
+        kinematics through ``solve_delay``).
+
+        ltt.py's z is TOWARD the observer and is the companion-minus-
+        primary separation r sin(omega_* + f) sin i, so the star's own
+        toward-observer displacement is ``-(M_c/M) z`` on an orbit's
+        primary side and ``+(M_p/M) z`` on its companion side -- the
+        barycentric shares the RV terms use, with the RV terms' signs.
+        A Taylor orbit adds its own line-of-sight displacement (its
+        acceleration and jerk terms; the constant and linear ones are the
+        gamma and the system's motion, already in t_bary).  Per file,
+        ``light_travel_time: false`` turns it off (default on, like every
+        other retarded consumer); the orbits it retards then report their
+        target-frame timing (Orbit._ltt_reporting_mask).
+        """
+        from .. import ltt
+
+        flags = np.array(
+            [
+                bool(self.light_travel_time[i])
+                for i in self.inst_map[self._raw_rows]
+            ]
+        )
+        if not flags.any():
+            return t_bary
+        orbits = system.orbit
+        s = int(self.star_ndx[0])
+        z = vz = az = 0.0
+        for o, role in orbits.star_membership(s):
+            o = int(o)
+            if role == "primary":
+                factor = -orbits.m_companion.value[o] / orbits.m_total.value[o]
+            else:
+                factor = orbits.m_primary.value[o] / orbits.m_total.value[o]
+            zo, vzo, azo = ltt.line_of_sight_kinematics(
+                t_bary,
+                orbits.tp_target.value[o],
+                orbits.n.value[o],
+                orbits.ecc.value[o],
+                orbits.sinw.value[o],
+                orbits.cosw.value[o],
+                orbits.sini.value[o],
+                orbits.a.value[o],
+                factor=factor,
+                circular=orbits._all_circular(np.array([o])),
+            )
+            z, vz, az = z + zo, vz + vzo, az + azo
+        for o, _role in orbits.taylor_membership(s):
+            omap = np.array([int(o)])
+            Z = orbits.state_vectors(t_bary, omap, line_of_sight_only=True)
+            # state_vectors' Z is AWAY; ltt's z is toward the observer.
+            z, vz = z - Z[2][:, 0], vz - Z[5][:, 0]
+        if isinstance(z, float):
+            return t_bary
+        delay = ltt.solve_delay(z, vz, pt.zeros_like(z) + az)
+        if not flags.all():
+            delay = delay * flags.astype(float)
+        return t_bary - delay
+
     def _raw_rv_model(self, system, time, blocks):
         """The likelihood's model when some file is raw: ``(model,
         matrix, kep, offset)``, internal units (rvinstrument.md).
@@ -627,11 +696,13 @@ class RVInstrument(Instrument):
             xp=pt,
         )
         self._raw_t_bary_node = geom["t_bary"]
-        t_eval = pt.set_subtensor(time[rows], geom["t_bary"])
+        t_emit = self._emission_time(system, geom["t_bary"])
+        self._raw_t_emit_node = t_emit
+        t_eval = pt.set_subtensor(time[rows], t_emit)
         kep, matrix = self._rv_model(system, t_eval, blocks, offset=None)
         offset = self.gamma.value[self.inst_map_tensor]
         v_los = kep[rows] * SOLRAD_PER_DAY_TO_MPS
-        v_n, v_e = self._reflex_sky(system, geom["t_bary"])
+        v_n, v_e = self._reflex_sky(system, t_emit)
         ratio = doppler_ratio(geom, self._raw_obs, (v_los, v_n, v_e), xp=pt)
         gamma_ms = (
             self.gamma.value[self.inst_map[rows]] * SOLRAD_PER_DAY_TO_MPS
@@ -943,7 +1014,7 @@ class RVInstrument(Instrument):
             # Settled here, not at stage 1: the astrometry's epoch exists
             # once every component has loaded.
             self.reference_epoch = self._reference_epoch(system)
-            self._check_raw_rv_prior()
+            self._check_raw_rv_prior(system)
         self._register_noise(self.manifest, self.jittervar_lower)
         self._register_gp(self.manifest)
         self._register_robust(self.manifest)
