@@ -499,7 +499,7 @@ def get_hipparcos_iad(
         f"    mode: gaia\n"
         f"    observer_location: earth\n"
         f"    reference_point: [{ab['ra0']:.8f}, {ab['dec0']:.8f}]\n"
-        f"    fithipframe: true   # when fit together with Gaia epoch astrometry"
+        f"    # fithipframe defaults to true when Gaia astrometry is in the fit"
     )
     return out, ab
 

@@ -13,7 +13,7 @@ Products (all written to --path):
   ``HIP <n>`` star (or a SIMBAD name with a HIP identifier), reconstructed
   into the ``mode: gaia`` file ``HIP<n>.Hipparcos.astrom`` (BJD_TDB, w, err,
   scan angle) with the config entry it needs printed (``reference_point:``
-  the J1991.25 catalog position; ``fithipframe: true`` with Gaia data).
+  the J1991.25 catalog position; ``fithipframe`` defaults on with Gaia data).
   --hip-merge-consortia writes one abscissa per orbit, the FAST/NDAC pair
   combined under its stated correlation, instead of both.
 * --gaia-epoch-astrometry: the Gaia DR4 EPOCH_ASTROMETRY DataLink product

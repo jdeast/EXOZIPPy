@@ -60,8 +60,30 @@ per-epoch error inflation is the dataset's ordinary ``jitter_variance``.
 Legal only on a ``mode: gaia`` or ``mode: abs`` dataset that is not Gaia
 itself (``data_format: gaia_epoch`` and ``observer_location: gaia`` raise:
 the Gaia datasets are the reference).  INACTIVE on every other dataset (the
-fluxfrac pattern), and declared only when some dataset sets the flag, so a
-fit without it has no such rows and an unchanged graph.
+fluxfrac pattern), and declared only when some dataset has the terms, so a
+fit without them has no such rows and an unchanged graph.
+
+The default.  An explicit ``fithipframe: true``/``false`` always wins.
+Without one, the terms are ON for a dataset that IS Hipparcos epoch
+astrometry and is fit together with another absolute dataset that defines
+the frame, and OFF otherwise.  "Is Hipparcos" is decided from the data,
+not from a file name or a comment line:
+
+  * ``mode: gaia`` (one-dimensional along-scan abscissae with scan angles),
+  * not observed by Gaia (``observer_location`` is not ``gaia``; a
+    gaia_epoch file is Gaia by construction), and
+  * EVERY epoch inside the Hipparcos mission, 1989 Nov 1 - 1993 Apr 1
+    (JD 2447831.5 - 2449078.5; observations ran 1989 Nov - 1993 Mar,
+    ESA 1997 Vol. 1).
+
+Hipparcos was the only mission that delivered along-scan abscissae before
+Gaia, so nothing else satisfies all three; ground-based astrometry of the
+same years is two-dimensional (``mode: abs``) and is never defaulted on.
+"Another absolute dataset that defines the frame" is any gaia/abs/catalog
+dataset that is not itself Hipparcos by that test.  A Hipparcos dataset
+fit alone (examples/HIP1349) has nothing to tie to, so the default leaves
+it off (and says so); an explicit ``true`` there is honored with the
+warning in ``check_frame_reference``.
 """
 
 import logging
@@ -84,17 +106,25 @@ FRAME_PARAMS = ("frame_dE", "frame_dN", "frame_dpmE", "frame_dpmN")
 # n-way choices), with its own priors.
 FRAME_FLAG = "fithipframe"
 FRAME_MODES = ("gaia", "abs")
+# The Hipparcos mission, padded to whole months: the data window that makes
+# a mode-gaia dataset "Hipparcos" for the default (see the module docstring).
+HIPPARCOS_WINDOW_JD = (2447831.5, 2449078.5)
 
 
 def parse_frame_flags(inst):
     """``fithipframe:`` per dataset of AstrometryInstrument ``inst``
     (at construction, after its data formats are parsed).  Returns a list
-    of bools; raises, naming the dataset, on a non-boolean value or a
-    dataset that cannot be in the Hipparcos frame."""
+    of True / False / None (unset: resolved from the data by
+    ``resolve_frame_defaults`` once the epochs are read); raises, naming the
+    dataset, on a non-boolean value or a dataset that cannot be in the
+    Hipparcos frame."""
     flags = []
     for i, c in enumerate(inst.config):
         where = f"[{inst.prefix}.{inst.names[i]}]"
-        flag = c.get(FRAME_FLAG, False)
+        flag = c.get(FRAME_FLAG)
+        if flag is None:
+            flags.append(None)
+            continue
         if not isinstance(flag, bool):
             raise ValueError(
                 f"{where} {FRAME_FLAG} must be true or false; got {flag!r}."
@@ -122,6 +152,53 @@ def parse_frame_flags(inst):
                 )
         flags.append(flag)
     return flags
+
+
+def is_hipparcos(inst, i):
+    """Whether dataset ``i`` (loaded) is Hipparcos epoch astrometry by the
+    module docstring's three tests."""
+    if inst.modes[i] != "gaia" or inst.observers[i] == "gaia":
+        return False
+    if inst.data_formats[i] == "gaia_epoch":
+        return False
+    t = np.asarray(inst.datasets[i]["time"], dtype=float)
+    lo, hi = HIPPARCOS_WINDOW_JD
+    return bool(len(t)) and bool(np.all((t >= lo) & (t <= hi)))
+
+
+def resolve_frame_defaults(inst):
+    """Replace each unset (None) flag by the default (module docstring),
+    after ``load_data`` has read every dataset's epochs.  Logs each
+    decision the default made."""
+    hip = [is_hipparcos(inst, i) for i in range(inst.n_elements)]
+    frame_defined = [
+        m in ("gaia", "abs", "catalog") and not hip[i]
+        for i, m in enumerate(inst.modes)
+    ]
+    out = []
+    for i, flag in enumerate(inst.fithipframe):
+        if flag is not None:
+            out.append(flag)
+            continue
+        on = hip[i] and any(frame_defined)
+        where = f"[{inst.prefix}.{inst.names[i]}]"
+        if on:
+            logger.info(
+                f"{where} Hipparcos epoch astrometry (mode gaia, every epoch "
+                f"in the Hipparcos mission) fit with "
+                f"{[inst.names[j] for j, f in enumerate(frame_defined) if f]}"
+                f": {FRAME_FLAG} defaults to true, the Hipparcos frame's "
+                f"offset and spin from theirs are fit.  Set {FRAME_FLAG}: "
+                f"false to take the frames as identical."
+            )
+        elif hip[i]:
+            logger.info(
+                f"{where} Hipparcos epoch astrometry with no other absolute "
+                f"dataset to define a frame: {FRAME_FLAG} defaults to false "
+                f"(the frame terms would be fixed by their priors alone)."
+            )
+        out.append(on)
+    return out
 
 
 def check_frame_reference(inst):
@@ -165,7 +242,7 @@ def add_frame_prose(inst, system):
 
     names = join_names([latex_escape(inst.names[i]) for i in tied])
     get_collector(system).add(
-        rf"The positions of {names} are in the Hipparcos reference frame, "
+        rf"The {names} astrometry is in the Hipparcos reference frame, "
         r"which differs from the Gaia frame of the other astrometry by an "
         r"orientation offset and a spin \citep{Kovalevsky:1997, "
         r"Lindegren:2021b}; for one star these project onto a sky-plane "

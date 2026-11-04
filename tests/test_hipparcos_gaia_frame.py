@@ -1,5 +1,6 @@
 """Hipparcos and Gaia epoch astrometry of one star fit jointly, with the
-Hipparcos-to-Gaia frame tie as parameters (`fithipframe: true`;
+Hipparcos-to-Gaia frame tie as parameters (`fithipframe`, on by default
+for Hipparcos data fit with Gaia;
 components/astrometryinstrument/frametie.py).
 
 The point of the feature is the 25-year lever arm: a companion with a period
@@ -168,7 +169,7 @@ def sim_files(tmp_path_factory):
     return out
 
 
-def _config(files, with_hip=True, fithipframe=True):
+def _config(files, with_hip=True, fithipframe=None):
     hip = {
         "name": "Hipparcos",
         "file": str(files["hip"]),
@@ -177,8 +178,8 @@ def _config(files, with_hip=True, fithipframe=True):
         "reference_point": list(HIP_REF),
         "epoch": EPOCH,
     }
-    if fithipframe:
-        hip["fithipframe"] = True
+    if fithipframe is not None:
+        hip["fithipframe"] = fithipframe
     dr4 = {
         "name": "DR4",
         "file": str(files["dr4"]),
@@ -190,7 +191,8 @@ def _config(files, with_hip=True, fithipframe=True):
     return {
         "name": "hipgaia",
         "star": [{"name": "A", "mist": False}],
-        "planet": [{"name": "B"}],
+        # radius pinned, so Chen & Kipping would act on the mass
+        "planet": [{"name": "B", "chen": False}],
         "orbit": [{"name": "B"}],
         "astrometryinstrument": [hip, dr4] if with_hip else [dr4],
     }
@@ -263,9 +265,11 @@ def _model_w(system, model, i):
 def test_model_abscissae_match_the_numpy_reference(sim_files):
     """
     Given the simulated Hipparcos (frame offset and spin injected) and DR4
-      datasets, each measured from its own reference point,
-    When the system is built at the truth, frame terms included,
-    Then each dataset's tangent point is its reference_point, and the model
+      datasets, each measured from its own reference point, and NO
+      fithipframe key,
+    When the system is built at the truth,
+    Then the frame terms are on by default for the Hipparcos dataset only,
+      each dataset's tangent point is its reference_point, and the model
       abscissae equal the noiseless numpy ones to 1e-6 mas on both.
     """
     system, model = _build(_config(sim_files), _params(frame=FRAME))
@@ -496,7 +500,7 @@ def test_gradients_are_finite_in_c_and_jax(sim_files):
 # ----------------------------------------------------------------------
 def test_flag_off_declares_nothing_and_leaves_the_model(sim_files):
     """
-    Given the joint config without fithipframe,
+    Given the joint config with fithipframe: false,
     When it is built,
     Then no frame parameter exists, and the Hipparcos model abscissae are
       the frame-free numpy ones (the frames taken as identical).
@@ -562,3 +566,39 @@ def test_frame_terms_on_gaia_epoch_data_raise():
         }
         with pytest.raises(ValueError, match=match):
             System(cfg, user_params={})
+
+
+def test_default_is_off_without_a_frame_or_outside_the_mission(
+    sim_files, tmp_path
+):
+    """
+    Given (a) the Hipparcos dataset fit alone, and (b) the same abscissae
+      with one epoch moved past the end of the Hipparcos mission, fit with
+      DR4, neither saying fithipframe,
+    When each is prepared,
+    Then (a) has nothing to tie to and (b) is not Hipparcos data by the
+      epoch test, so the default leaves the terms off in both (no frame
+      parameter is declared); an explicit true on (a) is honored.
+    """
+    cfg = _config(sim_files)
+    cfg["astrometryinstrument"] = cfg["astrometryinstrument"][:1]
+    system = System(cfg, user_params=_params())
+    system.prepare()
+    assert system.astrometryinstrument.fithipframe == [False]
+    assert "frame_dE" not in system.astrometryinstrument.manifest
+
+    arr = np.loadtxt(sim_files["hip"])
+    arr[-1, 0] = 2449200.0  # 1993.5: after the mission
+    moved = tmp_path / "late.astrom"
+    np.savetxt(moved, arr, fmt="%.10f")
+    cfg = _config(sim_files)
+    cfg["astrometryinstrument"][0]["file"] = str(moved)
+    system = System(cfg, user_params=_params())
+    system.prepare()
+    assert system.astrometryinstrument.fithipframe == [False, False]
+
+    cfg = _config(sim_files, fithipframe=True)
+    cfg["astrometryinstrument"] = cfg["astrometryinstrument"][:1]
+    system = System(cfg, user_params=_params())
+    system.prepare()
+    assert system.astrometryinstrument.fithipframe == [True]

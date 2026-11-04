@@ -104,14 +104,18 @@ Per-instrument config keys:
                       from two points -- Hipparcos IAD about the J1991.25
                       catalog position (exozippy-getdata --hipparcos-iad
                       prints it) and Gaia DR4 about its own (ra0, dec0).
-  fithipframe       : gaia/abs only, default false: this dataset is in the
-                      Hipparcos reference frame, and its offset from the
-                      frame the other datasets define (Gaia) is fit -- a
-                      position offset at J1991.25 (frame_dE, frame_dN) and
-                      a proper-motion offset (frame_dpmE, frame_dpmN), with
+  fithipframe       : gaia/abs only: this dataset is in the Hipparcos
+                      reference frame, and its offset from the frame the
+                      other datasets define (Gaia) is fit -- a position
+                      offset at J1991.25 (frame_dE, frame_dN) and a
+                      proper-motion offset (frame_dpmE, frame_dpmN), with
                       Gaussian priors from the Hipparcos-Gaia
-                      cross-calibration.  See frametie.py and "Hipparcos and
-                      Gaia together" below.
+                      cross-calibration.  Default: true for a dataset that
+                      IS Hipparcos (mode gaia, not observed by Gaia, every
+                      epoch inside the Hipparcos mission) when another
+                      absolute dataset is in the fit, false otherwise; an
+                      explicit value wins.  See frametie.py and "Hipparcos
+                      and Gaia together" below.
   observer_location : ephemeris for parallax factors (default 'gaia' for
                       gaia mode, 'earth' otherwise; see exozippy.ephemeris)
   star_ndx          : index of the host star (default 0); also sets the
@@ -168,9 +172,10 @@ one star.ra/dec/pm/parallax and one photocenter orbit serve both, so a
 companion of decades to centuries bends the track between the missions.
 The two frames differ by an orientation and a spin, which for one star is a
 position offset and a proper-motion offset of the Hipparcos dataset;
-`fithipframe: true` on it fits them (four parameters, INACTIVE elsewhere,
-added to the star's track inside _absolute_model so likelihood and plots
-agree).  Without the flag the frames are taken as identical.  The 1997 IAD
+`fithipframe` fits them (four parameters, INACTIVE elsewhere, added to the
+star's track inside _absolute_model so likelihood and plots agree); it is
+on by default for Hipparcos data fit with another absolute dataset, and
+`fithipframe: false` takes the frames as identical.  The 1997 IAD
 abscissae of the FAST and NDAC consortia are correlated and are treated as
 independent unless getdata merged them (--hip-merge-consortia).
 
@@ -317,6 +322,7 @@ from exozippy.components.astrometryinstrument.frametie import (
     frame_offset,
     numpy_frame_offset,
     parse_frame_flags,
+    resolve_frame_defaults,
 )
 from exozippy.components.instrument import Instrument
 from exozippy.components.orbit.bodies import (
@@ -773,7 +779,9 @@ class AstrometryInstrument(Instrument):
 
         self._parse_catalog_and_split_keys()
         self._parse_data_formats()
-        # The Hipparcos-to-Gaia frame tie (frametie.py), per dataset.
+        # The Hipparcos-to-Gaia frame tie (frametie.py), per dataset: the
+        # explicit values here, the unset ones (None) resolved from the
+        # epochs at the end of load_data.
         self.fithipframe = parse_frame_flags(self)
 
     def _parse_catalog_and_split_keys(self):
@@ -1401,8 +1409,11 @@ class AstrometryInstrument(Instrument):
                 "accepts": [True, False],
                 "required": False,
                 "doc": (
-                    "gaia/abs only, default false. This dataset is in the "
-                    "Hipparcos reference frame: fit its offset from the "
+                    "gaia/abs only. Default: true for Hipparcos epoch data "
+                    "(mode gaia, every epoch in the Hipparcos mission) fit "
+                    "with another absolute dataset, else false. This "
+                    "dataset is in the Hipparcos reference frame: fit its "
+                    "offset from the "
                     "frame of the other datasets (Gaia) as a position "
                     "offset at J1991.25 (frame_dE, frame_dN, mas) and a "
                     "proper-motion offset (frame_dpmE, frame_dpmN, mas/yr) "
@@ -1686,6 +1697,7 @@ class AstrometryInstrument(Instrument):
         logger.info(
             f"[{self.prefix}] reference epoch for ra/dec/pm: {self.epoch:.4f}"
         )
+        self.fithipframe = resolve_frame_defaults(self)
 
     def _load_catalog(self, i, d, df, ra_ref, dec_ref):
         """Fill catalog dataset ``d`` from its one-row file ``df`` (review

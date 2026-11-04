@@ -41,13 +41,15 @@ poetry run exozippy hd114762.yaml
 
 - One star, priors from Gaia DR3 (FLAME mass and radius, GSP-Spec Teff and
   [M/H]); no MIST.
-- One dark companion on a Keplerian orbit, started at the Gaia DR3
+- One dark companion on a Keplerian orbit (`chen: false`: its radius is
+  pinned, so the mass-radius relation would act on the mass), started at
+  the Gaia DR3
   two-body solution (Thiele-Innes constants converted to Campbell
   elements; the conventions are the same, `examples/gaia4/README.md`).
   The companion is luminous in reality, so the fitted mass describes the
   photocenter orbit.  Without RVs, (Omega, omega) and (Omega + 180,
   omega + 180) are degenerate and Omega is restricted to [0, 180] deg.
-- `fithipframe: true` on the Hipparcos dataset: the Hipparcos frame minus
+- `fithipframe` (on by default: Hipparcos epochs fit with Gaia): the Hipparcos frame minus
   the Gaia frame at the star -- a position offset at J1991.25 (`frame_dE`,
   `frame_dN`) and a proper-motion offset (`frame_dpmE`, `frame_dpmN`) --
   with Gaussian priors of 0.3 mas and 0.28 mas/yr per coordinate from the
@@ -57,39 +59,67 @@ poetry run exozippy hd114762.yaml
 
 ## Status
 
-WIP like `examples/gaia4` and `examples/GaiaBH3`: the system prepares and
-builds (tests/test_examples_prepare.py), and a maximum-a-posteriori fit
-from the DR3 start (below) behaves as expected, but no posterior has been
-sampled yet.  Maximum a posteriori from the DR3 start, with 1-sigma from
-the Hessian (2026-11-04; the per-dataset jitter absorbs the pre-release's
-underestimated CCD errors at G = 7, DR4 chi2/N ~ 9.7 on the formal ones):
+`hd114762.yaml` was sampled once (2026-11-04; the config's numpyro
+settings, 4 chains x (1000 tune + 3000 draws)).  It did NOT converge to the
+code's thresholds: 250 divergences after tuning, max Rhat 1.014
+(`planet.bs`), min ESS 312 (`orbit.tc_sampled`).  The reason is physical:
+without RVs the orbit is nearly face-on (cos i = 0.966 +/- 0.027, against
+its bound) and e and omega are then barely constrained (secosw, sesinw =
+0.00 +/- 0.41, -0.03 +/- 0.38).  The well-measured quantities:
 
-| quantity | Hipparcos + DR4 | DR4 alone |
+| quantity | posterior (mean +/- sd) |
+|---|---|
+| companion mass (dark) [M_J] | 242 +/- 16 |
+| period [d] | 83.891 +/- 0.032 |
+| pm_ra*, pm_dec [mas/yr] (J2017.5) | -582.469 +/- 0.020, -0.548 +/- 0.016 |
+| distance [pc] | 39.544 +/- 0.054 |
+| frame_dE, frame_dN [mas] | 0.09 +/- 0.29, 0.02 +/- 0.29 |
+| frame_dpmE, frame_dpmN [mas/yr] | -0.01 +/- 0.27, -0.13 +/- 0.27 |
+
+The frame terms stay at their priors: the Hipparcos abscissae are 2-5 mas,
+and an 84-day orbit is covered many times by DR4 alone, so this companion
+gains little from the 25-year lever arm.  The astrometric orbit also
+disagrees with the RV one: a0 sin i ~ 0.6 mas from the astrometry (Gaia
+DR3: a0 = 1.80 mas, i = 18.9 deg) against a_* sin i = 0.121 +/- 0.012 mas
+from the RV orbit (K = 612.5 m/s; Kiefer et al. 2019, Table 1) -- a
+factor of 5 that RVs in the fit would have to resolve.
+
+### The wide companion B: `hd114762_accel.yaml`
+
+HD 114762 B is a 0.088 Msun ultracool subdwarf 3.3 arcsec (128 AU
+projected) from A (Bowler et al. 2009).  Its pull on A is at most
+G M_B / r_proj^2 = 0.0054 mas/yr^2 on the sky: over the 26 years between
+Hipparcos and DR4 that bends A's track by up to a t^2/2 = 1.8 mas, against
+Hipparcos position errors of ~1 mas -- while over DR4's 5.3 years it is
+0.02 mas.  `hd114762_accel.yaml` adds B as an outer `constant_acceleration`
+orbit (orbit.B.accel_ra, accel_dec).  Maximum a posteriori, 1-sigma from
+the Hessian (2026-11-04):
+
+| | Hipparcos + DR4 | DR4 alone |
 |---|---|---|
-| companion mass (dark) [M_J] | 230 +/- 26 | 187 +/- 28 |
-| period [d] | 83.917 +/- 0.029 | 83.913 +/- 0.037 |
-| e | 0.313 +/- 0.044 | 0.285 +/- 0.028 |
-| cos i | 0.941 +/- 0.042 | 0.909 +/- 0.026 |
-| pm_ra*, pm_dec [mas/yr] | -582.471, -0.547 (+/- 0.02) | -582.455, -0.553 (+/- 0.02) |
-| frame_dE, frame_dN [mas] | 0.09, 0.03 (+/- 0.29) | -- |
-| frame_dpmE, frame_dpmN [mas/yr] | -0.00, -0.15 (+/- 0.27) | -- |
+| accel_ra [mas/yr^2] | 0.0028 +/- 0.0033 | -0.046 +/- 0.039 |
+| accel_dec [mas/yr^2] | 0.0007 +/- 0.0028 | 0.007 +/- 0.033 |
 
-An 84-day orbit is covered many times by DR4 alone, so the 25-year lever
-arm adds little here and the frame terms stay at their priors (the
-Hipparcos abscissae are 2-5 mas); the example demonstrates the machinery
-on real data.  The lever arm pays for companions with periods of decades
-(tests/test_hipparcos_gaia_frame.py: a 60-yr companion's mass and period
-are >= 3x better constrained with Hipparcos than with DR4 alone).
+The joint fit constrains the acceleration 12x better than DR4 alone, to
+the level of B's expected pull; DR4 alone is 7x too weak to see it.  It is
+NOT a detection (0.9 sigma): B's acceleration is at most ~1.7 sigma of
+what this star's Hipparcos positions can measure, and the true one is
+smaller unless B is at its projected separation.  A star with ~10x the
+acceleration (a brown dwarf at 20 AU, a stellar companion at 50 AU) would
+be a clean demonstration; none is among the twelve pre-release sources,
+of which HD 114762 is the only Hipparcos star (checked by cone match
+against the Hipparcos catalog; HD 183633 is not a Hipparcos star).
 
 ## What it would take to make this a science example
 
-- RVs.  The CfA (Latham et al. 1989) and later velocities (e.g. Kiefer et
-  al. 2019, SOPHIE) would break the node degeneracy and give the
-  companion's mass function; they were not retrievable from this machine
-  (CDS/VizieR unreachable), so none are shipped.
+- RVs.  The Lick velocities (Kane et al. 2011, the orbit Kiefer et al.
+  2019 adopt) would break the node and face-on degeneracies, settle the
+  factor-of-5 a sin i tension above and let the sampler converge; they
+  were not retrievable from this machine (CDS/VizieR unreachable), so none
+  are shipped.
 - The companion's light (an M dwarf in an 84-d orbit around an F9 star):
   give it a star block and an SED so the photocenter flux fraction is
   predicted (`band:` + `companion_star_ndx:`).
-- The reported wide companion HD 114762 B (a few arcsec, i.e. ~100 AU or
-  more) would add a second, long-period orbit -- the case the 25-year
-  lever arm exists for.
+- B as a Keplerian (rather than constant-acceleration) orbit, with its
+  measured separation and position angle from the AO imaging as rel
+  astrometry, would turn the acceleration bound into a mass constraint.

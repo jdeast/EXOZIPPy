@@ -193,7 +193,7 @@ exozippy-getdata "HIP 64426" --gaia-epoch-astrometry --gaia-prerelease
 
 `--hipparcos-iad` reconstructs the Hipparcos 1997 Intermediate Astrometric
 Data into a `mode: gaia` astrometry file and prints the config entry it needs
-(`reference_point:`, `fithipframe: true`); `--gaia-epoch-astrometry` writes the
+(`reference_point:`; the frame tie `fithipframe` is on by default when Gaia data are in the fit); `--gaia-epoch-astrometry` writes the
 Gaia DR4 epoch-astrometry table as the archive delivers it, for `data_format:
 gaia_epoch` (before DR4 is public the archive refuses, and `--gaia-prerelease`
 uses the June 2026 pre-release of twelve sources instead).  Asking for
