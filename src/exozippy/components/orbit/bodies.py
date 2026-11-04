@@ -44,6 +44,10 @@ CARTESIAN_TAYLOR_TYPES = (
 )
 UNIFORM_ROTATION_TYPE = "uniform_rotation"
 TAYLOR_TYPES = CARTESIAN_TAYLOR_TYPES + (UNIFORM_ROTATION_TYPE,)
+# The Taylor types a microlensing lens companion can move on: the polar
+# rotation and the Cartesian straight line, both parameterized by the
+# (ds_dt, dalpha_dt) of the pair at t0_par (orbit.md "Taylor orbits").
+LENS_TAYLOR_TYPES = (UNIFORM_ROTATION_TYPE, "constant_velocity")
 
 # The pre-2026-11 spellings, ordered by RV polynomial for the RV trend and by
 # position for the lens -- the same word for two different orders, which is

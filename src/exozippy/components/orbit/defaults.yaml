@@ -644,7 +644,9 @@ orbit:
   ds_dt:
     # Rate of change of the projected separation of a microlensing lens
     # binary, Einstein radii (of the TOTAL mass, C13) per Julian year, at
-    # t0_par (type: uniform_rotation).  gamma_par = ds_dt / s_0.  Read by a lens companion whose
+    # t0_par (type: uniform_rotation; for type: constant_velocity the
+    # straight line's radial rate AT t0_par, so gamma_par = ds_dt / s_0
+    # holds at first order either way).  gamma_par = ds_dt / s_0.  Read by a lens companion whose
     # `orbit:` names this orbit (conventions.md C24; it lived on the lens
     # until the orbit types were unified).
     # Bounds are rope, not gates: |gamma| ~ 0.25-0.6 /yr is typical for a
@@ -737,6 +739,55 @@ orbit:
     internal_unit: "mas/yr3"
     latex: "\\dot{g}_\\delta"
     description: "Sky jerk (Dec)"
+  rel_dE:
+    # A type: constant_velocity orbit read by a `rel` dataset: the
+    # COMPANION group's sky offset from the PRIMARY group at the orbit's
+    # epoch (the astrometric reference epoch by default), East (true arc),
+    # mas -- the rel-mode convention (sep/PA East of North of the companion
+    # relative to the primary: dE = sep sin PA, dN = sep cos PA).  Sampled
+    # Cartesian, not sep/PA, so the line has no angle to wrap.  Seeded from
+    # the data (Orbit._hint_rel_lines).  Bounds are rope, not gates:
+    # +/-1e7 mas (~3 deg) holds any pair a relative dataset resolves.
+    initval: 0.0
+    lower: -10000000.0
+    upper: 10000000.0
+    init_scale: 1.0
+    unit: "mas"
+    internal_unit: "mas"
+    latex: "\\Delta\\alpha^*_0"
+    description: "Relative offset at epoch (RA)"
+  rel_dN:
+    # North twin of rel_dE; see the note there.
+    initval: 0.0
+    lower: -10000000.0
+    upper: 10000000.0
+    init_scale: 1.0
+    unit: "mas"
+    internal_unit: "mas"
+    latex: "\\Delta\\delta_0"
+    description: "Relative offset at epoch (Dec)"
+  rel_vE:
+    # The constant relative sky velocity, East, mas/yr (type:
+    # constant_velocity, read by `rel`): dE(t) = rel_dE + rel_vE (t - epoch).
+    # Bounds: rope, +/-1e5 mas/yr as pm_ra's.
+    initval: 0.0
+    lower: -100000.0
+    upper: 100000.0
+    init_scale: 0.1
+    unit: "mas/yr"
+    internal_unit: "mas/yr"
+    latex: "\\dot{\\Delta\\alpha}^*"
+    description: "Relative velocity (RA)"
+  rel_vN:
+    # North twin of rel_vE; see the note there.
+    initval: 0.0
+    lower: -100000.0
+    upper: 100000.0
+    init_scale: 0.1
+    unit: "mas/yr"
+    internal_unit: "mas/yr"
+    latex: "\\dot{\\Delta\\delta}"
+    description: "Relative velocity (Dec)"
   accel_total:
     # |A|, the magnitude of the primary's acceleration vector at the epoch,
     # where the RVs AND the absolute astrometry read the orbit: gammadot in

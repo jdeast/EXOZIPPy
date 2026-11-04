@@ -370,7 +370,7 @@ def _write_binary_lc(path, n=120):
     return str(path)
 
 
-def _om_system(tmp_path, backend="vbm_direct"):
+def _om_system(tmp_path, backend="vbm_direct", otype="uniform_rotation"):
     from exozippy.system import System
 
     tmp_path.mkdir(parents=True, exist_ok=True)
@@ -394,7 +394,7 @@ def _om_system(tmp_path, backend="vbm_direct"):
         "orbit": [
             {
                 "name": "L",
-                "type": "uniform_rotation",
+                "type": otype,
                 "primary": ["L1"],
                 "companion": ["L2"],
             }
@@ -604,16 +604,14 @@ def test_the_removed_orbital_motion_key_names_its_replacement(motion):
     assert "type: uniform_rotation" in str(exc.value).replace("'", "")
 
 
-@pytest.mark.parametrize(
-    "otype", ["constant_velocity", "constant_acceleration", "constant_jerk"]
-)
-def test_a_cartesian_lens_orbit_is_refused(otype):
+@pytest.mark.parametrize("otype", ["constant_acceleration", "constant_jerk"])
+def test_an_accelerating_lens_orbit_is_refused(otype):
     """
-    Given: a lens companion on a Cartesian Taylor orbit,
+    Given: a lens companion on an accelerating Cartesian Taylor orbit,
     When: the Lens component is constructed,
-    Then: it raises NotImplementedError naming uniform_rotation -- a lens
-      reads the polar rates (C24); a Cartesian relative state for a lens is
-      a follow-on.
+    Then: it raises NotImplementedError naming the lens types
+      (uniform_rotation, constant_velocity) -- the backends take no
+      relative acceleration.
     """
     from exozippy.components.mulensing.lens import Lens
     from exozippy.config import ConfigManager

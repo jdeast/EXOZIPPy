@@ -22,6 +22,7 @@ import pytensor.tensor as pt
 
 from exozippy.components.component import Component
 from exozippy.components.orbit.bodies import (
+    LENS_TAYLOR_TYPES,
     STATIC_TYPE,
     UNIFORM_ROTATION_TYPE,
     orbit_types,
@@ -170,13 +171,14 @@ class Lens(Component):
                     f"static companion carries no 'orbit:' key (the static "
                     f"orbit block may still pair it with its host)."
                 )
-            if t not in ("keplerian", UNIFORM_ROTATION_TYPE):
+            if t not in ("keplerian",) + LENS_TAYLOR_TYPES:
                 raise NotImplementedError(
                     f"lens.{j + 1}: orbit {ref!r} is type: {t}; a lens "
-                    f"companion moves on a keplerian or a uniform_rotation "
-                    f"orbit (constant ds_dt, dalpha_dt; conventions.md C24).  "
-                    f"A Cartesian Taylor state for a lens is not implemented "
-                    f"(review 8.8.14 follow-on)."
+                    f"companion moves on a keplerian, a uniform_rotation "
+                    f"(constant ds_dt, dalpha_dt; conventions.md C24) or a "
+                    f"constant_velocity (the straight line those rates start "
+                    f"at t0_par) orbit; the backends take no relative "
+                    f"acceleration."
                 )
             if t == "keplerian":
                 # A keplerian orbit gives its COMPANION GROUP's position
@@ -466,14 +468,17 @@ class Lens(Component):
         # no filler is ever read (the same rule as companion_body_map).
         for mode, attr in (
             ("keplerian", "lens_kep_orbit_map"),
-            (UNIFORM_ROTATION_TYPE, "lens_motion_orbit_map"),
+            (LENS_TAYLOR_TYPES, "lens_motion_orbit_map"),
         ):
+            # Both rate-parameterized modes read the orbit's ds_dt/dalpha_dt
+            # through the one motion map.
+            modes = (mode,) if isinstance(mode, str) else mode
             own = [
                 (j + 1, o)
                 for j, (m, o) in enumerate(
                     zip(self.companion_motion, self.companion_orbit_idx)
                 )
-                if m == mode
+                if m in modes
             ]
             if own:
                 orbit_map = np.full(n, own[0][1], dtype=int)
@@ -570,7 +575,11 @@ class Lens(Component):
         # prints the primary row can show a contradictory tuple.
         modes = ["primary"]
         for om in self._companion_om:
-            if om == UNIFORM_ROTATION_TYPE:
+            if om in LENS_TAYLOR_TYPES:
+                # uniform_rotation and constant_velocity declare the same
+                # geometry: s0/alpha0 on the lens, the rates on the orbit,
+                # beta and period_min from the rates at t0_par, where the
+                # two types' velocities coincide.
                 modes.append("companion_uniform_rotation")
             elif om == "keplerian":
                 modes.append("companion_keplerian")
@@ -828,12 +837,20 @@ class Lens(Component):
         """
         self._validate_q_start()
 
-        linear = [
+        # The polar line can be carried through s = 0, which is where its
+        # approximation breaks; the straight line passes the primary at its
+        # closest approach, which is physical, so only the former warns.
+        rotating = [
             j + 1
             for j, m in enumerate(self.companion_motion)
             if m == UNIFORM_ROTATION_TYPE
         ]
-        self._warn_linear_separation_collapse(system, linear)
+        self._warn_linear_separation_collapse(system, rotating)
+        linear = [
+            j + 1
+            for j, m in enumerate(self.companion_motion)
+            if m in LENS_TAYLOR_TYPES
+        ]
         if linear:
             # The bound-orbit rope for the linear rates (C24; Skowron A19):
             # ONE LENS ORBIT, ONE BOUND (review 8.6.18) -- so one bound per
@@ -852,11 +869,25 @@ class Lens(Component):
                     name,
                     soft_upper_bound(self.beta.value[elem], 1.0, scale=0.1),
                 )
+            straight = any(
+                self.companion_motion[e - 1] == "constant_velocity"
+                for e in linear
+            )
+            model = (
+                r"as a straight line in the plane of the sky, the "
+                r"companion's position relative to the primary moving at "
+                r"the constant velocity that $\dot{s}$ and $\dot{\alpha}$ "
+                r"define at $t_{0,\rm par}$"
+                if straight
+                else r"$s(t) = s_0 + \dot{s}\,(t - t_{0,\rm par})$ "
+                r"and $\alpha(t) = \alpha_0 + \dot{\alpha}\,(t - "
+                r"t_{0,\rm par})$"
+            )
             get_collector(system).add(
                 r"We modeled the orbital motion of the lens binary to "
-                r"first order, $s(t) = s_0 + \dot{s}\,(t - t_{0,\rm par})$ "
-                r"and $\alpha(t) = \alpha_0 + \dot{\alpha}\,(t - "
-                r"t_{0,\rm par})$ \citep{Albrow:2000, Skowron:2011}, and "
+                r"first order, "
+                + model
+                + r" \citep{Albrow:2000, Skowron:2011}, and "
                 r"applied a soft upper bound at unity on the projected "
                 r"kinetic-to-potential energy ratio "
                 r"$\beta_{\rm kin}$ \citep{Batista:2011, Skowron:2011}, a "

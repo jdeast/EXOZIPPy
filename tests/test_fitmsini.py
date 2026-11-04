@@ -54,6 +54,10 @@ class _FakeOrbit:
     def star_membership(self, star_idx):
         return [(i, "primary") for i in range(self.n_elements)]
 
+    @property
+    def is_keplerian(self):
+        return np.ones(self.n_elements, dtype=bool)
+
     def bodies(self, i):
         return [("star", 0), ("planet", int(i))]
 
