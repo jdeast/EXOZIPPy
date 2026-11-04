@@ -145,6 +145,17 @@ SEED_LEDGER_ATTR = "exozippy_seed_ledger"
 # the stamp existed.
 HOT_SEARCH_ATTR = "exozippy_hot_search"
 
+# Which angle elements were sampled DIRECTLY instead of through their
+# direction latents, and each one's window (src/exozippy/angles.py): JSON
+# {"<prefix>.<angle>": {"elements", "center", "halfwidth", "scale", "sigma",
+# "forced"}}, internal units.  The automatic switch is decided from the
+# polished start, so a rebuild from the same config cannot re-derive it, and a
+# raw draw decodes only through the window it was sampled in -- the same
+# reason whitening.json carries the anchor.  The reuse path applies it BEFORE
+# building (angles.restore_from_trace).  Absent when nothing was direct, which
+# is every trace written before the switch existed: those sampled latents.
+ANGLES_ATTR = "exozippy_direct_angles"
+
 # The payload is a debugging aid, not the check itself; a pathological
 # config (thousands of per-parameter entries) should not bloat the trace
 # file.  Past this many characters only the hash is stored, and a mismatch
@@ -463,6 +474,8 @@ def structural_metadata(source) -> Dict[str, Any]:
         out[RESTART_AS_ATTR] = (
             json.dumps(aliases, sort_keys=True) if aliases else None
         )
+    direct = getattr(source, "direct_angles", None)
+    out[ANGLES_ATTR] = json.dumps(direct, sort_keys=True) if direct else None
     blob = json.dumps(payload, sort_keys=True, default=str)
     out[PAYLOAD_ATTR] = blob if len(blob) <= _MAX_PAYLOAD_CHARS else None
 
@@ -733,6 +746,26 @@ def check_trace_coordinates(idata, model, trace_path) -> None:
             f"REMEDY: re-sample with 'sampler: {{recompute_trace: true}}'."
             f"\n{_BANNER}"
         )
+
+
+def read_trace_root_attr(trace_path, name: str) -> Optional[str]:
+    """ONE root attribute of a saved trace, or None when it is absent.
+
+    The reader twin of :func:`stamp_trace_attr`, for a stamp a caller needs
+    BEFORE it can build the model that would decode the trace (the direct-
+    angle choices, ANGLES_ATTR): opening the whole InferenceData for one
+    string is a lazy DataTree with an HDF5 handle to manage, and h5py reads
+    the attribute in O(1).  A file h5py cannot open propagates, as there.
+    """
+    import h5py
+
+    with h5py.File(str(trace_path), "r") as f:
+        if name not in f.attrs:
+            return None
+        value = f.attrs[name]
+    if isinstance(value, bytes):
+        value = value.decode("utf-8")
+    return str(value)
 
 
 def stamp_trace_attr(trace_path, name: str, value: str) -> None:

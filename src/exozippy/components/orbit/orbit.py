@@ -257,7 +257,14 @@ class Orbit(Component):
 
     # Orbit-block keys that only mean something for a Keplerian orbit.  On a
     # Taylor orbit they would be silently inert, so they raise instead.
-    _KEPLERIAN_ONLY_KEYS = ("fitvcve", "fitchord", "i180", "global_search")
+    _KEPLERIAN_ONLY_KEYS = (
+        "fitvcve",
+        "fitchord",
+        "i180",
+        "global_search",
+        "fitbigomega",
+        "fitomega",
+    )
 
     def _parse_types(self):
         """Read and validate each orbit block's `type:` (default keplerian).
@@ -967,6 +974,36 @@ class Orbit(Component):
                     "the relaxation engine cannot derive them from the params "
                     "file. true forces it; false opts out. Single-orbit "
                     "systems only -- a periodogram peak names no orbit."
+                ),
+            },
+            {
+                "key": "fitbigomega",
+                "kind": "option",
+                "accepts": [True, False],
+                "required": False,
+                "doc": (
+                    "Sample the ascending node bigomega directly (uniform on "
+                    "a window centered on its start: a full turn, or half a "
+                    "turn where no RV identifies the node) instead of through "
+                    "its direction latents xbigomega/ybigomega.  Default: "
+                    "decided automatically at the polished start -- direct "
+                    "when the data measure bigomega to better than 5.7 deg, "
+                    "where the latents' posterior is a narrow ray NUTS cannot "
+                    "cross efficiently -- with a warning when it switches.  "
+                    "true forces the direct coordinate, false the latents."
+                ),
+            },
+            {
+                "key": "fitomega",
+                "kind": "option",
+                "accepts": [True, False],
+                "required": False,
+                "doc": (
+                    "Under fitvcve only (the one parameterization that samples "
+                    "omega through direction latents xomega/yomega): sample "
+                    "omega directly on a full-turn window centered on its "
+                    "start.  Default: automatic, exactly as fitbigomega; true "
+                    "forces it, false keeps the latents."
                 ),
             },
             {
@@ -2973,9 +3010,10 @@ class Orbit(Component):
             r"With astrometry but no RVs, $(\Omega, \omega_*)$ and "
             r"$(\Omega+180^\circ, \omega_*+180^\circ)$ are exactly "
             r"degenerate (which node is ascending is unknown); the "
-            r"posterior is folded onto $\Omega \in [0^\circ, "
-            r"180^\circ)$ after sampling, so the reported interval is a "
-            r"fold of a chain that explored both."
+            r"reported interval is of one of the two, chosen from the draws "
+            r"by a fold after sampling (or, where $\Omega$ is measured well "
+            r"enough to be sampled directly, by a half-turn window centered "
+            r"on its start)."
         )
 
         # The direction-vector SEED is not set here any more, and that is a
@@ -2994,6 +3032,30 @@ class Orbit(Component):
         self.manifest["omega"] = merge_options(
             self.manifest.get("omega"), table_note=note
         )
+
+    def direct_angle_halfwidth(self, angle):
+        """Half-width of a DIRECT angle's window, per orbit (exozippy.angles).
+
+        A full turn, except the ascending node of a node-DEGENERATE orbit
+        (astrometry, no radial data): there `(bigomega, omega, tc)` and
+        `(bigomega + 180, omega + 180, tc')` are one solution, so the window
+        is HALF a turn centered on the start and holds exactly one label.
+        That is not the truncation review 1.8.3 removed: that wall sat at a
+        FIXED 0/180, wherever the posterior happened to be, while this one
+        sits 90 deg from a start the data measure to better than
+        `angles.threshold(pi/2)` (31 sigma or more), and the mass past
+        it is the partner label, which the window already represents.  A
+        full-turn window would instead put its seam exactly ON the partner,
+        so a chain started there would sample against a wall.
+        """
+        half = np.full(self.n_elements, np.pi)
+        if angle == "bigomega":
+            degenerate = np.atleast_1d(
+                np.asarray(getattr(self, "node_degenerate", False), dtype=bool)
+            )
+            if degenerate.size == self.n_elements:
+                half[degenerate] = 0.5 * np.pi
+        return half
 
     # Sampled coordinates the reflection through the sky plane moves.  The
     # first four flip sign; `tc` moves to the other conjunction.  Every other
@@ -3042,6 +3104,19 @@ class Orbit(Component):
 
         moved = False
         for i in np.where(degenerate)[0]:
+            # A node sampled DIRECTLY lives on a half-turn window centered on
+            # its start (direct_angle_halfwidth), which holds one label by
+            # construction: there is nothing to fold, and its latents do not
+            # exist to flip.
+            if self.bigomega.element_is_sampled(i):
+                logger.info(
+                    "[%s.%s] ascending-node fold not needed: bigomega is "
+                    "sampled directly on a half-turn window, which holds one "
+                    "label.",
+                    self.prefix,
+                    self.names[i] if i < len(self.names) else i,
+                )
+                continue
             # The conjunction that moves is the SAMPLED one: `tc` itself on
             # an orbit sampled at the user's epoch, `tc_sampled` on one
             # sampled nearer the data (tc_epoch != 0; `tc` is then derived

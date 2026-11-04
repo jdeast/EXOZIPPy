@@ -1948,6 +1948,7 @@ def create_summary_plot(
     """
     import arviz as az
 
+    from ..angles import restore_from_trace as restore_direct_angles
     from ..system import System
     from ..trace_meta import check_trace_freshness
     from ..yamlio import load_system_config
@@ -1971,6 +1972,10 @@ def create_summary_plot(
 
         system = System(config)
         system.prepare()
+        # The trace's raw draws decode only in the angle coordinates they
+        # were sampled in (exozippy.angles), which the automatic switch chose
+        # from a start this path never computes.
+        restore_direct_angles(system, trace_path)
         model = system.build_model()
 
         idata = az.from_netcdf(str(trace_path))

@@ -1644,6 +1644,7 @@ def prepare_whitening(
     reusing_trace,
     cores=1,
     eval_timeout=None,
+    logp_fn=None,
 ):
     """Put the model into the whitened coordinates this run must use.
 
@@ -1663,12 +1664,19 @@ def prepare_whitening(
 
     ``cores`` / ``eval_timeout`` reach the probe (measure_and_whiten): run.py
     passes the sampler's core grant and ``sampler: eval_timeout:``.
+    ``logp_fn`` is an already-compiled ``model.compile_logp()`` to reuse (the
+    direct-angle decision compiles one for the same model just before).
     """
     if reusing_trace:
         restore_whitening_for_trace(system, path, trace_path)
         return None
     report = measure_and_whiten(
-        system, model, raw_start, cores=cores, eval_timeout=eval_timeout
+        system,
+        model,
+        raw_start,
+        logp_fn=logp_fn,
+        cores=cores,
+        eval_timeout=eval_timeout,
     )
     save_whitening(system, path, map_lp=report["map_lp"])
     return report

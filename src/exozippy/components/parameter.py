@@ -1211,6 +1211,17 @@ class Parameter:
     # start value as (mkparam; `orbit.tc_sampled` -> `tc`).  Declared in
     # defaults.yaml, never by a user.  See run.md.
     restart_as: Optional[str] = None
+    # The elements of an ANGLE sampled directly instead of through its
+    # direction latents (src/exozippy/angles.py; parameter.md, "Structural
+    # priors"): {"center": [...], "halfwidth": [...], "scale": [...]}, one
+    # entry per element in INTERNAL units, NaN on every element that keeps
+    # its latents.  On the others the element is a logit-uniform angle on
+    # [center - halfwidth, center + halfwidth], started at the center with
+    # `scale` as its preliminary whitening scale.  Internal units on purpose:
+    # the window is computed from an internal-unit start, and a user-unit
+    # spelling would need a conversion factor outside this class.  A
+    # manifest option set by the generic angle layer, never a user's.
+    direct_window: Any = None
     # The resolved per-element period in USER units, set by
     # recenter_posterior for the summaries to reuse on any SUBSET of the
     # draws (a mode split by the cut needs its own recentering).  Dropped by
@@ -1336,6 +1347,54 @@ class Parameter:
         self.upper = convert(self.upper)
         self.mu = convert(self.mu)
         self.sigma = convert(self.sigma)
+        self._apply_direct_window()
+
+    def _apply_direct_window(self):
+        """Put the DIRECT elements of an angle on their window (internal units).
+
+        After the unit conversion, so the window -- computed by
+        ``exozippy.angles`` from an internal-unit start -- is written in the
+        unit the transform uses and nothing outside this class needs a
+        conversion factor (CLAUDE.md).  An element with a NaN center keeps
+        whatever it resolved to: it is still derived from its latents.
+        """
+        if self.direct_window is None:
+            return
+        n = self._n_elements()
+        win = self.direct_window
+        center = np.asarray(win["center"], dtype=float).reshape(-1)
+        half = np.asarray(win["halfwidth"], dtype=float).reshape(-1)
+        scale = np.asarray(win["scale"], dtype=float).reshape(-1)
+        if not (center.size == half.size == scale.size == n):
+            raise ValueError(
+                f"[{self.label}] direct_window has {center.size}/{half.size}/"
+                f"{scale.size} center/halfwidth/scale entries for {n} "
+                f"element(s); the angle layer sizes it per element."
+            )
+        direct = np.isfinite(center)
+        if not np.all(np.isfinite(half[direct]) & (half[direct] > 0)) or (
+            not np.all(np.isfinite(scale[direct]) & (scale[direct] > 0))
+        ):
+            raise ValueError(
+                f"[{self.label}] direct_window needs a positive halfwidth and "
+                f"scale on every direct element; got halfwidth "
+                f"{half[direct].tolist()}, scale {scale[direct].tolist()}."
+            )
+
+        def put(field_value, values):
+            vec = np.array(
+                to_vec(
+                    field_value, n, fill=np.nan, where=f"{self.label}.window"
+                ),
+                dtype=float,
+            ).reshape(-1)
+            vec[direct] = values[direct]
+            return vec
+
+        self.initval = put(self.initval, center)
+        self.lower = put(self.lower, center - half)
+        self.upper = put(self.upper, center + half)
+        self.init_scale = put(self.init_scale, scale)
 
     def element_is_sampled(self, index=0):
         """True if element ``index`` is a FREE sampled element of this vector.

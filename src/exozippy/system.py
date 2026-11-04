@@ -19,6 +19,7 @@ except ImportError:  # pragma: no cover - older pytensor
     from pytensor.graph.basic import ancestors
 
 from exozippy import reporting
+from exozippy.angles import apply_forced as apply_forced_angles
 from exozippy.components.component import Component
 from exozippy.components.factory import discover_components, import_failures
 from exozippy.components.parameter import Parameter, SeedBoundViolation, to_vec
@@ -445,6 +446,14 @@ class System(Component):
                 self.config_manager.record_diagnostic(
                     "warning", message, paths
                 )
+
+        # After stage 4: a user's `fit<angle>: true` samples that angle
+        # directly instead of through its direction latents, on a window
+        # centered on the SOLVED start -- which is why it cannot happen at
+        # stage 3 (exozippy.angles; the automatic switch happens later, after
+        # the seed polish, in run.py).  Here and not in run.py so every
+        # caller of build_model -- the GUI included -- builds what was asked.
+        apply_forced_angles(self)
 
     def _adopt_element_owners(self):
         """Hand every OWNED vector's element owners to the ConfigManager.

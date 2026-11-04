@@ -85,7 +85,10 @@ spelling.  Before adding a flag, pick its kind and follow that template.
   is this kind in spirit (physics inclusion) and is deliberately NOT spelled
   `fit_finite_source`: the finite-source effect is a direct measurement of rho and
   is always on when the physics is.
-- **Coordinate choices, `fit<coord>`** (`fitvcve`, `fitchord`): sample in this
+- **Coordinate choices, `fit<coord>`** (`fitvcve`, `fitchord`; `fitbigomega`,
+  `fitomega`, `fitalpha` -- an angle sampled directly rather than through its
+  direction latents, whose ABSENT value means "the code decides from the
+  polished start", `src/exozippy/angles.py`): sample in this
   parameterization rather than the default.  Only the coordinates change --
   **but that is a property the flag's owner has to PAY FOR, not one it gets.**
   Every sampled parameter carries a prior uniform over its own bounds and

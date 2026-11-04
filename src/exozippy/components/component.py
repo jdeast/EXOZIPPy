@@ -309,6 +309,40 @@ class Component(ABC):
                 wrote[i] = True
         return wrote
 
+    def direct_angle_requests(self, angle):
+        """``(flag, per-element request)`` for an angle with direction latents.
+
+        The user's override of the automatic coordinate choice in
+        ``exozippy.angles``: ``fit<angle>: true`` on an instance's block
+        samples the angle directly, ``false`` keeps its latents, absent lets
+        the code decide.  One boolean, tri-state at the config layer exactly
+        as ``fitvcve`` is (components.md, "Config flag vocabulary": a
+        coordinate choice is ``fit<coord>``).  Read here, once, from the
+        per-instance config blocks; a component whose elements are not one
+        per block overrides this.  A non-boolean value raises.
+        """
+        flag = f"fit{angle}"
+        requests = []
+        for i, block in enumerate(self.config):
+            value = (block or {}).get(flag)
+            if value is not None and not isinstance(value, bool):
+                raise ValueError(
+                    f"[{self.prefix}.{self.names[i]}] '{flag}' must be true "
+                    f"or false (absent lets the code choose); got {value!r}."
+                )
+            requests.append(value)
+        return flag, requests
+
+    def direct_angle_halfwidth(self, angle):
+        """Per element: the half-width (rad) of a DIRECT angle's window.
+
+        A full turn by default (pi), so the only seam is opposite the start.
+        A component whose angle is exactly degenerate with angle + pi on some
+        elements returns pi/2 there (``Orbit``: an ascending node no radial
+        datum identifies), so the window holds one label.
+        """
+        return np.full(self.n_elements, np.pi)
+
     @classmethod
     def config_schema(cls):
         """Describe component-LEVEL config keys that are not parameters.
