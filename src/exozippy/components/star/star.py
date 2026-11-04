@@ -1707,10 +1707,24 @@ class Star(Component):
             m in ("gaia", "abs", "catalog") for m in astrom_modes
         )
 
+        # A raw-redshift RV file (rvinstrument data_format: raw_redshift)
+        # does the barycentric correction in the model, from the star's
+        # position, proper motion, parallax and absolute RV
+        # (rvinstrument.md, "Raw redshifts"): the same astrometric
+        # parameters, read by one more perspective.
+        rvi = in_topology(system, "rvinstrument")
+        rv_formats = getattr(rvi, "data_formats", None)
+        if rv_formats is None:
+            rv_formats = [
+                (c or {}).get("data_format", "rv") for c in (rvi or [])
+            ]
+        has_raw_rv = "raw_redshift" in rv_formats
+
         if (
             in_system("mulensevent")
             or in_system("galacticmodel")
             or has_abs_astrom
+            or has_raw_rv
         ):
             self.manifest.update(
                 {
@@ -1741,7 +1755,7 @@ class Star(Component):
             )
             self._seed_pm_from_sgra_prior()
 
-        if in_system("galacticmodel"):
+        if in_system("galacticmodel") or has_raw_rv:
             self.manifest["rv"] = None
 
         if "distance" in self.manifest:

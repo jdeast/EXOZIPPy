@@ -1,0 +1,51 @@
+# SIMULATED example (make_data.py): raw measured redshifts of a
+# Gaia-4-like star from three ground sites, barycentric-corrected INSIDE
+# the model (rvinstrument data_format: raw_redshift; rvinstrument.md).
+run:
+  name: "raw_redshift_sim"
+
+prefix: "fitresults/Gaia4like_raw"
+logger_level: INFO
+
+star:
+  - name: "A"
+    mist: False
+
+planet:
+  - name: "b"
+
+orbit:
+  - name: "b"
+
+rvinstrument:
+  - name: "HPF"
+    file: "Gaia4like.HPF.rv"
+    data_format: raw_redshift
+    observer_location: "-104.0147,30.6814,2026"   # McDonald
+    time_frame: jd       # the observatory's own clock ...
+    time_scale: utc      # ... a flux-weighted UTC exposure midpoint
+    epoch: 2457389.0     # star.ra/dec/pm refer to Gaia DR3's J2016.0
+  - name: "NEID"
+    file: "Gaia4like.NEID.rv"
+    data_format: raw_redshift
+    observer_location: "-111.6003,31.9583,2091"   # Kitt Peak
+    time_frame: jd
+    time_scale: utc
+    epoch: 2457389.0
+  - name: "FIES"
+    file: "Gaia4like.FIES.rv"
+    data_format: raw_redshift
+    observer_location: "-17.8850,28.7577,2382"    # Roque de los Muchachos
+    time_frame: jd
+    time_scale: utc
+    epoch: 2457389.0
+
+parameter_file: "raw_redshift_sim.params.yaml"
+
+sampler:
+  method: numpyro
+  tune: 1000
+  draws: 2000
+  chains: 4
+  cores: 4
+  target_accept: 0.95

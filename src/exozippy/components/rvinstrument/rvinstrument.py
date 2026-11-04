@@ -10,8 +10,20 @@ import pytensor
 import pytensor.tensor as pt
 
 from exozippy.components.instrument import Instrument
+from exozippy.constants import C_MPS
 from exozippy.outputs.prose import get_collector
 from exozippy.outputs.texutils import latex_escape
+
+#: ``data_format:`` values.  ``rv`` (the default, and what an absent key
+#: means) is today's file: barycentric-corrected velocities, modeled as
+#: gamma + the reflex.  ``raw_redshift`` is the measured c z before any
+#: barycentric correction, which the model corrects itself
+#: (``rvinstrument.md``, "Raw redshifts"; ``redshift.py``).
+DATA_FORMAT_RV = "rv"
+RAW_REDSHIFT = "raw_redshift"
+DATA_FORMATS = (DATA_FORMAT_RV, RAW_REDSHIFT)
+#: Keys that exist only on a raw_redshift file.
+RAW_ONLY_KEYS = ("observer_location", "epoch")
 
 
 class RVInstrument(Instrument):
@@ -63,10 +75,97 @@ class RVInstrument(Instrument):
             bool(c.get("light_travel_time", True)) for c in self.config
         ]
         self.total_detrend_cols = 0
+        # data_format: raw_redshift -- the barycentric correction inside the
+        # model (rvinstrument.md, "Raw redshifts").  Parsed here so a
+        # malformed spec fails at construction.
+        self.data_formats = [
+            self._parse_data_format(i, c) for i, c in enumerate(self.config)
+        ]
+        self.raw = [f == RAW_REDSHIFT for f in self.data_formats]
+        self.observers = [
+            self._parse_raw_keys(i, c) if self.raw[i] else None
+            for i, c in enumerate(self.config)
+        ]
 
     @property
     def prefix(self):
         return "rvinstrument"
+
+    def _parse_data_format(self, i, c):
+        """File ``i``'s ``data_format:`` (absent: ``rv``, today's file)."""
+        fmt = c.get("data_format", DATA_FORMAT_RV)
+        if fmt not in DATA_FORMATS:
+            raise ValueError(
+                f"[{self.prefix}.{self.names[i]}] data_format: {fmt!r} is "
+                f"not one of {list(DATA_FORMATS)} ('rv': barycentric-"
+                f"corrected velocities, the default; 'raw_redshift': the "
+                f"measured c*z before any barycentric correction)."
+            )
+        if fmt != RAW_REDSHIFT:
+            for key in RAW_ONLY_KEYS:
+                if key in c:
+                    raise ValueError(
+                        f"[{self.prefix}.{self.names[i]}] {key}: belongs to "
+                        f"data_format: raw_redshift; a corrected-velocity "
+                        f"file does not read it."
+                    )
+        return fmt
+
+    def _parse_raw_keys(self, i, c):
+        """Validate a raw_redshift file's keys; returns its observer.
+
+        The observatory is ``observer_location:`` (the vocabulary of
+        ``ephemeris.get_observer_position``: an astropy site name, a
+        ``'lon,lat,height'`` string, or a spacecraft ``.eph`` file) and
+        nothing else -- ``time_location`` would be a second spelling of the
+        same place, and the geocenter ('earth', 'moon') is no spectrograph's
+        site (the Earth's rotation alone is 0.46 km/s).  ``time_frame`` must
+        be SAID: its default, bjd, is what a corrected file carries and
+        almost never what a raw spectrum's exposure midpoint is.
+        """
+        where = f"[{self.prefix}.{self.names[i]}] data_format: raw_redshift"
+        loc = c.get("observer_location")
+        if not isinstance(loc, str) or not loc:
+            raise ValueError(
+                f"{where} needs observer_location: -- the observatory, as "
+                f"an astropy site name, a 'lon_deg,lat_deg,height_m' string "
+                f"or a spacecraft .eph file (e.g. 'gaia'); got {loc!r}."
+            )
+        if loc in ("earth", "moon"):
+            raise ValueError(
+                f"{where}: observer_location: {loc!r} is a body's centre, "
+                f"not an observatory; name the site (the Earth's rotation "
+                f"is up to 0.46 km/s of the barycentric velocity)."
+            )
+        if "time_location" in c:
+            raise ValueError(
+                f"{where} reads the observatory from observer_location:; "
+                f"time_location: would be a second spelling of the same "
+                f"place -- remove it."
+            )
+        if "time_frame" not in c:
+            raise ValueError(
+                f"{where} needs time_frame: said explicitly -- jd for the "
+                f"observatory's own clock (a flux-weighted exposure "
+                f"midpoint, with time_scale: utc), or bjd for barycentric "
+                f"tags.  The default (bjd) is a corrected file's frame."
+            )
+        ep = c.get("epoch")
+        if ep is not None and (
+            isinstance(ep, bool)
+            or not isinstance(ep, (int, float, np.integer, np.floating))
+            or not ep > 2_000_000.0
+        ):
+            raise ValueError(
+                f"{where}: epoch: is the BJD_TDB reference epoch of "
+                f"star.ra/dec/pm_ra/pm_dec (e.g. 2457389.0 for Gaia DR3's "
+                f"J2016.0); got {ep!r}."
+            )
+        # Resolve the location now, so a typo fails at construction.
+        from exozippy.ephemeris import _resolve_observer
+
+        _resolve_observer(loc)
+        return loc
 
     def _parse_rv_unit(self, i, entry):
         """Resolve a file's ``unit:`` key to an astropy Unit.
@@ -149,6 +248,45 @@ class RVInstrument(Instrument):
                     "'m/s'."
                 ),
             },
+            {
+                "key": "data_format",
+                "kind": "option",
+                "accepts": list(DATA_FORMATS),
+                "required": False,
+                "doc": (
+                    "'rv' (default): barycentric-corrected velocities, "
+                    "modeled as gamma + the reflex. 'raw_redshift': the "
+                    "measured c*z (in `unit:`, default m/s) BEFORE any "
+                    "barycentric correction, which the model applies "
+                    "itself from the fitted star.ra/dec/pm_ra/pm_dec/"
+                    "parallax/rv and every orbit (Wright & Eastman 2014); "
+                    "needs observer_location and an explicit time_frame, "
+                    "and a prior on star.rv."
+                ),
+            },
+            {
+                "key": "observer_location",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "raw_redshift only: the observatory -- an astropy site "
+                    "name, 'lon_deg,lat_deg,height_m', or a spacecraft "
+                    ".eph file (e.g. 'gaia')."
+                ),
+            },
+            {
+                "key": "epoch",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "raw_redshift only: BJD_TDB reference epoch of "
+                    "star.ra/dec/pm (e.g. 2457389.0 = J2016.0 for Gaia "
+                    "DR3). Required unless the system has absolute "
+                    "astrometry, whose epoch it must then equal."
+                ),
+            },
             cls._mask_config_schema(),
             cls._columns_config_schema(("time", "rv", "err")),
             *cls._time_config_schema(),
@@ -163,9 +301,33 @@ class RVInstrument(Instrument):
         """Stage 1: Load CSVs and generate data-driven bounds/inits."""
         self.gamma_init = [0.0] * self.n_elements
         self.jittervar_lower = [0.0] * self.n_elements
+        self._raw_files = [None] * self.n_elements
+        seed_blocks = []
 
         blocks = self._concat_blocks()
         for i in range(self.n_elements):
+            if self.raw[i]:
+                # The raw redshifts: observer-frame times, the observer's
+                # barycentric state, and a start-star correction for the
+                # SEEDS only (the likelihood corrects in the graph).
+                df, t_bary, v_seed = self._load_raw_file(system, i)
+                factor = self.units[i].to(u.solRad / u.d)
+                m_s_factor = self.units[i].to(u.m / u.s)
+                self.gamma_init[i] = float(np.mean(v_seed))
+                self.jittervar_lower[i] = self._jitter_floor(
+                    df.iloc[:, 2].values, factor=m_s_factor
+                )
+                blocks.add(
+                    i,
+                    time=t_bary,
+                    obs=df.iloc[:, 1].values * factor,
+                    err=df.iloc[:, 2].values * factor,
+                    df=df,
+                )
+                seed_blocks.append(
+                    v_seed * float((u.m / u.s).to(u.solRad / u.d))
+                )
+                continue
             # Shared reader: columns:, mask:, time_* conversion, then one
             # sort per file before anything is derived from it, keeping the
             # RVs, errors and detrend columns aligned by construction.
@@ -185,6 +347,7 @@ class RVInstrument(Instrument):
                 err=df.iloc[:, 2].values * factor,
                 df=df,
             )
+            seed_blocks.append(df.iloc[:, 1].values * factor)
 
         # Shared accumulator: concatenation (time/rv/err), inst_map, the
         # per-file row ranges, the block-diagonal detrend matrix, and the
@@ -196,6 +359,18 @@ class RVInstrument(Instrument):
             user_factor=(u.solRad / u.d).to(u.m / u.s),
             hint_unit="m/s",
         )
+        # The velocities every SEED reads (the K estimate, the Lomb-Scargle
+        # search, the conjunction-epoch information): the data themselves
+        # for a corrected file -- the very same array, so nothing moves --
+        # and for a raw file its redshifts corrected with the START star
+        # (_load_raw_file).  The likelihood never reads this.
+        self.rv_seed = (
+            np.concatenate(seed_blocks).astype(float)
+            if any(self.raw)
+            else self.rv
+        )
+        if any(self.raw):
+            self._concat_raw_observers()
 
         self.k_init = self._estimate_k_init()
 
@@ -205,6 +380,267 @@ class RVInstrument(Instrument):
         # window at stage 2 from whatever start it can see).
         self.ls_signal = None
         self._seed_from_lombscargle(system)
+
+    # ------------------------------------------------------------------
+    # data_format: raw_redshift (rvinstrument.md, "Raw redshifts")
+    # ------------------------------------------------------------------
+    def _load_raw_file(self, system, i):
+        """Read raw file ``i``: ``(df, t_bary, v_seed)``.
+
+        ``df`` -- the shared reader's frame, its time column the OBSERVER's
+        coordinate time JD_TDB at reception (``_to_observer_tdb``);
+        ``t_bary`` -- each spectrum's BJD_TDB at the START star (what the
+        plots, the GP's ordering and every seed read as ``self.time``; the
+        likelihood forms its own from the fitted star);
+        ``v_seed`` -- the redshifts corrected with the start star, m/s:
+        ``c[(1 + z_B)(1 + z_meas) - 1]`` (``redshift.barycentric_redshift``).
+
+        The observer's barycentric state and the solar-system potential
+        at each epoch are parameter-independent and computed here, once
+        (``redshift.observer_terms``).
+        """
+
+        from .redshift import (
+            barycentric_redshift,
+            observer_terms,
+            star_geometry,
+        )
+
+        loc = self.observers[i]
+        df = self._read_data(
+            i, roles=("time", "rv", "err"), detrend=True, observer_time=loc
+        )
+        t_tdb = df.iloc[:, 0].values.astype(float)
+        obs = observer_terms(t_tdb, loc, self.time_specs[i]["ephemeris"])
+        star = self._seed_star(i)
+        ep = self.config[i].get("epoch")
+        # The seed's epoch: the file's own, else its midpoint -- the
+        # correction moves by ~1 cm/s per year of epoch error, which no
+        # start value notices.  The model's epoch is settled at stage 3
+        # (_reference_epoch), when the astrometry has loaded.
+        epoch = float(ep) if ep is not None else 0.5 * (t_tdb[0] + t_tdb[-1])
+        t_bary = star_geometry(t_tdb, obs["r_au"], *star, epoch)["t_bary"]
+        z_b = barycentric_redshift(t_tdb, obs, star, epoch)
+        cz = df.iloc[:, 1].values * float(self.units[i].to(u.m / u.s))
+        v_seed = C_MPS * ((1.0 + z_b) * (1.0 + cz / C_MPS) - 1.0)
+        self._raw_files[i] = {"t_tdb": t_tdb, "obs": obs}
+        return df, np.asarray(t_bary, dtype=float), v_seed
+
+    def _seed_star(self, i):
+        """The start star for file ``i``'s seeds, internal units:
+        ``(ra, dec, pm_ra, pm_dec, parallax, rv)``.
+
+        ra/dec must be INFORMED (``require_star_radec`` raises otherwise:
+        a correction toward the defaults.yaml placeholder would be wrong by
+        tens of km/s).  The rest are the user's starts where given; where
+        not, the seed takes 0 (pm, rv) and 1 mas (parallax) -- terms that
+        move this SEED by < 1 m/s (the systemic rv enters only through its
+        product with the barycentric velocity, ~v_B rv / c), never the model.
+        """
+        from exozippy.components.star.position import (
+            _user_start,
+            require_star_radec,
+        )
+
+        cm = self.config_manager
+        s = int(self.star_ndx[i])
+        ra, dec = require_star_radec(
+            cm, s, f"[{self.prefix}.{self.names[i]}] data_format: raw_redshift"
+        )
+
+        def start(name, absent):
+            path = f"star.{s}.{name}"
+            val = _user_start(cm, path)
+            return absent if val is None else cm.to_internal(path, val)
+
+        plx = start("parallax", None)
+        if plx is None:
+            dist = start("distance", None)
+            plx = 1.0 if dist is None else 1000.0 / dist
+        return (
+            ra,
+            dec,
+            start("pm_ra", 0.0),
+            start("pm_dec", 0.0),
+            plx,
+            start("rv", 0.0),
+        )
+
+    def _concat_raw_observers(self):
+        """The raw files' observer terms, concatenated in row order, and
+        the rows they sit on (``self._raw_rows``, a concrete index array:
+        the likelihood writes the raw model into exactly those rows)."""
+        idx = [i for i in range(self.n_elements) if self.raw[i]]
+        self._raw_rows = np.concatenate(
+            [np.arange(*self.row_ranges[i]) for i in idx]
+        ).astype(int)
+        parts = [self._raw_files[i]["obs"] for i in idx]
+        self._raw_t_tdb = np.concatenate(
+            [self._raw_files[i]["t_tdb"] for i in idx]
+        )
+        self._raw_obs = {
+            key: np.concatenate([p[key] for p in parts], axis=axis)
+            for key, axis in (
+                ("r_au", 0),
+                ("beta", 0),
+                ("gamma", 0),
+                ("one_plus_zgrav", 0),
+                ("shapiro_hat", 1),
+                ("shapiro_coef", 1),
+            )
+        }
+
+    def _reference_epoch(self, system):
+        """The BJD_TDB epoch star.ra/dec/pm_ra/pm_dec refer to.
+
+        ONE star, one set of astrometric parameters, one epoch: with
+        absolute astrometry in the system it is the astrometry's
+        (``AstrometryInstrument.epoch``), and a raw file's ``epoch:`` must
+        equal it; without, every raw file must name it, and agree.
+        """
+        from ..astrometryinstrument.astrometryinstrument import ABSOLUTE_MODES
+
+        stated = sorted(
+            {
+                float(self.config[i]["epoch"])
+                for i in range(self.n_elements)
+                if self.raw[i] and "epoch" in self.config[i]
+            }
+        )
+        if len(stated) > 1:
+            raise ValueError(
+                f"[{self.prefix}] raw_redshift files name different "
+                f"epoch: values {stated}; star.ra/dec/pm are one set of "
+                f"parameters with one reference epoch."
+            )
+        ast = system.active_components.get("astrometryinstrument")
+        if ast is not None and any(m in ABSOLUTE_MODES for m in ast.modes):
+            if stated and stated[0] != float(ast.epoch):
+                raise ValueError(
+                    f"[{self.prefix}] raw_redshift epoch: {stated[0]} "
+                    f"disagrees with the astrometry's reference epoch "
+                    f"{float(ast.epoch)} for star.ra/dec/pm; drop epoch: "
+                    f"from the rvinstrument (the astrometry's is used)."
+                )
+            return float(ast.epoch)
+        if not stated:
+            raise ValueError(
+                f"[{self.prefix}] data_format: raw_redshift needs epoch: "
+                f"(BJD_TDB), the reference epoch of star.ra/dec/pm_ra/"
+                f"pm_dec -- e.g. 2457389.0 for Gaia DR3's J2016.0 -- since "
+                f"no absolute astrometry in this system supplies one."
+            )
+        return stated[0]
+
+    def _check_raw_rv_prior(self):
+        """star.rv must carry a prior: the data constrain only each
+        instrument's product (1 + gamma_i/c) = (1 + z0_i)(1 + rv/c)
+        (rvinstrument.md, "What the data constrain"), so without one rv
+        is flat over +/-c, and at a relativistic rv the terms that DO
+        read it alone (gamma_*, the perspective stretch) are nonsense."""
+        s = int(self.star_ndx[0])
+        r = self.config_manager.resolve("star", "rv", element=s)
+        # A Gaussian (star/defaults.yaml gives rv no sigma, so any sigma is
+        # the user's), or bounds that confine rv to |rv| < 0.01 c: either
+        # states what rv can be.  The defaults' +/-3e8 m/s states nothing.
+        sigma = r["sigma"]
+        has_sigma = sigma is not None and bool(np.all(np.isfinite(sigma)))
+        bounded = (
+            r["lower"] is not None
+            and r["upper"] is not None
+            and float(np.max(np.abs([r["lower"], r["upper"]]))) < 0.01 * C_MPS
+        )
+        if not (has_sigma or bounded):
+            raise ValueError(
+                f"[{self.prefix}] data_format: raw_redshift needs a prior on "
+                f"star.{s}.rv (the star's absolute radial velocity, m/s): "
+                f"the redshifts constrain only (1 + gamma_i/c) = (1 + z0_i)"
+                f"(1 + rv/c) per instrument.  A Gaia DR3 radial_velocity is "
+                f"the natural one, e.g. star.{s}.rv: {{mu: <v>, sigma: "
+                f"<err>}}; ~1 km/s is ample (an rv error dv moves the model "
+                f"by ~dv K / c)."
+            )
+
+    def _reflex_sky(self, system, t):
+        """The observed star's reflex velocity ACROSS the line of sight,
+        ``(v_north, v_east)`` in m/s at times ``t``, from the full orbit
+        state -- or ``(None, None)`` where the system does not model the
+        orbit's sky orientation (no ``bigomega``: no astrometry).  Only
+        Keplerian orbits: a Taylor orbit's sky terms are angular and need
+        a parallax, and are < 1e-3 of a resolved reflex.  The
+        line-of-sight part is the one ``_rv_model`` builds."""
+        from exozippy.constants import SOLRAD_PER_DAY_TO_MPS
+
+        orbits = system.orbit
+        if "bigomega" not in orbits.manifest:
+            return None, None
+        members = orbits.star_membership(self.star_ndx[0])
+        if not members:
+            return None, None
+        v_n = v_e = 0.0
+        for o, role in members:
+            omap = np.array([o])
+            primary = role == "primary"
+            _, _, _, VX, VY, _ = orbits.state_vectors(
+                t, omap, relative=not primary
+            )
+            frac = (
+                orbits.m_companion.value[o] / orbits.m_total.value[o]
+                if primary
+                else orbits.m_primary.value[o] / orbits.m_total.value[o]
+            )
+            v_n = v_n + VX[:, 0] * frac
+            v_e = v_e + VY[:, 0] * frac
+        return v_n * SOLRAD_PER_DAY_TO_MPS, v_e * SOLRAD_PER_DAY_TO_MPS
+
+    def _raw_rv_model(self, system, time, blocks):
+        """The likelihood's model when some file is raw: ``(model,
+        matrix, kep, offset)``, internal units (rvinstrument.md).
+
+        Corrected rows are ``gamma + reflex`` exactly as without raw files.
+        Raw rows are ``c z_meas`` predicted by ``redshift.doppler_ratio``
+        from the FITTED star (direction, Roemer delay to ``t_B``, space
+        velocity) and the reflex of every orbit evaluated at ``t_B`` --
+        the same ``_rv_model`` columns, evaluated on a time vector whose
+        raw rows are the in-graph barycentric arrival times.  Each raw
+        file's ``gamma`` is its instrument-frame systemic velocity,
+        ``c[(1 + z0_i)(1 + rv/c) - 1]``.
+        """
+        from exozippy.constants import SOLRAD_PER_DAY_TO_MPS
+
+        from .redshift import doppler_ratio, star_geometry
+
+        rows = self._raw_rows
+        star = system.star
+        s = int(self.star_ndx[0])
+        rv = star.rv.value[s]
+        geom = star_geometry(
+            self._raw_t_tdb,
+            self._raw_obs["r_au"],
+            star.ra.value[s],
+            star.dec.value[s],
+            star.pm_ra.value[s],
+            star.pm_dec.value[s],
+            star.parallax.value[s],
+            rv,
+            self.reference_epoch,
+            xp=pt,
+        )
+        self._raw_t_bary_node = geom["t_bary"]
+        t_eval = pt.set_subtensor(time[rows], geom["t_bary"])
+        kep, matrix = self._rv_model(system, t_eval, blocks, offset=None)
+        offset = self.gamma.value[self.inst_map_tensor]
+        v_los = kep[rows] * SOLRAD_PER_DAY_TO_MPS
+        v_n, v_e = self._reflex_sky(system, geom["t_bary"])
+        ratio = doppler_ratio(geom, self._raw_obs, (v_los, v_n, v_e), xp=pt)
+        gamma_ms = (
+            self.gamma.value[self.inst_map[rows]] * SOLRAD_PER_DAY_TO_MPS
+        )
+        one_plus_z0 = (1.0 + gamma_ms / C_MPS) / (1.0 + rv / C_MPS)
+        cz = C_MPS * (one_plus_z0 * ratio - 1.0) / SOLRAD_PER_DAY_TO_MPS
+        base = offset + kep
+        model = pt.set_subtensor(base[rows], cz)
+        return model, matrix, kep, offset
 
     def epochs_constraining(self, system, orbit):
         """Each RV file's epochs on every orbit its star is a body of, with
@@ -249,7 +685,8 @@ class RVInstrument(Instrument):
                 continue
             ts = [self.dataset_times(i) for i in files]
             vs = [
-                np.asarray(self.rv[self.rows(i)], dtype=float) for i in files
+                np.asarray(self.rv_seed[self.rows(i)], dtype=float)
+                for i in files
             ]
             es = [self.dataset_errors(i) for i in files]
             shapes = [
@@ -376,7 +813,7 @@ class RVInstrument(Instrument):
         # planet.
         to_ms = (u.solRad / u.d).to(u.m / u.s)
         gammas = np.asarray(self.gamma_init, dtype=float)
-        residual = self.rv * to_ms - gammas[self.inst_map]
+        residual = self.rv_seed * to_ms - gammas[self.inst_map]
         signal = globalsearch.lombscargle_search(
             self.time,
             residual,
@@ -456,7 +893,7 @@ class RVInstrument(Instrument):
         """
         to_ms = (u.solRad / u.d).to(u.m / u.s)
         gammas = np.asarray(self.gamma_init, dtype=float)
-        residual = self.rv * to_ms - gammas[self.inst_map]
+        residual = self.rv_seed * to_ms - gammas[self.inst_map]
         k = np.sqrt(2.0) * np.std(residual)
         if np.isfinite(k) and k > 0.0:
             return float(k)
@@ -502,6 +939,11 @@ class RVInstrument(Instrument):
         # offset instead of sampling it.  manifest.expression_config now
         # raises on that mismatch, so this has to say what it means.
         self.manifest = {"gamma": None}
+        if any(self.raw):
+            # Settled here, not at stage 1: the astrometry's epoch exists
+            # once every component has loaded.
+            self.reference_epoch = self._reference_epoch(system)
+            self._check_raw_rv_prior()
         self._register_noise(self.manifest, self.jittervar_lower)
         self._register_gp(self.manifest)
         self._register_robust(self.manifest)
@@ -714,12 +1156,23 @@ class RVInstrument(Instrument):
         # Retained as plain attributes (not Deterministics -- (N_obs,) per
         # draw per chain); compile_plotters compiles the matrix as the
         # plotted model AT the observations.
-        rv_model, rv_matrix = self._rv_model(
-            system,
-            time,
-            self._data_blocks(),
-            offset=self.gamma.value[self.inst_map_tensor],
-        )
+        if any(self.raw):
+            # Some file is raw: its rows are the in-graph barycentric
+            # correction of the fitted star (_raw_rv_model).  The gap
+            # between that and the corrected-mode model (gamma + reflex)
+            # is kept for the plots, which draw the data as reflex +
+            # likelihood residual (_plotted_rv).
+            rv_model, rv_matrix, kep, offset = self._raw_rv_model(
+                system, time, self._data_blocks()
+            )
+            self._rv_bary_data_node = rv_model - (offset + kep)
+        else:
+            rv_model, rv_matrix = self._rv_model(
+                system,
+                time,
+                self._data_blocks(),
+                offset=self.gamma.value[self.inst_map_tensor],
+            )
         self._rv_model_data_node = rv_model
         self._rv_matrix_data_node = rv_matrix
 
@@ -776,6 +1229,38 @@ class RVInstrument(Instrument):
                 rank=21,
             )
         get_collector(system).add_software("exoplanet-core")
+        if any(self.raw):
+            self._add_raw_prose(system)
+
+    def _add_raw_prose(self, system):
+        """The raw-redshift sentence (outputs.md: declared where the model
+        is built)."""
+        names = ", ".join(
+            latex_escape(self.names[i])
+            for i in range(self.n_elements)
+            if self.raw[i]
+        )
+        transverse = (
+            " and its full three-dimensional reflex velocity"
+            if "bigomega" in system.orbit.manifest
+            else " and its line-of-sight reflex velocity"
+        )
+        get_collector(system).add(
+            "The " + names + " spectra were fit as raw measured redshifts: "
+            "the barycentric correction was computed inside the model "
+            r"following \citet{Wright:2014}, as a function of the fitted "
+            "stellar position, proper motion, parallax and absolute radial "
+            "velocity, with the star's space motion" + transverse + " "
+            "entering the multiplicative relativistic Doppler relation, so "
+            "the cross terms between the barycentric and stellar velocities "
+            "and the perspective acceleration are modeled rather than "
+            "approximated. Each instrument's zero point absorbs the "
+            "template, gravitational-redshift and convective-blueshift "
+            "offsets, and the absolute radial velocity is set by its prior.",
+            section="orbits",
+            key=f"{self.prefix}.raw_redshift",
+            rank=22,
+        )
 
     # Points per block on a plotted model grid; one size for the unphased
     # span and the phased period window so both share one compiled layout.
@@ -876,6 +1361,12 @@ class RVInstrument(Instrument):
                 outputs=[rv_full_node, rv_matrix_node],
                 on_unused_input="ignore",
             )
+            if any(self.raw):
+                self._rv_bary_fn = pytensor.function(
+                    inputs=param_symbols,
+                    outputs=self._rv_bary_data_node,
+                    on_unused_input="ignore",
+                )
             data_node = getattr(self, "_rv_matrix_data_node", None)
             self._rv_data_fn = (
                 pytensor.function(
@@ -903,6 +1394,21 @@ class RVInstrument(Instrument):
         if gamma is not None and hasattr(gamma, "element_factor"):
             return gamma.element_factor(0)
         return (u.solRad / u.d).to(u.m / u.s)
+
+    def _plotted_rv(self, system, point):
+        """The observations the plots draw, internal units.
+
+        A corrected file's are its data.  A raw file's c z_meas carries the
+        barycentric velocity (tens of km/s), so at a point it is drawn as
+        what the corrected-mode panels expect -- gamma + reflex + the
+        likelihood's own residual: ``data - (model - (gamma + reflex))``
+        (``_rv_bary_data_node``, compiled from the likelihood's graph).
+        Without a point (the data-only preview) a raw file is drawn as
+        measured."""
+        if point is None or not any(self.raw):
+            return self.rv
+        bary = self._rv_bary_fn(*self._point_to_plot_params(point, system))
+        return self.rv - np.asarray(bary, dtype=float)
 
     def _shortest_period(self, system, point):
         """The shortest period (days) of this star's Keplerian member
@@ -1164,7 +1670,7 @@ class RVInstrument(Instrument):
         # base inverse of the likelihood's own combination
         # (Instrument.detrend_corrected); unchanged without detrend columns.
         rv_corrected, err_corrected = self.detrend_corrected(
-            self.rv, self.err, point
+            self._plotted_rv(system, point), self.err, point
         )
         return {
             "param_values": param_values,
@@ -1339,7 +1845,7 @@ class RVInstrument(Instrument):
         # the likelihood's own combination (Instrument.detrend_corrected);
         # the raw data without detrend columns.
         rv_corrected, err_corrected = self.detrend_corrected(
-            self.rv, self.err, point
+            self._plotted_rv(system, point), self.err, point
         )
         for i in range(self.n_elements):
             mask = self.inst_map == i
@@ -1373,6 +1879,11 @@ class RVInstrument(Instrument):
             + self.detrend_dep_labels()
             + self.gp_dep_labels()
         )
+        if point is not None and any(self.raw):
+            # The raw data move with the star too (_plotted_rv).
+            numpy_deps = numpy_deps + self._model_trace_param_deps(
+                self._rv_bary_data_node, system
+            )
         if point is not None:
             model_deps = model_deps + [
                 lbl for lbl in numpy_deps if lbl not in model_deps

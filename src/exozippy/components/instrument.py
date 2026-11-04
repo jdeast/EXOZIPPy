@@ -840,7 +840,9 @@ class Instrument(TimeSystem, Component):
     # ------------------------------------------------------------------
     # Shared file reading: columns, mask, time system, sort
     # ------------------------------------------------------------------
-    def _read_data(self, i, roles, detrend=False, shared_roles=()):
+    def _read_data(
+        self, i, roles, detrend=False, shared_roles=(), observer_time=None
+    ):
         """Read data file ``i`` into canonical column order, ready to use.
 
         One call replaces the read/mask/sort triplet every child used to
@@ -865,6 +867,13 @@ class Instrument(TimeSystem, Component):
         ``shared_roles`` names groups of roles this component allows to
         read the SAME file column (see ``_check_no_duplicate_columns``);
         every other collision is an error.
+
+        ``observer_time`` -- an ``observer_location`` (the
+        ``ephemeris.get_observer_position`` vocabulary) for a component
+        that models the light's travel ITSELF (``rvinstrument``'s
+        ``data_format: raw_redshift``): step 3 then delivers the OBSERVER's
+        coordinate time JD_TDB at reception (``_to_observer_tdb``) instead
+        of a BJD_TDB tag.  None (every other reader) is step 3 as above.
         """
         if roles[0] != "time":
             raise ValueError(
@@ -902,7 +911,11 @@ class Instrument(TimeSystem, Component):
             ) from e
         df = self._select_columns(df, i, roles, detrend, shared_roles)
         df = self._apply_mask(df, i)
-        t = self._to_bjd_tdb(df.iloc[:, 0].values.astype(float), i)
+        raw_t = df.iloc[:, 0].values.astype(float)
+        if observer_time is None:
+            t = self._to_bjd_tdb(raw_t, i)
+        else:
+            t = self._to_observer_tdb(raw_t, i, observer_time)
         df[df.columns[0]] = t
         return self._sort_by_time(df)
 

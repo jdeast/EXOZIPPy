@@ -226,6 +226,8 @@ Every Keplerian evaluation in the tree goes through `physics.solve_kepler(M, ecc
 
 Tests: `tests/test_circular_fast_path.py`.
 
+**Raw redshifts read the full state too.** An `rvinstrument` file with `data_format: raw_redshift` evaluates every orbit at its in-graph barycentric arrival time `t_B` (a function of the fitted star, so the orbit stays in the observed BJD_TDB frame every other consumer uses) and, where `bigomega` exists, takes the star's TRANSVERSE reflex from `state_vectors` (`VX`, `VY` times `M_c/M` on the primary side, `M_p/M` on the companion side) for the relativistic Doppler factor; the line-of-sight part is the usual `get_radial_velocity`/Taylor columns. See `src/exozippy/components/rvinstrument/rvinstrument.md`.
+
 ## Transit and occultation durations, and what they measure (review 8.8.7)
 
 `planet.t14` / `tfwhm` / `tau`, their occultation twins `t14s` / `tfwhms` / `taus`, the occultation impact parameter `planet.bs`, and the eclipse time `orbit.ts` are ordinary **derived Parameters**. They were bare `pm.Deterministic`s built inline in `transit.py`, which cost two things: an RV-only fit could not state them at all, and no fit could put a prior on one. They are geometry, not photometry -- every input is a planet or orbit parameter -- so they are declared **wherever there is an orbit**, transit data or not.

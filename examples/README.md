@@ -43,6 +43,7 @@ the way it is) lives in the example's README.
 | `gj1214` | GJ 1214 b, a sub-Neptune around an M dwarf | Recreates Mahajan & Eastman (2024): JWST MIRI LRS transits and occultations (thermal emission, spline detrending), ground transits, HARPS RVs, SED and the Mann M-dwarf mass relation. |
 | `GaiaBH1` | Gaia BH1, a G star orbiting a dark 9.6 M_sun companion | Joint real RVs + simulated Gaia epoch astrometry (`astrometryinstrument`, `mode: gaia`) with a dark companion. |
 | `HIP1349` | HIP 1349, a 411-day astrometric binary | Real Hipparcos intermediate astrometric data (1-D along-scan abscissae, `mode: gaia`). |
+| `raw_redshift_sim` | A SIMULATED Gaia-4-like star (K = 330 m/s) seen from three ground sites | Raw measured redshifts (`rvinstrument` `data_format: raw_redshift`): the barycentric correction computed inside the model from the fitted star.ra/dec/pm/parallax/rv and the planet. Simulated data, not a measurement (see its README). |
 | `astrometry_sim` | A simulated nearby G + M binary | The two ground-based astrometry modes: absolute photocenter astrometry with a light-contributing companion (`mode: abs`) and relative separation/position angle (`mode: rel`). |
 | `galactic_model` | A single bulge star, no data | Sampling the galactic-model prior alone (distance, proper motion, RV) -- a prior-only check. |
 
