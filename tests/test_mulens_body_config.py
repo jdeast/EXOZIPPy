@@ -197,7 +197,7 @@ def test_every_schema_key_still_builds():
     cfg["orbit"] = [
         {
             "name": "b",
-            "type": "linear",
+            "type": "uniform_rotation",
             "primary": ["Lens"],
             "companion": ["b"],
         }

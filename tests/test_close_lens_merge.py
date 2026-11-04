@@ -340,7 +340,7 @@ def _linear_system(tmp_path, ds_dt):
         "orbit": [
             {
                 "name": "L",
-                "type": "linear",
+                "type": "uniform_rotation",
                 "primary": ["L1"],
                 "companion": ["L2"],
             }

@@ -104,9 +104,9 @@ def _orbit_links(system):
 
 ORBITS = {
     "keplerian": {"name": "AB", "primary": ["A"], "companion": ["B"]},
-    "linear": {
+    "constant_acceleration": {
         "name": "AB",
-        "type": "linear",
+        "type": "constant_acceleration",
         "primary": ["A"],
         "companion": ["B"],
     },

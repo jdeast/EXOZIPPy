@@ -592,7 +592,7 @@ class RVInstrument(Instrument):
         """
         orbits = system.orbit
         K_vec, omap = self._orbit_rv_terms(system, self.star_ndx[0])
-        # Taylor orbits (type: linear | quadratic) the observed star is the
+        # Taylor orbits (type: constant_acceleration | constant_jerk) the observed star is the
         # PRIMARY of -- Orbit._taylor_consumers refused the companion side
         # at stage 3.  Each is one more column, after the Keplerian ones.
         taylor = [o for o, _ in orbits.taylor_membership(self.star_ndx[0])]
@@ -762,7 +762,7 @@ class RVInstrument(Instrument):
         if taylor_types:
             # The orbit too long to resolve, as the Taylor expansion of the
             # star's reflex velocity about the orbit's reference epoch.
-            quad = "quadratic" in taylor_types
+            quad = "constant_jerk" in taylor_types
             get_collector(system).add(
                 "An additional companion on an orbit too long for the data "
                 "to resolve was modeled as a "

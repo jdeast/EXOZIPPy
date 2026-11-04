@@ -18,6 +18,7 @@ from exozippy.components.parameterization import (
     restrict_active,
 )
 from exozippy.config import user_entry
+from exozippy.constants import DAYS_PER_YEAR
 from exozippy.outputs.prose import get_collector, join_names
 from exozippy.potentials import soft_lower_bound, soft_upper_bound
 
@@ -25,8 +26,11 @@ from exozippy.potentials import soft_lower_bound, soft_upper_bound
 # it registers all the mathematical relations
 from . import physics
 from .bodies import (
+    CARTESIAN_TAYLOR_TYPES,
+    REMOVED_ORBIT_TYPES,
     STATIC_TYPE,
     TAYLOR_TYPES,
+    UNIFORM_ROTATION_TYPE,
     component_instance_names,
     parse_orbit_bodies,
     photocenter_stars,
@@ -39,6 +43,10 @@ from .bodies import (
 # the integrator backend review 8.8.15 describes and is refused until it
 # exists.
 ORBIT_TYPES = ("keplerian",) + TAYLOR_TYPES + (STATIC_TYPE, "nbody")
+
+# mas of sky at parallax plx [mas] -> solRad: (mas / plx) AU.  The Taylor
+# orbit's sampled sky coefficients are angular (orbit.md "Taylor orbits").
+AU_SOLRAD = (1.0 * u.AU).to(u.solRad).value
 
 
 def amplitude_constrained_orbits(system, orbit):
@@ -250,7 +258,7 @@ class Orbit(Component):
     def _parse_types(self):
         """Read and validate each orbit block's `type:` (default keplerian).
 
-        A Taylor orbit (`linear`, `quadratic`) is a different MODEL, not a
+        A Taylor orbit (TAYLOR_TYPES) is a different MODEL, not a
         coordinate choice -- it has a different parameter set -- so `type:`
         is a value, the way `band.ld_law` is, rather than a fit<x> boolean
         (components.md "Config flag vocabulary").  `epoch:` is the Taylor
@@ -264,6 +272,14 @@ class Orbit(Component):
             c = c or {}
             name = c.get("name", str(i))
             t = c.get("type", "keplerian")
+            if t in REMOVED_ORBIT_TYPES:
+                raise ValueError(
+                    f"[{self.prefix}.{name}] type: {t} was removed: "
+                    f"{REMOVED_ORBIT_TYPES[t]}.  The Taylor types now name "
+                    f"the degree of the POSITION polynomial (orbit.md, "
+                    f"'Taylor orbits'), so the old RV 'linear' is one order "
+                    f"higher than the old lens 'linear'."
+                )
             if t not in ORBIT_TYPES:
                 raise ValueError(
                     f"[{self.prefix}.{name}] type: {t!r} is not an orbit "
@@ -274,8 +290,9 @@ class Orbit(Component):
                 raise NotImplementedError(
                     f"[{self.prefix}.{name}] type: nbody is reserved for an "
                     f"N-body integrator backend that does not exist yet "
-                    f"(review 8.8.15).  Use keplerian, or linear/quadratic "
-                    f"for an orbit too long for the data to resolve."
+                    f"(review 8.8.15).  Use keplerian, or a Taylor type "
+                    f"({', '.join(TAYLOR_TYPES)}) for an orbit too long for "
+                    f"the data to resolve."
                 )
             if t != "keplerian":
                 bad = [k for k in self._KEPLERIAN_ONLY_KEYS if k in c]
@@ -289,7 +306,7 @@ class Orbit(Component):
             if t not in TAYLOR_TYPES and "epoch" in c:
                 raise ValueError(
                     f"[{self.prefix}.{name}] 'epoch:' is the reference epoch "
-                    f"of a Taylor orbit (type: linear or quadratic); a "
+                    f"of a Taylor orbit (type: {' / '.join(TAYLOR_TYPES)}); a "
                     f"type: {t} orbit has none"
                     + (" (its epoch is its tc)" if t == "keplerian" else "")
                     + ".  Remove the key or set the orbit's type."
@@ -299,7 +316,7 @@ class Orbit(Component):
 
     @property
     def is_taylor(self):
-        """Per orbit: is this a Taylor orbit (type linear or quadratic)?"""
+        """Per orbit: is this a Taylor orbit (any of TAYLOR_TYPES)?"""
         return np.array([t in TAYLOR_TYPES for t in self.types], dtype=bool)
 
     @property
@@ -857,13 +874,18 @@ class Orbit(Component):
                 "required": False,
                 "doc": (
                     "What kind of orbit this is.  'keplerian' (default): a "
-                    "two-body Keplerian arc.  'linear' / 'quadratic': an "
-                    "orbit too long for the data to resolve, written as the "
-                    "first (second) time derivatives of what its consumers "
-                    "measure about 'epoch:' -- the primary star's RV slope "
-                    "gammadot (and curvature gammaddot), or a lens "
-                    "companion's ds_dt/dalpha_dt -- with no period, "
-                    "eccentricity, mass or K.  Needs an explicit 'primary:'; "
+                    "two-body Keplerian arc.  The Taylor types, for an orbit "
+                    "too long for the data to resolve, name the degree of "
+                    "the position polynomial about 'epoch:': "
+                    "'constant_velocity' (nothing an RV or an absolute "
+                    "astrometric dataset can see), 'constant_acceleration' "
+                    "(the RV slope gammadot, the sky acceleration "
+                    "accel_ra/accel_dec), 'constant_jerk' (+ gammaddot, "
+                    "jerk_ra/jerk_dec); 'uniform_rotation' is a lens "
+                    "companion's constant ds_dt/dalpha_dt about t0_par.  "
+                    "None has a period, eccentricity, mass or K.  "
+                    "('linear'/'quadratic' were removed and raise with the "
+                    "migration.)  Needs an explicit 'primary:'; "
                     "'companion:' may be omitted for an unseen body.  "
                     "'static': a pairing with no dynamics -- it names "
                     "'primary:' and 'companion:' (both required) and "
@@ -879,9 +901,13 @@ class Orbit(Component):
                 "required": False,
                 "doc": (
                     "Taylor orbits only: the BJD_TDB the expansion is "
-                    "about.  Default: the midpoint of the primary star's RV "
-                    "span (EXOFASTv2's RVEPOCH); a lens-read orbit is always "
-                    "anchored at the event's t0_par."
+                    "about.  Default: the astrometric reference epoch of "
+                    "ra/dec/pm when absolute astrometry reads the orbit, "
+                    "else the midpoint of the primary star's RV span "
+                    "(EXOFASTv2's RVEPOCH); a lens-read orbit is always "
+                    "anchored at the event's t0_par.  An RV instrument's "
+                    "gamma is the velocity at 'epoch:' if given, else at "
+                    "the RV midpoint."
                 ),
             },
             {
@@ -1033,6 +1059,21 @@ class Orbit(Component):
                         if t == ctype:
                             W[i, idx] = 1.0
                 self._group_w[side][ctype] = W
+
+        # Per orbit, its ANCHOR star (the first star of its primary group,
+        # orbit.md: every member's distance is linked to it), whose parallax
+        # turns a Taylor orbit's angular sky coefficients physical
+        # (`accel_total`'s star.parallax[taylor_anchor_map]).  An orbit whose
+        # primary group holds no star has no astrometric consumer and its
+        # accel_total element is inactive, so its entry is never read; 0
+        # keeps the int map rectangular.
+        self.taylor_anchor_map = np.array(
+            [
+                next((idx for t, idx in g if t == "star"), 0)
+                for g in self.primary_bodies
+            ],
+            dtype=int,
+        )
 
     @property
     def circular_orbits(self):
@@ -1795,7 +1836,7 @@ class Orbit(Component):
                 f"[{self.prefix}] rm:/dopptom name non-Keplerian orbit(s) "
                 f"{non_keplerian_targets}; the Rossiter-McLaughlin and "
                 f"Doppler tomography models need a transit geometry, which "
-                f"a type: linear/quadratic/static orbit does not have."
+                f"a Taylor or static orbit does not have."
             )
         unknown_targets = spin_targets - set(self.names)
         if unknown_targets:
@@ -1947,7 +1988,7 @@ class Orbit(Component):
                     "i > 90 deg" if own_i180.any() else "i < 90 deg",
                 )
 
-        # Taylor orbits (type: linear | quadratic).  Every Keplerian entry
+        # Taylor orbits (TAYLOR_TYPES).  Every Keplerian entry
         # above is INACTIVE on them -- not derived from anything, not
         # reported: a Taylor orbit must self-declare that it has no period,
         # eccentricity, mass or K (review 8.8.14, "inactive must never be
@@ -1970,7 +2011,7 @@ class Orbit(Component):
                 self.manifest[key] = restrict_active(
                     self.manifest[key], keplerian, self.n_elements
                 )
-            self.taylor_epoch = self._taylor_epochs(
+            self.taylor_epoch, self.taylor_rv_epoch = self._taylor_epochs(
                 system, self._taylor_consumer_map
             )
             self.manifest.update(
@@ -1979,29 +2020,52 @@ class Orbit(Component):
             self._hint_rv_trends(system, self._taylor_consumer_map)
         else:
             self.taylor_epoch = np.full(self.n_elements, np.nan)
+            self.taylor_rv_epoch = np.full(self.n_elements, np.nan)
 
     # Which Taylor coefficients each consumer reads, per orbit type.  A
     # coefficient is active on an orbit exactly where some consumer of that
     # orbit reads it, the way bigomega exists only where astrometry does.
+    # The Cartesian types name the degree of the POSITION polynomial of the
+    # primary group's reflex; the constant and linear terms of every
+    # consumer are absorbed (an RV instrument's gamma, a star's ra/dec/pm),
+    # so a constant_velocity orbit gives the RVs and the absolute astrometry
+    # NOTHING to read.
     TAYLOR_COEFFS = {
         "rv": {
-            "linear": ("gammadot",),
-            "quadratic": ("gammadot", "gammaddot"),
+            "constant_velocity": (),
+            "constant_acceleration": ("gammadot",),
+            "constant_jerk": ("gammadot", "gammaddot"),
         },
-        "lens": {"linear": ("ds_dt", "dalpha_dt")},
+        "astrometry": {
+            "constant_velocity": (),
+            "constant_acceleration": ("accel_ra", "accel_dec"),
+            "constant_jerk": (
+                "accel_ra",
+                "accel_dec",
+                "jerk_ra",
+                "jerk_dec",
+            ),
+        },
+        "lens": {UNIFORM_ROTATION_TYPE: ("ds_dt", "dalpha_dt")},
     }
 
     def _taylor_consumers(self, system):
-        """{taylor orbit index: set of consumer kinds} -- "rv" and/or "lens".
+        """{taylor orbit index: set of consumer kinds} -- "rv", "lens"
+        and/or "astrometry".
 
         RAISES, naming the orbit, for every consumer that would otherwise
         read a Taylor orbit as if it were Keplerian or drop it in silence:
-        astrometry, Rossiter-McLaughlin/Doppler tomography (refused where the spin
-        targets are read), xallarap, an RV star in the COMPANION group (its
-        trend is the primary's scaled by a mass ratio no Taylor orbit has),
-        and a quadratic lens orbit (the magnification backends take first
-        derivatives only).  A Taylor orbit that NOTHING reads raises too: its
-        coefficients would be free dimensions no likelihood term constrains.
+        relative (`rel`, `lensrel`) astrometry, Rossiter-McLaughlin/Doppler
+        tomography (refused where the spin targets are read), xallarap, an
+        RV star or an absolute-astrometry light in the COMPANION group (its
+        reflex is the primary's scaled by a mass ratio no Taylor orbit has),
+        RVs or absolute astrometry of a uniform_rotation orbit (a relative
+        frame with no line of sight), and a lens on a Cartesian type (the
+        backends take polar first derivatives, C24).  A Taylor orbit from
+        which NO consumer reads a coefficient raises too ("nothing
+        observable"): its coefficients would be free dimensions no
+        likelihood term constrains -- a constant_velocity orbit read only by
+        RVs or absolute astrometry is one, since v0 is gamma / the pm.
         """
         consumers = {int(o): set() for o in np.nonzero(self.is_taylor)[0]}
         if not consumers:
@@ -2015,6 +2079,15 @@ class Orbit(Component):
         if rv is not None:
             for s in sorted(set(rv.star_ndx)):
                 for o, role in self.taylor_membership(s):
+                    if self.types[o] == UNIFORM_ROTATION_TYPE:
+                        raise NotImplementedError(
+                            f"[{self.prefix}.{name(o)}] the RV star (star "
+                            f"{s}) is on a type: uniform_rotation orbit, a "
+                            f"relative sky-plane rotation (ds_dt, dalpha_dt) "
+                            f"with no line-of-sight component.  Use "
+                            f"constant_acceleration or constant_jerk for an "
+                            f"RV trend."
+                        )
                     if role != "primary":
                         raise NotImplementedError(
                             f"[{self.prefix}.{name(o)}] the RV star (star "
@@ -2030,10 +2103,11 @@ class Orbit(Component):
             if self.types[o] not in self.TAYLOR_COEFFS["lens"]:
                 raise NotImplementedError(
                     f"[{self.prefix}.{name(o)}] a lens companion moves on "
-                    f"this type: {self.types[o]} orbit, but the "
-                    f"magnification backends take first derivatives only "
-                    f"(ds_dt, dalpha_dt; conventions.md C24).  Use type: "
-                    f"linear, or keplerian."
+                    f"this type: {self.types[o]} orbit.  A lens reads "
+                    f"type: uniform_rotation (constant ds_dt, dalpha_dt "
+                    f"about t0_par, conventions.md C24) or keplerian; a "
+                    f"Cartesian relative state for a lens is not "
+                    f"implemented (review 8.8.14 follow-on)."
                 )
             consumers[o].add("lens")
 
@@ -2041,7 +2115,7 @@ class Orbit(Component):
             if o in consumers:
                 raise NotImplementedError(
                     f"[{self.prefix}.{name(o)}] a source's orbit is "
-                    f"a type: {self.types[o]} orbit; linear xallarap is "
+                    f"a type: {self.types[o]} orbit; Taylor xallarap is "
                     f"deliberately not supported (conventions.md C25, "
                     f"review 8.6.9) -- a linear source drift is absorbed by "
                     f"t_E/t_0/u_0/alpha.  Use a keplerian source orbit."
@@ -2050,53 +2124,152 @@ class Orbit(Component):
         # A planet on a Taylor orbit has no Keplerian geometry, and Planet
         # then declares none (Planet.keplerian_geometry) -- legal when
         # nothing needs it, e.g. a lens planet whose only reader is the
-        # lens's linear orbital motion (#485).  What needs it is a TRANSIT,
-        # and that refusal lives in Planet.keplerian_geometry, which sees
-        # every way a planet can lack the geometry (a Taylor orbit, a static
-        # one, or none).  (RM/DT and astrometry on a Taylor orbit are refused
-        # by their own checks above and below.)
+        # lens's orbital motion (#485).  What needs it is a TRANSIT, and that
+        # refusal lives in Planet.keplerian_geometry.  (RM/DT on a Taylor
+        # orbit is refused by its own check.)
 
         ast = components.get("astrometryinstrument")
         if ast is not None:
-            touched = set()
-            for i, mode in enumerate(ast.modes):
-                if mode == "rel":
-                    o = ast.rel_orbit[i]
-                    if o is None:
-                        continue
-                    if o in consumers:
-                        touched.add(o)
-                    group = self.primary_bodies[o] + self.companion_bodies[o]
-                    stars = {idx for t, idx in group if t == "star"}
-                else:
-                    stars = set(
-                        photocenter_stars(
-                            ast.config[i], self.config_manager.system_config
-                        )
-                    )
-                for t in consumers:
-                    if stars & {
-                        idx for ty, idx in self.bodies(t) if ty == "star"
-                    }:
-                        touched.add(t)
-            if touched:
-                raise NotImplementedError(
-                    f"[{self.prefix}] astrometry measures a star on Taylor "
-                    f"orbit(s) {[name(o) for o in sorted(touched)]}; the "
-                    f"sky-plane Taylor terms are not implemented for "
-                    f"astrometryinstrument yet (review 8.8.14)."
-                )
+            self._taylor_astrometry_consumers(ast, consumers)
 
-        unread = [name(o) for o, c in consumers.items() if not c]
+        unread = [
+            name(o)
+            for o, kinds in consumers.items()
+            if not any(
+                self.TAYLOR_COEFFS[k].get(self.types[o], ()) for k in kinds
+            )
+        ]
         if unread:
             raise ValueError(
-                f"[{self.prefix}] nothing in the model reads Taylor orbit(s) "
-                f"{unread}: a type: linear/quadratic orbit is measured by "
-                f"the RVs of a star in its PRIMARY group, or by a lens "
-                f"companion whose `orbit:` names it.  Its coefficients would "
-                f"be free dimensions no likelihood term constrains."
+                f"[{self.prefix}] nothing observable on Taylor orbit(s) "
+                f"{unread}.  Their consumers read: the RVs of a star in the "
+                f"PRIMARY group gammadot (constant_acceleration) and "
+                f"gammaddot (constant_jerk); the gaia/abs/catalog "
+                f"astrometry of a primary-group star accel_ra/accel_dec "
+                f"(constant_acceleration) and jerk_ra/jerk_dec "
+                f"(constant_jerk); a lens companion whose `orbit:` names it "
+                f"ds_dt/dalpha_dt (uniform_rotation).  A constant velocity "
+                f"is invisible to the RVs and the absolute astrometry (it "
+                f"is each instrument's gamma and the star's proper motion), "
+                f"so its coefficients would be free dimensions no "
+                f"likelihood term constrains."
             )
+        self._warn_galactic_pm(system, consumers)
         return consumers
+
+    def _warn_galactic_pm(self, system, consumers):
+        """WARN where a galactic-model kinematic prior reads the proper
+        motion (or rv) of a star an outer Taylor orbit accelerates.
+
+        The constant and linear terms of a Taylor orbit are absorbed by each
+        consumer's own constants, so with one in the model star.pm_ra /
+        pm_dec (and each RV instrument's gamma) are the INNER system's
+        values at their epochs -- the barycentric motion plus the unseen
+        companion's reflex velocity -- while the galactic model reads them
+        as barycentric.  The reflex is usually m/s to a few km/s against a
+        20-100 km/s dispersion, so this is a note, not a refusal (rope, not
+        gates)."""
+        components = getattr(system, "active_components", None) or {}
+        if components.get("galacticmodel") is None:
+            return
+        touched = sorted(
+            {
+                (self.names[o], idx)
+                for o, kinds in consumers.items()
+                if kinds & {"rv", "astrometry"}
+                for t, idx in self.primary_bodies[o]
+                if t == "star"
+            }
+        )
+        if touched:
+            logger.warning(
+                "[%s] the galactic model's kinematic prior reads the proper "
+                "motion of star(s) %s on Taylor orbit(s) %s as BARYCENTRIC, "
+                "but with an outer Taylor orbit pm_ra/pm_dec are the inner "
+                "system's at the astrometric epoch, which includes the "
+                "unseen companion's reflex velocity (orbit.md, 'Taylor "
+                "orbits').",
+                self.prefix,
+                sorted({idx for _, idx in touched}),
+                sorted({n for n, _ in touched}),
+            )
+
+    def _taylor_astrometry_consumers(self, ast, consumers):
+        """Add "astrometry" to ``consumers[o]`` for every Taylor orbit an
+        absolute (gaia/abs/catalog) dataset's photocenter reads, and RAISE
+        for the readers the sky-plane terms cannot serve (review 8.8.14).
+
+        The photocenter's lights are ``orbit.bodies.photocenter_stars``
+        (the target, plus the SED path's ``companion_star_ndx``); a light in
+        a Taylor orbit's PRIMARY group moves with the group's reflex.  A
+        light in its COMPANION group would move by ``-m_primary/m_companion``
+        times it, a mass ratio a Taylor orbit does not have -- the rule that
+        refuses a companion-group RV star -- so it raises.  The
+        sampled-``fluxfrac`` light is placed by the Keplerian orbit it
+        belongs to, which is known only once the parameters are built, so
+        AstrometryInstrument._taylor_photocenter_terms checks it.  A
+        uniform_rotation orbit is a relative frame and refuses absolute
+        astrometry.
+
+        A relative dataset (``rel``, ``lensrel``) touching a star on a
+        Taylor orbit is refused: relative Taylor terms are not implemented.
+        """
+
+        def name(o):
+            return self.names[o]
+
+        refused = set()
+        for i, mode in enumerate(ast.modes):
+            if mode == "rel":
+                o = ast.rel_orbit[i]
+                if o is None:
+                    continue
+                if o in consumers:
+                    refused.add(o)
+                group = self.primary_bodies[o] + self.companion_bodies[o]
+                stars = {idx for t, idx in group if t == "star"}
+            elif mode == "lensrel":
+                stars = {int(ast.config[i].get("star_ndx", 0))}
+            else:
+                lights = photocenter_stars(
+                    ast.config[i], self.config_manager.system_config
+                )
+                for s in lights:
+                    for o, role in self.taylor_membership(s):
+                        if self.types[o] == UNIFORM_ROTATION_TYPE:
+                            raise NotImplementedError(
+                                f"[{self.prefix}.{name(o)}] astrometry "
+                                f"dataset '{ast.names[i]}' sees star {s} on "
+                                f"a type: uniform_rotation orbit, a "
+                                f"relative-frame rotation an absolute "
+                                f"photocenter cannot read.  Use "
+                                f"constant_acceleration or constant_jerk."
+                            )
+                        if role != "primary":
+                            raise NotImplementedError(
+                                f"[{self.prefix}.{name(o)}] astrometry "
+                                f"dataset '{ast.names[i]}' sees star {s} in "
+                                f"this Taylor orbit's COMPANION group.  Its "
+                                f"sky motion would be the primary's scaled "
+                                f"by -m_primary/m_companion, a mass ratio a "
+                                f"type: {self.types[o]} orbit does not "
+                                f"have; put the observed star(s) in the "
+                                f"primary group, or give the orbit "
+                                f"type: keplerian."
+                            )
+                        consumers[o].add("astrometry")
+                continue
+            for t in consumers:
+                if stars & {idx for ty, idx in self.bodies(t) if ty == "star"}:
+                    refused.add(t)
+        if refused:
+            raise NotImplementedError(
+                f"[{self.prefix}] relative (rel/lensrel) astrometry measures "
+                f"a star on Taylor orbit(s) "
+                f"{[name(o) for o in sorted(refused)]}; only the absolute "
+                f"(gaia/abs/catalog) photocenter reads a Taylor orbit "
+                f"(review 8.8.14).  Give the orbit type: keplerian."
+            )
 
     def _refuse_static_readers(self, system):
         """RAISE where a consumer would read geometry from a static orbit.
@@ -2134,22 +2307,45 @@ class Orbit(Component):
             )
 
     def _taylor_epochs(self, system, consumers):
-        """Per orbit: the Taylor expansion's reference epoch (BJD_TDB), NaN
-        on a Keplerian orbit.
+        """Per orbit: ``(epoch, rv_epoch)``, both BJD_TDB, NaN on a
+        Keplerian orbit.
 
-        A lens-read orbit is anchored at the event's t0_par -- the epoch the
-        parallax and the lens rates already share (C24), and the reason the
-        two effects compose -- so an `epoch:` there must be t0_par or
-        absent.  Otherwise `epoch:` if given, else EXOFASTv2's RVEPOCH
-        default (mkss.pro): the midpoint of the observed span, (min + max)/2
-        over every RV of a star in the orbit's primary group.
+        ``epoch`` is the SHARED state's reference: the instant the
+        acceleration (and jerk) are quoted at.  A lens-read orbit is anchored
+        at the event's t0_par -- the epoch the parallax and the lens rates
+        already share (C24) -- so an `epoch:` there must be t0_par or
+        absent.  Otherwise `epoch:` if given; else, for an orbit absolute
+        astrometry reads, the astrometric reference epoch of ra/dec/pm
+        (JDE 2026-11-03), so position, proper motion and the Taylor terms
+        share one instant; else EXOFASTv2's RVEPOCH default (mkss.pro), the
+        midpoint (min + max)/2 of every RV of a star in the primary group.
+
+        ``rv_epoch`` is where the RVs' own absorbed constant lives -- each
+        instrument's gamma is the velocity THERE: `epoch:` if given, else
+        the RV midpoint.  It is never moved to the astrometric epoch, which
+        would extrapolate gamma years along gammadot and correlate the two
+        for no physics.  On an orbit no RV reads it is NaN.
         """
         epochs = np.full(self.n_elements, np.nan)
-        rv = (getattr(system, "active_components", None) or {}).get(
-            "rvinstrument"
-        )
+        rv_epochs = np.full(self.n_elements, np.nan)
+        components = getattr(system, "active_components", None) or {}
+        rv = components.get("rvinstrument")
         for o, kinds in consumers.items():
             user = (self.config[o] or {}).get("epoch")
+            midpoint = None
+            if "rv" in kinds:
+                stars = {
+                    idx for t, idx in self.primary_bodies[o] if t == "star"
+                }
+                times = np.concatenate(
+                    [
+                        np.asarray(rv.time[rv.rows(i)], dtype=float)
+                        for i in range(rv.n_elements)
+                        if rv.star_ndx[i] in stars
+                    ]
+                )
+                midpoint = 0.5 * (times.min() + times.max())
+                rv_epochs[o] = float(user) if user is not None else midpoint
             if "lens" in kinds:
                 t0_par = float(system.mulensevent.t0_par[0])
                 if user is not None and float(user) != t0_par:
@@ -2161,43 +2357,45 @@ class Orbit(Component):
                         f"'epoch:'."
                     )
                 epochs[o] = t0_par
-            elif user is not None:
+                continue
+            if user is not None:
                 epochs[o] = float(user)
+                continue
+            if "astrometry" in kinds:
+                epochs[o] = float(system.astrometryinstrument.epoch)
+                why = "the astrometric reference epoch of ra/dec/pm"
             else:
-                stars = {
-                    idx for t, idx in self.primary_bodies[o] if t == "star"
-                }
-                times = np.concatenate(
-                    [
-                        np.asarray(rv.time[rv.rows(i)], dtype=float)
-                        for i in range(rv.n_elements)
-                        if rv.star_ndx[i] in stars
-                    ]
-                )
-                epochs[o] = 0.5 * (times.min() + times.max())
-                logger.info(
-                    "[%s] Taylor orbit '%s': reference epoch %.6f BJD_TDB, "
-                    "the midpoint of its RVs (set 'epoch:' to choose "
-                    "another).",
-                    self.prefix,
-                    self.names[o],
-                    epochs[o],
-                )
-        return epochs
+                epochs[o] = midpoint
+                why = "the midpoint of its RVs"
+            logger.info(
+                "[%s] Taylor orbit '%s': reference epoch %.6f BJD_TDB, %s "
+                "(set 'epoch:' to choose another).",
+                self.prefix,
+                self.names[o],
+                epochs[o],
+                why,
+            )
+        return epochs, rv_epochs
 
     def _hint_rv_trends(self, system, consumers):
         """Seed each RV-read Taylor orbit's coefficients from the data.
 
         EXOFASTv2's start (mkss.pro): a polynomial of the orbit's order fit
-        to the velocities about the reference epoch, each instrument's own
-        mean removed first (the offsets BETWEEN instruments are not a
-        trend).  A ranked data hint, so a user's `initval` still wins.  The
-        Keplerian signal is in the fit too; this is a start value, and the
-        sampler does the rest.
+        to the velocities about the RV epoch, each instrument's own mean
+        removed first (the offsets BETWEEN instruments are not a trend).  The
+        fit's slope is the line-of-sight acceleration AT the RV epoch; the
+        shared state quotes it at ``taylor_epoch``, so with a jerk
+        ``gammadot = slope - gammaddot (rv_epoch - epoch)``.  A ranked data
+        hint, so a user's `initval` still wins.  The Keplerian signal is in
+        the fit too; this is a start value, and the sampler does the rest.
         """
-        rv_read = [o for o, kinds in consumers.items() if "rv" in kinds]
+        rv_read = [
+            o
+            for o, kinds in consumers.items()
+            if "rv" in kinds and self.TAYLOR_COEFFS["rv"][self.types[o]]
+        ]
         if not rv_read:
-            return  # only lens-read Taylor orbits: no RVs to seed from
+            return  # nothing on the line of sight to seed
         rv = system.rvinstrument
         to_ms = float((u.solRad / u.d).to(u.m / u.s))
         gammas = np.asarray(rv.gamma_init, dtype=float)
@@ -2207,30 +2405,37 @@ class Orbit(Component):
                 rv.inst_map,
                 [i for i in range(rv.n_elements) if rv.star_ndx[i] in stars],
             )
-            dt = np.asarray(rv.time, dtype=float)[rows] - self.taylor_epoch[o]
+            dt = (
+                np.asarray(rv.time, dtype=float)[rows]
+                - self.taylor_rv_epoch[o]
+            )
             resid = (rv.rv * to_ms - gammas[rv.inst_map])[rows]
-            order = 2 if self.types[o] == "quadratic" else 1
+            order = 2 if self.types[o] == "constant_jerk" else 1
             if dt.size <= order or np.ptp(dt) == 0.0:
                 continue  # too few epochs to say anything: keep the default
             coeffs = np.polyfit(dt, resid, order)  # highest power first
+            slope = float(coeffs[-2])
+            if order == 2:
+                # polyfit's coefficient of dt**2 is HALF the derivative.
+                curvature = float(2.0 * coeffs[0])
+                slope -= curvature * (
+                    self.taylor_rv_epoch[o] - self.taylor_epoch[o]
+                )
+                self.config_manager.add_hint(
+                    f"{self.prefix}.{o}.gammaddot",
+                    curvature,
+                    unit="m/(s d2)",
+                )
             # The fit is in m/s per day (and per day**2): stated, so a user
             # `unit:` on the rates cannot rescale it (review 1.5.10).
             self.config_manager.add_hint(
-                f"{self.prefix}.{o}.gammadot",
-                float(coeffs[-2]),
-                unit="m/(s d)",
+                f"{self.prefix}.{o}.gammadot", slope, unit="m/(s d)"
             )
-            if order == 2:
-                # polyfit's coefficient of dt**2 is HALF the derivative.
-                self.config_manager.add_hint(
-                    f"{self.prefix}.{o}.gammaddot",
-                    float(2.0 * coeffs[0]),
-                    unit="m/(s d2)",
-                )
 
     def _taylor_manifest(self, consumers):
         """Manifest entries for the Taylor coefficients, each active exactly
-        on the Taylor orbits some consumer reads it on."""
+        on the Taylor orbits some consumer reads it on, and the bounds and
+        derived magnitudes they make available."""
         masks = {}
         for o, kinds in consumers.items():
             for kind in kinds:
@@ -2239,11 +2444,9 @@ class Orbit(Component):
                         coeff, np.zeros(self.n_elements, dtype=bool)
                     )[o] = True
         out = {}
-        if "gammadot" in masks:
-            # What an RV slope implies about the unseen companion: a reported
-            # lower bound on M_c / r^2, on exactly the orbits with a slope.
-            mask = masks["gammadot"]
-            out["mc_over_r2_min"] = (
+
+        def derived(mask):
+            return (
                 "default"
                 if mask.all()
                 else {
@@ -2252,14 +2455,38 @@ class Orbit(Component):
                     "inactive_value": 0.0,
                 }
             )
-        for coeff in ("gammadot", "gammaddot", "ds_dt", "dalpha_dt"):
+
+        if "gammadot" in masks:
+            # Where the sky acceleration is measured too, the RV slope and
+            # the sky components are ONE acceleration vector, so |A| and
+            # M_c / r^2 = |A| / G are measured outright (an equality);
+            # elsewhere the slope gives only the lower bound.
+            both = masks["gammadot"] & masks.get(
+                "accel_ra", np.zeros(self.n_elements, dtype=bool)
+            )
+            rv_only = masks["gammadot"] & ~both
+            if rv_only.any():
+                out["mc_over_r2_min"] = derived(rv_only)
+            if both.any():
+                out["accel_total"] = derived(both)
+                out["mc_over_r2"] = derived(both)
+        for coeff in (
+            "gammadot",
+            "gammaddot",
+            "ds_dt",
+            "dalpha_dt",
+            "accel_ra",
+            "accel_dec",
+            "jerk_ra",
+            "jerk_dec",
+        ):
             if coeff not in masks:
                 continue
             mask = masks[coeff]
             entry = {}
             if not mask.all():
                 entry = {"mask": mask, "inactive_value": 0.0}
-            if coeff in ("gammadot", "gammaddot"):
+            if coeff not in ("ds_dt", "dalpha_dt"):
                 epochs = ", ".join(
                     (f"{self.names[o]}: " if mask.sum() > 1 else "")
                     + f"{self.taylor_epoch[o]:.6f}"
@@ -2271,13 +2498,133 @@ class Orbit(Component):
             out[coeff] = entry or None
         return out
 
-    def taylor_radial_velocity(self, t, orbit_idx):
-        """The line-of-sight velocity trend of Taylor orbit ``orbit_idx``'s
-        PRIMARY group on times ``t``, in the internal RV unit (solRad/d):
-        ``gammadot (t - epoch) [+ gammaddot (t - epoch)**2 / 2]``.
+    def _taylor_value(self, name, o):
+        """Taylor coefficient ``name`` of orbit ``o`` (internal units), or
+        0.0 where no consumer of ``o`` reads it -- decided by the consumer
+        map, the one record of which coefficients exist, never by probing
+        for the attribute."""
+        kinds = self._taylor_consumer_map[o]
+        if any(
+            name in self.TAYLOR_COEFFS[k].get(self.types[o], ()) for k in kinds
+        ):
+            return getattr(self, name).value[o]
+        return 0.0
 
-        No constant term: a velocity offset at the epoch is exactly
-        degenerate with each instrument's gamma, which already carries it.
+    def _taylor_state(
+        self, t, o, relative, parallax, lens_anchor, line_of_sight_only=False
+    ):
+        """``state_vectors`` of ONE Taylor orbit ``o``: six (N_obs,) terms.
+
+        Cartesian types: the primary group's reflex displacement from its
+        own state at ``taylor_epoch`` (the constant and linear terms belong
+        to each consumer: gamma, ra/dec/pm), in solRad and solRad/day:
+
+            Z  = gammadot dt^2/2 + gammaddot dt^3/6        (dt in days)
+            X  = (accel_dec dt^2/2 + jerk_dec dt^3/6) [mas] / parallax
+            Y  = (accel_ra  dt^2/2 + jerk_ra  dt^3/6) [mas] / parallax
+                                                           (dt in years)
+
+        the sky terms converted from the sampled ANGULAR coefficients with
+        the anchor star's ``parallax`` (mas, AU -> solRad).  A component no
+        consumer reads is structurally zero.  ``relative=True`` raises: the
+        relative separation needs a mass ratio no Taylor orbit has.  With
+        ``line_of_sight_only`` (the RV consumer, which has no parallax to
+        give) the sky terms are not built and come back as None.
+
+        uniform_rotation: the relative separation of a lens pair in the
+        lens's own trajectory frame and Einstein radii, in the axis and sign
+        convention the lens geometry places a companion with (C15: +x along
+        tau_hat, +y along beta_hat): ``X, Y = s(t) (cos alpha(t),
+        -sin alpha(t))`` with ``s(t) = s0 + ds_dt dt`` and
+        ``alpha(t) = alpha0 + dalpha_dt dt`` about t0_par (dt in Julian
+        years), velocities their exact derivatives per Julian year, Z = 0.
+        ``lens_anchor = (s0, alpha0 [rad])`` are the LENS's (JDE 2026-10-07:
+        "s0/alpha0 stay on the lens").  Only ``relative=True`` exists.
+        """
+        typ = self.types[o]
+        t = pt.as_tensor_variable(t)
+        dt_d = t - float(self.taylor_epoch[o])
+        if typ == UNIFORM_ROTATION_TYPE:
+            if not relative or lens_anchor is None:
+                raise ValueError(
+                    f"[{self.prefix}.{self.names[o]}] a type: "
+                    f"uniform_rotation orbit's state is the RELATIVE "
+                    f"separation in the lens frame: call state_vectors with "
+                    f"relative=True and lens_anchor=(s0, alpha0)."
+                )
+            s0, alpha0 = lens_anchor
+            dt_y = dt_d / DAYS_PER_YEAR
+            ds = self.ds_dt.value[o]
+            dal = self.dalpha_dt.value[o]
+            s = s0 + ds * dt_y
+            alpha = alpha0 + dal * dt_y
+            cos_a, sin_a = pt.cos(alpha), pt.sin(alpha)
+            zero = pt.zeros_like(dt_d)
+            # C15: the companion sits at s (cos alpha, -sin alpha).
+            X = s * cos_a
+            Y = -s * sin_a
+            VX = ds * cos_a - s * dal * sin_a
+            VY = -(ds * sin_a + s * dal * cos_a)
+            return X, Y, zero, VX, VY, zero
+        if relative:
+            raise NotImplementedError(
+                f"[{self.prefix}.{self.names[o]}] the relative separation "
+                f"of a type: {typ} orbit needs -M/M_c times the primary's "
+                f"reflex, a mass ratio a Taylor orbit does not have."
+            )
+        jerk = typ == "constant_jerk"
+        zero = pt.zeros_like(dt_d)
+        # Line of sight, solRad (internal gammadot: solRad/d^2).
+        g1 = self._taylor_value("gammadot", o)
+        g2 = self._taylor_value("gammaddot", o) if jerk else 0.0
+        if "rv" in self._taylor_consumer_map[o]:
+            VZ = g1 * dt_d
+            Z = 0.5 * g1 * dt_d**2
+            if jerk:
+                VZ = VZ + 0.5 * g2 * dt_d**2
+                Z = Z + g2 * dt_d**3 / 6.0
+        else:
+            VZ = Z = zero
+        if line_of_sight_only:
+            X = Y = VX = VY = None
+        elif "astrometry" in self._taylor_consumer_map[o]:
+            if parallax is None:
+                raise ValueError(
+                    f"[{self.prefix}.{self.names[o]}] the sky components "
+                    f"of a Taylor orbit are sampled in mas; state_vectors "
+                    f"needs the anchor star's parallax to state them in "
+                    f"solRad."
+                )
+            dt_y = dt_d / DAYS_PER_YEAR
+            # mas -> solRad at this parallax: (mas / plx) AU
+            to_solrad = AU_SOLRAD / parallax
+            out = []
+            for comp in ("dec", "ra"):  # X = North, Y = East
+                a = self._taylor_value(f"accel_{comp}", o)
+                pos = 0.5 * a * dt_y**2
+                vel = a * dt_y
+                if jerk:
+                    j = self._taylor_value(f"jerk_{comp}", o)
+                    pos = pos + j * dt_y**3 / 6.0
+                    vel = vel + 0.5 * j * dt_y**2
+                out.append((pos * to_solrad, vel * to_solrad / DAYS_PER_YEAR))
+            (X, VX), (Y, VY) = out
+        else:
+            X = Y = VX = VY = zero
+        return X, Y, Z, VX, VY, VZ
+
+    def taylor_radial_velocity(self, t, orbit_idx):
+        """The RV consumer of Taylor orbit ``orbit_idx``: the line-of-sight
+        velocity of its PRIMARY group on times ``t``, relative to its value
+        at the RV epoch, in the internal RV unit (solRad/d) --
+        ``VZ(t) - VZ(rv_epoch)`` from ``state_vectors``.
+
+        The velocity at the RV epoch is each instrument's gamma, which
+        already carries it.  With a jerk and a shared epoch elsewhere
+        (``rv_epoch != taylor_epoch``) this is ``(gammadot + gammaddot D)
+        (t - rv_epoch) + gammaddot (t - rv_epoch)^2 / 2`` with
+        D = rv_epoch - taylor_epoch; where the two coincide (every RV-only
+        orbit) the subtracted term is identically zero and is not built.
         """
         o = int(orbit_idx)
         if not self.is_taylor[o]:
@@ -2285,11 +2632,17 @@ class Orbit(Component):
                 f"[{self.prefix}.{self.names[o]}] taylor_radial_velocity on "
                 f"a {self.types[o]} orbit; it has no Taylor coefficients."
             )
-        dt = t - float(self.taylor_epoch[o])
-        v = self.gammadot.value[o] * dt
-        if self.types[o] == "quadratic":
-            v = v + 0.5 * self.gammaddot.value[o] * dt**2
-        return v
+        omap = np.array([o])
+        VZ = self.state_vectors(t, omap, line_of_sight_only=True)[5][:, 0]
+        t_rv = float(self.taylor_rv_epoch[o])
+        if t_rv != float(self.taylor_epoch[o]):
+            VZ = (
+                VZ
+                - self.state_vectors(
+                    np.array([t_rv]), omap, line_of_sight_only=True
+                )[5][0, 0]
+            )
+        return VZ
 
     def _lens_orbit_refs(
         self, system, comp_name, idx_attr, ref_key, raw_comp_name=None
@@ -2341,8 +2694,8 @@ class Orbit(Component):
         }
 
     def _lens_taylor_orbits(self, system):
-        """Taylor orbits a lens companion's rates are read from (C24's
-        linear mode)."""
+        """Taylor orbits a lens companion's motion is read from (C24's
+        uniform_rotation mode)."""
         return {
             o
             for o in self._lens_companion_orbits(system)
@@ -3484,7 +3837,15 @@ class Orbit(Component):
 
         return pt.arctan2(terms.sinf, terms.cosf)
 
-    def state_vectors(self, t, orbit_map, relative=False):
+    def state_vectors(
+        self,
+        t,
+        orbit_map,
+        relative=False,
+        parallax=None,
+        lens_anchor=None,
+        line_of_sight_only=False,
+    ):
         """Full sky-frame state of an orbit's RELATIVE separation, in
         physical units: (X, Y, Z, VX, VY, VZ), each (N_obs, N_planets),
         positions in solRad (the internal unit of ``a``) and velocities in
@@ -3529,7 +3890,56 @@ class Orbit(Component):
         is a Keplerian convenience that will NOT survive that swap (it
         becomes a subtraction, review 4.8.3(a)), so new consumers should
         treat it as this method's business, never re-derive it.
+
+        A TAYLOR orbit (orbit.md "Taylor orbits") satisfies the same
+        contract as a polynomial (``_taylor_state``): the Cartesian types
+        return the primary group's reflex (``relative=False`` only), with
+        ``parallax`` -- the anchor star's, mas, one per orbit in
+        ``orbit_map`` -- converting their sampled angular sky coefficients;
+        ``uniform_rotation`` returns a lens pair's relative separation in
+        its own frame and Einstein radii from ``lens_anchor = (s0, alpha0)``
+        per orbit (``relative=True`` only).  ``line_of_sight_only`` (Taylor
+        orbits only) builds Z and VZ alone, the X/Y/VX/VY slots None -- the
+        RV consumer's projection, which needs no parallax.  One call reads
+        one KIND of orbit; a mixed ``orbit_map`` raises.
         """
+        orbit_map = np.asarray(orbit_map, dtype=int)
+        kepler = self.is_keplerian[orbit_map]
+        if not kepler.all():
+            if kepler.any() or not self.is_taylor[orbit_map].all():
+                raise ValueError(
+                    f"[{self.prefix}] state_vectors reads one kind of orbit "
+                    f"per call; orbit_map mixes "
+                    f"{sorted({self.types[o] for o in orbit_map})}."
+                )
+            rows = [
+                self._taylor_state(
+                    t,
+                    o,
+                    relative,
+                    None if parallax is None else parallax[k],
+                    None
+                    if lens_anchor is None
+                    else (lens_anchor[0][k], lens_anchor[1][k]),
+                    line_of_sight_only,
+                )
+                for k, o in enumerate(orbit_map)
+            ]
+            return tuple(
+                None
+                if rows[0][c] is None
+                else pt.stack([row[c] for row in rows], axis=1)
+                for c in range(6)
+            )
+        if (
+            parallax is not None
+            or lens_anchor is not None
+            or line_of_sight_only
+        ):
+            raise ValueError(
+                f"[{self.prefix}] parallax / lens_anchor are Taylor-orbit "
+                f"inputs; a Keplerian state carries its own amplitude `a`."
+            )
         t_grid = t[:, None]
         tp = self.tp_target.value[orbit_map][None, :]
         n = self.n.value[orbit_map][None, :]

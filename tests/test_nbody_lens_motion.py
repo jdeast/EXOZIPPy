@@ -161,7 +161,7 @@ def _triple_system(tmp_path, orbits, lens_orbit):
 def _orbit(name, companion):
     return {
         "name": name,
-        "type": "linear",
+        "type": "uniform_rotation",
         "primary": ["L1"],
         "companion": [companion],
     }
@@ -179,7 +179,7 @@ def _eval(system, model, nodes):
 
 def test_a_static_companion_beside_a_moving_one(tmp_path):
     system = _triple_system(tmp_path, [_orbit("L", "L2")], ["L", None])
-    assert system.lens.companion_motion == ["linear", None]
+    assert system.lens.companion_motion == ["uniform_rotation", None]
     model = system.build_model()
     times = _times()
     S, A = system.mulensevent._companion_geometry_series(times, system)
@@ -200,7 +200,10 @@ def test_two_companions_each_on_their_own_orbit(tmp_path):
     system = _triple_system(
         tmp_path, [_orbit("L", "L2"), _orbit("M", "L3")], ["L", "M"]
     )
-    assert system.lens.companion_motion == ["linear", "linear"]
+    assert system.lens.companion_motion == [
+        "uniform_rotation",
+        "uniform_rotation",
+    ]
     assert system.lens.motion_orbit_idxs == [0, 1]
     model = system.build_model()
     names = {v.name for v in model.potentials}
@@ -214,7 +217,7 @@ def test_two_companions_each_on_their_own_orbit(tmp_path):
 def test_two_companions_on_one_orbit_are_refused(tmp_path):
     orbit = {
         "name": "L",
-        "type": "linear",
+        "type": "uniform_rotation",
         "primary": ["L1"],
         "companion": ["L2", "L3"],
     }

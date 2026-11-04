@@ -26,6 +26,7 @@ import pytensor.tensor as pt
 from exozippy.components.component import Component
 from exozippy.components.orbit.bodies import (
     STATIC_TYPE,
+    UNIFORM_ROTATION_TYPE,
     orbit_types,
     parse_orbit_bodies,
 )
@@ -83,6 +84,10 @@ FRAME_VELOCITY_STEP_DAYS = 0.05
 # alpha is stored in radians (lens.alpha's internal_unit) and consumed in
 # degrees by both magnification backends.
 _RAD_TO_DEG = 180.0 / np.pi
+# Floor on a uniform_rotation companion's s^2 (Einstein radii^2) before the
+# square root: STRICTLY positive, so a separation passing exactly through
+# zero never meets sqrt'(0) = inf (CLAUDE.md, the where-trap rule).
+_S_SQ_FLOOR = 1e-300
 
 
 _VBM_ACCURACY_DEFAULTS = {
@@ -1595,13 +1600,23 @@ class MulensEvent(Component):
         ``None`` when no companion moves (review 8.6.33: any number of
         companions may move, each on its own orbit, beside static ones).
 
-        Each row follows its own companion's mode.  The linear mode is
-        DEFINITIONAL in these coordinates (C24):
+        Each row follows its own companion's mode.  The uniform_rotation
+        mode is DEFINITIONAL in these coordinates (C24):
 
             s_j(t)     = s_j0     + ds_dt[o_j]     * (t - t0_par)/DAYS_PER_YEAR
             alpha_j(t) = alpha_j0 + dalpha_dt[o_j] * (t - t0_par)/DAYS_PER_YEAR
 
-        with o_j companion j's own linear orbit, anchored at t0_par -- the
+        with o_j companion j's own uniform_rotation orbit, anchored at
+        t0_par, read THROUGH ``Orbit.state_vectors`` like every other
+        consumer of an orbit (JDE 2026-11-03): the state is the pair's
+        separation ``X, Y = s(t) (cos, sin) alpha(t)`` in the trajectory
+        frame and Einstein radii, from the LENS's (s_j0, alpha_j0), in C15's
+        placement ``s (cos alpha, -sin alpha)``, and the row is its polar form -- s = |(X, Y)| and alpha = alpha_j0 plus the
+        angle rotated from the anchor direction (continuous within half a
+        turn of alpha_j0; the backends read alpha only through its sine and
+        cosine).  Where s_j0 + ds_dt dt passes through zero the state passes
+        to the other side, |s| with alpha + 180 deg, which is the same
+        configuration.  Anchored at t0_par -- the
         same fiducial epoch the parallax uses (5d: one anchor is what makes
         the two effects composable; Skowron Eq. A17).  A keplerian row comes
         from companion j's own orbit through ``lens_geometry_from_orbit``,
@@ -1630,16 +1645,29 @@ class MulensEvent(Component):
             zip(lens.companion_motion, lens.companion_orbit_idx)
         ):
             elem = j + 1
-            if mode == "linear":
-                # The rates are the companion's own type: linear ORBIT's
+            if mode == UNIFORM_ROTATION_TYPE:
+                # The companion's own uniform_rotation ORBIT's state
                 # (anchored at t0_par, that orbit's epoch --
-                # Orbit._taylor_epochs).
-                s_rows.append(
-                    lens.s.value[elem] + orbit.ds_dt.value[o] * dt_yr
+                # Orbit._taylor_epochs), from the lens's (s0, alpha0).
+                alpha0 = lens.alpha.value[elem]
+                X, Y, *_ = orbit.state_vectors(
+                    pt.as_tensor_variable(times),
+                    np.array([o]),
+                    relative=True,
+                    lens_anchor=(
+                        pt.stack([lens.s.value[elem]]),
+                        pt.stack([alpha0]),
+                    ),
                 )
+                X, Y = X[:, 0], Y[:, 0]
+                # Strictly positive radicand floor (CLAUDE.md where-trap).
+                s_rows.append(pt.sqrt(pt.maximum(X**2 + Y**2, _S_SQ_FLOOR)))
+                # C15's placement is s (cos alpha, -sin alpha): the angle
+                # rotated from the anchor direction, with Y's sign undone.
+                ca, sa = pt.cos(alpha0), pt.sin(alpha0)
+                rotated = pt.arctan2(-ca * Y - sa * X, ca * X - sa * Y)
                 alpha_rows.append(
-                    self._alpha_deg(system, j)
-                    + orbit.dalpha_dt.value[o] * _RAD_TO_DEG * dt_yr
+                    self._alpha_deg(system, j) + rotated * _RAD_TO_DEG
                 )
             elif mode == "keplerian":
                 # No anchor enters -- alpha(t) = phi_pi - PA_axis(t) is
@@ -1847,8 +1875,8 @@ class MulensEvent(Component):
         """The MulensModel parameter vector of source slot ``index``, in
         op.py's positional layout: ``[t_0, u_0, t_E, pi_E_N, pi_E_E]`` +
         ``[rho]`` (finite source) + ``[s, q, alpha_deg]`` (binary lens) +
-        ``[ds_dt, dalpha_dt_deg]`` (a companion on a ``type: linear``
-        orbit).  ONE builder for the ``mulensmodel`` backend's Ops and the
+        ``[ds_dt, dalpha_dt_deg]`` (a companion on a ``type:
+        uniform_rotation`` orbit, read off its state at t0_par).  ONE builder for the ``mulensmodel`` backend's Ops and the
         MulensModel plots, so the caustics and trajectory drawn are those of
         the parameters the fit reads.  Limb darkening is not part of it:
         the Op caller appends ``u1``.
@@ -1880,15 +1908,28 @@ class MulensEvent(Component):
                     self._alpha_deg(system, 0),
                 ]
             )
-            if lens.companion_motion[0] == "linear":
+            if lens.companion_motion[0] == UNIFORM_ROTATION_TYPE:
                 # MulensModel's LINEAR branch is definitional in the same
-                # (ds_dt, dalpha_dt) and takes deg/yr; the rates are the
-                # companion's type: linear orbit's.
+                # (ds_dt, dalpha_dt) and takes deg/yr; they are read off the
+                # companion's uniform_rotation state at t0_par (its epoch),
+                # in C15's placement s (cos alpha, -sin alpha):
+                # ds/dt = (X VX + Y VY)/s, dalpha/dt = -(X VY - Y VX)/s^2.
                 o = lens.companion_orbit_idx[0]
+                X, Y, _, VX, VY, _ = system.orbit.state_vectors(
+                    np.array([float(system.orbit.taylor_epoch[o])]),
+                    np.array([o]),
+                    relative=True,
+                    lens_anchor=(
+                        pt.stack([lens.s.value[1]]),
+                        pt.stack([lens.alpha.value[1]]),
+                    ),
+                )
+                X, Y, VX, VY = X[0, 0], Y[0, 0], VX[0, 0], VY[0, 0]
+                s_sq = X**2 + Y**2
                 params.extend(
                     [
-                        system.orbit.ds_dt.value[o],
-                        system.orbit.dalpha_dt.value[o] * _RAD_TO_DEG,
+                        (X * VX + Y * VY) / pt.sqrt(s_sq),
+                        -(X * VY - Y * VX) / s_sq * _RAD_TO_DEG,
                     ]
                 )
         return params

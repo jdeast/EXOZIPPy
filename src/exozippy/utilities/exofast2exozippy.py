@@ -951,7 +951,7 @@ def convert(pro_path, outdir, base, priorfile_override=None):
 
     # /fitslope, /fitquad: EXOFASTv2's RV trend is the reflex of a companion
     # too long-period to resolve, which EXOZIPPy writes as what it is -- a
-    # Taylor orbit (type: linear / quadratic) whose primary is the observed
+    # Taylor orbit (type: constant_acceleration / constant_jerk) whose primary is the observed
     # star.  RVEPOCH is its epoch (EXOFASTv2's default, the midpoint of the
     # RV span, is also EXOZIPPy's, so it is written only when given).
     fitslope = bool(take("fitslope"))
@@ -964,7 +964,7 @@ def convert(pro_path, outdir, base, priorfile_override=None):
         else:
             trend = dict(
                 name="trend",
-                type="quadratic" if fitquad else "linear",
+                type="constant_jerk" if fitquad else "constant_acceleration",
                 epoch=None if rvepoch is None else float(rvepoch),
             )
             info(
@@ -1915,14 +1915,14 @@ def _emit_config(
         L.append(f'    companion: ["{p}"]')
     if trend:
         L.append(
-            f"  # EXOFASTv2's /fit{'quad' if trend['type'] == 'quadratic' else 'slope'}: "
+            f"  # EXOFASTv2's /fit{'quad' if trend['type'] == 'constant_jerk' else 'slope'}: "
             "the reflex of a companion too long-period"
         )
         L.append(
             "  # to resolve, as a Taylor orbit: orbit.trend.gammadot is the "
             "RV slope"
         )
-        if trend["type"] == "quadratic":
+        if trend["type"] == "constant_jerk":
             L.append(
                 "  # and orbit.trend.gammaddot its curvature (TWICE "
                 "EXOFASTv2's QUAD)."

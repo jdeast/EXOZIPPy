@@ -33,7 +33,32 @@ custom solver.
 
 # Orbit `type:` values whose orbit is a low-order Taylor expansion about a
 # reference epoch rather than a Keplerian (see orbit.md "Taylor orbits").
-TAYLOR_TYPES = ("linear", "quadratic")
+# The three Cartesian ones name the degree of the POSITION polynomial of the
+# primary group's reflex (constant velocity, + acceleration, + jerk);
+# uniform_rotation is the microlensing lens's polar-linear relative motion
+# (constant ds/dt and dalpha/dt, conventions.md C24).
+CARTESIAN_TAYLOR_TYPES = (
+    "constant_velocity",
+    "constant_acceleration",
+    "constant_jerk",
+)
+UNIFORM_ROTATION_TYPE = "uniform_rotation"
+TAYLOR_TYPES = CARTESIAN_TAYLOR_TYPES + (UNIFORM_ROTATION_TYPE,)
+
+# The pre-2026-11 spellings, ordered by RV polynomial for the RV trend and by
+# position for the lens -- the same word for two different orders, which is
+# why they were renamed (JDE 2026-11-03).  They raise with the migration.
+REMOVED_ORBIT_TYPES = {
+    "linear": (
+        "an RV slope (gammadot) is now type: constant_acceleration; a "
+        "microlensing lens's linear orbital motion (ds_dt, dalpha_dt) is "
+        "now type: uniform_rotation"
+    ),
+    "quadratic": (
+        "an RV slope + curvature (gammadot, gammaddot) is now type: "
+        "constant_jerk"
+    ),
+}
 
 # The orbit `type:` of a PAIRING WITH NO DYNAMICS (orbit.md "Planet membership has one spelling"):
 # it names a primary and a companion group like any orbit block -- which is
@@ -195,6 +220,11 @@ def parse_orbit_bodies(orbit_cfgs, system_config):
         prim_cfg = cfg.get("primary")
         comp_cfg = cfg.get("companion")
         otype = cfg.get("type", "keplerian")
+        if otype in REMOVED_ORBIT_TYPES:
+            raise ValueError(
+                f"{ctx}type: {otype} was removed: "
+                f"{REMOVED_ORBIT_TYPES[otype]}."
+            )
         taylor = otype in TAYLOR_TYPES
         if otype == STATIC_TYPE and (prim_cfg is None or comp_cfg is None):
             # A static orbit exists only to say who is paired with whom, so

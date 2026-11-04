@@ -623,8 +623,10 @@ sign is pinned by a synthetic orbit with KNOWN inclination rather than by a chi2
 improvement.
 
 - Implemented in: `Lens` (config key `orbit:` on the companion's entry; the referenced
-  orbit's `type: linear|keplerian` selects the mode, and a linear orbit owns the rates as
-  `orbit.<name>.ds_dt` / `orbit.<name>.dalpha_dt`),
+  orbit's `type: uniform_rotation|keplerian` selects the mode -- `uniform_rotation` was
+  spelled `linear` until 2026-11, and that spelling now raises with the migration -- and a
+  uniform_rotation orbit owns the rates as `orbit.<name>.ds_dt` / `orbit.<name>.dalpha_dt`
+  and serves the definitional series below through `Orbit.state_vectors`),
   `mulensing/physics.py`, `MulensEvent._companion_geometry_series` (one row per
   companion), `op.VBMDirectMagOp` (per-epoch `(n_companions, n_epochs)` geometry inputs).
 - Pinned by: `tests/test_lens_orbital_motion.py` -- the known-inclination sign test, the

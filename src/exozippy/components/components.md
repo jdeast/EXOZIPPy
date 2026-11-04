@@ -142,7 +142,7 @@ make the illegal combinations REPRESENTABLE, so the parser owes an explicit
 state impossible.  That is a real trade and it was made deliberately, not
 overlooked.  `band.ld_law` is NOT a counterexample: `quadratic` vs `linear` is
 a different model (different parameter count), not a coordinate choice --
-and neither is `orbit.type` (`keplerian` / `linear` / `quadratic`), which
+and neither is `orbit.type` (`keplerian` / the Taylor types / `static`), which
 chooses between a Keplerian and a Taylor orbit.
 `planet.mass_parameterization` WAS drift and is gone: it became the
 exclusive pair `fitlogq` / `fitmsini` when the third coordinate arrived
