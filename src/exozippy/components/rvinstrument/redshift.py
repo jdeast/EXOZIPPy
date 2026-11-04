@@ -35,7 +35,8 @@ The prediction (WE14 eq. 28 turned into a forward model) is
 with ``beta_*`` the star's TOTAL velocity (systemic space motion plus every
 orbit's reflex) and ``beta_o`` the observer's, both barycentric over c;
 ``z_grav,o = 1/(1 + Phi_o/c^2) - 1`` the blueshift of light falling into the
-solar-system potential at the observer; ``z_Shapiro`` WE14's eq. 27; and
+solar-system potential at the observer; ``z_Shapiro`` the exact derivative
+of the Shapiro delay (WE14's eq. 27 plus its d ln r/dt piece); and
 ``z0_i`` the instrument's zero point (template, the star's own gravitational
 redshift and convective blueshift: constants, absorbed there).
 
@@ -77,18 +78,30 @@ JULIAN_YEAR_S = JULIAN_YEAR_D * 86400.0
 MPS_TO_AU_PER_YR = JULIAN_YEAR_S / AU_M
 C_AU_PER_D = C_MPS * 86400.0 / AU_M
 
-#: The bodies whose potential (and Shapiro term) at the observer is kept,
-#: and their GM in m^3/s^2 -- barycorrpy's set (WE14 sec. 5: everything else
-#: is < 1 mm/s).  The Sun's term is ~3 m/s with a +/-5 cm/s annual swing
-#: (the Earth's orbital eccentricity); the Earth's own is ~0.2 m/s and
-#: constant at a site; Jupiter and Saturn are sub-mm/s.
+#: The bodies whose potential at the observer is kept, and their GM in
+#: m^3/s^2 (DE430's values for the planetary systems and the Moon).  The
+#: Sun's term is ~3 m/s with a +/-5 cm/s annual swing (the Earth's orbital
+#: eccentricity); the Earth's own is ~0.2 m/s and constant at a site;
+#: Jupiter and Saturn are sub-mm/s; the Moon, Venus, Mars, Mercury, Uranus
+#: and Neptune together a near-constant 0.065 mm/s (Venus varies by 0.02).
+#: barycorrpy keeps the first four only.
 GRAVITY_BODIES = (
     ("sun", const.GM_sun.to(u.m**3 / u.s**2).value),
     ("earth", const.GM_earth.to(u.m**3 / u.s**2).value),
     ("jupiter", const.GM_jup.to(u.m**3 / u.s**2).value),
-    # DE430's GM of the Saturn system, 37931207.8 km^3/s^2.
     ("saturn", 3.79312078e16),
+    ("moon", 4.902800118e12),
+    ("venus", 3.24858592e14),
+    ("mars", 4.2828375816e13),
+    ("mercury", 2.2031868551e13),
+    ("uranus", 5.793951256527e15),
+    ("neptune", 6.83509997e15),
 )
+#: The bodies whose Shapiro term is kept.  The Earth's is dropped: the
+#: observer sits in its potential at a fixed radius, and with the observer
+#: velocity RELATIVE to it (the site's rotation) the term is far below the
+#: others; the Moon and the remaining planets are below 0.001 mm/s.
+SHAPIRO_BODIES = ("sun", "jupiter", "saturn")
 
 
 def observer_terms(t_tdb, observer_location, ephemeris):
@@ -105,11 +118,13 @@ def observer_terms(t_tdb, observer_location, ephemeris):
               added, or a spacecraft's spline velocity);
     ``gamma`` (N,)   its Lorentz factor;
     ``one_plus_zgrav`` (N,) ``1 / (1 + sum GM/(r c^2))`` over ``GRAVITY_BODIES``;
-    ``shapiro_hat`` (B, N, 3) unit vectors from each body to the observer and
+    ``shapiro_hat`` (B, N, 3) unit vectors from each ``SHAPIRO_BODIES``
+    body to the observer, ``shapiro_beta`` (B, N, 3) the observer's
+    velocity RELATIVE to that body over c, and
     ``shapiro_coef`` (B, N) ``-2 GM / (c^2 r)``, the parameter-independent
     halves of WE14 eq. 27 (the other half reads the fitted direction).
     """
-    from astropy.coordinates import get_body_barycentric
+    from astropy.coordinates import get_body_barycentric_posvel
     from astropy.time import Time
 
     from exozippy.ephemeris import get_observer_posvel, use_ephemeris
@@ -120,13 +135,12 @@ def observer_terms(t_tdb, observer_location, ephemeris):
     gamma = 1.0 / np.sqrt(1.0 - np.sum(beta**2, axis=1))
     r_m = r_au * AU_M
     phi = np.zeros(t_tdb.size)
-    hats, coefs = [], []
+    hats, coefs, betas = [], [], []
     with use_ephemeris(ephemeris):
         t_obj = Time(t_tdb, format="jd", scale="tdb")
         for body, gm in GRAVITY_BODIES:
-            rb = np.atleast_2d(
-                get_body_barycentric(body, t_obj).xyz.to(u.m).value.T
-            )
+            pb, vb = get_body_barycentric_posvel(body, t_obj)
+            rb = np.atleast_2d(pb.xyz.to(u.m).value.T)
             sep = r_m - rb
             dist = np.linalg.norm(sep, axis=1)
             if not np.all(dist > 0.0):
@@ -138,8 +152,11 @@ def observer_terms(t_tdb, observer_location, ephemeris):
                     f"{body}; its potential is singular there."
                 )
             phi += gm / dist
-            hats.append(sep / dist[:, None])
-            coefs.append(-2.0 * gm / (C_MPS**2 * dist))
+            if body in SHAPIRO_BODIES:
+                hats.append(sep / dist[:, None])
+                coefs.append(-2.0 * gm / (C_MPS**2 * dist))
+                vb = np.atleast_2d(vb.xyz.to(u.m / u.s).value.T)
+                betas.append(beta - vb / C_MPS)
     return {
         "r_au": r_au,
         "beta": beta,
@@ -147,6 +164,7 @@ def observer_terms(t_tdb, observer_location, ephemeris):
         "one_plus_zgrav": 1.0 / (1.0 + phi / C_MPS**2),
         "shapiro_hat": np.asarray(hats),
         "shapiro_coef": np.asarray(coefs),
+        "shapiro_beta": np.asarray(betas),
     }
 
 
@@ -281,17 +299,19 @@ def doppler_ratio(geom, obs, v_reflex, xp=np, phi_star=None):
     star = gamma_star * (1.0 + sum(rho[k] * beta[k] for k in range(3)))
     bo = obs["beta"]
     observer = obs["gamma"] * (1.0 + sum(rho[k] * bo[:, k] for k in range(3)))
-    # WE14 eq. 27: sum_b -2GM/(c^2 r) [(rho - (R.rho)R) . beta_o] / (1 + R.rho)
+    # The Shapiro term: the exact time derivative of the delay
+    # -2GM/c^3 ln(r (1 + R_hat . rho)) (what PINT and TEMPO2 differentiate),
+    # with the observer's velocity RELATIVE to each body:
+    #   sum_b -2GM/(c^2 r) [(rho + R_hat) . beta_rel] / (1 + R_hat . rho)
+    # = WE14 eq. 27 plus its d ln r/dt piece.  Against PINT this takes the
+    # worst epoch from 0.063 to 0.042 mm/s (informational).
     z_shapiro = 0.0
     for b in range(obs["shapiro_coef"].shape[0]):
         R = obs["shapiro_hat"][b]
+        br = obs["shapiro_beta"][b]
         r_dot = sum(R[:, k] * rho[k] for k in range(3))
-        perp_dot_beta = sum(
-            (rho[k] - r_dot * R[:, k]) * bo[:, k] for k in range(3)
-        )
-        z_shapiro = z_shapiro + obs["shapiro_coef"][b] * perp_dot_beta / (
-            1.0 + r_dot
-        )
+        num = sum((rho[k] + R[:, k]) * br[:, k] for k in range(3))
+        z_shapiro = z_shapiro + obs["shapiro_coef"][b] * num / (1.0 + r_dot)
     ratio = star / observer * obs["one_plus_zgrav"] * (1.0 + z_shapiro)
     if phi_star is not None:
         ratio = ratio * (1.0 + phi_star)

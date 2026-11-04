@@ -31,7 +31,7 @@ star parameters the astrometry constrains.
 
 How large the errors are. Each number below is the RMS over three years of epochs at
 McDonald (2023-2026, star coordinates at J2016.0), from EXOZIPPy's model
-(`redshift.py`, which agrees with barycorrpy to 0.017 cm/s). "After a refit" removes an
+(`redshift.py`, which agrees with barycorrpy to 0.12 mm/s and with PINT to 0.02 mm/s RMS). "After a refit" removes an
 offset, a linear trend and a refit Keplerian amplitude, which is what a corrected-RV fit
 could absorb on its own.
 
@@ -192,5 +192,5 @@ fitted parameters. The full description is in
 
 The cross terms, the proper-motion and perspective terms and the coordinate epoch are
 therefore never separate steps that can be skipped or applied inconsistently. The
-correction is validated against barycorrpy (Kanodia & Wright 2018) to 0.017 cm/s, and
-against the TEMPO comparison set published with WE14 to the precision of that set.
+correction is validated against barycorrpy (Kanodia & Wright 2018), PINT, TEMPO2, TEMPO and
+PEXO at the 0.02-0.2 mm/s level (`src/exozippy/components/rvinstrument/rvinstrument.md`).

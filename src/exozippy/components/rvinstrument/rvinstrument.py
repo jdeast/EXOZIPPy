@@ -487,6 +487,7 @@ class RVInstrument(Instrument):
                 ("one_plus_zgrav", 0),
                 ("shapiro_hat", 1),
                 ("shapiro_coef", 1),
+                ("shapiro_beta", 1),
             )
         }
 

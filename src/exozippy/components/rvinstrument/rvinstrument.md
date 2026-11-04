@@ -89,8 +89,11 @@ Precomputed at stage 1, parameter-independent (`redshift.observer_terms`):
   relativistic addition `(v_site + v_earth)/(1 + v_site . v_earth / c^2)` WE14 and
   barycorrpy use; for a spacecraft the analytic derivative of the `.eph` position spline;
 - the solar-system potential at the observer, `1 + z_grav = 1 / (1 + sum GM/(r c^2))` over
-  the Sun, Earth, Jupiter and Saturn (barycorrpy's set), and the body-to-observer unit
-  vectors and `-2GM/(c^2 r)` factors of WE14's Shapiro term (eq. 27).
+  the Sun, the planets and the Moon (`redshift.GRAVITY_BODIES`; barycorrpy keeps the Sun,
+  Earth, Jupiter and Saturn), and for the Sun, Jupiter and Saturn the body-to-observer
+  unit vectors, the observer's velocity relative to each, and the `-2GM/(c^2 r)` factors
+  of the Shapiro term, taken as the exact time derivative of the Shapiro delay (WE14's
+  eq. 27 plus its `d ln r / dt` piece; the Earth's term is dropped).
 
 In the graph, functions of the fitted parameters (`redshift.star_geometry`,
 `redshift.doppler_ratio`, `RVInstrument._raw_rv_model`):
@@ -194,11 +197,20 @@ of any one instrument is not, and is not claimed.
   (McDonald, Kitt Peak, La Palma, Paranal) x four stars (Barnard's star at J2016 and at
   J2000 -- 25 yr of its 10 arcsec/yr between epoch and data --, tau Ceti, and a Gaia-4-like
   star at ra 209.5063, dec 31.6955, pm (-75.53, 17.97) mas/yr, parallax 13.63 mas) x 40
-  epochs 2015-2026: `c z_B` agrees to **0.017 cm/s worst with DE430** on both sides (0.017
-  is Barnard's at J2000; 0.004 at J2016, 0.0002 for the others), and to **0.27 cm/s worst
-  with the builtin (erfa) ephemeris**, the default, which the committed test uses. And
-  the inverse: barycorrpy, given the redshifts this model PREDICTS for a companion-free
-  star, recovers a constant velocity to < 1 cm/s peak-to-peak.
+  epochs 2015-2026: `c z_B` agrees to **0.12 mm/s worst with DE430** on both sides at
+  every epoch with the star above the horizon (0.28 mm/s for Barnard's star at J2000), and
+  to **0.27 cm/s worst with the builtin (erfa) ephemeris**, the default, which the
+  committed test uses. Before three refinements this model has and barycorrpy does not
+  the DE430 agreement was 0.017 cm/s; the differences now are, each confirmed against
+  PINT and TEMPO2 by an independent comparison: `X(T)` at `t_B` (barycorrpy propagates
+  the star to the observer's TDB; Barnard's star against PINT goes from 0.063 mm/s with
+  barycorrpy to 0.015 mm/s here, so up to 0.09 mm/s of the difference is barycorrpy's);
+  the Moon and the remaining planets' potentials (a constant 0.065 mm/s); and the exact
+  Shapiro derivative with the observer velocity relative to each body and no Earth term
+  (barycorrpy's Earth term divides by `1 + R_hat . rho`, which vanishes toward the
+  nadir: the worst differences, up to 0.48 mm/s, are all at epochs with the star below
+  the horizon). And the inverse: barycorrpy, given the redshifts this model PREDICTS for
+  a companion-free star, recovers a constant velocity to < 1 cm/s peak-to-peak.
 - **Against the TEMPO comparison set published with WE14** (informational: everything
   here is below barycorrpy's own ~0.2 mm/s precision, and nothing in this mode waits on
   it) (tau Ceti from the CTIO
@@ -218,11 +230,42 @@ of any one instrument is not, and is not claimed.
   mm/s); IAU 1976/1980 precession-nutation with GST94 in place of IAU 2006/2000A (0.01
   mm/s); UT1 = UTC (6.5 mm/s, far worse); the Moon, Venus, Mars, Mercury, Uranus and
   Neptune potentials (a constant 0.064 mm/s, which moves the mean -0.099 -> -0.035 mm/s
-  and leaves the RMS unchanged -- absorbed by any zero point, so not added); `v^2/c^2`,
+  and leaves the RMS unchanged; they are added since, see `GRAVITY_BODIES`); `v^2/c^2`,
   annual, semiannual, lunar and Jupiter-period terms (none reduces the RMS by more than
   0.003 mm/s). The comparison script is `scripts/compare_tempo_zb.py`; the table itself
   is not committed (it is redistributed under barycorrpy's GPL-3.0, this repository is
   BSD-3), so the script takes its path.
+- **Against PINT, TEMPO2 and TEMPO** (informational; an independent comparison by a
+  separate agent, five sites x stars x epochs; the method and install recipe are in
+  `docs/timing_code_crosscheck.md`):
+
+  | comparison (per-case constant removed) | RMS | max |
+  |---|---|---|
+  | this model - PINT | 0.019 mm/s | 0.063 mm/s |
+  | this model - native TEMPO2 | 0.022 mm/s | 0.064 mm/s |
+  | PINT - native TEMPO2 | 0.015 mm/s | 0.048 mm/s |
+  | this model - TEMPO1 | 0.21 mm/s | 0.61 mm/s |
+  | this model, polar motion OFF - TEMPO1 | 0.03 mm/s | 0.13 mm/s |
+  | this model with the exact Shapiro term and the extra bodies (now the default) - PINT | 0.012 mm/s | 0.042 mm/s |
+
+  The TEMPO1 residual is entirely polar motion, which TEMPO1 lacks. This is the same
+  effect as the 0.33 mm/s against the WE14 TEMPO set above. The per-site constant
+  between this model and the TT-based codes is closed: it is the observatory clock
+  term `(GM_E/r + v_rot^2/2 - W0)/c` (the geoid potential W0) plus the bodies
+  barycorrpy omits. The prediction matches the measured constant to <= 0.006 mm/s at
+  every site:
+
+  | site | clock term | omitted bodies | predicted | measured vs PINT |
+  |---|---|---|---|---|
+  | Keck | -0.210 | -0.066 | -0.276 | -0.279 mm/s |
+  | Kitt Peak | -0.087 | -0.066 | -0.153 | -0.158 mm/s |
+  | McDonald | -0.092 | -0.066 | -0.157 | -0.162 mm/s |
+  | La Palma | -0.113 | -0.066 | -0.179 | -0.183 mm/s |
+  | Las Campanas | -0.116 | -0.065 | -0.181 | -0.185 mm/s |
+
+  The omitted bodies are now modeled (`redshift.GRAVITY_BODIES`). The clock term is a
+  constant per site, which each instrument's `z0_i` absorbs, so it is not modeled.
+  The float64 floor of one JD time stamp (~40 us) is 0.0004 mm/s RMS.
 - **Against PEXO** (Feng et al. 2019; an independent comparison run by a separate
   agent, scripts not in this repository). For single stars at ground sites this model
   matches PEXO to <= 0.015 mm/s once each term is attributed. The attributed terms:
@@ -233,7 +276,7 @@ of any one instrument is not, and is not claimed.
   | `X` at `t_B` rather than at the reception instant | up to +/-0.07 mm/s, Barnard's star | modeled |
   | the star's orbital displacement in `rho_hat` | 0.5 mm/s binary, 0.03 mm/s planet | modeled |
   | the companion's gravitational redshift at the star | 20-40 mm/s planet, 190-390 mm/s binary (absorbed by a refit only by biasing K, omega) | modeled (`_companion_potential`) |
-  | the observatory clock / potential model: the geoid potential W0 against GM_E/r + v_rot^2/2, Earth's J2 (+0.02 to +0.055 mm/s), the Moon (0.042), Venus (0.008, variable), Mars, Mercury, Uranus, Neptune (0.057-0.084 mm/s in all) | a CONSTANT per site: McDonald -0.155, Kitt Peak -0.150, La Palma -0.176, Paranal -0.199 mm/s, shared with barycorrpy | not modeled: informational, below barycorrpy's ~0.2 mm/s and absorbed by every zero point. This model keeps the site-height term, which PEXO drops |
+  | the observatory clock / potential model: the geoid potential W0 against GM_E/r + v_rot^2/2, Earth's J2 (+0.02 to +0.055 mm/s), the Moon (0.042), Venus (0.008, variable), Mars, Mercury, Uranus, Neptune (0.057-0.084 mm/s in all) | a CONSTANT per site: McDonald -0.155, Kitt Peak -0.150, La Palma -0.176, Paranal -0.199 mm/s, shared with barycorrpy | the bodies are now modeled. The clock/geoid/J2 constant is not modeled: it is informational, below barycorrpy's ~0.2 mm/s, and absorbed by every zero point. This model keeps the site-height term, which PEXO drops |
   | tropospheric Doppler | 0.1-1 mm/s at 20-60 deg elevation | out of scope: it needs per-epoch pressure and humidity |
 
   The WE14 TEMPO residual's mean (-0.099 mm/s at CTIO, -0.035 mm/s with the Moon and
@@ -250,7 +293,7 @@ of any one instrument is not, and is not claimed.
   mm/s and < 1 mm/s.
 - **Recovery** on the simulated example (`examples/raw_redshift_sim`): the likelihood's
   graph reproduces the numpy forward model that made the data to < 1 mm/s at the truth;
-  a MAP fit recovers K, P and the three zero points; C and JAX gradients are finite and
+  a MAP fit recovers K (327.9 against 330 m/s) and the three zero points (within 1.8 m/s), P within its loose 1.3-orbit constraint (578.8 against 571 d); C and JAX gradients are finite and
   agree in every coordinate (ra, dec, pm, distance, rv, the orbit).
 
 ### What a corrected-RV fit misses: a Gaia-4-like system
@@ -292,9 +335,8 @@ perspectives -- and that no step can be applied inconsistently.
 ### Not modeled, with their size
 
 The tropospheric Doppler term (0.1-1 mm/s at 20-60 deg elevation; it needs pressure
-data); Earth's J2 and the geoid clock offset (a per-site constant < 0.2 mm/s, above); the
-Shapiro delay on `t_B` (< 0.1 ms); the Moon's and the other planets' potentials (<
-0.1 mm/s); a Taylor orbit's transverse reflex and transverse displacement (its sky terms are angular and need a parallax; < 1e-3 of a
+data); Earth's J2 and the geoid clock offset (a per-site constant of -0.09 to -0.21 mm/s,
+above, absorbed by each zero point); the Shapiro delay on `t_B` (< 0.1 ms); a Taylor orbit's transverse reflex and transverse displacement (its sky terms are angular and need a parallax; < 1e-3 of a
 resolved reflex); the TDB-vs-SI velocity scale (L_B = 1.55e-8: 0.5 mm/s at 30 km/s, as in
 WE14; the TEMPO comparison rules it out as a term this model misses).
 
