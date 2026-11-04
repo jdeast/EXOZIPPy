@@ -14,6 +14,7 @@ independent of the Thiele-Innes shortcut used in Orbit.get_sky_position.
 """
 
 import logging
+from types import SimpleNamespace
 
 import numpy as np
 import pymc as pm
@@ -141,13 +142,17 @@ def compiled_sky_functions():
                 )
 
             t_var = pt.vector("t")
-            a_var = pt.vector("a_scale")
+            a_var = pt.vector("a")
             K_var = pt.vector("K_int")
             omap = np.array([0])
+            # A bodiless Orbit declares no `a` (it is derived from the group
+            # masses); state_vectors' amplitude is the orbit's own relative
+            # semimajor axis (review 4.8.3(d)), so stand one in as an input.
+            orbit_comp.a = SimpleNamespace(value=a_var)
 
-            dE_star, dN_star = orbit_comp.get_sky_position(t_var, a_var, omap)
+            dE_star, dN_star = orbit_comp.get_sky_position(t_var, omap)
             dE_rel, dN_rel = orbit_comp.get_sky_position(
-                t_var, a_var, omap, relative=True
+                t_var, omap, relative=True
             )
             rv_node = orbit_comp.get_radial_velocity(t_var, K_var, omap)
 
@@ -202,7 +207,7 @@ def test_sky_position_matches_rotation_reference(case, compiled_sky_functions):
     omega, ecc, bigom, cosi = case
     sky_fn, _ = compiled_sky_functions
     t = np.linspace(_TC, _TC + _P_DAYS, 137)
-    a_scale = np.array([3.7])  # mas
+    a_scale = np.array([3.7])  # the orbit's a, in solRad
 
     dE_s, dN_s, dE_r, dN_r = sky_fn(
         *_free_vals(omega, ecc, bigom, cosi), t, a_scale

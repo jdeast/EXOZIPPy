@@ -27,6 +27,8 @@ parallax signs) stay pinned by tests/test_skyframe.py and
 tests/test_astrometry.py, which now exercise the same kernel path.
 """
 
+from types import SimpleNamespace
+
 import numpy as np
 import pymc as pm
 import pytensor
@@ -81,15 +83,17 @@ def compiled_state_functions():
                 )
 
             t_var = pt.vector("t")
-            a_var = pt.vector("a_scale")
+            a_var = pt.vector("a")
             K_var = pt.vector("K_int")
             omap = np.array([0])
+            # A bodiless Orbit declares no `a` (it is derived from the group
+            # masses); state_vectors' amplitude is the orbit's own relative
+            # semimajor axis (review 4.8.3(d)), so stand one in as an input.
+            orbit_comp.a = SimpleNamespace(value=a_var)
 
-            state = orbit_comp.state_vectors(t_var, a_var, omap)
-            state_rel = orbit_comp.state_vectors(
-                t_var, a_var, omap, relative=True
-            )
-            dE, dN = orbit_comp.get_sky_position(t_var, a_var, omap)
+            state = orbit_comp.state_vectors(t_var, omap)
+            state_rel = orbit_comp.state_vectors(t_var, omap, relative=True)
+            dE, dN = orbit_comp.get_sky_position(t_var, omap)
             rv_node = orbit_comp.get_radial_velocity(t_var, K_var, omap)
 
             free_inputs = [
@@ -126,8 +130,8 @@ def _free_vals(omega, ecc, bigom, cosi):
     ]
 
 
-def _eval_state(state_fn, case, t, a_scale=1.0):
-    out = state_fn(*_free_vals(*case), t, np.array([a_scale], dtype=float))
+def _eval_state(state_fn, case, t, a=1.0):
+    out = state_fn(*_free_vals(*case), t, np.array([a], dtype=float))
     out = [np.asarray(o)[:, 0] for o in out]
     return out[:6], out[6:12], (out[12], out[13])
 
@@ -199,7 +203,7 @@ def test_projection_delegations(case, compiled_state_functions):
     np.testing.assert_array_equal(dN, X)
 
     # K chosen so the collapsed amplitude equals state_vectors' vamp*sini
-    # with a_scale = 1: the two must then agree to roundoff.
+    # with a = 1: the two must then agree to roundoff.
     n_val = 2.0 * np.pi / _P_DAYS
     sini = np.sqrt(1.0 - cosi**2)
     K = n_val * sini / np.sqrt(1.0 - ecc**2)

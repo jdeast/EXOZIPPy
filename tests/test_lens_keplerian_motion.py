@@ -135,7 +135,6 @@ def _series_and_pa(system, model, times):
     omap = np.array([system.lens.companion_orbit_idx[0]])
     dE, dN = system.orbit.get_sky_position(
         pt.as_tensor_variable(times),
-        pt.ones(1),
         omap,
         relative=True,
     )

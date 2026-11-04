@@ -15,6 +15,8 @@ Two layers:
   mirrored convention.
 """
 
+from types import SimpleNamespace
+
 import numpy as np
 import pymc as pm
 import pytensor
@@ -405,7 +407,8 @@ def production_orbit_functions():
 
     Given a standalone Orbit with bigomega in its manifest (an astrometry
     consumer in the topology), the functions take the orbit's free inputs
-    plus (t, a_scale) or (t, K).
+    plus (t, a) or (t, K) -- `a` stood in as an input, since
+    state_vectors' amplitude is the orbit's own relative semimajor axis.
     """
     system = _DummySystem()
     system.config = {"astrometryinstrument": []}
@@ -424,11 +427,15 @@ def production_orbit_functions():
                     model=pm.modelcontext(None), param_name=name, system=system
                 )
             t_var = pt.vector("t")
-            a_var = pt.vector("a_scale")
+            a_var = pt.vector("a")
             k_var = pt.vector("K")
             omap = np.array([0])
-            star = orbit.state_vectors(t_var, a_var, omap)
-            rel = orbit.state_vectors(t_var, a_var, omap, relative=True)
+            # A bodiless Orbit declares no `a` (it is derived from the group
+            # masses); state_vectors' amplitude is the orbit's own relative
+            # semimajor axis (review 4.8.3(d)), so stand one in as an input.
+            orbit.a = SimpleNamespace(value=a_var)
+            star = orbit.state_vectors(t_var, omap)
+            rel = orbit.state_vectors(t_var, omap, relative=True)
             rv = orbit.get_radial_velocity(t_var, k_var, omap)
             inputs = [
                 orbit.logP.value,

@@ -1996,16 +1996,18 @@ class AstrometryInstrument(Instrument):
 
     def _photocenter_terms(self, system, i, beta):
         """
-        Photocenter wobble of absolute dataset i: per-orbit amplitudes in
-        mas for ``Orbit.get_sky_position(relative=False)`` -- whose unit
-        vector is the PRIMARY group's own orbit about the barycenter, along
-        ``-x_rel`` -- over every Keplerian orbit that moves the photocenter
-        (``_photocenter_orbits``).  Returns ``(a_phot vector node, orbit
-        index array)``, or ``(None, None)`` when no orbit moves it.
+        Photocenter wobble of absolute dataset i: per-orbit scales in mas per
+        solRad of ``Orbit.get_sky_position(relative=False)`` -- the relative
+        separation along ``-x_rel``, the direction of the PRIMARY group's own
+        orbit about the barycenter, in solRad (review 4.8.3(d): the
+        amplitude, mass and flux fractions and the unit conversion are this
+        caller's) -- over every Keplerian orbit that moves the photocenter
+        (``_photocenter_orbits``).  Returns ``(scale vector node, orbit index
+        array)``, or ``(None, None)`` when no orbit moves it.
 
         With x_P = -(M_c/M) x_rel and x_C = +(M_p/M) x_rel, the photocenter
         ``(1 - b) x_target + b x_other`` is ``k x_rel`` with, per orbit
-        (amplitude = -k a_rel plx):
+        (scale = -k RSUN_AU plx):
 
             target primary,   other companion:  k = b - M_c/M
             target companion, other primary:    k = M_p/M - b
@@ -2042,11 +2044,11 @@ class AstrometryInstrument(Instrument):
             coef = pt.stack(
                 [self._photocenter_coef(orbits, *term, beta) for term in terms]
             )
-        return orbits.a.value[omap] * RSUN_AU * coef * plx, omap
+        return RSUN_AU * coef * plx, omap
 
     @staticmethod
     def _photocenter_coef(orbits, o, r_t, r_c, beta):
-        """One orbit's amplitude, in units of its a_rel, for
+        """One orbit's coefficient of its a_rel, for
         ``get_sky_position(relative=False)``: ``-k`` of the table in
         ``_photocenter_terms``."""
         m_tot = orbits.m_total.value[o]
@@ -2148,11 +2150,12 @@ class AstrometryInstrument(Instrument):
                 f"the active system."
             )
         plx = system.star.parallax.value[self.star_map[i]]
-        a_rel = orbits.a.value[o] * RSUN_AU * plx
+        # mas per solRad of separation (review 4.8.3(d): the caller scales)
+        scale = RSUN_AU * plx
         dE_rel, dN_rel = orbits.get_sky_position(
-            t_node, pt.stack([a_rel]), np.array([o]), relative=True
+            t_node, np.array([o]), relative=True
         )
-        dE, dN = dE_rel[:, 0], dN_rel[:, 0]
+        dE, dN = dE_rel[:, 0] * scale, dN_rel[:, 0] * scale
 
         comp_set = set(orbits.companion_bodies[o])
         prim_set = set(orbits.primary_bodies[o])
@@ -2167,12 +2170,12 @@ class AstrometryInstrument(Instrument):
                 if beta is None:
                     continue
                 mfrac = orbits.m_companion.value[o2] / orbits.m_total.value[o2]
-                amp = orbits.a.value[o2] * RSUN_AU * plx * (beta - mfrac) * sgn
+                amp = RSUN_AU * plx * (beta - mfrac) * sgn
                 dE2, dN2 = orbits.get_sky_position(
-                    t_node, pt.stack([amp]), np.array([o2]), relative=True
+                    t_node, np.array([o2]), relative=True
                 )
-                dE = dE + dE2[:, 0]
-                dN = dN + dN2[:, 0]
+                dE = dE + dE2[:, 0] * amp
+                dN = dN + dN2[:, 0] * amp
         return dE, dN
 
     def _lensrel_model(self, system, i, t, dev):
@@ -2229,13 +2232,13 @@ class AstrometryInstrument(Instrument):
             P_E, P_N = d["P_E"], d["P_N"]
         dE, dN = self._star_track(system, d, s, t, P_E, P_N)
 
-        a_phot, omap = self._photocenter_terms(system, d["index"], beta)
-        if a_phot is not None:
+        scale, omap = self._photocenter_terms(system, d["index"], beta)
+        if scale is not None:
             dE_orb, dN_orb = system.orbit.get_sky_position(
-                pt.as_tensor_variable(t), a_phot, omap
+                pt.as_tensor_variable(t), omap
             )
-            dE = dE + pt.sum(dE_orb, axis=1)
-            dN = dN + pt.sum(dN_orb, axis=1)
+            dE = dE + pt.sum(dE_orb * scale[None, :], axis=1)
+            dN = dN + pt.sum(dN_orb * scale[None, :], axis=1)
 
         # Astrometric microlensing (C30), last: the shift and the blend
         # drag are both referenced to the SOURCE's own track, which is what
@@ -2652,16 +2655,14 @@ class AstrometryInstrument(Instrument):
                 self._photo_nodes.append(None)
                 continue
             beta = self._sed_beta_node(system, i)
-            a_phot, omap = self._photocenter_terms(system, i, beta)
-            if a_phot is None:
+            scale, omap = self._photocenter_terms(system, i, beta)
+            if scale is None:
                 self._compiled_photo.append(None)
                 self._photo_nodes.append(None)
                 continue
-            dE_orb, dN_orb = system.orbit.get_sky_position(
-                t_input, a_phot, omap
-            )
-            dE_node = pt.sum(dE_orb, axis=1)
-            dN_node = pt.sum(dN_orb, axis=1)
+            dE_orb, dN_orb = system.orbit.get_sky_position(t_input, omap)
+            dE_node = pt.sum(dE_orb * scale[None, :], axis=1)
+            dN_node = pt.sum(dN_orb * scale[None, :], axis=1)
             self._photo_nodes.append((dE_node, dN_node))
             self._compiled_photo.append(
                 pytensor.function(
