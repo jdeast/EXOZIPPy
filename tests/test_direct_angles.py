@@ -99,6 +99,16 @@ def _system(tmp, node_sigma_deg, rv=True, orbit_extra=None, extra=None):
     return system
 
 
+def _whitened(system, model, lpf):
+    """The start in whitened coordinates -- what run.py hands the decision
+    (it runs after the whitening probe, so the Hessian's steps are scaled)."""
+    from exozippy.whitening import measure_and_whiten
+
+    system.recenter_whitening_anchor(model)
+    measure_and_whiten(system, model, system.get_raw_start(model), lpf)
+    return system.get_raw_start(model)
+
+
 def _latent_terms(system, raw_start):
     """ln p of the two latents' prior terms at raw_start (see the Jacobian test)."""
     total = 0.0
@@ -118,8 +128,8 @@ def tight(tmp_path_factory):
     """The node measured to 0.1 deg: the switch fires."""
     system = _system(tmp_path_factory.mktemp("tight"), 0.1)
     latent_model = system.build_model()
-    raw = system.get_raw_start(latent_model)
     lpf = latent_model.compile_logp()
+    raw = _whitened(system, latent_model, lpf)
     out = {
         "system": system,
         "latent_lp": float(lpf(raw)),
@@ -472,13 +482,19 @@ def test_seeds_that_disagree_by_a_half_turn_keep_the_latents(tmp_path, caplog):
     system = _system(
         tmp_path,
         0.1,
-        extra={"orbit.BH.bigomega": {"initval": [150.0, 330.0]}},
+        extra={
+            "orbit.BH.bigomega": {
+                "initval": [150.0, 330.0],
+                "mu": 150.0,
+                "sigma": 0.1,
+            }
+        },
     )
     model = system.build_model()
     raw = system.get_raw_start(model)
     with caplog.at_level(logging.WARNING, logger="exozippy"):
         choices, _ = angles.choose_direct_angles(
-            system, model, raw, _gaussian_on_node(system, model, 0.1)
+            system, model, raw, model.compile_logp()
         )
 
     assert choices == {}
@@ -495,11 +511,17 @@ def test_seed_starts_carry_their_own_angle_into_the_window(tmp_path):
     system = _system(
         tmp_path,
         0.1,
-        extra={"orbit.BH.bigomega": {"initval": [150.0, 152.0]}},
+        extra={
+            "orbit.BH.bigomega": {
+                "initval": [150.0, 152.0],
+                "mu": 150.0,
+                "sigma": 0.1,
+            }
+        },
     )
     model = system.build_model()
-    raw = system.get_raw_start(model)
-    lpf = _gaussian_on_node(system, model, 0.1)
+    lpf = model.compile_logp()
+    raw = _whitened(system, model, lpf)
     choices, _ = angles.choose_direct_angles(system, model, raw, lpf)
     new_model = angles.adopt_direct_angles(system, model, raw, choices)
     system.recenter_whitening_anchor(new_model)
@@ -515,26 +537,66 @@ def test_seed_starts_carry_their_own_angle_into_the_window(tmp_path):
     assert decoded == pytest.approx([150.0 * _DEG, 152.0 * _DEG], abs=1e-9)
 
 
-def _gaussian_on_node(system, model, sigma_deg):
-    """A logp with a Gaussian on the node, for systems whose params file
-    spends the bigomega entry on a seed list."""
+def _compiled(model, tensor):
+    """A point function of the model's value variables for ``tensor``."""
     import pytensor.tensor as pt
 
-    base = model.compile_logp()
-    expr = model.replace_rvs_by_values(
-        [pt.flatten(system.orbit.bigomega.value)[0]]
-    )[0]
-    node = model.compile_fn(
-        expr,
-        inputs=model.value_vars,
-        on_unused_input="ignore",
-        point_fn=True,
+    expr = model.replace_rvs_by_values([pt.flatten(tensor)[0]])[0]
+    return model.compile_fn(
+        expr, inputs=model.value_vars, on_unused_input="ignore", point_fn=True
     )
-    center = 150.0 * _DEG
-    s = sigma_deg * _DEG
+
+
+def test_the_marginal_sigma_is_recorded_and_matches_the_prior(switched):
+    """
+    Given the tight node (its only information a 0.1 deg Gaussian, nothing
+      correlated with it),
+    When the switch is decided,
+    Then the Laplace MARGINAL sigma it records is the same 0.1 deg (to 2%),
+      and the warning reports it beside the conditional one.
+    """
+    rec = switched["choices"]["orbit.bigomega"]
+    assert rec["marginal_sigma"][0] == pytest.approx(0.1 * _DEG, rel=0.02)
+    (msg,) = switched["warnings"]
+    assert "marginally" in msg and "gradient calls" in msg
+
+
+def test_a_conditionally_tight_but_degenerate_angle_keeps_its_latents(
+    tmp_path, caplog, monkeypatch
+):
+    """
+    Given a node constrained only through (bigomega - 1 rad * cos i) to
+      0.1 deg, with cos i free on [-1, 1] -- tight along the circle with cos
+      i held fixed, ~33 deg wide marginally, the face-on-orbit shape --
+      evaluated with no gradient (so the finite-difference-of-logp Hessian
+      runs),
+    When the automatic decision runs,
+    Then the conditional probe passes but the marginal check refuses the
+      switch, and says why.
+    """
+    import exozippy.polish as polish
+
+    system = _system(tmp_path, 60.0)
+    model = system.build_model()
+    base = model.compile_logp()
+    node = _compiled(model, system.orbit.bigomega.value)
+    cosi = _compiled(model, system.orbit.cosi.value)
+    s = 0.1 * _DEG
 
     def logp(point):
-        d = np.angle(np.exp(1j * (float(node(point)) - center)))
+        d = float(node(point)) - 150.0 * _DEG - (float(cosi(point)) - 0.4)
         return float(base(point)) - 0.5 * (d / s) ** 2
 
-    return logp
+    raw = _whitened(system, model, logp)
+    monkeypatch.setattr(polish, "_compile_logp_grad", lambda model: None)
+    (slot,) = angles.find_slots(system)
+    assert angles.measure_angle_sigma(slot, raw, logp)[1] is not None
+
+    with caplog.at_level(logging.INFO, logger="exozippy"):
+        choices, _ = angles.choose_direct_angles(system, model, raw, logp)
+
+    assert choices == {}
+    msgs = [
+        r.getMessage() for r in caplog.records if "keeps its" in r.getMessage()
+    ]
+    assert msgs and all("marginal" in m.lower() for m in msgs), msgs

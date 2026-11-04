@@ -35,6 +35,9 @@ from .angles import (
     choose_direct_angles,
 )
 from .angles import (
+    has_auto_slots as has_auto_angle_slots,
+)
+from .angles import (
     restore_from_trace as restore_direct_angles,
 )
 from .branches import (
@@ -1156,27 +1159,11 @@ def _run_fit(config, gui, user_params=None):
                 raw_start = system.get_raw_start(model)
                 polished_start = True
 
-            # The automatic DIRECT-ANGLE switch (exozippy.angles; JDE
-            # 2026-11-04): an angle sampled through direction latents that
-            # the data measure to better than DIRECT_ANGLE_MAX_SIGMA at this
-            # (polished) start is sampled directly instead, on a window
-            # centered here.  HERE because the decision needs the start and
-            # the whitening probe needs the final coordinates; when nothing
-            # switches (two logp calls per angle) the model, the start and
-            # everything below are untouched, and the compiled logp is handed
-            # on to the probe.  When something does, the model is rebuilt
-            # outside the old context and the polished point carried over.
-            angle_choices, angle_logp_fn = choose_direct_angles(
-                system, model, raw_start
-            )
-            if angle_choices != (system.direct_angles or {}):
-                model_context.close()
-                model = adopt_direct_angles(
-                    system, model, raw_start, angle_choices
-                )
-                model_context.enter_context(model)
-                angle_logp_fn = None  # compiled for the model it replaced
-                raw_start = system.get_raw_start(model)
+            # The automatic direct-angle switch needs a compiled logp; it is
+            # compiled ONCE here and shared with the probe below, so a model
+            # with latent angles pays no extra compile.
+            if has_auto_angle_slots(system):
+                angle_logp_fn = model.compile_logp()
 
             # Re-center the whitening anchor on the (now polished) start, so
             # raw = 0 IS the start and `model.initial_point()` is correct BY
@@ -1236,6 +1223,42 @@ def _run_fit(config, gui, user_params=None):
                 # the new raw coordinates; re-read it for every consumer
                 # below (a no-op for an unpolished all-zeros start).
                 raw_start = system.get_raw_start(model)
+
+        # The automatic DIRECT-ANGLE switch (exozippy.angles; JDE
+        # 2026-11-04/05): an angle sampled through direction latents that the
+        # data measure to better than DIRECT_ANGLE_MAX_SIGMA at this polished
+        # start -- conditionally (a probe along the circle) AND marginally
+        # (the Laplace covariance) -- is sampled directly instead, on a
+        # window centered here.  AFTER the probe, so the Hessian is taken in
+        # whitened coordinates; when nothing switches (two logp calls per
+        # angle) the model, the start and the whitening are untouched.  When
+        # something does, the model is rebuilt outside the old context, the
+        # polished point carried over, and the whitening measured again on
+        # the new model (that file supersedes the first).
+        if not reusing_trace:
+            angle_choices, _ = choose_direct_angles(
+                system, model, raw_start, angle_logp_fn
+            )
+            if angle_choices != (system.direct_angles or {}):
+                model_context.close()
+                model = adopt_direct_angles(
+                    system, model, raw_start, angle_choices
+                )
+                model_context.enter_context(model)
+                system.recenter_whitening_anchor(model)
+                raw_start = system.get_raw_start(model)
+                if measure_scales:
+                    whiten_report = prepare_whitening(
+                        system,
+                        model,
+                        raw_start,
+                        whitening_path,
+                        trace_path,
+                        reusing_trace=False,
+                        cores=cores,
+                        eval_timeout=eval_timeout,
+                    )
+                    raw_start = system.get_raw_start(model)
 
         # 1. Get your starting dictionaries (after the rescale, so the
         # diagnostic table reports the measured scales)

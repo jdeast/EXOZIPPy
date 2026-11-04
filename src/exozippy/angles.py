@@ -26,14 +26,16 @@ post-sampling fold has nothing to collapse.  The prior is unchanged: uniform
 on a full turn is exactly the latents' angle marginal, and uniform on the
 half-turn window is the folded one.
 
-THE DECISION NEEDS THE START AND CHANGES THE GRAPH, so it is taken between the
+THE DECISION NEEDS THE START AND CHANGES THE GRAPH, so it is taken after the
 seed polish and the whitening probe (``run.py``): the latent model is built,
-polished, the angle's sigma is probed along the circle at the polished point
-(:func:`choose_direct_angles`; two logp evaluations per element when the
-angle is NOT tight, which is the common case and leaves the run bit-identical),
-and only when something switches is the model rebuilt
-(:func:`adopt_direct_angles`), the polished point carried over physically,
-and the probe run on the new model.  A user override is read at stage 3 and
+polished and whitened, the angle's CONDITIONAL sigma is probed along the
+circle at the polished point (:func:`choose_direct_angles`; two logp
+evaluations per element when the angle is NOT tight, which is the common case
+and leaves the run bit-identical), a tight one must also pass MARGINALLY
+(the Laplace covariance from the Hessian, :class:`_MarginalProbe`), and only
+when something switches is the model rebuilt (:func:`adopt_direct_angles`),
+the polished point carried over physically, and the probe run again on the
+new model.  A user override is read at stage 3 and
 applied at the end of ``System.prepare`` (:func:`apply_forced`), so the GUI and
 every other caller of ``build_model`` honors it too.  Which elements were
 direct, and their windows, travel with the trace (``trace_meta.ANGLES_ATTR``),
@@ -56,6 +58,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -442,7 +445,7 @@ def choices_from_json(text, where):
     return choices
 
 
-def _add_choice(choices, slot, center, scale, sigma, forced):
+def _add_choice(choices, slot, center, scale, sigma, forced, marginal=None):
     rec = choices.setdefault(
         slot.key,
         {
@@ -451,6 +454,7 @@ def _add_choice(choices, slot, center, scale, sigma, forced):
             "halfwidth": [],
             "scale": [],
             "sigma": [],
+            "marginal_sigma": [],
             "forced": [],
         },
     )
@@ -459,6 +463,7 @@ def _add_choice(choices, slot, center, scale, sigma, forced):
     rec["halfwidth"].append(float(slot.halfwidth))
     rec["scale"].append(float(scale))
     rec["sigma"].append(None if sigma is None else float(sigma))
+    rec["marginal_sigma"].append(None if marginal is None else float(marginal))
     rec["forced"].append(bool(forced))
 
 
@@ -657,6 +662,177 @@ def _seed_angles(system, slot, theta0):
     return out
 
 
+# The marginal check (JDE 2026-11-05, PR #561 review): the probe's sigma
+# above is CONDITIONAL on every other coordinate, and an angle degenerate
+# with another one is tight conditionally while its marginal is wide -- a
+# face-on orbit's node, of which only Omega + omega is measured, would pass
+# the probe and then pile against its window's walls.  So an angle also has
+# to pass the threshold MARGINALLY, from the Laplace covariance at the start:
+# Sigma = (-H)^-1 over every raw coordinate, sigma_theta^2 = J Sigma J^T
+# with J = d theta / d raw (two nonzero entries, the latents').  The
+# Hessian is taken in the WHITENED raw coordinates (the decision runs after
+# the probe, so a unit step is ~0.5 nats on every axis): central
+# differences of the gradient (2n gradient calls) when the model has one,
+# else central second differences of logp (~2n^2 calls) when that fits
+# _FD_HESSIAN_BUDGET_S, else the switch is refused.
+_GRAD_STEP = 1e-3
+_LOGP_STEP = 0.1
+_FD_HESSIAN_BUDGET_S = 300.0
+# A non-positive curvature direction is ignored when the angle's Jacobian
+# has less than this fraction of its norm along it (the direction is a
+# nuisance the angle does not couple to); above it the marginal is refused.
+_NONMAX_OVERLAP = 1e-3
+
+
+class _Flat:
+    """Flatten/unflatten a raw point dict in a fixed key order."""
+
+    def __init__(self, point, order):
+        self.keys = list(order)
+        self.shapes = [np.shape(point[k]) for k in self.keys]
+        self.sizes = [int(np.size(point[k])) for k in self.keys]
+        self.offsets = np.concatenate([[0], np.cumsum(self.sizes)])
+
+    def flat(self, point):
+        return np.concatenate(
+            [np.asarray(point[k], dtype=float).reshape(-1) for k in self.keys]
+        )
+
+    def point(self, x):
+        return {
+            k: x[self.offsets[j] : self.offsets[j + 1]].reshape(self.shapes[j])
+            for j, k in enumerate(self.keys)
+        }
+
+    def index(self, key, pos):
+        return int(self.offsets[self.keys.index(key)] + pos)
+
+
+def _hessian_from_grad(grad_fn, flat, x0):
+    n = x0.size
+    h = np.empty((n, n))
+    for i in range(n):
+        e = np.zeros(n)
+        e[i] = _GRAD_STEP
+        h[:, i] = (
+            grad_fn(flat.point(x0 + e)) - grad_fn(flat.point(x0 - e))
+        ) / (2.0 * _GRAD_STEP)
+    return 0.5 * (h + h.T)
+
+
+def _hessian_from_logp(logp_fn, flat, x0, lp0):
+    n = x0.size
+    s = _LOGP_STEP
+    h = np.empty((n, n))
+
+    def lp(dx):
+        return float(logp_fn(flat.point(x0 + dx)))
+
+    for i in range(n):
+        ei = np.zeros(n)
+        ei[i] = s
+        h[i, i] = (lp(ei) - 2.0 * lp0 + lp(-ei)) / s**2
+        for j in range(i):
+            ej = np.zeros(n)
+            ej[j] = s
+            h[i, j] = h[j, i] = (
+                lp(ei + ej) - lp(ei - ej) - lp(-ei + ej) + lp(-ei - ej)
+            ) / (4.0 * s * s)
+    return h
+
+
+class _MarginalProbe:
+    """The Laplace covariance at one start, shared by every angle slot."""
+
+    def __init__(self, model, raw_start, logp_fn, lp_seconds):
+        from .polish import _compile_logp_grad
+
+        self.flat = _Flat(raw_start, [v.name for v in model.value_vars])
+        self.x0 = self.flat.flat(raw_start)
+        self.cov = None
+        self.reason = None
+        fn = _compile_logp_grad(model)
+        n = self.x0.size
+        if fn is not None:
+
+            def grad_fn(point):
+                return np.concatenate(
+                    [
+                        np.asarray(g, dtype=float).reshape(-1)
+                        for g in fn(point)[1:]
+                    ]
+                )
+
+            hess = _hessian_from_grad(grad_fn, self.flat, self.x0)
+            self.method = f"Hessian from {2 * n} gradient calls"
+        else:
+            cost = 2.0 * n * n * lp_seconds
+            if cost > _FD_HESSIAN_BUDGET_S:
+                self.reason = (
+                    f"the model has no gradient and a finite-difference "
+                    f"Hessian over its {n} coordinates would take ~{cost:.0f} s "
+                    f"(budget {_FD_HESSIAN_BUDGET_S:.0f} s)"
+                )
+                return
+            lp0 = float(logp_fn(raw_start))
+            hess = _hessian_from_logp(logp_fn, self.flat, self.x0, lp0)
+            self.method = f"Hessian from {2 * n * n} logp calls"
+        if not np.all(np.isfinite(hess)):
+            self.reason = "the Hessian at the start is not finite"
+            return
+        # Eigen-decomposed rather than Cholesky-inverted: a start that is not
+        # a maximum along some NUISANCE direction (a polish that stopped
+        # early, a multimodal coordinate) has no full Laplace covariance, but
+        # the angle's marginal only needs the directions it couples to.  So
+        # a non-positive curvature is fatal only if the angle's Jacobian
+        # overlaps it (angle_sigma); elsewhere it is irrelevant.
+        self.curv, self.vecs = np.linalg.eigh(-hess)
+        self.cov = True
+
+    def angle_sigma(self, slot):
+        """The angle's marginal sigma (rad), or None with ``self.reason``."""
+        if self.cov is None:
+            return None
+        jac = self._jacobian(slot)
+        proj = self.vecs.T @ jac
+        bad = self.curv <= 0.0
+        overlap = np.abs(proj[bad]) / max(np.linalg.norm(jac), 1e-300)
+        if np.any(overlap > _NONMAX_OVERLAP):
+            self.reason = (
+                "the start is not a maximum along a direction the angle "
+                f"couples to (overlap {float(overlap.max()):.2g}), so no "
+                "Laplace marginal exists there"
+            )
+            return None
+        good = ~bad
+        return float(np.sqrt(np.sum(proj[good] ** 2 / self.curv[good])))
+
+    def _jacobian(self, slot):
+        """d angle / d raw, over the flattened raw point."""
+        xp = getattr(slot.comp, slot.x)
+        yp = getattr(slot.comp, slot.y)
+        xk, xi = _raw_position(xp, slot.element)
+        yk, yi = _raw_position(yp, slot.element)
+        jx, jy = self.flat.index(xk, xi), self.flat.index(yk, yi)
+        rx, ry = self.x0[jx], self.x0[jy]
+        d = 1e-6
+        x = float(xp.element_phys_from_raw(slot.element, rx))
+        y = float(yp.element_phys_from_raw(slot.element, ry))
+        dx = float(
+            xp.element_phys_from_raw(slot.element, rx + d)
+            - xp.element_phys_from_raw(slot.element, rx - d)
+        ) / (2 * d)
+        dy = float(
+            yp.element_phys_from_raw(slot.element, ry + d)
+            - yp.element_phys_from_raw(slot.element, ry - d)
+        ) / (2 * d)
+        r2 = x * x + y * y
+        jac = np.zeros(self.x0.size)
+        jac[jx] = -y / r2 * dx
+        jac[jy] = x / r2 * dy
+        return jac
+
+
 def choose_direct_angles(system, model, raw_start, logp_fn=None):
     """Decide which angle elements to sample directly, at ``raw_start``.
 
@@ -664,8 +840,13 @@ def choose_direct_angles(system, model, raw_start, logp_fn=None):
     forced ones included, and is EMPTY of new entries -- equal to
     ``system.direct_angles`` -- when nothing switched, in which case the
     caller keeps the model it has (and may reuse ``logp_fn``, compiled only
-    if an automatic element exists).  Logs one WARNING per switched element,
-    naming the measured sigma, the threshold, the window and the override.
+    if an automatic element exists).  An element switches only when BOTH its
+    conditional sigma (the circle probe) and its MARGINAL sigma (the Laplace
+    covariance, ``_MarginalProbe``) are below the threshold; ``raw_start``
+    must be in WHITENED coordinates (run.py calls this after the probe), so
+    the Hessian's finite-difference steps are well scaled.  Logs one WARNING
+    per switched element, naming both sigmas, the threshold, the window and
+    the override.
     """
     current = copy.deepcopy(getattr(system, "direct_angles", None) or {})
     auto = [
@@ -680,6 +861,7 @@ def choose_direct_angles(system, model, raw_start, logp_fn=None):
         logp_fn = model.compile_logp()
     choices = copy.deepcopy(current)
     switched = False
+    marginal = None
     for slot in auto:
         if slot.user_bounded:
             logger.info(
@@ -729,12 +911,54 @@ def choose_direct_angles(system, model, raw_start, logp_fn=None):
                 slot.flag,
             )
             continue
-        _add_choice(choices, slot, theta0, sigma, sigma, False)
+        if marginal is None:
+            t0 = time.perf_counter()
+            logp_fn(raw_start)
+            marginal = _MarginalProbe(
+                model, raw_start, logp_fn, time.perf_counter() - t0
+            )
+        sigma_m = marginal.angle_sigma(slot)
+        if sigma_m is None:
+            logger.warning(
+                "[%s] %s is measured to %s at the start conditionally, but "
+                "its MARGINAL sigma cannot be measured (%s), so it keeps its "
+                "direction latents. Set '%s: true' on its block to force the "
+                "direct coordinate.",
+                slot.where,
+                slot.angle,
+                _fmt(slot, sigma),
+                marginal.reason,
+                slot.flag,
+            )
+            continue
+        if sigma_m >= threshold(slot.halfwidth):
+            logger.info(
+                "[%s] %s is measured to %s conditionally but %s marginally "
+                "(%s), above the %s threshold -- it is degenerate with "
+                "another coordinate, so it keeps its direction latents.",
+                slot.where,
+                slot.angle,
+                _fmt(slot, sigma),
+                _fmt(slot, sigma_m),
+                marginal.method,
+                _fmt(slot, threshold(slot.halfwidth)),
+            )
+            continue
+        _add_choice(choices, slot, theta0, sigma, sigma, False, sigma_m)
         switched = True
-        _warn_switch(slot, theta0, sigma)
+        _warn_switch(slot, theta0, sigma, sigma_m, marginal.method)
     if not switched:
         return current, logp_fn
     return choices, logp_fn
+
+
+def has_auto_slots(system):
+    """Is there any angle element the automatic switch would probe?"""
+    current = getattr(system, "direct_angles", None) or {}
+    return any(
+        s.request is None and not _is_direct(current, s)
+        for s in find_slots(system)
+    )
 
 
 def _is_direct(choices, slot):
@@ -761,10 +985,11 @@ def _fmt_window(slot, center, half):
     return f"[{lo:.6g}, {hi:.6g}] {unit}".rstrip()
 
 
-def _warn_switch(slot, theta0, sigma):
+def _warn_switch(slot, theta0, sigma, sigma_m, method):
     aspect = 0.523 / sigma
     logger.warning(
-        "[%s] %s is measured to %s at the start (threshold %s), so it is "
+        "[%s] %s is measured to %s at the start conditionally and %s "
+        "marginally (%s; threshold %s), so it is "
         "sampled DIRECTLY, uniform on the window %s centered on the start, "
         "instead of through its direction latents %s/%s, whose posterior "
         "would be a narrow ray from the origin (~%.0f:1) that a diagonal "
@@ -774,6 +999,8 @@ def _warn_switch(slot, theta0, sigma):
         slot.where,
         slot.angle,
         _fmt(slot, sigma),
+        _fmt(slot, sigma_m),
+        method,
         _fmt(slot, threshold(slot.halfwidth)),
         _fmt_window(slot, theta0, slot.halfwidth),
         slot.x,
