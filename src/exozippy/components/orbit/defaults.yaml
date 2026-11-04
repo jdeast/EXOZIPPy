@@ -685,7 +685,8 @@ orbit:
     # arc, the direction of pm_ra), in mas/yr^2 -- the sky components of the
     # same acceleration vector gammadot is the line-of-sight component of
     # (type: constant_acceleration and constant_jerk).  Read by gaia/abs/
-    # catalog astrometry of a star in this orbit's PRIMARY group, as
+    # catalog astrometry of a star in this orbit's PRIMARY group (and, as
+    # the relative vector -(M/M_c) times it, by a rel dataset), as
     # 0.5 * accel_ra * ((t - epoch)/365.25 d)**2.  Sampled ANGULAR -- what
     # the photocenter does, decoupled from the parallax -- and made
     # physical through the anchor star's parallax only where a physical
@@ -740,7 +741,10 @@ orbit:
     latex: "\\dot{g}_\\delta"
     description: "Sky jerk (Dec)"
   rel_dE:
-    # A type: constant_velocity orbit read by a `rel` dataset: the
+    # A Cartesian Taylor orbit read by a `rel` dataset (constant_velocity,
+    # and the relative position/velocity terms of constant_acceleration /
+    # constant_jerk, whose curvature rel reads from the shared accel_*/
+    # jerk_* through the group masses -- orbit.md "Taylor orbits"): the
     # COMPANION group's sky offset from the PRIMARY group at the orbit's
     # epoch (the astrometric reference epoch by default), East (true arc),
     # mas -- the rel-mode convention (sep/PA East of North of the companion
