@@ -60,7 +60,26 @@ poetry run exozippy hd114762.yaml
 WIP like `examples/gaia4` and `examples/GaiaBH3`: the system prepares and
 builds (tests/test_examples_prepare.py), and a maximum-a-posteriori fit
 from the DR3 start (below) behaves as expected, but no posterior has been
-sampled yet.
+sampled yet.  Maximum a posteriori from the DR3 start, with 1-sigma from
+the Hessian (2026-11-04; the per-dataset jitter absorbs the pre-release's
+underestimated CCD errors at G = 7, DR4 chi2/N ~ 9.7 on the formal ones):
+
+| quantity | Hipparcos + DR4 | DR4 alone |
+|---|---|---|
+| companion mass (dark) [M_J] | 230 +/- 26 | 187 +/- 28 |
+| period [d] | 83.917 +/- 0.029 | 83.913 +/- 0.037 |
+| e | 0.313 +/- 0.044 | 0.285 +/- 0.028 |
+| cos i | 0.941 +/- 0.042 | 0.909 +/- 0.026 |
+| pm_ra*, pm_dec [mas/yr] | -582.471, -0.547 (+/- 0.02) | -582.455, -0.553 (+/- 0.02) |
+| frame_dE, frame_dN [mas] | 0.09, 0.03 (+/- 0.29) | -- |
+| frame_dpmE, frame_dpmN [mas/yr] | -0.00, -0.15 (+/- 0.27) | -- |
+
+An 84-day orbit is covered many times by DR4 alone, so the 25-year lever
+arm adds little here and the frame terms stay at their priors (the
+Hipparcos abscissae are 2-5 mas); the example demonstrates the machinery
+on real data.  The lever arm pays for companions with periods of decades
+(tests/test_hipparcos_gaia_frame.py: a 60-yr companion's mass and period
+are >= 3x better constrained with Hipparcos than with DR4 alone).
 
 ## What it would take to make this a science example
 
