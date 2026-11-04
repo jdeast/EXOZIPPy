@@ -173,8 +173,7 @@ EXOZIPPy installs three commands that do much of items 1-3 of Step 4 for you. Ru
 from the directory the fit will live in (e.g. `~/modeling/toi1234`); `--help`
 lists each one's options.
 
-**Download TESS/Kepler/K2 light curves** (Gaia astrometry and Roman data are
-planned):
+**Download TESS/Kepler/K2 light curves** (Roman data are planned):
 
 ```bash
 exozippy-getdata TOI-1234
@@ -182,6 +181,23 @@ exozippy-getdata TOI-1234
 
 The argument is any SIMBAD-resolvable name. Each sector is written as its own
 file (e.g. `n20190718.TESS.TESS.TOI-1234.S14.0120.SPOC.dat`).
+
+The same command fetches **epoch astrometry** for a joint Hipparcos + Gaia fit
+(`examples/HD114762`):
+
+```bash
+exozippy-getdata "HIP 64426" --hipparcos-iad          # HIP64426.Hipparcos.astrom
+exozippy-getdata "HIP 64426" --gaia-epoch-astrometry  # Gaia DR4 (from 2026-12-02)
+exozippy-getdata "HIP 64426" --gaia-epoch-astrometry --gaia-prerelease
+```
+
+`--hipparcos-iad` reconstructs the Hipparcos 1997 Intermediate Astrometric
+Data into a `mode: gaia` astrometry file and prints the config entry it needs
+(`reference_point:`, `fithipframe: true`); `--gaia-epoch-astrometry` writes the
+Gaia DR4 epoch-astrometry table as the archive delivers it, for `data_format:
+gaia_epoch` (before DR4 is public the archive refuses, and `--gaia-prerelease`
+uses the June 2026 pre-release of twelve sources instead).  Asking for
+astrometry skips the light curves unless `--lightcurves` is given too.
 
 **Build an SED file and a starting params file** from the all-sky catalogs
 (broadband photometry, parallax, extinction, and starting stellar values),

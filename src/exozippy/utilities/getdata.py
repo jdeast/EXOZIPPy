@@ -1,8 +1,36 @@
-"""Download TESS/Kepler light curves and format them for EXOFASTv2/EXOZIPPy.
+"""Download TESS/Kepler light curves -- and Hipparcos and Gaia DR4 epoch
+astrometry -- and format them for EXOFASTv2/EXOZIPPy.
 
 This is the importable home of the former scripts/getdata.py. The CLI is
 defined by build_parser() and driven by main(argv=None); scripts/getdata.py
 is now a thin wrapper that calls main().
+
+Products (all written to --path):
+
+* light curves (the default, and with --lightcurves): TESS/Kepler/K2 via
+  lightkurve, one EXOFASTv2-named file per sector.
+* --hipparcos-iad: the Hipparcos 1997 Intermediate Astrometric Data of a
+  ``HIP <n>`` star (or a SIMBAD name with a HIP identifier), reconstructed
+  into the ``mode: gaia`` file ``HIP<n>.Hipparcos.astrom`` (BJD_TDB, w, err,
+  scan angle) with the config entry it needs printed (``reference_point:``
+  the J1991.25 catalog position; ``fithipframe: true`` with Gaia data).
+  --hip-merge-consortia writes one abscissa per orbit, the FAST/NDAC pair
+  combined under its stated correlation, instead of both.
+* --gaia-epoch-astrometry: the Gaia DR4 EPOCH_ASTROMETRY DataLink product
+  (RAW VOTable) of the target, ``Gaia<source_id>.DR4.epoch_astrometry.xml``,
+  read by ``data_format: gaia_epoch``.  DR4 is public from 2026-12-02;
+  before that the archive refuses and this says so.  With
+  --gaia-prerelease the June 2026 pre-release (twelve sources) is the
+  source instead (downloaded, or --gaia-prerelease-file for a local zip or
+  xml), the target selected by source_id.  The source_id is --source-id,
+  else read off a ``Gaia DR3 <id>`` name, else the archive's Hipparcos-2
+  cross-match for ``HIP <n>``, else SIMBAD.
+
+Asking for any astrometry product skips the light curves unless
+--lightcurves is given too; with none of these flags the behavior is the
+light-curve download it always was.  Gaia DR4 epoch radial velocities are
+not fetched yet: their archive format is not public before DR4.  See
+exozippy.utilities.getastrometry for the reconstruction and its checks.
 
 The heavy lightkurve import is deferred into run() so that build_parser()
 and the introspection layer stay importable without the download stack.
@@ -143,7 +171,8 @@ def build_parser():
     """Return the argparse parser for the getdata utility."""
     parser = argparse.ArgumentParser(
         prog="exozippy-getdata",
-        description="Downloads TESS/Kepler data and formats it for "
+        description="Downloads TESS/Kepler light curves (and, on request, "
+        "Hipparcos and Gaia DR4 epoch astrometry) and formats them for "
         "EXOZIPPy and EXOFASTv2",
     )
     parser.add_argument("id", help="SIMBAD-resolvable star name")
@@ -197,6 +226,59 @@ def build_parser():
         action="store_true",
         dest="overwrite",
         help="Overwrite previously downloaded files",
+    )
+    parser.add_argument(
+        "--lightcurves",
+        default=False,
+        action="store_true",
+        dest="lightcurves",
+        help="Download light curves (the default when no astrometry "
+        "product is requested)",
+    )
+    parser.add_argument(
+        "--hipparcos-iad",
+        default=False,
+        action="store_true",
+        dest="hipparcos_iad",
+        help="Hipparcos 1997 IAD -> HIP<n>.Hipparcos.astrom (mode: gaia)",
+    )
+    parser.add_argument(
+        "--hip-merge-consortia",
+        default=False,
+        action="store_true",
+        dest="hip_merge_consortia",
+        help="With --hipparcos-iad: one abscissa per orbit, the correlated "
+        "FAST/NDAC pair combined, instead of both",
+    )
+    parser.add_argument(
+        "--gaia-epoch-astrometry",
+        default=False,
+        action="store_true",
+        dest="gaia_epoch_astrometry",
+        help="Gaia DR4 epoch astrometry (RAW VOTable) for data_format: "
+        "gaia_epoch",
+    )
+    parser.add_argument(
+        "--gaia-prerelease",
+        default=False,
+        action="store_true",
+        dest="gaia_prerelease",
+        help="With --gaia-epoch-astrometry: read the June 2026 DR4 "
+        "pre-release (twelve sources) instead of the archive",
+    )
+    parser.add_argument(
+        "--gaia-prerelease-file",
+        default=None,
+        dest="gaia_prerelease_file",
+        help="A local copy of the pre-release zip (or its xml); default: "
+        "download it",
+    )
+    parser.add_argument(
+        "--source-id",
+        default=None,
+        type=int,
+        dest="source_id",
+        help="Gaia source_id of the target (else resolved from the name)",
     )
     return parser
 
@@ -581,10 +663,61 @@ def run(args):
         print("Downloaded " + filename)
 
 
+def wants_astrometry(args):
+    """Whether the namespace asks for any astrometry product."""
+    return bool(
+        getattr(args, "hipparcos_iad", False)
+        or getattr(args, "gaia_epoch_astrometry", False)
+    )
+
+
+def run_astrometry(args):
+    """Fetch the astrometry products the parsed namespace asks for."""
+    from exozippy.utilities import getastrometry
+
+    if (args.gaia_prerelease or args.gaia_prerelease_file) and not (
+        args.gaia_epoch_astrometry
+    ):
+        raise SystemExit(
+            "--gaia-prerelease/--gaia-prerelease-file select the source of "
+            "--gaia-epoch-astrometry; add that flag."
+        )
+    if args.hip_merge_consortia and not args.hipparcos_iad:
+        raise SystemExit(
+            "--hip-merge-consortia shapes the --hipparcos-iad file; add that "
+            "flag."
+        )
+    if args.hipparcos_iad:
+        getastrometry.get_hipparcos_iad(
+            args.id,
+            path=args.path,
+            merge=args.hip_merge_consortia,
+            overwrite=args.overwrite,
+        )
+    if args.gaia_epoch_astrometry:
+        try:
+            getastrometry.get_gaia_epoch_astrometry(
+                args.id,
+                path=args.path,
+                source_id=args.source_id,
+                prerelease=bool(
+                    args.gaia_prerelease or args.gaia_prerelease_file
+                ),
+                prerelease_file=args.gaia_prerelease_file,
+            )
+        except getastrometry.GaiaReleaseNotAvailable as e:
+            raise SystemExit(str(e)) from e
+
+
 def main(argv=None):
     """CLI entry point. Parses argv (or sys.argv) and runs the download."""
     parser = build_parser()
     args = parser.parse_args(argv)
+    if wants_astrometry(args):
+        run_astrometry(args)
+        if args.lightcurves:
+            run(args)
+        return
     run(args)
 
 

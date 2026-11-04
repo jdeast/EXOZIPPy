@@ -96,6 +96,22 @@ Per-instrument config keys:
                       agrees to 1.5e-5).
   source_id         : gaia_epoch only: the source to read from a table of
                       several
+  reference_point   : mode gaia columns files only: [ra, dec] (deg), the
+                      point the file's abscissae w are measured from, which
+                      is then the dataset's tangent point (as a gaia_epoch
+                      file's (ra0, dec0) is).  Default: the star's ra/dec
+                      start.  Needed when two datasets of one star measure
+                      from two points -- Hipparcos IAD about the J1991.25
+                      catalog position (exozippy-getdata --hipparcos-iad
+                      prints it) and Gaia DR4 about its own (ra0, dec0).
+  fithipframe       : gaia/abs only, default false: this dataset is in the
+                      Hipparcos reference frame, and its offset from the
+                      frame the other datasets define (Gaia) is fit -- a
+                      position offset at J1991.25 (frame_dE, frame_dN) and
+                      a proper-motion offset (frame_dpmE, frame_dpmN), with
+                      Gaussian priors from the Hipparcos-Gaia
+                      cross-calibration.  See frametie.py and "Hipparcos and
+                      Gaia together" below.
   observer_location : ephemeris for parallax factors (default 'gaia' for
                       gaia mode, 'earth' otherwise; see exozippy.ephemeris)
   star_ndx          : index of the host star (default 0); also sets the
@@ -142,6 +158,21 @@ Per-instrument config keys:
                       light is inside this dataset's PSF (the split, below).
   catalog_parameters, catalog_epochs, catalog_span, catalog_n_epochs :
                       catalog mode only; see above.
+
+Hipparcos and Gaia together (frametie.py).  The Hipparcos Intermediate
+Astrometric Data (mode gaia, observer earth, reference_point the J1991.25
+catalog position) and Gaia DR4 epoch astrometry (data_format: gaia_epoch)
+of one star fit jointly give the 25-year lever arm the Hipparcos-Gaia
+Catalog of Accelerations (Brandt 2018, 2021) is built on, from the epochs:
+one star.ra/dec/pm/parallax and one photocenter orbit serve both, so a
+companion of decades to centuries bends the track between the missions.
+The two frames differ by an orientation and a spin, which for one star is a
+position offset and a proper-motion offset of the Hipparcos dataset;
+`fithipframe: true` on it fits them (four parameters, INACTIVE elsewhere,
+added to the star's track inside _absolute_model so likelihood and plots
+agree).  Without the flag the frames are taken as identical.  The 1997 IAD
+abscissae of the FAST and NDAC consortia are correlated and are treated as
+independent unless getdata merged them (--hip-merge-consortia).
 
 Astrometric microlensing (conventions.md C30; review 8.10.1 stage 1).  A
 gaia/abs dataset of a microlensing source carries, inside the
@@ -279,6 +310,14 @@ import pymc as pm
 import pytensor
 import pytensor.tensor as pt
 
+from exozippy.components.astrometryinstrument.frametie import (
+    FRAME_PARAMS,
+    add_frame_prose,
+    check_frame_reference,
+    frame_offset,
+    numpy_frame_offset,
+    parse_frame_flags,
+)
 from exozippy.components.instrument import Instrument
 from exozippy.components.orbit.bodies import (
     component_instance_names,
@@ -734,6 +773,8 @@ class AstrometryInstrument(Instrument):
 
         self._parse_catalog_and_split_keys()
         self._parse_data_formats()
+        # The Hipparcos-to-Gaia frame tie (frametie.py), per dataset.
+        self.fithipframe = parse_frame_flags(self)
 
     def _parse_catalog_and_split_keys(self):
         """The catalog-mode and blend-split keys (review 8.10.3), checked at
@@ -887,6 +928,7 @@ class AstrometryInstrument(Instrument):
         """
         self.data_formats = []
         self.source_ids = []
+        self.reference_points = []
         self._gaia_epoch_meta = [None] * self.n_elements
         for i, c in enumerate(self.config):
             where = f"[{self.prefix}.{self.names[i]}]"
@@ -896,6 +938,9 @@ class AstrometryInstrument(Instrument):
                     f"{where} data_format must be one of {list(DATA_FORMATS)}; "
                     f"got {fmt!r}."
                 )
+            self.reference_points.append(
+                self._parse_reference_point(c, where, fmt)
+            )
             sid = c.get("source_id")
             if fmt != "gaia_epoch":
                 if sid is not None:
@@ -948,6 +993,49 @@ class AstrometryInstrument(Instrument):
                 "ephemeris": "builtin",
                 "needs_conversion": True,
             }
+
+    def _parse_reference_point(self, c, where, fmt):
+        """``reference_point: [ra, dec]`` (deg) of a mode-gaia columns
+        file: the point its abscissae w are measured from, which is then the
+        dataset's tangent point (as a gaia_epoch file's own (ra0, dec0) is).
+
+        Without it the tangent point is the star's ra/dec start, which is
+        right only when w was reconstructed about that same point: two
+        datasets of one star measured from two points (Hipparcos IAD about
+        the J1991.25 catalog position, Gaia DR4 about its own reference
+        point 25 years of proper motion away) need each its own, or every
+        abscissa of one is offset by the difference.  Returns the pair in
+        radians, or None.
+        """
+        ref = c.get("reference_point")
+        if ref is None:
+            return None
+        if fmt == "gaia_epoch":
+            raise ValueError(
+                f"{where} reference_point: a gaia_epoch file states its own "
+                f"(ra0, dec0); giving it a second time would compete with "
+                f"the file.  Drop the key."
+            )
+        if c.get("mode", "gaia") != "gaia":
+            raise ValueError(
+                f"{where} reference_point: is the origin of a mode-gaia "
+                f"file's along-scan abscissae; this dataset is mode "
+                f"'{c.get('mode')}'."
+            )
+        if (
+            not isinstance(ref, list)
+            or len(ref) != 2
+            or not all(
+                isinstance(v, (int, float)) and not isinstance(v, bool)
+                for v in ref
+            )
+            or not -90.0 <= float(ref[1]) <= 90.0
+        ):
+            raise ValueError(
+                f"{where} reference_point must be [ra, dec] in degrees; "
+                f"got {ref!r}."
+            )
+        return np.radians(float(ref[0])), np.radians(float(ref[1]))
 
     def _read_table(self, i):
         """``data_format: gaia_epoch`` reads the archive table; every other
@@ -1296,6 +1384,33 @@ class AstrometryInstrument(Instrument):
                 ),
             },
             {
+                "key": "reference_point",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "mode: gaia columns file only. [ra, dec] in deg: the "
+                    "point its abscissae w are measured from (Hipparcos IAD: "
+                    "the J1991.25 catalog position), which is then the "
+                    "tangent point. Default: the star's ra/dec start."
+                ),
+            },
+            {
+                "key": "fithipframe",
+                "kind": "option",
+                "accepts": [True, False],
+                "required": False,
+                "doc": (
+                    "gaia/abs only, default false. This dataset is in the "
+                    "Hipparcos reference frame: fit its offset from the "
+                    "frame of the other datasets (Gaia) as a position "
+                    "offset at J1991.25 (frame_dE, frame_dN, mas) and a "
+                    "proper-motion offset (frame_dpmE, frame_dpmN, mas/yr) "
+                    "with Gaussian priors from the Hipparcos-Gaia "
+                    "cross-calibration (frametie.py)."
+                ),
+            },
+            {
                 "key": "epoch",
                 "kind": "option",
                 "accepts": None,
@@ -1416,6 +1531,10 @@ class AstrometryInstrument(Instrument):
                     meta = self._gaia_epoch_meta[i]
                     ra_ref = np.radians(meta["ra0"])
                     dec_ref = np.radians(meta["dec0"])
+                elif self.reference_points[i] is not None:
+                    # The same rule for a columns file whose config states
+                    # the origin of its abscissae (reference_point:).
+                    ra_ref, dec_ref = self.reference_points[i]
                 d["ra_ref"] = ra_ref
                 d["dec_ref"] = dec_ref
 
@@ -1879,6 +1998,17 @@ class AstrometryInstrument(Instrument):
             for key in ("blend_dE", "blend_dN"):
                 self.manifest[key] = {"mask": lensed, "inactive_value": 0.0}
             self._register_blend_split(lensed)
+
+        # The Hipparcos-to-Gaia frame tie (frametie.py): four terms on each
+        # dataset with fithipframe: true, INACTIVE elsewhere, and declared
+        # only when one exists (no rows, no graph change otherwise).
+        if any(self.fithipframe):
+            check_frame_reference(self)
+            for key in FRAME_PARAMS:
+                self.manifest[key] = {
+                    "mask": list(self.fithipframe),
+                    "inactive_value": 0.0,
+                }
 
     def _check_sed_pair(self, system, i, target, other):
         """The SED path's ``companion_star_ndx`` must name ANOTHER star of
@@ -2819,6 +2949,13 @@ class AstrometryInstrument(Instrument):
         if P_E is None:
             P_E, P_N = d["P_E"], d["P_N"]
         dE, dN = self._star_track(system, d, s, t, P_E, P_N)
+        if self.fithipframe[d["index"]]:
+            # The Hipparcos frame minus the Gaia frame, at the star
+            # (frametie.py): every position this dataset measures moves.
+            fE, fN = frame_offset(
+                t, *(getattr(self, p).value[d["index"]] for p in FRAME_PARAMS)
+            )
+            dE, dN = dE + fE, dN + fN
 
         dE_orb, dN_orb = self._photocenter_offset(system, d["index"], beta, t)
         if dE_orb is not None:
@@ -3143,6 +3280,7 @@ class AstrometryInstrument(Instrument):
 
         self._add_lens_prose(system)
         self._add_catalog_prose(system)
+        add_frame_prose(self, system)
 
     def _add_lens_prose(self, system):
         """Modeling-draft sentence for the centroid shift, declared next to
@@ -3433,7 +3571,10 @@ class AstrometryInstrument(Instrument):
             + plx * d["P_E"]
         )
         dN = (dec - d["dec_ref"]) * RAD2MAS + pm_dec * dt_yr + plx * d["P_N"]
-        return dE, dN
+        # The frame tie is linear in time too, and _absolute_model adds it
+        # to the star's track; the plotted model must carry it as well.
+        fE, fN = numpy_frame_offset(self, d, t, point)
+        return dE + fE, dN + fN
 
     def _node_pair_deps(self, nodes, system):
         """Union of param_deps over a retained (dE, dN) node pair (or None)."""
@@ -3483,6 +3624,11 @@ class AstrometryInstrument(Instrument):
             label = getattr(getattr(star, attr, None), "label", None)
             if label in known and label not in deps:
                 deps.append(label)
+        if any(self.fithipframe):
+            for attr in FRAME_PARAMS:
+                label = getattr(self, attr).label
+                if label in known and label not in deps:
+                    deps.append(label)
         return deps
 
     def plot(self, system, points, filename_prefix="debug"):
