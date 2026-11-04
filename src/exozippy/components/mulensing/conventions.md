@@ -557,6 +557,21 @@ is rad/yr and its user unit deg/yr -- the identity mapping to MulensModel's `ds_
 `dalpha_dt` (C18 extends to both), and Skowron's own Section 3.3.1 parameterization up to
 the sign vocabulary below.
 
+**The straight-line mode is its first-order twin** (orbit `type: constant_velocity`).  The
+same rates define, at `t0_par`, the companion's position and velocity in the trajectory
+frame of C15, and the straight-line mode holds that velocity constant:
+
+    r_j(t) = r_j0 + v_j * (t - t0_par)/365.25
+    r_j0   = s_j0 (cos alpha_j0, -sin alpha_j0)
+    v_j    = ds_dt_j (cos alpha_j0, -sin alpha_j0) - s_j0 dalpha_dt_j (sin alpha_j0, cos alpha_j0)
+
+with `s_j(t) = |r_j(t)|` and `alpha_j(t)` the angle of `r_j(t)` in C15's placement.  It is
+the linear mode's position and velocity AT `t0_par`, so `gamma_par`, `gamma_perp` (below),
+beta (A19) and every sign rule here carry over unchanged; the two modes differ at second
+order, where the linear mode keeps rotating (acceleration `-s_j0 dalpha_dt_j^2` radially and
+`2 ds_dt_j dalpha_dt_j` tangentially at `t0_par`) and the straight line does not.  Neither
+MulensModel nor VBMicrolensing has a straight-line mode.
+
 **Skowron's gamma vocabulary maps onto these with ONE minus sign, and it is not optional:**
 
     gamma_par_j     = ds_dt_j / s_j0
@@ -623,7 +638,7 @@ sign is pinned by a synthetic orbit with KNOWN inclination rather than by a chi2
 improvement.
 
 - Implemented in: `Lens` (config key `orbit:` on the companion's entry; the referenced
-  orbit's `type: uniform_rotation|keplerian` selects the mode -- `uniform_rotation` was
+  orbit's `type: uniform_rotation|constant_velocity|keplerian` selects the mode -- `uniform_rotation` was
   spelled `linear` until 2026-11, and that spelling now raises with the migration -- and a
   uniform_rotation orbit owns the rates as `orbit.<name>.ds_dt` / `orbit.<name>.dalpha_dt`
   and serves the definitional series below through `Orbit.state_vectors`),

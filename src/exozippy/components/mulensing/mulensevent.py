@@ -25,6 +25,7 @@ import pytensor.tensor as pt
 
 from exozippy.components.component import Component
 from exozippy.components.orbit.bodies import (
+    LENS_TAYLOR_TYPES,
     STATIC_TYPE,
     UNIFORM_ROTATION_TYPE,
     orbit_types,
@@ -1645,8 +1646,9 @@ class MulensEvent(Component):
             zip(lens.companion_motion, lens.companion_orbit_idx)
         ):
             elem = j + 1
-            if mode == UNIFORM_ROTATION_TYPE:
-                # The companion's own uniform_rotation ORBIT's state
+            if mode in LENS_TAYLOR_TYPES:
+                # The companion's own uniform_rotation (polar) or
+                # constant_velocity (straight-line) ORBIT's state
                 # (anchored at t0_par, that orbit's epoch --
                 # Orbit._taylor_epochs), from the lens's (s0, alpha0).
                 alpha0 = lens.alpha.value[elem]
@@ -1867,6 +1869,13 @@ class MulensEvent(Component):
             return f"a {n_lenses}-body lens (MulensModel carries at most 2)"
         if n_lenses == 2 and system.lens.companion_motion[0] == "keplerian":
             return "a lens companion on a keplerian orbit"
+        if (
+            n_lenses == 2
+            and system.lens.companion_motion[0] == "constant_velocity"
+        ):
+            # MulensModel's lens motion is polar-linear (ds_dt, dalpha_dt)
+            # or Keplerian; it has no straight-line mode.
+            return "a lens companion on a constant_velocity orbit"
         if self.xal_orbit_idxs:
             return "xallarap (a source orbit)"
         return None

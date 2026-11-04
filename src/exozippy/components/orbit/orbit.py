@@ -27,6 +27,7 @@ from exozippy.potentials import soft_lower_bound, soft_upper_bound
 from . import physics
 from .bodies import (
     CARTESIAN_TAYLOR_TYPES,
+    LENS_TAYLOR_TYPES,
     REMOVED_ORBIT_TYPES,
     STATIC_TYPE,
     TAYLOR_TYPES,
@@ -95,8 +96,11 @@ def _astrometric_orbits(system, orbit):
         return out
     for i, mode in enumerate(ast.modes):
         if mode == "rel":
-            if ast.rel_orbit[i] is not None:
-                out.add(ast.rel_orbit[i])
+            # Keplerian orbits only: a rel dataset of a constant_velocity
+            # orbit reads its own straight line, which has no elements.
+            o = ast.rel_orbit[i]
+            if o is not None and orbit.is_keplerian[o]:
+                out.add(o)
         else:
             # A gaia/abs/catalog photocenter moves with every Keplerian
             # orbit holding one of its stars, on either side (review
@@ -2018,6 +2022,7 @@ class Orbit(Component):
                 self._taylor_manifest(self._taylor_consumer_map)
             )
             self._hint_rv_trends(system, self._taylor_consumer_map)
+            self._hint_rel_lines(system, self._taylor_consumer_map)
         else:
             self.taylor_epoch = np.full(self.n_elements, np.nan)
             self.taylor_rv_epoch = np.full(self.n_elements, np.nan)
@@ -2046,7 +2051,20 @@ class Orbit(Component):
                 "jerk_dec",
             ),
         },
-        "lens": {UNIFORM_ROTATION_TYPE: ("ds_dt", "dalpha_dt")},
+        # Both lens types are parameterized by the pair's (ds_dt,
+        # dalpha_dt) at t0_par: uniform_rotation keeps them constant, the
+        # Cartesian constant_velocity keeps the velocity they define
+        # constant (orbit.md "Taylor orbits").
+        "lens": {
+            UNIFORM_ROTATION_TYPE: ("ds_dt", "dalpha_dt"),
+            "constant_velocity": ("ds_dt", "dalpha_dt"),
+        },
+        # A `rel` dataset naming the orbit: the companion group's position
+        # relative to the primary group, a straight line on the sky (E/N,
+        # mas and mas/yr) about the epoch.
+        "rel": {
+            "constant_velocity": ("rel_dE", "rel_dN", "rel_vE", "rel_vN"),
+        },
     }
 
     def _taylor_consumers(self, system):
@@ -2088,7 +2106,10 @@ class Orbit(Component):
                             f"constant_acceleration or constant_jerk for an "
                             f"RV trend."
                         )
-                    if role != "primary":
+                    if (
+                        role != "primary"
+                        and self.TAYLOR_COEFFS["rv"][self.types[o]]
+                    ):
                         raise NotImplementedError(
                             f"[{self.prefix}.{name(o)}] the RV star (star "
                             f"{s}) is in this Taylor orbit's COMPANION "
@@ -2105,9 +2126,10 @@ class Orbit(Component):
                     f"[{self.prefix}.{name(o)}] a lens companion moves on "
                     f"this type: {self.types[o]} orbit.  A lens reads "
                     f"type: uniform_rotation (constant ds_dt, dalpha_dt "
-                    f"about t0_par, conventions.md C24) or keplerian; a "
-                    f"Cartesian relative state for a lens is not "
-                    f"implemented (review 8.8.14 follow-on)."
+                    f"about t0_par, conventions.md C24), constant_velocity "
+                    f"(the straight line those rates start at t0_par) or "
+                    f"keplerian; the backends take no relative "
+                    f"acceleration."
                 )
             consumers[o].add("lens")
 
@@ -2148,11 +2170,13 @@ class Orbit(Component):
                 f"astrometry of a primary-group star accel_ra/accel_dec "
                 f"(constant_acceleration) and jerk_ra/jerk_dec "
                 f"(constant_jerk); a lens companion whose `orbit:` names it "
-                f"ds_dt/dalpha_dt (uniform_rotation).  A constant velocity "
-                f"is invisible to the RVs and the absolute astrometry (it "
-                f"is each instrument's gamma and the star's proper motion), "
-                f"so its coefficients would be free dimensions no "
-                f"likelihood term constrains."
+                f"ds_dt/dalpha_dt (uniform_rotation, constant_velocity); a "
+                f"rel dataset naming it rel_dE/rel_dN/rel_vE/rel_vN "
+                f"(constant_velocity).  A constant velocity is invisible to "
+                f"the RVs and the absolute astrometry (it is each "
+                f"instrument's gamma and the star's proper motion), so "
+                f"those alone would leave free dimensions no likelihood "
+                f"term constrains."
             )
         self._warn_galactic_pm(system, consumers)
         return consumers
@@ -2225,9 +2249,20 @@ class Orbit(Component):
                 if o is None:
                     continue
                 if o in consumers:
-                    refused.add(o)
+                    if self.types[o] not in self.TAYLOR_COEFFS["rel"]:
+                        refused.add(o)
+                    else:
+                        # The relative straight line: this dataset reads
+                        # the orbit's own rel_* coefficients.
+                        consumers[o].add("rel")
                 group = self.primary_bodies[o] + self.companion_bodies[o]
                 stars = {idx for t, idx in group if t == "star"}
+                for t in consumers:
+                    if t != o and stars & {
+                        idx for ty, idx in self.bodies(t) if ty == "star"
+                    }:
+                        refused.add(t)
+                continue
             elif mode == "lensrel":
                 stars = {int(ast.config[i].get("star_ndx", 0))}
             else:
@@ -2245,7 +2280,10 @@ class Orbit(Component):
                                 f"photocenter cannot read.  Use "
                                 f"constant_acceleration or constant_jerk."
                             )
-                        if role != "primary":
+                        if (
+                            role != "primary"
+                            and self.TAYLOR_COEFFS["astrometry"][self.types[o]]
+                        ):
                             raise NotImplementedError(
                                 f"[{self.prefix}.{name(o)}] astrometry "
                                 f"dataset '{ast.names[i]}' sees star {s} in "
@@ -2266,9 +2304,11 @@ class Orbit(Component):
             raise NotImplementedError(
                 f"[{self.prefix}] relative (rel/lensrel) astrometry measures "
                 f"a star on Taylor orbit(s) "
-                f"{[name(o) for o in sorted(refused)]}; only the absolute "
-                f"(gaia/abs/catalog) photocenter reads a Taylor orbit "
-                f"(review 8.8.14).  Give the orbit type: keplerian."
+                f"{[name(o) for o in sorted(refused)]}; a rel dataset reads "
+                f"only the orbit it names, and only a type: "
+                f"constant_velocity one among the Taylor types (review "
+                f"8.8.14).  Give the orbit type: keplerian or "
+                f"constant_velocity."
             )
 
     def _refuse_static_readers(self, system):
@@ -2361,9 +2401,8 @@ class Orbit(Component):
             if user is not None:
                 epochs[o] = float(user)
                 continue
-            if "astrometry" in kinds:
-                epochs[o] = float(system.astrometryinstrument.epoch)
-                why = "the astrometric reference epoch of ra/dec/pm"
+            if kinds & {"astrometry", "rel"}:
+                epochs[o], why = self._astrometric_epoch(system, o, kinds)
             else:
                 epochs[o] = midpoint
                 why = "the midpoint of its RVs"
@@ -2376,6 +2415,34 @@ class Orbit(Component):
                 why,
             )
         return epochs, rv_epochs
+
+    def _astrometric_epoch(self, system, o, kinds):
+        """``(epoch, why)`` for an orbit astrometry reads: the astrometric
+        reference epoch of ra/dec/pm wherever that epoch means something --
+        a user `epoch:` on an astrometry dataset, or absolute (gaia/abs/
+        catalog) data that define it.  A rel-only system has neither (the
+        instrument's epoch is then a placeholder, no ra/dec/pm being
+        fitted), so a rel-read orbit takes the midpoint of its own rel
+        epochs, (min + max)/2, the RV rule's twin."""
+        ast = system.astrometryinstrument
+        defined = any(
+            m in ("gaia", "abs", "catalog") for m in ast.modes
+        ) or any("epoch" in (c or {}) for c in ast.config)
+        if "astrometry" in kinds or defined:
+            return (
+                float(ast.epoch),
+                "the astrometric reference epoch of ra/dec/pm",
+            )
+        times = np.concatenate(
+            [
+                np.asarray(ast.datasets[i]["time"], dtype=float)
+                for i, mode in enumerate(ast.modes)
+                if mode == "rel" and ast.rel_orbit[i] == o
+            ]
+        )
+        return 0.5 * (
+            times.min() + times.max()
+        ), "the midpoint of its rel data"
 
     def _hint_rv_trends(self, system, consumers):
         """Seed each RV-read Taylor orbit's coefficients from the data.
@@ -2432,6 +2499,45 @@ class Orbit(Component):
                 f"{self.prefix}.{o}.gammadot", slope, unit="m/(s d)"
             )
 
+    def _hint_rel_lines(self, system, consumers):
+        """Seed each rel-read constant_velocity orbit's straight line from
+        its data: a weighted line through the companion's measured (dE, dN)
+        = sep (sin PA, cos PA) about the orbit's epoch, per axis (a constant
+        where the data span no time).  A ranked data hint, so a user's
+        `initval` wins; the sampler does the rest."""
+        rel_read = [o for o, kinds in consumers.items() if "rel" in kinds]
+        if not rel_read:
+            return
+        ast = system.astrometryinstrument
+        for o in rel_read:
+            rows = [
+                i
+                for i, mode in enumerate(ast.modes)
+                if mode == "rel" and ast.rel_orbit[i] == o
+            ]
+            d = [ast.datasets[i] for i in rows]
+            t = np.concatenate([np.asarray(x["time"], dtype=float) for x in d])
+            sep = np.concatenate([x["sep"] for x in d])
+            pa = np.concatenate([x["pa"] for x in d])
+            err = np.concatenate([x["err_sep"] for x in d])
+            dt = (t - self.taylor_epoch[o]) / DAYS_PER_YEAR
+            for axis, comp in (
+                ("E", sep * np.sin(pa)),
+                ("N", sep * np.cos(pa)),
+            ):
+                if dt.size >= 2 and np.ptp(dt) > 0.0:
+                    slope, offset = np.polyfit(dt, comp, 1, w=1.0 / err)
+                else:
+                    slope, offset = 0.0, float(np.mean(comp))
+                self.config_manager.add_hint(
+                    f"{self.prefix}.{o}.rel_d{axis}", float(offset), unit="mas"
+                )
+                self.config_manager.add_hint(
+                    f"{self.prefix}.{o}.rel_v{axis}",
+                    float(slope),
+                    unit="mas/yr",
+                )
+
     def _taylor_manifest(self, consumers):
         """Manifest entries for the Taylor coefficients, each active exactly
         on the Taylor orbits some consumer reads it on, and the bounds and
@@ -2479,6 +2585,10 @@ class Orbit(Component):
             "accel_dec",
             "jerk_ra",
             "jerk_dec",
+            "rel_dE",
+            "rel_dN",
+            "rel_vE",
+            "rel_vN",
         ):
             if coeff not in masks:
                 continue
@@ -2540,6 +2650,22 @@ class Orbit(Component):
         years), velocities their exact derivatives per Julian year, Z = 0.
         ``lens_anchor = (s0, alpha0 [rad])`` are the LENS's (JDE 2026-10-07:
         "s0/alpha0 stay on the lens").  Only ``relative=True`` exists.
+
+        constant_velocity, ``relative=True`` -- a RELATIVE straight line, in
+        the frame of the consumer that reads it:
+          * with ``lens_anchor``: the lens pair, same frame and units as
+            uniform_rotation, from the same anchor and the same rates --
+            ``(X, Y)(t) = (X, Y)(t0_par) + (VX, VY)(t0_par) dt`` with the
+            position and velocity uniform_rotation has AT t0_par, so the two
+            types agree to first order and differ at second (the polar line
+            keeps rotating, the straight line does not);
+          * without: a ``rel`` dataset's companion-minus-primary sky offset,
+            ``X = (rel_dN + rel_vN dt)``, ``Y = (rel_dE + rel_vE dt)`` in mas
+            (mas/yr, dt in years) converted to solRad (solRad/d) with the
+            anchor star's ``parallax``, like the absolute sky terms.
+        Z = VZ = 0: no consumer of a relative straight line measures depth.
+        ``relative=False`` is the primary's reflex, every term of which a
+        consumer absorbs, so it is identically zero.
         """
         typ = self.types[o]
         t = pt.as_tensor_variable(t)
@@ -2566,6 +2692,8 @@ class Orbit(Component):
             VX = ds * cos_a - s * dal * sin_a
             VY = -(ds * sin_a + s * dal * cos_a)
             return X, Y, zero, VX, VY, zero
+        if typ == "constant_velocity" and relative:
+            return self._relative_line(o, dt_d, parallax, lens_anchor)
         if relative:
             raise NotImplementedError(
                 f"[{self.prefix}.{self.names[o]}] the relative separation "
@@ -2612,6 +2740,43 @@ class Orbit(Component):
         else:
             X = Y = VX = VY = zero
         return X, Y, Z, VX, VY, VZ
+
+    def _relative_line(self, o, dt_d, parallax, lens_anchor):
+        """A constant_velocity orbit's relative straight line (see
+        ``_taylor_state``): the lens frame from ``lens_anchor``, or a rel
+        dataset's sky frame from the rel_* coefficients and ``parallax``."""
+        zero = pt.zeros_like(dt_d)
+        dt_y = dt_d / DAYS_PER_YEAR
+        if lens_anchor is not None:
+            s0, alpha0 = lens_anchor
+            ds = self.ds_dt.value[o]
+            dal = self.dalpha_dt.value[o]
+            cos_a, sin_a = pt.cos(alpha0), pt.sin(alpha0)
+            # uniform_rotation's position and velocity AT t0_par (C15:
+            # s (cos alpha, -sin alpha)), held constant.
+            VX = ds * cos_a - s0 * dal * sin_a
+            VY = -(ds * sin_a + s0 * dal * cos_a)
+            X = s0 * cos_a + VX * dt_y + zero
+            Y = -s0 * sin_a + VY * dt_y + zero
+            return X, Y, zero, VX + zero, VY + zero, zero
+        if "rel" not in self._taylor_consumer_map[o]:
+            raise ValueError(
+                f"[{self.prefix}.{self.names[o]}] the relative straight "
+                f"line of a constant_velocity orbit is read by a lens "
+                f"(lens_anchor=) or a rel dataset; this orbit has neither."
+            )
+        if parallax is None:
+            raise ValueError(
+                f"[{self.prefix}.{self.names[o]}] the rel_* coefficients "
+                f"are sampled in mas; state_vectors needs the anchor star's "
+                f"parallax to state them in solRad."
+            )
+        to_solrad = AU_SOLRAD / parallax
+        X = (self.rel_dN.value[o] + self.rel_vN.value[o] * dt_y) * to_solrad
+        Y = (self.rel_dE.value[o] + self.rel_vE.value[o] * dt_y) * to_solrad
+        VX = self.rel_vN.value[o] * to_solrad / DAYS_PER_YEAR + zero
+        VY = self.rel_vE.value[o] * to_solrad / DAYS_PER_YEAR + zero
+        return X, Y, zero, VX, VY, zero
 
     def taylor_radial_velocity(self, t, orbit_idx):
         """The RV consumer of Taylor orbit ``orbit_idx``: the line-of-sight
@@ -2736,8 +2901,9 @@ class Orbit(Component):
         if ast is not None:
             for i, mode in enumerate(ast.modes):
                 if mode == "rel":
-                    if ast.rel_orbit[i] is not None:
-                        astrometric.add(ast.rel_orbit[i])
+                    o = ast.rel_orbit[i]
+                    if o is not None and self.is_keplerian[o]:
+                        astrometric.add(o)
                 else:
                     astrometric.update(
                         _photocenter_orbits(system, self, ast.config[i])

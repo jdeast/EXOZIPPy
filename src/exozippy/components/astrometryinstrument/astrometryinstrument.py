@@ -1324,9 +1324,10 @@ class AstrometryInstrument(Instrument):
                 # it is not counted as phase information on any orbit.
                 continue
             if mode == "rel":
-                targets = (
-                    [] if self.rel_orbit[i] is None else [self.rel_orbit[i]]
-                )
+                # Timing information on KEPLERIAN orbits only: a
+                # constant_velocity orbit has no phase to time.
+                o = self.rel_orbit[i]
+                targets = [] if o is None or not orbit.is_keplerian[o] else [o]
                 amplitude = float(np.median(d["sep"]))
                 inv_var = 0.5 * (
                     d["err_sep"] ** -2.0 + (d["err_pa"] * d["sep"]) ** -2.0
@@ -2328,22 +2329,35 @@ class AstrometryInstrument(Instrument):
         group's position is its photocenter: the two-body barycenter arc,
         corrected by the photocenter wobble of any orbit fully nested in a
         group, r_phot - r_bary = (beta - M_c/M_tot) * r_rel.
+
+        A type: constant_velocity orbit (review 8.8.14) is a relative
+        straight line, its rel_* coefficients read through
+        ``Orbit.state_vectors`` with this star's parallax (shared with the
+        orbit's anchor) and scaled back to mas.
         """
         orbits = system.orbit
         o = self.rel_orbit[i]
-        if not hasattr(orbits, "a"):
-            raise ValueError(
-                f"[{self.prefix}.{self.names[i]}] relative astrometry "
-                f"needs the orbit scale parameters (a/masses), but the "
-                f"orbit component's body groups did not resolve against "
-                f"the active system."
-            )
         plx = system.star.parallax.value[self.star_map[i]]
         # mas per solRad of separation (review 4.8.3(d): the caller scales)
         scale = RSUN_AU * plx
-        dE_rel, dN_rel = orbits.get_sky_position(
-            t_node, np.array([o]), relative=True
-        )
+        if orbits.is_taylor[o]:
+            dN_rel, dE_rel, *_ = orbits.state_vectors(
+                pt.as_tensor_variable(t_node),
+                np.array([o]),
+                relative=True,
+                parallax=pt.stack([plx]),
+            )
+        else:
+            if not hasattr(orbits, "a"):
+                raise ValueError(
+                    f"[{self.prefix}.{self.names[i]}] relative astrometry "
+                    f"needs the orbit scale parameters (a/masses), but the "
+                    f"orbit component's body groups did not resolve "
+                    f"against the active system."
+                )
+            dE_rel, dN_rel = orbits.get_sky_position(
+                t_node, np.array([o]), relative=True
+            )
         dE, dN = dE_rel[:, 0] * scale, dN_rel[:, 0] * scale
 
         comp_set = set(orbits.companion_bodies[o])
@@ -2940,8 +2954,8 @@ class AstrometryInstrument(Instrument):
         self._rel_nodes = []
         for i in range(self.n_elements):
             # rel data always require an orbit (build_likelihood raises
-            # without one), so has_orbit only ever skips an empty list here.
-            if self.modes[i] != "rel" or not has_orbit:
+            # without one); a constant_velocity one has no Keplerian `a`.
+            if self.modes[i] != "rel" or not has_any_orbit:
                 self._compiled_rel.append(None)
                 self._rel_nodes.append(None)
                 continue
