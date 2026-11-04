@@ -159,6 +159,9 @@ def test_pooled_build_is_bit_identical_and_makes_no_main_process_call(caplog):
     set_worker_globals(logp)
     pool, cores = create_pool(4, 100, "test", logging.getLogger(__name__))
     evaluator = StartEvaluator(logp, pool=pool, cores=cores)
+    # The logger can already be at INFO (test order), so the serial build
+    # above may have left its own rung lines in caplog: count only ours.
+    caplog.clear()
 
     # ACT
     try:
