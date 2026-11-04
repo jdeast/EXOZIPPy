@@ -879,6 +879,24 @@ class Instrument(TimeSystem, Component):
                 f"apply the fitted trend the same way (components/"
                 f"instrument.md, 'One detrend mechanism')."
             )
+        df = self._read_table(i)
+        df = self._select_columns(df, i, roles, detrend, shared_roles)
+        df = self._apply_mask(df, i)
+        t = self._to_bjd_tdb(df.iloc[:, 0].values.astype(float), i)
+        df[df.columns[0]] = t
+        return self._sort_by_time(df)
+
+    def _read_table(self, i):
+        """File ``i`` as a DataFrame of its on-disk columns, unaltered.
+
+        The one step of ``_read_data`` a child may replace: a component
+        whose data come as a structured product rather than whitespace
+        columns (astrometry's ``data_format: gaia_epoch``, a Gaia archive
+        table) overrides this to deliver the same thing -- positional
+        columns, ``time`` first, in the file's own time system -- and
+        everything after it (``columns:``, ``mask:``, ``time_*:``, the sort)
+        stays shared.
+        """
         # A bad path or an unreadable file used to surface as pandas' own
         # error -- a bare FileNotFoundError, or "No columns to parse from
         # file" -- with no instrument and no config key in it, so on a
@@ -900,11 +918,7 @@ class Instrument(TimeSystem, Component):
                 f"[{self.prefix}[{self.names[i]}]] could not parse data "
                 f"file {path!r} (the 'file:' key of this entry): {e}"
             ) from e
-        df = self._select_columns(df, i, roles, detrend, shared_roles)
-        df = self._apply_mask(df, i)
-        t = self._to_bjd_tdb(df.iloc[:, 0].values.astype(float), i)
-        df[df.columns[0]] = t
-        return self._sort_by_time(df)
+        return df
 
     # ------------------------------------------------------------------
     # Optional per-file column layout (columns:)
