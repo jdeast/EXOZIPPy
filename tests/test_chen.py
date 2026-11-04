@@ -136,6 +136,12 @@ class _FakeOrbit:
     def star_membership(self, star_idx):
         return self._memberships.get(int(star_idx), [])
 
+    @property
+    def is_keplerian(self):
+        # Every fake orbit is Keplerian (a rel target on a Taylor orbit is
+        # left out of the astrometric predicate).
+        return np.ones(64, dtype=bool)
+
     def bodies(self, i):
         return self._bodies.get(int(i), [])
 
