@@ -1247,14 +1247,18 @@ def _run_fit(config, gui, user_params=None):
                 model_context.enter_context(model)
                 system.recenter_whitening_anchor(model)
                 raw_start = system.get_raw_start(model)
-                if measure_scales:
+                # The same guard as the first call (reusing_trace is False on
+                # this path, so it reduces to measure_scales), kept in that
+                # spelling so the restore can never be gated on
+                # measure_scales alone (tests/test_run_whitening_reuse.py).
+                if reusing_trace or measure_scales:
                     whiten_report = prepare_whitening(
                         system,
                         model,
                         raw_start,
                         whitening_path,
                         trace_path,
-                        reusing_trace=False,
+                        reusing_trace=reusing_trace,
                         cores=cores,
                         eval_timeout=eval_timeout,
                     )
