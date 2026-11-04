@@ -445,14 +445,15 @@ def test_rel_and_rvs_on_one_straight_line(tmp_path):
     )
 
 
-@pytest.mark.parametrize(
-    "otype", ["constant_acceleration", "uniform_rotation"]
-)
+@pytest.mark.parametrize("otype", ["uniform_rotation"])
 def test_a_rel_dataset_of_another_taylor_type_is_refused(tmp_path, otype):
     """
-    Given a rel dataset naming a Taylor orbit that is not constant_velocity,
+    Given a rel dataset naming a uniform_rotation orbit (the lens's polar
+      frame),
     When the system is prepared,
-    Then it raises naming constant_velocity as the one rel-readable type.
+    Then it raises naming the Cartesian types a rel dataset can read
+      (constant_acceleration/jerk are read since review 8.8.14's rel
+      follow-on, tests/test_taylor_rel.py).
     """
     # Arrange
     config, up, _ = _rel_config(tmp_path, otype=otype)
