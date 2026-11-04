@@ -1932,11 +1932,7 @@ def _wrap_up(
     wrapup.stage(
         f"posterior plots for {len(system.active_components)} component(s)"
     )
-    draws = get_draws(
-        idata,
-        param_lookup=system.get_parameter_lookup(),
-        exclude=report_only,
-    )
+    draws = _plot_points(system, idata, idata, exclude=report_only)
     for comp in system.active_components.values():
         comp.plot(system, draws, filename_prefix=str(prefix) + "_mcmc")
 
@@ -1957,7 +1953,9 @@ def _wrap_up(
         idata,
         f"{prefix}_mcmc_summary.pdf",
         title=(config.get("run") or {}).get("name"),
-        draws=draws,
+        # the random draws only: the figure draws its own median-draw point,
+        # which _plot_points put first in `draws` for the component PDFs
+        draws=draws[1:],
     )
 
     # Multimodal posteriors: re-emit the same corner + component plots once
@@ -3832,6 +3830,38 @@ def _convert_posterior_to_user_units(idata, param_lookup, only=None):
         idata.posterior[var_name] = idata.posterior[var_name] * factor
 
 
+def _plot_points(system, idata, idata_ref, mode=None, exclude=()):
+    """The points a posterior plot is drawn at: the REFERENCE point first,
+    then ``get_draws``' random spaghetti draws.
+
+    Every plotter treats ``points[0]`` as the reference -- the phased
+    panels fold the data on its period and conjunction and label the axis
+    with them, the per-observation "isolated" data subtract its other
+    signals, and the modeling draft takes its model-bearing figures from it
+    (plotrender.render_spec_groups, dopptom, the mulens zooms).  It used to
+    be simply the first of the random draws, so a phased RV panel was folded
+    on whatever period one random draw had -- examples/gaia4's joint fit was
+    labelled P = 574.38 d against a posterior median of 575.8 +/- 1.3, and
+    an RV-only fit with a period prior 578.6 +/- 3.5 was folded at 568.87,
+    2.8 sigma out -- and the fold changed from one rendering to the next.
+    The reference is now ``summary_plot.median_draw_point``: the valid joint
+    draw nearest the posterior median in the sampled coordinates, the same
+    point the one-page summary figure is drawn at (outputs.md, "The point is
+    the median draw of the REPORTED posterior").  ``idata_ref`` is the trace
+    the median is taken over -- the full posterior, or one mode's -- and
+    ``mode`` restricts the spaghetti draws to that mode.
+    """
+    from .outputs.summary_plot import median_draw_point
+
+    reference = median_draw_point(system, idata_ref)[0]
+    return [reference] + get_draws(
+        idata,
+        param_lookup=system.get_parameter_lookup(),
+        mode=mode,
+        exclude=exclude,
+    )
+
+
 def get_draws(idata, n_draws=50, param_lookup=None, mode=None, exclude=()):
     """
     Extracts a random subset of draws from the posterior for plotting.
@@ -3950,7 +3980,6 @@ def _emit_per_mode_outputs(system, idata, mode_report, prefix):
     per-mode loop should be visible in logs, not silent.
     """
     prefix = str(prefix)
-    param_lookup = system.get_parameter_lookup()
     report_only = set(system.report_only_labels())
     for k, m in enumerate(mode_report.modes):
         suffix = mode_suffix(k)
@@ -3964,8 +3993,8 @@ def _emit_per_mode_outputs(system, idata, mode_report, prefix):
         # Same draw-count knob as the combined-posterior plots (get_draws'
         # n_draws default) -- no extra stratification needed here since each
         # mode draws from its own full, already-labeled set of samples.
-        draws_k = get_draws(
-            idata, param_lookup=param_lookup, mode=k, exclude=report_only
+        draws_k = _plot_points(
+            system, idata, idata_k, mode=k, exclude=report_only
         )
         for comp in system.active_components.values():
             comp.plot(

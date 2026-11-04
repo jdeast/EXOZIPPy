@@ -209,6 +209,48 @@ def test_emit_per_mode_outputs_calls_component_plot_per_mode(tmp_path):
         assert len(points) > 0
 
 
+def test_plot_reference_point_is_each_modes_median_draw(tmp_path):
+    """
+    Given a two-mode trace and a recording component,
+    When _emit_per_mode_outputs runs,
+    Then each mode's points[0] -- the reference every plotter folds and
+      labels with -- is that mode's draw nearest its median in the sampled
+      (*_raw) coordinates, each scaled by its spread (computed here in
+      numpy from the trace and the mode labels), not a random draw; the
+      random spaghetti draws follow it.
+    """
+    rng = np.random.default_rng(7)
+    idata = _two_mode_idata(rng)
+    rep = identify_modes(idata)
+
+    calls = {}
+
+    class _RecordingComponent:
+        def plot(self, system, points, filename_prefix="debug"):
+            calls[filename_prefix] = points
+
+    class _SystemWithComponent(_FakeSystem):
+        active_components = {"dummy": _RecordingComponent()}
+
+    prefix = tmp_path / "fit"
+    _emit_per_mode_outputs(_SystemWithComponent(), idata, rep, prefix)
+
+    labels = np.asarray(idata.posterior["mode"].values).ravel()
+    x = np.asarray(idata.posterior["x_raw"].values).ravel()
+    y = np.asarray(idata.posterior["y_raw"].values).ravel()
+    for k in range(2):
+        points = calls[f"{prefix}_mcmc_{mode_suffix(k)}"]
+        sel = labels == k
+        xk, yk = x[sel], y[sel]
+        d2 = ((xk - np.median(xk)) / np.std(xk)) ** 2 + (
+            (yk - np.median(yk)) / np.std(yk)
+        ) ** 2
+        best = int(np.argmin(d2))
+        assert float(points[0]["x"]) == xk[best]
+        assert float(points[0]["y"]) == yk[best]
+        assert len(points) > 1  # the spaghetti draws follow the reference
+
+
 # ----------------------------------------------------------------------
 # single-mode guard (mirrors the `mode_report.n_modes > 1` check in run_fit)
 # ----------------------------------------------------------------------
