@@ -369,7 +369,7 @@ def test_config_validation():
     linear_s = [
         {
             "name": "S",
-            "type": "linear",
+            "type": "uniform_rotation",
             "primary": ["Source"],
             "companion": ["SComp"],
         }

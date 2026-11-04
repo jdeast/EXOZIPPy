@@ -101,7 +101,7 @@ _ORBITAL_MOTION_REMOVED = (
     "'orbital_motion:' was removed: a lens companion's motion is set by the "
     "orbit it moves on.  Put 'orbit: <orbit name>' on the COMPANION's lens "
     "entry and give that orbit block 'type: keplerian' (the default) or "
-    "'type: linear', with 'primary:' the lens primary's body and "
+    "'type: uniform_rotation', with 'primary:' the lens primary's body and "
     "'companion:' the companion's.  The linear rates are now "
     "orbit.<name>.ds_dt and orbit.<name>.dalpha_dt in the params file "
     "(they were lens.<name>.ds_dt / .dalpha_dt)."

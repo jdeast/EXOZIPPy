@@ -217,6 +217,25 @@ PSF holds the target and at most ONE other light
     and the remedy is the SED path.  The dark default (fluxfrac pinned at
     0) is legal in any topology: no other light, the target's own motion.
 
+A long-period companion as a Taylor orbit (orbit.md, "Taylor orbits";
+review 8.8.14).  A `type: constant_acceleration` (or `constant_jerk`) orbit
+whose PRIMARY group holds a photocenter light moves the absolute track by
+the primary's reflex from Orbit.state_vectors -- accel (t - epoch)^2 / 2
+(+ jerk (t - epoch)^3 / 6), accel_ra/accel_dec in mas/yr^2 (jerk_ra/jerk_dec
+in mas/yr^3), t - epoch in Julian years, Gaia DR3's convention -- less its
+value and velocity at the astrometric epoch, which are this star's ra/dec/pm
+(_taylor_sky_offset).  The photocenter rules above hold with the group's
+reflex in place of its orbit: all of the light moves when both lights are
+in the primary group, (1 - b) when only the target is, b when only the
+other light is (_taylor_photocenter_terms).  A light in the Taylor orbit's
+COMPANION group is refused (it needs a mass ratio no Taylor orbit has), as
+are rel/lensrel astrometry of a star on one and a uniform_rotation orbit
+(a lens pair's relative frame).  constant_velocity adds nothing: a constant
+sky velocity is the proper motion.  With such a term, pm_ra/pm_dec are the
+inner system's at the astrometric epoch, not the barycentric ones.  It is
+built in _photocenter_offset, the one builder, so the likelihood, the
+catalog projection and the plots share it.
+
 Model limitations: one other light per PSF (a PSF holding three luminous
 stars -- KELT-4 C with both B and A unresolved -- cannot be stated);
 relative positions are Keplerian two-body per orbit plus one level of
@@ -2046,6 +2065,176 @@ class AstrometryInstrument(Instrument):
             )
         return RSUN_AU * coef * plx, omap
 
+    def _photocenter_offset(
+        self, system, i, beta, t, keplerian=True, taylor=True
+    ):
+        """The photocenter's motion about the system barycenter's linear
+        track, ``(dE, dN)`` mas at times ``t`` for absolute dataset ``i``:
+        the Keplerian wobble (``_photocenter_terms``) plus the sky-plane
+        Taylor terms (``_taylor_photocenter_terms``).  ``(None, None)`` when
+        nothing moves it.  THE one builder of that offset: the likelihood
+        (through ``_absolute_model``) and the plotters both call it, and
+        the ``keplerian``/``taylor`` switches exist only so the sky plot's
+        orbit panel can draw the Keplerian part alone.
+        """
+        dE = dN = None
+        if keplerian:
+            scale, omap = self._photocenter_terms(system, i, beta)
+            if scale is not None:
+                dE_orb, dN_orb = system.orbit.get_sky_position(
+                    pt.as_tensor_variable(t), omap
+                )
+                dE = pt.sum(dE_orb * scale[None, :], axis=1)
+                dN = pt.sum(dN_orb * scale[None, :], axis=1)
+        if taylor:
+            for o, weight in self._taylor_photocenter_terms(system, i, beta):
+                tE, tN = self._taylor_sky_offset(system, i, o, t)
+                if weight is not None:
+                    tE, tN = weight * tE, weight * tN
+                dE = tE if dE is None else dE + tE
+                dN = tN if dN is None else dN + tN
+        return dE, dN
+
+    def _taylor_sky_offset(self, system, i, o, t):
+        """Taylor orbit ``o``'s sky-plane displacement of the primary group,
+        ``(dE, dN)`` mas at times ``t``, as dataset ``i`` reads it: the
+        state from ``Orbit.state_vectors`` (solRad, its angular sky
+        coefficients converted with the target's parallax, which every
+        orbit member shares with the anchor), less the constant and linear
+        terms at the astrometric reference epoch -- those are this star's
+        ra/dec/pm, so pm stays the photocenter's velocity at THIS epoch
+        whatever the orbit's own ``epoch:`` (identically zero, and not
+        built, where the two epochs coincide, the default)."""
+        orbits = system.orbit
+        plx = system.star.parallax.value[int(self.star_map[i])]
+        omap = np.array([o])
+        X, Y, _, VX, VY, _ = orbits.state_vectors(
+            pt.as_tensor_variable(t), omap, parallax=pt.stack([plx])
+        )
+        dN, dE = X[:, 0], Y[:, 0]
+        if float(orbits.taylor_epoch[o]) != float(self.epoch):
+            X0, Y0, _, VX0, VY0, _ = orbits.state_vectors(
+                np.array([float(self.epoch)]), omap, parallax=pt.stack([plx])
+            )
+            dt = pt.as_tensor_variable(t) - float(self.epoch)
+            dN = dN - (X0[0, 0] + VX0[0, 0] * dt)
+            dE = dE - (Y0[0, 0] + VY0[0, 0] * dt)
+        scale = RSUN_AU * plx  # mas per solRad at this parallax
+        return dE * scale, dN * scale
+
+    def _taylor_photocenter_terms(self, system, i, beta):
+        """``[(orbit, weight), ...]`` -- the Taylor orbits whose sky terms
+        move absolute dataset i's photocenter, each with the share of the
+        PSF's light that moves with it (None for all of it).
+
+        A Taylor orbit's state is the reflex of its PRIMARY group; a light in
+        its companion group would need a mass ratio the orbit does not have,
+        and Orbit._taylor_astrometry_consumers
+        refuses that at stage 3 for the lights ``photocenter_stars`` names.
+        Of the PSF's two lights (the target, share ``1 - b``, and the other
+        one, share ``b``), the photocenter moves with
+
+            both in the primary group:   all of it (b cancels)
+            the target only:             (1 - b)
+            the other light only:        b
+
+        -- the "target only"/"other only" rows of ``_photocenter_terms``'s
+        table, with the group's acceleration in place of its orbit.  The
+        other light is the SED path's ``companion_star_ndx``; on the sampled
+        path it stands at the other group of the target's ONE Keplerian
+        orbit (``_check_sampled_photocenter``), and with fluxfrac at the dark
+        default 0 there is no other light.  A sampled light that a Taylor
+        orbit's companion group holds, or that the target has no Keplerian
+        orbit to place, RAISES naming the dataset (no fallbacks): the remedy
+        is the SED path or a dark fluxfrac.  A type whose sky polynomial
+        has no term the star's own ra/dec/pm do not already absorb
+        (constant_velocity) adds nothing and is left out.
+        """
+        orbits = getattr(system, "orbit", None)
+        if orbits is None or not np.any(orbits.is_taylor):
+            return []
+        stars = photocenter_stars(
+            self.config[i], self.config_manager.system_config
+        )
+        target = stars[0]
+        t_roles = dict(orbits.taylor_membership(target))
+        if len(stars) == 2:
+            o_roles = dict(orbits.taylor_membership(stars[1]))
+        elif self._fluxfrac_is_dark(i):
+            o_roles = None  # no other light in the PSF
+        else:
+            o_roles = self._sampled_light_taylor_roles(system, i, target)
+        quad = [
+            o
+            for o in sorted(set(t_roles) | set(o_roles or {}))
+            if orbits.TAYLOR_COEFFS["astrometry"].get(orbits.types[o])
+        ]
+        out = []
+        for o in quad:
+            in_t, in_o = o in t_roles, o_roles is not None and o in o_roles
+            if o_roles is None or (in_t and in_o):
+                out.append((o, None))
+            elif in_t:
+                out.append((o, 1.0 - beta))
+            else:
+                out.append((o, beta))
+        return out
+
+    def _sampled_light_taylor_roles(self, system, i, target):
+        """``{taylor orbit: 'primary'}`` for the sampled-fluxfrac light of
+        dataset i, which stands at the other group of the target's one
+        Keplerian orbit; RAISES where that light has no place a Taylor term
+        can move (see ``_taylor_photocenter_terms``)."""
+        orbits = system.orbit
+        where = f"[{self.prefix}.{self.names[i]}]"
+        remedy = (
+            "Name the luminous star inside the PSF with `band:` + "
+            "`companion_star_ndx:` (a sed: block weighs it star by star), "
+            "or pin fluxfrac at 0 (dark companions)."
+        )
+        taylor = [int(o) for o in np.nonzero(orbits.is_taylor)[0]]
+        kep = orbits.star_membership(target)
+        if not kep:
+            touched = [
+                orbits.names[o] for o, _ in orbits.taylor_membership(target)
+            ]
+            if not touched:
+                return {}  # no orbit moves the target or its light
+            raise ValueError(
+                f"{where} star {target} is on Taylor orbit(s) {touched} and "
+                f"in no Keplerian orbit, so a sampled fluxfrac's light would "
+                f"stand on the Taylor orbit's other side, whose motion needs "
+                f"a mass ratio the Taylor orbit does not have. {remedy}"
+            )
+        if len(kep) > 1:
+            # _check_sampled_photocenter raises this first wherever the
+            # Keplerian wobble is built; stated here for the same reason.
+            names = [orbits.names[o] for o, _ in kep]
+            raise ValueError(
+                f"{where} star {target} is in Keplerian orbits {names}, and "
+                f"a sampled fluxfrac cannot say which orbit's other side its "
+                f"light comes from. {remedy}"
+            )
+        o_k, r_t = kep[0]
+        other = set(
+            orbits.companion_bodies[o_k]
+            if r_t == "primary"
+            else orbits.primary_bodies[o_k]
+        )
+        roles = {}
+        for o in taylor:
+            if other <= set(orbits.primary_bodies[o]):
+                roles[o] = "primary"
+            elif other & set(orbits.bodies(o)):
+                raise ValueError(
+                    f"{where} the light a sampled fluxfrac places at the "
+                    f"other group of orbit {orbits.names[o_k]} is not wholly "
+                    f"in the PRIMARY group of Taylor orbit "
+                    f"{orbits.names[o]}, so its sky acceleration needs a "
+                    f"mass ratio the Taylor orbit does not have. {remedy}"
+                )
+        return roles
+
     @staticmethod
     def _photocenter_coef(orbits, o, r_t, r_c, beta):
         """One orbit's coefficient of its a_rel, for
@@ -2232,13 +2421,10 @@ class AstrometryInstrument(Instrument):
             P_E, P_N = d["P_E"], d["P_N"]
         dE, dN = self._star_track(system, d, s, t, P_E, P_N)
 
-        scale, omap = self._photocenter_terms(system, d["index"], beta)
-        if scale is not None:
-            dE_orb, dN_orb = system.orbit.get_sky_position(
-                pt.as_tensor_variable(t), omap
-            )
-            dE = dE + pt.sum(dE_orb * scale[None, :], axis=1)
-            dN = dN + pt.sum(dN_orb * scale[None, :], axis=1)
+        dE_orb, dN_orb = self._photocenter_offset(system, d["index"], beta, t)
+        if dE_orb is not None:
+            dE = dE + dE_orb
+            dN = dN + dN_orb
 
         # Astrometric microlensing (C30), last: the shift and the blend
         # drag are both referenced to the SOURCE's own track, which is what
@@ -2637,40 +2823,58 @@ class AstrometryInstrument(Instrument):
         and plot_data() render the same charts either way; only the
         orbit-dependent pieces are skipped.
         """
+        # Keplerian elements exist (a system whose orbits are all Taylor
+        # declares none); the Taylor sky terms need only the orbit.
         has_orbit = hasattr(system, "orbit") and hasattr(system.orbit, "a")
+        has_any_orbit = hasattr(system, "orbit")
 
         param_symbols = [p.value for p in system.plot_params]
         t_input = pt.vector("t_input")
 
-        # Photocenter orbit (summed over the star's member orbits), per
-        # gaia/abs instrument (beta varies); None when nothing moves the star.
-        # The symbolic (dE, dN) node pairs are retained so plot_data can
-        # derive param_deps by walking the graph (see
-        # Component._model_trace_param_deps).
+        # Photocenter motion about the linear track (the Keplerian wobble
+        # summed over the star's member orbits, plus any sky-plane Taylor
+        # term), per gaia/abs instrument (beta varies); None when nothing
+        # moves the star.  _compiled_kepler_photo is the Keplerian part
+        # alone, for the sky plot's orbit panel.  The symbolic (dE, dN) node
+        # pairs are retained so plot_data can derive param_deps by walking
+        # the graph (see Component._model_trace_param_deps).
         self._compiled_photo = []
+        self._compiled_kepler_photo = []
         self._photo_nodes = []
+
+        def compile_pair(nodes):
+            return pytensor.function(
+                inputs=[t_input] + param_symbols,
+                outputs=list(nodes),
+                on_unused_input="ignore",
+            )
+
         for i in range(self.n_elements):
-            if self.modes[i] not in ABSOLUTE_MODES or not has_orbit:
+            if self.modes[i] not in ABSOLUTE_MODES or not has_any_orbit:
                 self._compiled_photo.append(None)
+                self._compiled_kepler_photo.append(None)
                 self._photo_nodes.append(None)
                 continue
             beta = self._sed_beta_node(system, i)
-            scale, omap = self._photocenter_terms(system, i, beta)
-            if scale is None:
+            dE_node, dN_node = self._photocenter_offset(
+                system, i, beta, t_input
+            )
+            if dE_node is None:
                 self._compiled_photo.append(None)
+                self._compiled_kepler_photo.append(None)
                 self._photo_nodes.append(None)
                 continue
-            dE_orb, dN_orb = system.orbit.get_sky_position(t_input, omap)
-            dE_node = pt.sum(dE_orb * scale[None, :], axis=1)
-            dN_node = pt.sum(dN_orb * scale[None, :], axis=1)
             self._photo_nodes.append((dE_node, dN_node))
-            self._compiled_photo.append(
-                pytensor.function(
-                    inputs=[t_input] + param_symbols,
-                    outputs=[dE_node, dN_node],
-                    on_unused_input="ignore",
+            self._compiled_photo.append(compile_pair((dE_node, dN_node)))
+            if self._taylor_photocenter_terms(system, i, beta):
+                kep = self._photocenter_offset(
+                    system, i, beta, t_input, taylor=False
                 )
-            )
+                self._compiled_kepler_photo.append(
+                    None if kep[0] is None else compile_pair(kep)
+                )
+            else:
+                self._compiled_kepler_photo.append(self._compiled_photo[i])
 
         # Full absolute model -- linear terms + photocenter orbit + the
         # microlensing centroid shift -- per LENSED gaia/abs dataset, as a
@@ -2779,10 +2983,16 @@ class AstrometryInstrument(Instrument):
                 vals.append(np.atleast_1d(val))
         return vals
 
-    def _eval_photo(self, i, t, vals):
-        """Photocenter orbit at times t for instrument i; zeros when no
-        orbit moves the instrument's star."""
-        fn = getattr(self, "_compiled_photo", None)
+    def _eval_photo(self, i, t, vals, keplerian_only=False):
+        """Photocenter motion about the linear track at times t for
+        instrument i (the Keplerian wobble plus any sky-plane Taylor term,
+        or the wobble alone with ``keplerian_only``); zeros when nothing
+        moves the instrument's star."""
+        fn = getattr(
+            self,
+            "_compiled_kepler_photo" if keplerian_only else "_compiled_photo",
+            None,
+        )
         fn = fn[i] if fn is not None else None
         if fn is None:
             z = np.zeros(len(t), dtype=float)
@@ -3363,10 +3573,15 @@ class AstrometryInstrument(Instrument):
         t = d["time"]
         vals = self._point_values(system, point)
         photo = getattr(self, "_compiled_photo", None)
+        moves = photo is not None and photo[i] is not None
+        kepler = getattr(self, "_compiled_kepler_photo", None)
+        # The orbit panel draws the KEPLERIAN wobble with its node and
+        # direction annotations; a sky-plane Taylor term has no period to
+        # draw one over, so it appears only in the left panel's path.
         has_orbit = (
             getattr(self, "_compiled_elements", None) is not None
-            and photo is not None
-            and photo[i] is not None
+            and kepler is not None
+            and kepler[i] is not None
         )
         if has_orbit:
             fig, (axL, axR) = plt.subplots(1, 2, figsize=(13, 6))
@@ -3398,7 +3613,7 @@ class AstrometryInstrument(Instrument):
             zorder=1,
             label="pm + parallax",
         )
-        if has_orbit:
+        if moves:
             axL.plot(
                 dE_lin + dE_orb,
                 dN_lin + dN_orb,
@@ -3466,11 +3681,11 @@ class AstrometryInstrument(Instrument):
             P_orb = 2.0 * np.pi / np.atleast_1d(n_arr)
             t1 = t.max()
             t_orb = np.linspace(t1 - np.max(P_orb), t1, 2000)
-            dE_o, dN_o = self._eval_photo(i, t_orb, vals)
+            dE_o, dN_o = self._eval_photo(i, t_orb, vals, keplerian_only=True)
             axR.plot(
                 dE_o, dN_o, "k-", lw=1.2, zorder=2, label="photocenter orbit"
             )
-            dE_ep, dN_ep = self._eval_photo(i, t, vals)
+            dE_ep, dN_ep = self._eval_photo(i, t, vals, keplerian_only=True)
             axR.plot(
                 dE_ep, dN_ep, "r.", ms=5, zorder=3, label="observation epochs"
             )
@@ -3509,7 +3724,10 @@ class AstrometryInstrument(Instrument):
                 # shift into the plotted window
                 t_node += np.ceil((t_orb[0] - t_node) / P) * P
                 (xn,), (yn,) = self._eval_photo(
-                    i, np.array([t_node], dtype=np.float64), vals
+                    i,
+                    np.array([t_node], dtype=np.float64),
+                    vals,
+                    keplerian_only=True,
                 )
                 axR.plot(
                     xn,
@@ -3526,7 +3744,7 @@ class AstrometryInstrument(Instrument):
                 # Direction of motion: a curved arrow tracing the orbit away
                 # from the ascending node, drawn 25% outside the orbit itself.
                 t_arc = np.linspace(t_node, t_node + 0.06 * P, 60)
-                xa, ya = self._eval_photo(i, t_arc, vals)
+                xa, ya = self._eval_photo(i, t_arc, vals, keplerian_only=True)
                 xa, ya = 1.25 * np.asarray(xa), 1.25 * np.asarray(ya)
                 axR.plot(
                     xa[:-1], ya[:-1], "-", color="tab:blue", lw=2, zorder=6

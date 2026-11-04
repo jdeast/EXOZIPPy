@@ -1,4 +1,5 @@
-"""Taylor orbits: `orbit: type: linear | quadratic` (review 8.8.14).
+"""Taylor orbits: `orbit: type: constant_acceleration | constant_jerk`
+(review 8.8.14) as RV trends.
 
 An orbit too long for the data to resolve is written as the low-order time
 derivatives of what each consumer measures, about a reference epoch.  It is
@@ -81,7 +82,7 @@ def _at_start(system, model, node):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("otype", ["linear", "quadratic"])
+@pytest.mark.parametrize("otype", ["constant_acceleration", "constant_jerk"])
 def test_the_trend_is_the_taylor_series_about_the_epoch(tmp_path, otype):
     """
     Given a star whose only orbit is a Taylor orbit, with seeded coefficients,
@@ -96,7 +97,7 @@ def test_the_trend_is_the_taylor_series_about_the_epoch(tmp_path, otype):
         "orbit.trend.gammadot": {"initval": -1.25},
         "rvinstrument.TRES.gamma": {"initval": 300.0},
     }
-    if otype == "quadratic":
+    if otype == "constant_jerk":
         params["orbit.trend.gammaddot"] = {"initval": 0.006}
     system, model = _system(_config(rv, [orbit]), params)
     rvi = system.rvinstrument
@@ -107,7 +108,7 @@ def test_the_trend_is_the_taylor_series_about_the_epoch(tmp_path, otype):
     epoch = system.orbit.taylor_epoch[0]
     dt = rvi.time - epoch
     expected = 300.0 - 1.25 * dt
-    if otype == "quadratic":
+    if otype == "constant_jerk":
         expected = expected + 0.5 * 0.006 * dt**2
     # atol: the start round-trips through the logit raw coordinate (~1e-8).
     np.testing.assert_allclose(model_ms, expected, rtol=1e-10, atol=1e-6)
@@ -125,7 +126,11 @@ def test_a_slope_reports_its_companion_mass_over_r2_bound(tmp_path):
       bound and entering no potential.
     """
     rv = _write_rv(tmp_path / "t.rv")
-    orbit = {"name": "trend", "type": "linear", "primary": ["A"]}
+    orbit = {
+        "name": "trend",
+        "type": "constant_acceleration",
+        "primary": ["A"],
+    }
     system, model = _system(
         _config(rv, [orbit]), {"orbit.trend.gammadot": {"initval": -0.8}}
     )
@@ -154,7 +159,11 @@ def test_a_trend_beside_a_planet_adds_to_the_keplerian(tmp_path):
         rv,
         [
             {"name": "b", "primary": ["A"], "companion": ["b"]},
-            {"name": "trend", "type": "linear", "primary": ["A"]},
+            {
+                "name": "trend",
+                "type": "constant_acceleration",
+                "primary": ["A"],
+            },
         ],
         planets=[{"name": "b"}],
     )
@@ -189,7 +198,11 @@ def test_the_default_epoch_is_the_midpoint_of_the_rvs(tmp_path):
       EXOFASTv2's RVEPOCH default (mkss.pro).
     """
     rv = _write_rv(tmp_path / "t.rv")
-    orbit = {"name": "trend", "type": "linear", "primary": ["A"]}
+    orbit = {
+        "name": "trend",
+        "type": "constant_acceleration",
+        "primary": ["A"],
+    }
     system, _ = _system(_config(rv, [orbit]), build=False)
     assert system.orbit.taylor_epoch[0] == pytest.approx(
         0.5 * sum(_EPOCH_SPAN), abs=1e-9
@@ -204,7 +217,7 @@ def test_a_user_epoch_is_honored_and_shown_in_the_table_note(tmp_path):
     rv = _write_rv(tmp_path / "t.rv")
     orbit = {
         "name": "trend",
-        "type": "linear",
+        "type": "constant_acceleration",
         "primary": ["A"],
         "epoch": 2459700.25,
     }
@@ -232,7 +245,11 @@ def test_the_keplerian_elements_are_inactive_on_a_taylor_orbit(tmp_path):
         rv,
         [
             {"name": "b", "primary": ["A"], "companion": ["b"]},
-            {"name": "trend", "type": "linear", "primary": ["A"]},
+            {
+                "name": "trend",
+                "type": "constant_acceleration",
+                "primary": ["A"],
+            },
         ],
         planets=[{"name": "b"}],
     )
@@ -301,7 +318,11 @@ def test_restrict_active_narrows_every_selector():
     [
         ({"type": "Linear"}, ValueError, "case-sensitive"),
         ({"type": "nbody"}, NotImplementedError, "nbody"),
-        ({"type": "linear", "fitvcve": True}, ValueError, "Keplerian"),
+        (
+            {"type": "constant_acceleration", "fitvcve": True},
+            ValueError,
+            "Keplerian",
+        ),
         ({"epoch": 2459700.0}, ValueError, "epoch"),
     ],
 )
@@ -326,7 +347,7 @@ def test_a_taylor_orbit_needs_an_explicit_primary(tmp_path):
     rv = _write_rv(tmp_path / "t.rv")
     with pytest.raises(ValueError, match="primary"):
         System(
-            _config(rv, [{"name": "trend", "type": "linear"}]),
+            _config(rv, [{"name": "trend", "type": "constant_acceleration"}]),
             user_params=dict(_STAR),
         )
 
@@ -341,12 +362,16 @@ def test_an_unread_taylor_orbit_raises(tmp_path):
     cfg = _config(
         rv,
         [
-            {"name": "trend", "type": "linear", "primary": ["B"]},
+            {
+                "name": "trend",
+                "type": "constant_acceleration",
+                "primary": ["B"],
+            },
             {"name": "AB", "primary": ["A"], "companion": ["B"]},
         ],
     )
     cfg["star"].append({"name": "B", "mist": False})
-    with pytest.raises(ValueError, match="nothing in the model reads"):
+    with pytest.raises(ValueError, match="nothing observable"):
         _system(cfg, {"star.B.mass": {"initval": 0.5}}, build=False)
 
 
@@ -362,7 +387,7 @@ def test_the_rv_star_on_the_companion_side_is_refused(tmp_path):
         [
             {
                 "name": "trend",
-                "type": "linear",
+                "type": "constant_acceleration",
                 "primary": ["B"],
                 "companion": ["A"],
             }
@@ -387,7 +412,7 @@ def test_a_planet_on_a_taylor_orbit_has_no_keplerian_geometry(tmp_path):
         [
             {
                 "name": "trend",
-                "type": "linear",
+                "type": "constant_acceleration",
                 "primary": ["A"],
                 "companion": ["b"],
             }
@@ -415,7 +440,7 @@ def test_the_coefficients_are_seeded_from_the_rvs(tmp_path):
       coefficient).
     """
     rv = _write_rv(tmp_path / "t.rv", gammadot=-1.0, gammaddot=0.004)
-    orbit = {"name": "trend", "type": "quadratic", "primary": ["A"]}
+    orbit = {"name": "trend", "type": "constant_jerk", "primary": ["A"]}
     system, _ = _system(_config(rv, [orbit]))
     orbit_c = system.orbit
     gd = orbit_c.gammadot.from_internal(orbit_c.gammadot.initval)

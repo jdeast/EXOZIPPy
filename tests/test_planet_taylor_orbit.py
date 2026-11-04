@@ -31,7 +31,7 @@ def _planet_lens_system(tmp_path):
         "orbit": [
             {
                 "name": "L",
-                "type": "linear",
+                "type": "uniform_rotation",
                 "primary": ["Host"],
                 "companion": ["b"],
             }
@@ -87,7 +87,7 @@ def _geometry_at_start(system, model, times):
 
 def test_a_planet_companion_moves_on_a_linear_lens_orbit(planet_lens):
     system, model = planet_lens
-    assert system.lens.companion_motion == ["linear"]
+    assert system.lens.companion_motion == ["uniform_rotation"]
     # no Keplerian geometry: nothing to derive it from
     assert not system.planet.keplerian_geometry(system)
     for name in ("p", "a", "ar", "K", "teq", "t14"):
@@ -157,7 +157,7 @@ def _triple_lens_config(lc, with_static_orbit=True):
     orbits = [
         {
             "name": "L",
-            "type": "linear",
+            "type": "uniform_rotation",
             "primary": ["L1"],
             "companion": ["L2"],
         }
@@ -234,7 +234,7 @@ def test_a_static_planet_builds_beside_a_linear_stellar_companion(tmp_path):
     assert system.planet.orbit_ndx == [1]
     assert list(system.planet.star_map) == [0]
     assert list(system.orbit.is_static) == [False, True]
-    assert system.lens.companion_motion == ["linear", None]
+    assert system.lens.companion_motion == ["uniform_rotation", None]
     assert not system.planet.keplerian_geometry(system)
     for name in ("p", "a", "ar", "K", "teq", "t14"):
         assert name not in system.planet.manifest, name

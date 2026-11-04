@@ -498,9 +498,9 @@ lens:
                 "orbit.a[lens_kep_orbit_map]", "mulensevent.theta_E[event_map]",
                 "star.distance[primary_lens_map]",
                 "mulensevent.pi_E_N[event_map]", "mulensevent.pi_E_E[event_map]" ]
-  # Lens orbital motion, linear mode (conventions.md C24; review 8.6.8):
+  # Lens orbital motion, uniform_rotation mode (conventions.md C24; review 8.6.8):
   # the RATES ds_dt / dalpha_dt are parameters of the companion's
-  # `type: linear` ORBIT (orbit/defaults.yaml), anchored at t0_par.  Only
+  # `type: uniform_rotation` ORBIT (orbit/defaults.yaml), anchored at t0_par.  Only
   # the bound-orbit diagnostic beta below stays here, because it needs the
   # event's Einstein-radius scale.
   beta:
@@ -530,7 +530,7 @@ lens:
     # LOWER bound on the lens binary's period from its projected separation:
     # r_sky <= a(1 + e) < 2a, so P > sqrt((r_sky/2)^3 / M_total)
     # (physics.calc_period_min).  Reported on a companion moving on a
-    # `type: linear` orbit, where no period is fitted; never a potential
+    # `type: uniform_rotation` orbit, where no period is fitted; never a potential
     # (review 8.8.14).  Reported only, no truncation warning: see
     # physics.calc_period_min for why.
     unit: "d"

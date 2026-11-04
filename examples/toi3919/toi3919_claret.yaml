@@ -45,7 +45,7 @@ orbit:
   # EXOFASTv2's /fitslope: the reflex of a companion too long-period
   # to resolve, as a Taylor orbit: orbit.trend.gammadot is the RV slope
   - name: "trend"
-    type: linear
+    type: constant_acceleration
     primary: ["A"]
 
 transit:

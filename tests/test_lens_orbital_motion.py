@@ -18,7 +18,7 @@ What is pinned here, and why each pin is the one that matters:
     a sign for dalpha_dt is only meaningful jointly with sign(u_0).
   - The t0_par anchor: at t = t0_par the moving geometry IS (s_0, alpha_0),
     so the magnification there matches the static model exactly.
-  - System level: a lens companion on a `type: linear` orbit gets the
+  - System level: a lens companion on a `type: uniform_rotation` orbit gets the
     orbit's ds_dt/dalpha_dt and the lens's beta,
     beta evaluates to the A19 formula, and the model builds with a finite
     logp.  Also the mulensmodel backend passes the rates through natively.
@@ -388,13 +388,13 @@ def _om_system(tmp_path, backend="vbm_direct"):
         "lens": [
             {"body": "star.L1"},
             # Orbital motion is the COMPANION's geometry (design 1.4), and
-            # the orbit it moves on says how: a `type: linear` orbit's rates.
+            # the orbit it moves on says how: a `type: uniform_rotation` orbit's rates.
             {"body": "star.L2", "orbit": "L"},
         ],
         "orbit": [
             {
                 "name": "L",
-                "type": "linear",
+                "type": "uniform_rotation",
                 "primary": ["L1"],
                 "companion": ["L2"],
             }
@@ -437,7 +437,7 @@ def linear_om_system(tmp_path_factory):
 
 def test_linear_mode_declares_rates_and_beta(linear_om_system):
     """
-    Given: a lens companion on a `type: linear` orbit,
+    Given: a lens companion on a `type: uniform_rotation` orbit,
     When: parameters register,
     Then: ds_dt and dalpha_dt are the ORBIT's, beta is the lens's, the
       linear orbit has no Keplerian element left to sample, and the user's
@@ -601,15 +601,19 @@ def test_the_removed_orbital_motion_key_names_its_replacement(motion):
             ],
             cm,
         )
-    assert "type: linear" in str(exc.value).replace("'", "")
+    assert "type: uniform_rotation" in str(exc.value).replace("'", "")
 
 
-def test_a_quadratic_lens_orbit_is_refused():
+@pytest.mark.parametrize(
+    "otype", ["constant_velocity", "constant_acceleration", "constant_jerk"]
+)
+def test_a_cartesian_lens_orbit_is_refused(otype):
     """
-    Given: a lens companion on a `type: quadratic` orbit,
+    Given: a lens companion on a Cartesian Taylor orbit,
     When: the Lens component is constructed,
-    Then: it raises NotImplementedError -- the magnification backends take
-      first derivatives only.
+    Then: it raises NotImplementedError naming uniform_rotation -- a lens
+      reads the polar rates (C24); a Cartesian relative state for a lens is
+      a follow-on.
     """
     from exozippy.components.mulensing.lens import Lens
     from exozippy.config import ConfigManager
@@ -622,13 +626,13 @@ def test_a_quadratic_lens_orbit_is_refused():
         "orbit": [
             {
                 "name": "L",
-                "type": "quadratic",
+                "type": otype,
                 "primary": ["L1"],
                 "companion": ["L2"],
             }
         ],
     }
-    with pytest.raises(NotImplementedError, match="first derivatives"):
+    with pytest.raises(NotImplementedError, match="uniform_rotation"):
         Lens([{"body": "star.L1"}, {"body": "star.L2", "orbit": "L"}], cm)
 
 

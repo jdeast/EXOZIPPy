@@ -326,7 +326,8 @@ def test_fitspline_length_mismatch_raises(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "flag, otype", [("/fitslope", "linear"), ("/fitquad", "quadratic")]
+    "flag, otype",
+    [("/fitslope", "constant_acceleration"), ("/fitquad", "constant_jerk")],
 )
 def test_an_rv_trend_becomes_a_taylor_orbit(
     tmp_path, monkeypatch, flag, otype

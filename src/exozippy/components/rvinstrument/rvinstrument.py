@@ -762,7 +762,7 @@ class RVInstrument(Instrument):
         if taylor_types:
             # The orbit too long to resolve, as the Taylor expansion of the
             # star's reflex velocity about the orbit's reference epoch.
-            quad = "quadratic" in taylor_types
+            quad = "constant_jerk" in taylor_types
             get_collector(system).add(
                 "An additional companion on an orbit too long for the data "
                 "to resolve was modeled as a "

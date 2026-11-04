@@ -17,7 +17,7 @@ logger_level: INFO
 # THE LINEAR ORBITAL-MOTION VARIANT.  ob09020.yaml fits the SAME event on a
 # keplerian orbit, where the RV-constrained orbit drives s(t)/alpha(t) with
 # no new free parameters.  This config instead puts the lens binary on a
-# `type: linear` orbit -- the first-order expansion that most of the
+# `type: uniform_rotation` orbit -- the first-order expansion that most of the
 # microlensing literature uses,
 #
 #     s(t)     = s_0 (1 + gamma_par  (t - t0_par))
@@ -60,7 +60,7 @@ lens:
     # companion's entry, never the primary's.
   - body: star.L2
     # LINEAR orbital motion: the companion moves on orbit L, whose
-    # `type: linear` makes the sky-projected motion a first-order expansion
+    # `type: uniform_rotation` makes the sky-projected motion a first-order expansion
     # about t0_par (orbit.L.ds_dt, orbit.L.dalpha_dt) with no Kepler solve.
     # conventions.md C24.
     orbit: "L"
@@ -70,7 +70,7 @@ lens:
 # the event's t0_par by construction.
 orbit:
   - name: "L"
-    type: linear
+    type: uniform_rotation
     primary:   ["L1"]
     companion: ["L2"]
 

@@ -23,6 +23,7 @@ import pytensor.tensor as pt
 from exozippy.components.component import Component
 from exozippy.components.orbit.bodies import (
     STATIC_TYPE,
+    UNIFORM_ROTATION_TYPE,
     orbit_types,
     parse_orbit_bodies,
 )
@@ -138,7 +139,7 @@ class Lens(Component):
         # Lens orbital motion (C24) is a property of the ORBIT a companion
         # moves on: its `orbit:` key names an orbit block, and that orbit's
         # `type:` decides the mode -- keplerian derives s(t)/alpha(t) from
-        # its elements, linear supplies the rates ds_dt/dalpha_dt.  The
+        # its elements, uniform_rotation supplies the rates ds_dt/dalpha_dt.  The
         # per-lens `orbital_motion:` key that used to say this separately
         # (and could disagree with the orbit) is gone.
         # (A leftover `orbital_motion:` key is refused by the shared key
@@ -169,12 +170,13 @@ class Lens(Component):
                     f"static companion carries no 'orbit:' key (the static "
                     f"orbit block may still pair it with its host)."
                 )
-            if t not in ("keplerian", "linear"):
+            if t not in ("keplerian", UNIFORM_ROTATION_TYPE):
                 raise NotImplementedError(
                     f"lens.{j + 1}: orbit {ref!r} is type: {t}; a lens "
-                    f"companion moves on a keplerian or a linear orbit "
-                    f"(the magnification backends take first derivatives "
-                    f"only, conventions.md C24)."
+                    f"companion moves on a keplerian or a uniform_rotation "
+                    f"orbit (constant ds_dt, dalpha_dt; conventions.md C24).  "
+                    f"A Cartesian Taylor state for a lens is not implemented "
+                    f"(review 8.8.14 follow-on)."
                 )
             if t == "keplerian":
                 # A keplerian orbit gives its COMPANION GROUP's position
@@ -183,7 +185,7 @@ class Lens(Component):
                 # (C15) -- only when the groups are exactly [primary] and
                 # [companion j].  Anything else is a hierarchical system
                 # (8.6.33 phase 2) and would silently give the wrong
-                # geometry.  A linear orbit only holds rates of (s_j,
+                # geometry.  A uniform_rotation orbit only holds rates of (s_j,
                 # alpha_j) themselves, so its groups do not enter.
                 prim, comp = parse_orbit_bodies(sys_cfg.get("orbit"), sys_cfg)
                 want = ([tuple(self.bodies[0])], [tuple(self.bodies[j + 1])])
@@ -380,7 +382,8 @@ class Lens(Component):
                     "vocabulary; absent = a static s/alpha.  The orbit's "
                     "type decides the motion (conventions.md C24): "
                     "'keplerian' drives s(t)/alpha(t) from its elements with "
-                    "NO new free parameters; 'linear' expands about t0_par "
+                    "NO new free parameters; 'uniform_rotation' expands about "
+                    "t0_par "
                     "with the orbit's rates ds_dt [Einstein radii/yr] and "
                     "dalpha_dt [deg/yr user, rad/yr internal], under a soft "
                     "beta < 1 bound-orbit potential (Skowron+2011 A19).  The "
@@ -463,7 +466,7 @@ class Lens(Component):
         # no filler is ever read (the same rule as companion_body_map).
         for mode, attr in (
             ("keplerian", "lens_kep_orbit_map"),
-            ("linear", "lens_motion_orbit_map"),
+            (UNIFORM_ROTATION_TYPE, "lens_motion_orbit_map"),
         ):
             own = [
                 (j + 1, o)
@@ -567,8 +570,8 @@ class Lens(Component):
         # prints the primary row can show a contradictory tuple.
         modes = ["primary"]
         for om in self._companion_om:
-            if om == "linear":
-                modes.append("companion_linear")
+            if om == UNIFORM_ROTATION_TYPE:
+                modes.append("companion_uniform_rotation")
             elif om == "keplerian":
                 modes.append("companion_keplerian")
             else:
@@ -591,13 +594,13 @@ class Lens(Component):
             table = {
                 "primary": {},
                 "companion": dict(static_geom),
-                # Linear lens orbital motion (C24): the companion's orbit is
-                # type: linear, whose rates ds_dt/dalpha_dt (orbit
+                # Uniformly rotating lens (C24): the companion's orbit is
+                # type: uniform_rotation, whose rates ds_dt/dalpha_dt (orbit
                 # parameters, anchored at t0_par -- the parallax anchor, one
                 # epoch is what makes the two effects composable) move the
                 # static geometry here; the derived beta (Skowron A19) is
                 # softly bounded below 1 in build_likelihood.
-                "companion_linear": {
+                "companion_uniform_rotation": {
                     **static_geom,
                     "beta": "default",
                     # What the linear orbit implies about the period (8.8.14):
@@ -826,7 +829,9 @@ class Lens(Component):
         self._validate_q_start()
 
         linear = [
-            j + 1 for j, m in enumerate(self.companion_motion) if m == "linear"
+            j + 1
+            for j, m in enumerate(self.companion_motion)
+            if m == UNIFORM_ROTATION_TYPE
         ]
         self._warn_linear_separation_collapse(system, linear)
         if linear:

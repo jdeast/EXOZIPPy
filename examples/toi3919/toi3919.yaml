@@ -1,7 +1,7 @@
 # TOI-3919: a 7.43-day eccentric giant planet (TESS + ground-based transits,
 # TRES radial velocities) whose RVs also carry a LINEAR TREND -- the first
 # shipped example of a Taylor orbit.  The trend is orbit 'trend' below,
-# `type: linear`, with the star as its primary and no companion named: the
+# `type: constant_acceleration`, with the star as its primary and no companion named: the
 # reflex of a body too long-period to resolve, fitted as orbit.trend.gammadot
 # (m/s/day) about the midpoint of the RVs.  See README.md.
 #
@@ -45,7 +45,7 @@ orbit:
   # EXOFASTv2's /fitslope: the reflex of a companion too long-period
   # to resolve, as a Taylor orbit: orbit.trend.gammadot is the RV slope
   - name: "trend"
-    type: linear
+    type: constant_acceleration
     primary: ["A"]
 
 transit:

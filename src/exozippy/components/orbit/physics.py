@@ -1118,3 +1118,41 @@ def calc_mc_over_r2_min(gammadot):
     ``gammadot`` in solRad/d^2; returns jupiterMass/AU^2.
     """
     return pt.abs(gammadot) * _ACCEL_OVER_G
+
+
+# A sky acceleration of 1 mas/yr^2 at a parallax of 1 mas, in solRad/d^2
+# (gammadot's internal unit): 1 AU/yr^2.
+_SKY_ACCEL_SOLRAD_D2 = float(
+    (1.0 * _u.AU / _u.yr**2).to(_u.solRad / _u.d**2).value
+)
+
+# Floor on |A|^2 (solRad/d^2)^2: STRICTLY positive, so the square root never
+# meets sqrt'(0) = inf at an all-zero start (CLAUDE.md, the where-trap rule).
+_ACCEL_SQ_FLOOR = 1e-300
+
+
+@register_physics
+def calc_accel_total(gammadot, accel_ra, accel_dec, parallax):
+    """|A|: the magnitude of a Taylor orbit's primary-group acceleration
+    where the RVs AND the absolute astrometry both read it (review 8.8.14).
+
+    gammadot is the line-of-sight component (solRad/d^2); accel_ra /
+    accel_dec are the sky components, sampled angular (mas/yr^2), made
+    physical by the anchor star's parallax (mas): mas/yr^2 / plx = AU/yr^2.
+    One acceleration vector, so the three add in quadrature.  Returns
+    solRad/d^2.  For a constant_jerk orbit it is |A| at the orbit's epoch.
+    """
+    sky = _SKY_ACCEL_SOLRAD_D2 / parallax
+    a_sq = gammadot**2 + (accel_ra * sky) ** 2 + (accel_dec * sky) ** 2
+    return pt.sqrt(pt.maximum(a_sq, _ACCEL_SQ_FLOOR))
+
+
+@register_physics
+def calc_mc_over_r2(accel_total):
+    """M_c / r^2 = |A| / G: the companion mass over its squared 3-D
+    separation, an EQUALITY where the whole acceleration vector is measured
+    (RVs + absolute astrometry; the RV slope alone gives only
+    ``calc_mc_over_r2_min``'s bound).  M_c << M_primary is assumed, as for
+    the bound.  ``accel_total`` in solRad/d^2; returns jupiterMass/AU^2.
+    Reported, never a potential."""
+    return accel_total * _ACCEL_OVER_G
