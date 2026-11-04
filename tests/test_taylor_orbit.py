@@ -447,3 +447,156 @@ def test_the_coefficients_are_seeded_from_the_rvs(tmp_path):
     gdd = orbit_c.gammaddot.from_internal(orbit_c.gammaddot.initval)
     assert float(np.atleast_1d(gd)[0]) == pytest.approx(-1.0, rel=1e-6)
     assert float(np.atleast_1d(gdd)[0]) == pytest.approx(0.004, rel=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# 5. Inactive elements are never reported -- not by the consumers that
+#    enumerate the trace either (review 2.11.26)
+# ---------------------------------------------------------------------------
+
+
+def _fake_trace(model, n_chains=2, n_draws=40, seed=0):
+    """A posterior with every free RV jittered about the start, and every
+    Deterministic computed from it -- the variable set a fit's trace holds.
+    """
+    import arviz as az
+    import pymc as pm
+
+    rng = np.random.default_rng(seed)
+    ip = model.initial_point()
+    raws = {
+        v.name: np.asarray(ip[v.name])
+        + 1e-3
+        * rng.standard_normal(
+            (n_chains, n_draws) + np.shape(np.asarray(ip[v.name]))
+        )
+        for v in model.value_vars
+    }
+    idata = az.from_dict({"posterior": raws})
+    derived = pm.compute_deterministics(
+        idata.posterior.to_dataset(),
+        model=model,
+        merge_dataset=False,
+        progressbar=False,
+    )
+    for name in derived.data_vars:
+        idata.posterior[name] = derived[name]
+    return idata
+
+
+def test_inactive_elements_reach_no_trace_report(tmp_path, caplog):
+    """
+    Given a planet orbit beside a Taylor orbit -- whose Keplerian elements
+      (period, ecc, K, ...) are INACTIVE bookkeeping pins on the Taylor
+      element and whose gammadot is inactive on the planet's -- and a trace
+      that, like a fit's, carries every element of every vector,
+    When the summary table, the corner columns and the trace-plot rows are
+      built from what the wrap-up hands them,
+    Then no inactive element appears in any of them, and every active one
+      still does.  The LaTeX table and the CSV already left them out; these
+      listed each as a row and warned "constant at 0".  The filter is
+      ``Parameter.element_is_active``, the tables' own predicate.
+    """
+    import logging
+
+    from exozippy import run
+    from exozippy.corner_utils import collect_corner_samples
+
+    # Arrange
+    rv = _write_rv(tmp_path / "t.rv", gammadot=-1.0)
+    cfg = _config(
+        rv,
+        [
+            {"name": "b", "primary": ["A"], "companion": ["b"]},
+            {
+                "name": "trend",
+                "type": "constant_acceleration",
+                "primary": ["A"],
+            },
+        ],
+        planets=[{"name": "b"}],
+    )
+    params = {
+        "orbit.b.period": {"initval": 7.43},
+        "orbit.b.tc": {"initval": 2459650.0},
+    }
+    system, model = _system(cfg, params)
+    idata = _fake_trace(model)
+    masks = system.inactive_element_masks()
+    lookup = system.get_parameter_lookup()
+    for label, mask in masks.items():
+        p = lookup[label]
+        assert list(mask) == [
+            p.element_is_active(i) for i in range(mask.size)
+        ], label
+    # The premise: the trace does carry inactive elements to leave out.
+    assert np.asarray(idata.posterior["orbit.period"]).shape[-1] == 2
+    assert not masks["orbit.period"][1] and masks["orbit.period"][0]
+    assert masks["orbit.gammadot"].tolist() == [False, True]
+
+    report_only = set(system.report_only_labels())
+
+    def inactive_labels():
+        return {
+            f"{label}[{i}]"
+            for label, mask in masks.items()
+            if label in idata.posterior and label not in report_only
+            for i in np.flatnonzero(~mask)
+        }
+
+    def active_labels():
+        return {
+            f"{label}[{i}]"
+            for label, mask in masks.items()
+            if label in idata.posterior and label not in report_only
+            for i in np.flatnonzero(mask)
+        }
+
+    assert "orbit.period[1]" in inactive_labels()
+
+    # Act
+    reported = run.without_inactive(idata, masks)
+    diag = {
+        "burnin": 0,
+        "burnin_frac": 0.0,
+        "n_draws": 40,
+        "n_chains_used": 2,
+        "converged": True,
+    }
+    # What the wrap-up passes: the report-only nodes (review 2.6.14) are
+    # left out of every enumerating consumer as well.
+    summary = run._format_summary(reported, diag, system, exclude=report_only)
+    _, corner_labels = collect_corner_samples(
+        reported,
+        [
+            (v, run._element_coord_labels(reported.posterior[v]))
+            for v in reported.posterior.data_vars
+            if "_raw" not in v and v not in report_only
+        ],
+    )
+    plot_vars = [
+        p.label
+        for p in system.get_all_parameters()
+        if p.label in reported.posterior and p.label not in report_only
+    ]
+    with caplog.at_level(logging.WARNING):
+        run._split_degenerate_vars(reported, plot_vars)
+    trace_rows = {
+        label
+        for v in plot_vars
+        for _, label, _ in run._element_rows(reported.posterior, v)
+    }
+
+    # Assert
+    rows = {line.split()[0] for line in summary.splitlines()[1:] if line}
+    for label in inactive_labels():
+        assert label not in rows, label
+        assert label not in corner_labels, label
+        assert label not in trace_rows, label
+        assert label not in caplog.text, label
+    for label in active_labels():
+        assert label in rows, label
+        assert label in corner_labels, label
+        assert label in trace_rows, label
+    # The full trace is untouched for the mode pass, the tables and mkparam.
+    assert np.asarray(idata.posterior["orbit.period"]).shape[-1] == 2

@@ -1770,46 +1770,38 @@ class System(Component):
         was the raw-cancellation clip's wall at |raw| = 1e4 -- tc's excursion
         reaches ~1e5 -- worth ~1e10 nats; the logit raw coordinate is flat
         now and that clip is gone.)
+
+        Nothing here is caught (review 1.3.11).  A fold or a regeneration
+        that fails is a code bug, and the wrap-up runs AFTER the trace is
+        saved, so raising costs a `recompute_trace: false` rerun; logging
+        and continuing instead reported both labels' draws, or folded raws
+        beside unfolded derived columns, in every table and plot.
+
+        Every variable that changes is REPLACED through the xarray API with
+        a new array, never written through ``.values``: the buffer behind a
+        sampler's posterior may be read-only (a JAX sampler's is), which is
+        exactly how the swallowed crash happened.
         """
-        posterior = getattr(idata, "posterior", None)
-        if posterior is None:
-            return set()
+        posterior = idata.posterior
         moved = False
         for comp in self.active_components.values():
             fold = getattr(comp, "fold_node_degeneracy", None)
             if fold is None:
                 continue
-            try:
-                moved = bool(fold(posterior)) or moved
-            except Exception as exc:  # a fold must never kill a finished fit
-                logger.warning(
-                    "[%s] degeneracy fold failed (%s); the draws are left "
-                    "unfolded, so any diagnostic on the degenerate "
-                    "coordinate is computed on both labels at once.",
-                    getattr(comp, "prefix", comp),
-                    exc,
-                )
+            moved = bool(fold(posterior)) or moved
         if not moved:
             return set()
-        try:
-            regenerated = pm.compute_deterministics(
-                posterior,
-                model=model,
-                merge_dataset=False,
-                progressbar=False,
-            )
-        except Exception as exc:
-            logger.warning(
-                "could not regenerate the deterministics after the "
-                "degeneracy fold (%s); the raw draws are folded and the "
-                "derived ones are NOT, so they disagree -- treat this "
-                "trace's derived columns as unreliable.",
-                exc,
-            )
-            return set()
+        regenerated = pm.compute_deterministics(
+            posterior,
+            model=model,
+            merge_dataset=False,
+            progressbar=False,
+        )
         for name in regenerated.data_vars:
             if name in posterior:
-                posterior[name].values[...] = regenerated[name].values
+                posterior[name] = posterior[name].copy(
+                    data=np.array(regenerated[name].values)
+                )
         logger.info(
             "degeneracy fold applied; %d deterministics regenerated.",
             len(regenerated.data_vars),
@@ -1914,6 +1906,31 @@ class System(Component):
             for label, p in self.get_parameter_lookup().items()
             if p.report_only_node
         )
+
+    def inactive_element_masks(self):
+        """``{label: boolean ACTIVE mask}`` for every built Parameter that
+        has an INACTIVE element.
+
+        The answer is ``Parameter.element_is_active`` -- the predicate the
+        startup table, the LaTeX table and ``<prefix>_results.csv`` already
+        filter on, inherited inactivity included
+        (``Component._inherit_inactivity``) -- asked once per element, so
+        the consumers that enumerate the TRACE (the summary, the corners,
+        the detailed trace plots; ``run.without_inactive``) leave out exactly
+        the elements the tables leave out.  An inactive element is a
+        bookkeeping pin, not a parameter of its instance, and reporting it
+        as "constant at 0" was review 2.11.26.  A Parameter every element of
+        which is active is absent.  Valid after ``build_model()``.
+        """
+        out = {}
+        for label, p in self.get_parameter_lookup().items():
+            mask = np.array(
+                [p.element_is_active(i) for i in range(p._n_elements())],
+                dtype=bool,
+            )
+            if not mask.all():
+                out[label] = mask
+        return out
 
     def restart_aliases(self):
         """``{sampled label: derived label}`` for every built Parameter whose

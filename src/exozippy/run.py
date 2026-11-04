@@ -16,6 +16,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pymc as pm
 import pytensor
+import xarray as xr
 from matplotlib.backends.backend_pdf import PdfPages
 
 from exozippy.config import user_entry
@@ -1896,9 +1897,14 @@ def _wrap_up(
 
     # Announced like every other wrap-up step (review 2.3.12).
     wrapup.stage("convergence summary")
+    # The summary, the global corner and the detailed trace plots enumerate
+    # the trace, so they read it with every INACTIVE element left out -- by
+    # the same Parameter.element_is_active the tables and CSV use (review
+    # 2.11.26).  A view: `idata` keeps the full vectors for what follows.
+    reported = without_inactive(idata, system.inactive_element_masks())
     summary_path = Path(str(prefix) + "_summary.txt")
     summary_path.write_text(
-        _format_summary(idata, burn_diag, system, exclude=report_only),
+        _format_summary(reported, burn_diag, system, exclude=report_only),
         encoding="utf-8",
     )
 
@@ -1907,7 +1913,7 @@ def _wrap_up(
         f"corner plots (1 global + up to {len(system.active_components)} "
         f"per-component)"
     )
-    make_corner(idata, str(prefix) + "_corner.png", exclude=report_only)
+    make_corner(reported, str(prefix) + "_corner.png", exclude=report_only)
 
     # Component-specific corner plots (e.g. mulensing geometry). Unlike
     # comp.plot(), which also runs pre-flight on a single point, this only
@@ -1921,10 +1927,10 @@ def _wrap_up(
     plot_vars = [
         p.label
         for p in all_params
-        if p.label in idata["posterior"] and p.label not in report_only
+        if p.label in reported["posterior"] and p.label not in report_only
     ]
     save_multipage_trace(
-        idata, plot_vars, str(prefix) + "_trace_detailed.pdf", model=model
+        reported, plot_vars, str(prefix) + "_trace_detailed.pdf", model=model
     )
 
     # Generate final plots.  The modeling draft below reads draws[0] for its
@@ -2904,6 +2910,50 @@ def _format_summary(idata, diag, system=None, exclude=()):
     return "\n".join(header) + "\n" + df.to_string() + "\n"
 
 
+def without_inactive(idata, inactive_masks):
+    """``idata`` with every INACTIVE element left out of its posterior.
+
+    ``inactive_masks`` is ``System.inactive_element_masks()`` -- the same
+    ``Parameter.element_is_active`` answer the LaTeX table and the results
+    CSV filter on -- so the consumers that enumerate the trace (the
+    summary, the global and per-mode corners, the detailed trace plots)
+    report exactly the elements the tables do.  An inactive element is a
+    bookkeeping pin, so each one used to reach those as a "constant at 0"
+    row and a no-density warning (review 2.11.26).
+
+    A shallow copy: the posterior group is rebuilt from the surviving
+    elements (a variable with none left is dropped), every other group is
+    shared, and ``idata`` itself is untouched -- the mode pass, the
+    distributed posterior and the restart file need the full vectors.
+    Element coordinates are kept, so a surviving element keeps its index in
+    every label.  Returns ``idata`` itself when nothing is inactive.
+    """
+    post = idata["posterior"]
+    hit = [v for v in post.data_vars if v in inactive_masks]
+    if not hit:
+        return idata
+    data = {}
+    for v in post.data_vars:
+        da = post[v]
+        if v in inactive_masks:
+            mask = inactive_masks[v]
+            extra = [d for d in da.dims if d not in ("chain", "draw")]
+            if len(extra) != 1 or da.sizes[extra[0]] != mask.size:
+                raise ValueError(
+                    f"without_inactive: {v} has element dims "
+                    f"{[(d, da.sizes[d]) for d in extra]}, but its Parameter "
+                    f"has {mask.size} elements; a Parameter's trace variable "
+                    f"is (chain, draw, element)"
+                )
+            if not mask.any():
+                continue
+            da = da.isel({extra[0]: np.flatnonzero(mask)})
+        data[v] = da
+    view = idata.copy()
+    view["posterior"] = xr.DataTree(xr.Dataset(data, attrs=dict(post.attrs)))
+    return view
+
+
 def make_corner(idata, filename, max_samples=1000, exclude=()):
     """Corner-plot every physical variable in a trace's posterior group.
 
@@ -2927,9 +2977,32 @@ def make_corner(idata, filename, max_samples=1000, exclude=()):
         and v != "mode"
         and v not in exclude
     ]
-    var_specs = [(v, None) for v in physical_vars]
+    var_specs = [
+        (v, _element_coord_labels(idata["posterior"][v]))
+        for v in physical_vars
+    ]
     samples, labels = collect_corner_samples(idata, var_specs)
     save_corner_plot(samples, labels, filename, max_samples=max_samples)
+
+
+def _element_coord_labels(da):
+    """``["v[i]", ...]`` from a vector variable's element COORDINATE, or
+    None for a scalar.
+
+    Positional labels (corner_utils' default) would renumber a vector that
+    ``without_inactive`` thinned -- the surviving `orbit.gammadot[1]` of a
+    planet-plus-trend fit would be drawn as `orbit.gammadot[0]`, the
+    inactive one -- so the label is the element's own index, as the
+    summary's and the trace plots' are.  Identical to the positional label
+    for an unthinned vector.
+    """
+    extra = [d for d in da.dims if d not in ("chain", "draw")]
+    if len(extra) != 1:
+        return None
+    dim = extra[0]
+    if dim not in da.coords:
+        return None
+    return [f"{da.name}[{c}]" for c in da.coords[dim].values]
 
 
 # Module-level globals for fork-based parallel lp evaluation.
@@ -3981,13 +4054,16 @@ def _emit_per_mode_outputs(system, idata, mode_report, prefix):
     """
     prefix = str(prefix)
     report_only = set(system.report_only_labels())
+    inactive = system.inactive_element_masks()
     for k, m in enumerate(mode_report.modes):
         suffix = mode_suffix(k)
         t0 = time.time()
 
         idata_k = _idata_for_mode(idata, k)
         make_corner(
-            idata_k, f"{prefix}_corner_{suffix}.png", exclude=report_only
+            without_inactive(idata_k, inactive),
+            f"{prefix}_corner_{suffix}.png",
+            exclude=report_only,
         )
 
         # Same draw-count knob as the combined-posterior plots (get_draws'
