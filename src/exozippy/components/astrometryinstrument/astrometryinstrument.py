@@ -75,8 +75,27 @@ Supports three data modes (set per instrument via 'mode' in the config):
          own; the jitter is INACTIVE on a catalog dataset.
 
 Per-instrument config keys:
-  file              : data file (whitespace-separated, '#' comments)
-  mode              : gaia | abs | rel   (default gaia)
+  file              : data file (whitespace-separated, '#' comments; see
+                      data_format)
+  mode              : gaia | abs | rel | lensrel | catalog (default gaia)
+  data_format       : columns (default: the whitespace file above) |
+                      gaia_epoch (mode gaia only): a Gaia epoch-astrometry
+                      table as the archive delivers it (the DR4
+                      epoch_astrometry product; VOTable, ECSV or FITS),
+                      read by read_gaia_epoch_astrometry: one record per
+                      CCD observation AGIS used along scan, w =
+                      centroid_pos_al measured from the file's (ra0, dec0)
+                      -- which is then the tangent point -- and times in
+                      barycentric TCB (obs_time_tcb + obs_time_bary_corr,
+                      ns from 2010-01-01), converted to BJD_TDB.  The
+                      format fixes layout and time system, so columns:
+                      and time_* keys raise; observer_location must be
+                      gaia.  The model's along-scan parallax factors are
+                      checked against the file's parallax_factor_al at
+                      load (warned beyond 1e-3; the DR4 pre-release
+                      agrees to 1.5e-5).
+  source_id         : gaia_epoch only: the source to read from a table of
+                      several
   observer_location : ephemeris for parallax factors (default 'gaia' for
                       gaia mode, 'earth' otherwise; see exozippy.ephemeris)
   star_ndx          : index of the host star (default 0); also sets the
@@ -250,6 +269,7 @@ import logging
 import os
 
 import numpy as np
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -430,6 +450,203 @@ def wrap_ra_diff_pt(delta_rad):
     return pt.arctan2(pt.sin(delta_rad), pt.cos(delta_rad))
 
 
+# ----------------------------------------------------------------------
+# Gaia epoch astrometry, read as the archive delivers it
+# (data_format: gaia_epoch)
+# ----------------------------------------------------------------------
+DATA_FORMATS = ("columns", "gaia_epoch")
+# The origin of obs_time_tcb: 2010-01-01T00:00:00 TCB, as a JD (the DR4
+# data model; the VOTable's TIMESYS states it, and it is checked there).
+GAIA_EPOCH_TIME_ORIGIN = 2455197.5
+# Config keys that describe a file's time system or layout -- the format
+# fixes both, so a value for any of them would be a second, competing
+# description (one spelling: the file's).
+GAIA_EPOCH_FIXED_KEYS = (
+    "columns",
+    "time_offset",
+    "time_scale",
+    "time_frame",
+    "time_location",
+    "time_ephemeris",
+)
+# Per-transit columns, and the per-CCD (array-valued) ones, with the unit
+# each must carry when the file states one.
+GAIA_EPOCH_TRANSIT_COLUMNS = {
+    "source_id": None,
+    "transit_id": None,
+    "ra0": "deg",
+    "dec0": "deg",
+    "obs_time_bary_corr": "ns",
+    "parallax_factor_al": None,
+}
+GAIA_EPOCH_CCD_COLUMNS = {
+    "obs_time_tcb": "ns",
+    "centroid_pos_al": "mas",
+    "centroid_pos_error_al": "mas",
+    "scan_pos_angle": "deg",
+    "used_by_agis_al": None,
+}
+GAIA_EPOCH_READERS = {
+    ".xml": "votable",
+    ".vot": "votable",
+    ".votable": "votable",
+    ".ecsv": "ascii.ecsv",
+    ".fits": "fits",
+    ".fit": "fits",
+}
+
+
+def read_gaia_epoch_astrometry(path, source_id=None, where=""):
+    """One source's along-scan CCD observations from a Gaia epoch-astrometry
+    table (the DR4 ``epoch_astrometry`` product: VOTable, ECSV or FITS).
+
+    Each row of the product is one field-of-view transit, its per-CCD
+    quantities arrays.  This keeps the CCD observations AGIS used along
+    scan (``used_by_agis_al``, as DPAC's ``gaiasupdate`` does), one record
+    each, in the file's order, and returns ``(df, meta)``:
+
+    * ``df`` columns, positionally: the barycentric TCB instant as a JD
+      (``2455197.5 + (obs_time_tcb + obs_time_bary_corr)/86400e9``; the
+      same instant ``gaiasupdate.set_relative_time`` forms), ``w`` =
+      ``centroid_pos_al`` [mas], its error [mas], ``scan_pos_angle``
+      [deg], and DPAC's ``parallax_factor_al`` (a cross-check only; the
+      model computes its own from the spacecraft ephemeris);
+    * ``meta``: ``ra0``/``dec0`` [deg], the reference point ``w`` is
+      measured from, plus ``source_id`` and the number of field-of-view
+      transits ``n_transits``.
+
+    ``source_id`` selects the source; it may be omitted only when the file
+    holds one.  Raises, naming the file, on a missing column, a unit other
+    than the data model's, a VOTable TIMESYS other than TCB from
+    2455197.5, CCD arrays of unequal length, a used CCD without a
+    centroid, or a reference point that changes between transits.
+    """
+    from astropy.table import Table
+
+    label = f"{where} gaia_epoch file {path!r}".strip()
+    ext = os.path.splitext(str(path))[1].lower()
+    if ext not in GAIA_EPOCH_READERS:
+        raise ValueError(
+            f"{label}: unrecognized extension {ext!r}; a Gaia epoch-"
+            f"astrometry table is read as {sorted(GAIA_EPOCH_READERS)}."
+        )
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"{label}: data file not found.")
+    fmt = GAIA_EPOCH_READERS[ext]
+    if fmt == "votable":
+        from astropy.io.votable import parse
+
+        vot = parse(path)
+        timesys = [ts for res in vot.resources for ts in res.time_systems]
+        if len(timesys) > 1:
+            raise ValueError(
+                f"{label}: {len(timesys)} TIMESYS elements; expected one."
+            )
+        if timesys:
+            ts = timesys[0]
+            if (
+                str(ts.timescale).upper() != "TCB"
+                or float(ts.timeorigin) != GAIA_EPOCH_TIME_ORIGIN
+            ):
+                raise ValueError(
+                    f"{label}: TIMESYS says timescale {ts.timescale!r} from "
+                    f"JD {ts.timeorigin}; the Gaia epoch-astrometry data "
+                    f"model is TCB from {GAIA_EPOCH_TIME_ORIGIN} "
+                    f"(2010-01-01T00:00:00 TCB)."
+                )
+        table = vot.get_first_table().to_table()
+    else:
+        table = Table.read(path, format=fmt)
+
+    wanted = {**GAIA_EPOCH_TRANSIT_COLUMNS, **GAIA_EPOCH_CCD_COLUMNS}
+    missing = [c for c in wanted if c not in table.colnames]
+    if missing:
+        raise ValueError(
+            f"{label}: missing column(s) {missing} of the Gaia epoch-"
+            f"astrometry data model."
+        )
+    for col, unit in wanted.items():
+        have = table[col].unit
+        if unit is not None and have is not None and str(have) != unit:
+            raise ValueError(
+                f"{label}: column {col!r} is in {have}; the data model "
+                f"has it in {unit}."
+            )
+
+    ids = np.unique(np.asarray(table["source_id"], dtype=np.int64))
+    if source_id is None:
+        if len(ids) != 1:
+            raise ValueError(
+                f"{label}: holds {len(ids)} sources {ids.tolist()}; name "
+                f"one with `source_id:`."
+            )
+        source_id = int(ids[0])
+    rows = table[np.asarray(table["source_id"], dtype=np.int64) == source_id]
+    if len(rows) == 0:
+        raise ValueError(
+            f"{label}: source_id {source_id} is not in the file; it holds "
+            f"{ids.tolist()}."
+        )
+    ra0 = np.asarray(rows["ra0"], dtype=float)
+    dec0 = np.asarray(rows["dec0"], dtype=float)
+    if np.ptp(ra0) != 0.0 or np.ptp(dec0) != 0.0:
+        raise ValueError(
+            f"{label}: the reference point (ra0, dec0) of source "
+            f"{source_id} changes between transits; w is measured from one."
+        )
+
+    out = []
+    for r in rows:
+        ccd = {c: np.ma.asarray(r[c]) for c in GAIA_EPOCH_CCD_COLUMNS}
+        sizes = {c: a.size for c, a in ccd.items()}
+        if len(set(sizes.values())) != 1:
+            raise ValueError(
+                f"{label}: transit {r['transit_id']} has per-CCD arrays of "
+                f"unequal length {sizes}."
+            )
+        used = np.ma.filled(ccd["used_by_agis_al"].astype(bool), False)
+        if not used.any():
+            continue
+        # Per-transit values: masked on some transits, which is harmless
+        # only when the transit contributes nothing.
+        bary = r["obs_time_bary_corr"]
+        plx = r["parallax_factor_al"]
+        if np.ma.is_masked(bary) or np.ma.is_masked(plx):
+            raise ValueError(
+                f"{label}: transit {r['transit_id']} has CCDs used_by_agis_al "
+                f"but a masked obs_time_bary_corr or parallax_factor_al."
+            )
+        bary, plx = float(bary), float(plx)
+        for k in np.flatnonzero(used):
+            vals = [
+                ccd[c][k]
+                for c in GAIA_EPOCH_CCD_COLUMNS
+                if c != "used_by_agis_al"
+            ]
+            if any(np.ma.is_masked(v) for v in vals):
+                raise ValueError(
+                    f"{label}: transit {r['transit_id']} CCD {k} is "
+                    f"used_by_agis_al but has a masked time, centroid, "
+                    f"error or scan angle."
+                )
+            t_ns, w, err, psi = vals
+            jd = GAIA_EPOCH_TIME_ORIGIN + (int(t_ns) + bary) / 86400e9
+            out.append((jd, float(w), float(err), float(psi), plx))
+    if not out:
+        raise ValueError(
+            f"{label}: source {source_id} has no CCD observation used by "
+            f"AGIS along scan."
+        )
+    df = pd.DataFrame(out, columns=range(5))
+    meta = {
+        "source_id": int(source_id),
+        "ra0": float(ra0[0]),
+        "dec0": float(dec0[0]),
+        "n_transits": len(rows),
+    }
+    return df, meta
+
+
 class AstrometryInstrument(Instrument):
     prose_noun = "astrometry"
     # No per-file Gaussian process here.  Unlike the other instruments, an
@@ -516,6 +733,7 @@ class AstrometryInstrument(Instrument):
             self.rel_orbit.append(idx)
 
         self._parse_catalog_and_split_keys()
+        self._parse_data_formats()
 
     def _parse_catalog_and_split_keys(self):
         """The catalog-mode and blend-split keys (review 8.10.3), checked at
@@ -651,6 +869,132 @@ class AstrometryInstrument(Instrument):
                 f"{where} catalog_n_epochs must be an integer >= 3; got {n!r}."
             )
         return ("span", (float(span[0]), float(span[1])), int(n))
+
+    def _parse_data_formats(self):
+        """``data_format:`` per dataset (at construction).
+
+        ``columns`` (the default) is the whitespace file of the mode's
+        roles.  ``gaia_epoch`` is a Gaia epoch-astrometry TABLE as the
+        archive delivers it (``read_gaia_epoch_astrometry``), legal only in
+        ``mode: gaia`` with the Gaia spacecraft as observer.  The format
+        states the file's layout and its time system (barycentric TCB, ns
+        from 2010-01-01), so the keys that would describe either again --
+        ``columns:`` and every ``time_*:`` key -- raise rather than compete
+        with it; the time spec is set here to what the format says, and the
+        shared reader converts it to BJD_TDB like any other file's.
+        ``source_id:`` picks the source in a multi-source table and is a
+        gaia_epoch key only.
+        """
+        self.data_formats = []
+        self.source_ids = []
+        self._gaia_epoch_meta = [None] * self.n_elements
+        for i, c in enumerate(self.config):
+            where = f"[{self.prefix}.{self.names[i]}]"
+            fmt = c.get("data_format", "columns")
+            if fmt not in DATA_FORMATS:
+                raise ValueError(
+                    f"{where} data_format must be one of {list(DATA_FORMATS)}; "
+                    f"got {fmt!r}."
+                )
+            sid = c.get("source_id")
+            if fmt != "gaia_epoch":
+                if sid is not None:
+                    raise ValueError(
+                        f"{where} source_id selects a source in a "
+                        f"data_format: gaia_epoch table; this dataset is "
+                        f"data_format: {fmt}."
+                    )
+                self.data_formats.append(fmt)
+                self.source_ids.append(None)
+                continue
+            if self.modes[i] != "gaia":
+                raise ValueError(
+                    f"{where} data_format: gaia_epoch is Gaia along-scan "
+                    f"epoch astrometry, i.e. mode: gaia; this dataset is "
+                    f"mode '{self.modes[i]}'."
+                )
+            if self.observers[i] != "gaia":
+                raise ValueError(
+                    f"{where} data_format: gaia_epoch was observed by the "
+                    f"Gaia spacecraft; observer_location "
+                    f"{self.observers[i]!r} would compute its parallax "
+                    f"factors for the wrong observer.  Drop the key."
+                )
+            given = [k for k in GAIA_EPOCH_FIXED_KEYS if k in c]
+            if given:
+                raise ValueError(
+                    f"{where} data_format: gaia_epoch fixes the file's "
+                    f"layout and time system (barycentric TCB from "
+                    f"2010-01-01, converted to BJD_TDB on read); {given} "
+                    f"would describe them a second time.  Drop them."
+                )
+            if sid is not None and (
+                isinstance(sid, bool) or not isinstance(sid, (int, np.integer))
+            ):
+                raise ValueError(
+                    f"{where} source_id must be the integer Gaia source_id; "
+                    f"got {sid!r}."
+                )
+            self.data_formats.append(fmt)
+            self.source_ids.append(None if sid is None else int(sid))
+            # What the format says: barycentric (frame bjd) TCB, absolute
+            # JDs once read.  needs_conversion also makes the data prose
+            # say the times were converted, which they are.
+            self.time_specs[i] = {
+                "offset": 0.0,
+                "scale": "tcb",
+                "frame": "bjd",
+                "location": None,
+                "ephemeris": "builtin",
+                "needs_conversion": True,
+            }
+
+    def _read_table(self, i):
+        """``data_format: gaia_epoch`` reads the archive table; every other
+        file is the shared whitespace read."""
+        if self.data_formats[i] != "gaia_epoch":
+            return super()._read_table(i)
+        df, meta = read_gaia_epoch_astrometry(
+            self.files[i],
+            source_id=self.source_ids[i],
+            where=f"[{self.prefix}.{self.names[i]}]",
+        )
+        self._gaia_epoch_meta[i] = meta
+        logger.info(
+            f"[{self.prefix}.{self.names[i]}] Gaia epoch astrometry of "
+            f"source {meta['source_id']}: {len(df)} along-scan CCD "
+            f"observations used by AGIS, from {meta['n_transits']} "
+            f"field-of-view transits; w measured from (ra0, dec0) = "
+            f"({meta['ra0']:.9f}, {meta['dec0']:.9f}) deg."
+        )
+        return df
+
+    # The along-scan parallax factors of a gaia_epoch dataset, ours against
+    # DPAC's, may differ by this much before a warning (HIP1349's Hipparcos
+    # check uses the same tolerance; the twelve DR4 pre-release sources agree
+    # to <= 1.5e-5, i.e. 0.2 microarcsec of parallax for Gaia-4).
+    PARALLAX_FACTOR_TOL = 1e-3
+
+    def _check_gaia_parallax_factors(self, i, d):
+        """Compare the model's along-scan parallax factors (the spacecraft
+        ephemeris at the reception instant) with the ones DPAC ships in a
+        gaia_epoch file.  They measure the same thing, so a disagreement
+        means the ephemeris, the observer or the time conversion is off;
+        warned, not raised -- the fit can still be run to look."""
+        ours = d["P_E"] * d["sin_psi"] + d["P_N"] * d["cos_psi"]
+        diff = float(np.max(np.abs(ours - d["plx_al_dpac"])))
+        msg = (
+            f"[{self.prefix}.{self.names[i]}] along-scan parallax factors, "
+            f"model minus DPAC: max |diff| = {diff:.1e}"
+        )
+        if diff > self.PARALLAX_FACTOR_TOL:
+            logger.warning(
+                msg + f" exceeds {self.PARALLAX_FACTOR_TOL:g}: the "
+                f"spacecraft ephemeris, the observer or the time "
+                f"conversion disagrees with Gaia's own."
+            )
+        else:
+            logger.info(msg + ".")
 
     @property
     def prefix(self):
@@ -926,6 +1270,32 @@ class AstrometryInstrument(Instrument):
                 "doc": "catalog mode with catalog_span: number of epochs (default 100).",
             },
             {
+                "key": "data_format",
+                "kind": "option",
+                "accepts": list(DATA_FORMATS),
+                "required": False,
+                "doc": (
+                    "columns (default): a whitespace file of the mode's "
+                    "columns. gaia_epoch (mode: gaia only): a Gaia "
+                    "epoch-astrometry table as the archive delivers it "
+                    "(VOTable, ECSV or FITS; the DR4 epoch_astrometry "
+                    "product), read CCD by CCD, keeping the observations "
+                    "AGIS used along scan, in its own time system "
+                    "(barycentric TCB) and from its own reference point "
+                    "(ra0, dec0); columns: and time_* keys raise."
+                ),
+            },
+            {
+                "key": "source_id",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "data_format: gaia_epoch only. The Gaia source_id to "
+                    "read from a table holding several sources."
+                ),
+            },
+            {
                 "key": "epoch",
                 "kind": "option",
                 "accepts": None,
@@ -1037,10 +1407,23 @@ class AstrometryInstrument(Instrument):
                     f"[{self.prefix}.{self.names[i]}] the astrometry "
                     f"tangent point",
                 )
+                if self.data_formats[i] == "gaia_epoch":
+                    # The file measures w from ITS reference point, so that
+                    # is the tangent point: projecting about the star's
+                    # start instead would offset every abscissa by the
+                    # difference.  The star's start (required above all
+                    # the same) is then only where the sampler begins.
+                    meta = self._gaia_epoch_meta[i]
+                    ra_ref = np.radians(meta["ra0"])
+                    dec_ref = np.radians(meta["dec0"])
                 d["ra_ref"] = ra_ref
                 d["dec_ref"] = dec_ref
 
             if mode == "gaia":
+                if self.data_formats[i] == "gaia_epoch":
+                    # DPAC's along-scan parallax factor, kept to check the
+                    # model's own (below); the model never reads it.
+                    d["plx_al_dpac"] = df.iloc[:, 4].values.astype(float)
                 d["w"] = df.iloc[:, 1].values.astype(float)  # mas
                 d["err"] = df.iloc[:, 2].values.astype(float)  # mas
                 psi = df.iloc[:, 3].values.astype(float) * np.pi / 180.0
@@ -1118,6 +1501,8 @@ class AstrometryInstrument(Instrument):
                 )
                 # Apparent displacement of the source = parallax * (P_E, P_N)
                 d["P_E"], d["P_N"] = parallax_factors(xyz, ra_ref, dec_ref)
+                if "plx_al_dpac" in d:
+                    self._check_gaia_parallax_factors(i, d)
                 # Kept for the centroid shift of a lensed source: the
                 # trajectory wants the observer's Skowron+2011 deviations,
                 # which need t0_par and so are formed at stage 7
