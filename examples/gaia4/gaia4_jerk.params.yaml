@@ -1,0 +1,73 @@
+# Starting values / priors for Gaia-4.
+# Stellar priors and orbit starts from Stefansson et al. (2025), AJ 169,
+# 107, Tables 1 and 4 (the adopted Gaia+RV column); proper motion and
+# parallax from the Gaia DR3 two-body orbit solution; position at J2017.5
+# (the DR4 reference epoch) from the DR4 file's reference point (ra0, dec0).
+
+star.A.mass:
+  initval: 0.644
+  sigma: 0.024
+  citation: Stefansson:2025
+star.A.radius:
+  initval: 0.624
+  sigma: 0.015
+  citation: Stefansson:2025
+star.A.teff:
+  initval: 4034
+  sigma: 77
+  citation: Stefansson:2025
+star.A.feh:
+  initval: 0.05
+  sigma: 0.13
+  citation: Stefansson:2025
+
+star.A.ra:
+  initval: 209.5063268875399
+star.A.dec:
+  initval: 31.695499700479004
+star.A.pm_ra:
+  initval: -75.529
+star.A.pm_dec:
+  initval: 18.101
+star.A.parallax:
+  initval: 13.643
+
+planet.b.mass:
+  initval: 11.8
+planet.b.radius:
+  initval: 1.0
+  sigma: 0
+
+orbit.b.period:
+  initval: 571.3
+orbit.b.tp:
+  initval: 2457386.1
+orbit.b.secosw:
+  initval: -0.58137
+orbit.b.sesinw:
+  initval: -0.00304
+orbit.b.bigomega:
+  initval: 158.6
+orbit.b.cosi:
+  initval: -0.452
+
+rvinstrument.HPF.gamma:
+  initval: -55.6
+rvinstrument.NEID.gamma:
+  initval: -48.0
+rvinstrument.FIES.gamma:
+  initval: 67.1
+
+# The outer companion's reflex: no published value; started at zero.
+orbit.outer.gammadot:
+  initval: 0.0
+orbit.outer.accel_ra:
+  initval: 0.0
+orbit.outer.accel_dec:
+  initval: 0.0
+orbit.outer.gammaddot:
+  initval: 0.0
+orbit.outer.jerk_ra:
+  initval: 0.0
+orbit.outer.jerk_dec:
+  initval: 0.0
