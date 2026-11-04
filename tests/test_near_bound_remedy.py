@@ -89,6 +89,22 @@ class _System:
         return list(self._params)
 
 
+RNG = np.random.default_rng(20261104)
+
+
+def _hugging(wall, n=400, scale=0.05, side="lower"):
+    """Draws piled against ``wall`` in log space: a half-normal of log-width
+    ``scale`` leaning on it from inside -- the shape a bound gives a
+    posterior that would leave if it could."""
+    step = np.abs(RNG.normal(0.0, scale, n))
+    return wall * np.exp(step if side == "lower" else -step)
+
+
+def _lognormal(center, n=400, scale=0.1):
+    """Draws well inside the range: a log-normal of log-width ``scale``."""
+    return center * np.exp(RNG.normal(0.0, scale, n))
+
+
 def _built(label, posterior_values, remedy=REMEDY, lower=0.01, upper=100.0):
     par = Parameter(
         label=label,
@@ -108,14 +124,17 @@ def _built(label, posterior_values, remedy=REMEDY, lower=0.01, upper=100.0):
 
 def test_posterior_against_the_upper_wall_warns_with_the_remedy(caplog):
     """
-    Given a bounded parameter whose posterior median sits at 95 on [0.01, 100],
+    Given a bounded parameter whose posterior piles against 100 on
+      [0.01, 100],
     When the wrap-up near-bound check runs,
     Then it warns once, names the upper bound, and appends the component's
       remedy sentence -- while a parameter sitting mid-range says nothing.
     """
     # ARRANGE
-    wall = _built("mulensinstrument.A.err_scale", np.full(400, 95.0))
-    fine = _built("mulensinstrument.B.err_scale", np.full(400, 1.1))
+    wall = _built(
+        "mulensinstrument.A.err_scale", _hugging(100.0, side="upper")
+    )
+    fine = _built("mulensinstrument.B.err_scale", _lognormal(1.1))
 
     # ACT
     with caplog.at_level(logging.WARNING, logger="exozippy.diagnostics"):
@@ -134,14 +153,14 @@ def test_posterior_against_the_upper_wall_warns_with_the_remedy(caplog):
 
 def test_posterior_against_the_lower_wall_is_read_in_log_space(caplog):
     """
-    Given err_scale sitting at 0.012 on [0.01, 100],
+    Given err_scale piled against 0.01 on [0.01, 100], and another
+      element at 0.5 +/- 10%,
     When the check runs,
-    Then it is a LOWER-wall hit: linearly 0.012 is 0.002% of a span of
-      100 and log-space says 2% from the floor, and the check reads the
-      latter.  A parameter at 0.5 -- 0.5% of the linear span -- is NOT a hit.
+    Then the first is a LOWER-wall hit and the second -- 0.5% of the
+      linear span from the floor, but twenty of its own widths -- is not.
     """
-    near = _built("mulensinstrument.A.err_scale", np.full(300, 0.0115))
-    mid = _built("mulensinstrument.B.err_scale", np.full(300, 0.5))
+    near = _built("mulensinstrument.A.err_scale", _hugging(0.01, n=300))
+    mid = _built("mulensinstrument.B.err_scale", _lognormal(0.5, n=300))
 
     with caplog.at_level(logging.WARNING, logger="exozippy.diagnostics"):
         hits = diagnostics.warn_posterior_near_bounds(_System([near, mid]))
@@ -157,7 +176,9 @@ def test_a_parameter_without_a_remedy_still_warns_generically(caplog):
     Then the generic sentence is logged with nothing appended -- the remedy
       is optional and its absence is not an error.
     """
-    par = _built("star.X.thing", np.full(100, 99.9), remedy=None)
+    par = _built(
+        "star.X.thing", _hugging(100.0, n=100, side="upper"), remedy=None
+    )
 
     with caplog.at_level(logging.WARNING, logger="exozippy.diagnostics"):
         hits = diagnostics.warn_posterior_near_bounds(_System([par]))
@@ -234,8 +255,9 @@ def test_a_tail_on_the_wall_is_reported_even_when_the_median_is_not(caplog):
     Then it reports the element with trigger 'mass' and states the fraction,
       because an interval cut off by a wall is not one the data measured.
     """
-    # ARRANGE -- 20% at 0.011 (inside the 2% log-space margin of 0.01)
-    draws = np.concatenate([np.full(80, 0.011), np.full(320, 1.0)])
+    # ARRANGE -- 20% at 0.011 (on the wall, measured against the posterior's
+    # own width), the rest around 1
+    draws = np.concatenate([np.full(80, 0.011), _lognormal(1.0, n=320)])
     par = _built("star.teffsed", draws)
 
     # ACT
@@ -258,7 +280,7 @@ def test_a_small_tail_on_the_wall_is_not_reported(caplog):
       ordinary tail does not raise an alarm nobody would act on.
     """
     # ARRANGE
-    draws = np.concatenate([np.full(20, 0.011), np.full(380, 1.0)])
+    draws = np.concatenate([np.full(20, 0.011), _lognormal(1.0, n=380)])
     par = _built("star.teffsed", draws)
 
     # ACT
@@ -280,7 +302,7 @@ def test_a_grid_extent_says_the_model_ran_out_not_the_data(caplog):
       the thing telling you something.
     """
     # ARRANGE
-    draws = np.concatenate([np.full(80, 0.011), np.full(320, 1.0)])
+    draws = np.concatenate([np.full(80, 0.011), _lognormal(1.0, n=320)])
     par = _built("star.teffsed", draws)
     system = _SystemWithComponents([par], [_GridComponent()])
 
@@ -372,3 +394,87 @@ def test_grid_bounded_paths_reads_a_real_system(tmp_path):
     assert (
         paths["star.teffsed"]["source"] == "NextGen bolometric-correction grid"
     )
+
+
+def test_a_signed_variance_far_above_its_floor_is_not_on_the_wall(caplog):
+    """
+    Given a signed jitter variance on [-0.0015, 1e8] mas^2 whose posterior
+      is 0.0138 +/- 0.0013 (examples/GaiaBH3's astrometric jitter), and a
+      second element of the same shape piled against its -0.0015 floor,
+    When the check runs,
+    Then only the second is reported.  The first sat 1.5e-10 of the way
+      across the range, inside the old 2% range margin, and was reported on
+      every fit with a jitter; it is twelve of its own widths clear of the
+      floor, which is what the check now measures.
+    """
+    clear = _built(
+        "astrometryinstrument.G.jitter_variance",
+        RNG.normal(0.0138, 0.0013, 400),
+        remedy=None,
+        lower=-0.0015,
+        upper=1e8,
+    )
+    piled = _built(
+        "astrometryinstrument.H.jitter_variance",
+        -0.0015 + np.abs(RNG.normal(0.0, 0.0013, 400)),
+        remedy=None,
+        lower=-0.0015,
+        upper=1e8,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="exozippy.diagnostics"):
+        hits = diagnostics.warn_posterior_near_bounds(_System([clear, piled]))
+
+    assert [h["label"] for h in hits] == [
+        "astrometryinstrument.H.jitter_variance"
+    ]
+    assert hits[0]["side"] == "lower" and hits[0]["trigger"] == "median"
+    assert hits[0]["widths"] < 2.0
+
+
+def test_a_gaussian_two_sigma_clear_of_a_wall_is_not_reported(caplog):
+    """
+    Given a posterior whose centre is 3 sigma inside a lower bound (linear
+      space: the bound is negative) and one whose centre is 0.5 sigma inside,
+    When the check runs,
+    Then only the second -- whose median is under two of its narrower
+      half-widths from the wall -- is reported; the first is a measurement near a bound,
+      not a posterior the bound has shaped.
+    """
+    far = _built(
+        "x.A.thing",
+        np.clip(RNG.normal(3.0, 1.0, 4000), 0.0, None),
+        remedy=None,
+        lower=-0.0001,
+        upper=10.0,
+    )
+    near = _built(
+        "x.B.thing",
+        np.clip(RNG.normal(0.5, 1.0, 4000), 0.0, None),
+        remedy=None,
+        lower=-0.0001,
+        upper=10.0,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="exozippy.diagnostics"):
+        hits = diagnostics.warn_posterior_near_bounds(_System([far, near]))
+
+    assert [h["label"] for h in hits] == ["x.B.thing"]
+
+
+def test_a_point_mass_is_on_the_wall_only_when_it_sits_on_it(caplog):
+    """
+    Given one element whose every draw is 95 on [0.01, 100] and one whose
+      every draw IS the upper bound,
+    When the check runs,
+    Then only the second is reported: a posterior with no width has no
+      scale to call 95 "near" 100 in.
+    """
+    inside = _built("x.A.err_scale", np.full(100, 95.0), remedy=None)
+    on = _built("x.B.err_scale", np.full(100, 100.0), remedy=None)
+
+    with caplog.at_level(logging.WARNING, logger="exozippy.diagnostics"):
+        hits = diagnostics.warn_posterior_near_bounds(_System([inside, on]))
+
+    assert [h["label"] for h in hits] == ["x.B.err_scale"]
+    assert hits[0]["side"] == "upper"
