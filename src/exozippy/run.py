@@ -1245,7 +1245,6 @@ def _run_fit(config, gui, user_params=None):
                     system, model, raw_start, angle_choices
                 )
                 model_context.enter_context(model)
-                system.recenter_whitening_anchor(model)
                 raw_start = system.get_raw_start(model)
                 # The same guard as the first call (reusing_trace is False on
                 # this path, so it reduces to measure_scales), kept in that

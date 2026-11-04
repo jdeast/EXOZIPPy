@@ -1044,7 +1044,8 @@ def adopt_direct_angles(system, old_model, raw_start, choices):
     likelihood at the new start is the old one exactly and only the prior's
     coordinate term differs; seeds k > 0 get the angle written into
     ``config_manager.seed_resolved`` beside the latents they already carry,
-    wrapped into the window.  Returns the new model.
+    wrapped into the window.  The whitening anchor is re-centered on the
+    carried start before returning.  Returns the new model.
     """
     old = {}
     for par in system.get_all_parameters():
@@ -1127,6 +1128,11 @@ def adopt_direct_angles(system, old_model, raw_start, choices):
             resolved[f"{prefix}.{i}.{angle}"] = float(
                 _wrap(np.arctan2(float(y), float(x)), center)
             )
+    # The carried start becomes the new model's anchor here, so the model
+    # handed back already has `initial_point()` == the polished start
+    # (review 4.3.1) and run.py keeps its ONE re-centering call site
+    # (tests/test_nuts_start.py pins it before the probe and every dispatch).
+    system.recenter_whitening_anchor(model)
     return model
 
 
