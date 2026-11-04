@@ -3153,13 +3153,24 @@ class Orbit(Component):
             # trip is the identity only to ~1e-15, and an unflipped draw has
             # no business moving at all -- a fold that perturbs the draws it
             # decided to leave alone is a fold nobody can check.
+            #
+            # The folded variable is a NEW array assigned through the xarray
+            # API, never a write into `posterior[key].values`: that buffer
+            # is whatever the sampler handed back, and a JAX sampler's
+            # (numpyro, blackjax) is READ-ONLY -- the "assignment destination
+            # is read-only" crash of review 1.3.11, which a bare `except` in
+            # System.fold_degenerate_draws then turned into unfolded draws in
+            # every report.
             for name, values in new_phys.items():
                 param, key = params[name]
                 slot = self._raw_slot(param, i)
-                old_raw = posterior[key].values[..., slot]
-                posterior[key].values[..., slot] = np.where(
-                    flip, param.element_raw_from_phys(i, values), old_raw
+                raw = np.array(posterior[key].values)
+                raw[..., slot] = np.where(
+                    flip,
+                    param.element_raw_from_phys(i, values),
+                    raw[..., slot],
                 )
+                posterior[key] = posterior[key].copy(data=raw)
 
             if verbose:
                 logger.info(

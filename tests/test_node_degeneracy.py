@@ -450,3 +450,124 @@ def test_a_user_tc_box_on_a_node_degenerate_orbit_raises(tmp_path):
     system = System(config, params)
     with pytest.raises(ValueError, match=r"BH: a lower/upper on tc"):
         system.prepare()
+
+
+# ---------------------------------------------------------------------------
+# 4. The wrap-up's fold on a trace as the wrap-up actually receives it
+#    (review 1.3.11)
+# ---------------------------------------------------------------------------
+
+
+def _two_label_trace(system, model, path):
+    """A saved-and-reloaded trace holding one draw in each label.
+
+    Built the way a fit's trace is: every free RV's raw draws, every
+    Deterministic recomputed from them, the posterior put in USER units
+    (``run._finish_saved_trace``'s conversion), written to netCDF and read
+    back through ``run._load_trace``, the reader the wrap-up uses.
+    """
+    import arviz as az
+    import pymc as pm
+
+    from exozippy import run
+
+    point = model.initial_point()
+    partner = _antipodal_point(system, point)
+    raws = {
+        v.name: np.stack([[np.asarray(point[v.name]), partner[v.name]]])
+        for v in model.value_vars
+    }
+    idata = az.from_dict({"posterior": raws})
+    derived = pm.compute_deterministics(
+        idata.posterior.to_dataset(),
+        model=model,
+        merge_dataset=False,
+        progressbar=False,
+    )
+    for name in derived.data_vars:
+        idata.posterior[name] = derived[name]
+    run._convert_posterior_to_user_units(idata, system.get_parameter_lookup())
+    idata.to_netcdf(str(path))
+    return run._load_trace(str(path))
+
+
+def _make_read_only(idata):
+    """Freeze every posterior buffer, as a JAX sampler's arrive.
+
+    numpyro and blackjax hand back ``jax.device_get`` arrays, which numpy
+    marks read-only; on an astrometry-only fit with either sampler the fold
+    used to die on its first write ("assignment destination is read-only").
+    """
+    for name in idata.posterior.data_vars:
+        idata.posterior[name].values.flags.writeable = False
+
+
+@pytest.mark.parametrize("read_only", [False, True], ids=["reloaded", "jax"])
+def test_the_wrapup_fold_folds_a_reloaded_read_only_trace(
+    astrometry_only, tmp_path, read_only
+):
+    """
+    Given an astrometry-only orbit's trace with one draw in each label,
+      saved and reloaded the way the wrap-up reads it, and (for the JAX
+      samplers) with read-only buffers,
+    When the wrap-up's fold runs (``run.fold_degeneracies``),
+    Then both draws land on ONE label in the raw coordinates AND in every
+      regenerated Deterministic the tables, CSV, plots and mode pass read --
+      `bigomega`, `omega` and `tc`, in the user's units.  It used to crash on
+      the read-only write, log the crash and leave both labels in every
+      report (review 1.3.11).
+    """
+    from exozippy import run
+
+    # Arrange
+    system, model = astrometry_only
+    idata = _two_label_trace(system, model, tmp_path / "trace.nc")
+    before = idata.posterior["orbit.bigomega"].values[0, :, 0].copy()
+    assert abs(abs(before[0] - before[1]) - 180.0) < 1e-6  # the two labels
+    if read_only:
+        _make_read_only(idata)
+
+    # Act
+    run.fold_degeneracies(system, model, idata)
+
+    # Assert
+    post = idata.posterior
+    tc_name = system.orbit._sampled_tc_name(0)
+    for name in (
+        "xbigomega",
+        "ybigomega",
+        "secosw",
+        "sesinw",
+        tc_name,
+    ):
+        got = post[f"orbit.{name}_raw"].values[0, :, 0]
+        np.testing.assert_allclose(got[0], got[1], atol=1e-7, err_msg=name)
+    for name in ("bigomega", "omega", "tc"):
+        got = post[f"orbit.{name}"].values[0, :, 0]
+        np.testing.assert_allclose(got[0], got[1], atol=1e-6, err_msg=name)
+    # Still in the user's units (degrees, BJD), and on the label the draws
+    # chose -- one of the two they started on.
+    assert np.isclose(post["orbit.bigomega"].values[0, 0, 0], before).any()
+
+
+def test_a_failed_fold_raises(astrometry_only, tmp_path, monkeypatch):
+    """
+    Given a component whose fold fails,
+    When the wrap-up's fold runs,
+    Then the failure propagates.  A logged-and-swallowed fold reports both
+      labels' draws in every table and plot as if they were a measurement
+      (review 1.3.11; CLAUDE.md, "No fallbacks for internal invariants");
+      the wrap-up runs after the trace is saved, so raising costs a
+      `recompute_trace: false` rerun and nothing else.
+    """
+    from exozippy import run
+
+    system, model = astrometry_only
+    idata = _two_label_trace(system, model, tmp_path / "trace.nc")
+
+    def broken(posterior, verbose=True):
+        raise RuntimeError("fold exploded")
+
+    monkeypatch.setattr(system.orbit, "fold_node_degeneracy", broken)
+    with pytest.raises(RuntimeError, match="fold exploded"):
+        run.fold_degeneracies(system, model, idata)
