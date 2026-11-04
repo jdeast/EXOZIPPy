@@ -34,6 +34,7 @@ SITE = "-104.0147,30.6814,2026"
 EPOCH = 2457389.0
 RA, DEC = 209.5063, 31.6955
 SOLRAD_M = 6.957e8
+GM_SUN = 1.3271244e20
 
 
 def _times(n=40, span=(2459950.0, 2460700.0), seed=3):
@@ -60,7 +61,7 @@ def _kepler(t, tp, P, e, w):
 def _star_motion(t, orbits):
     """The star's line-of-sight position (m, AWAY from the observer) and
     velocity (m/s) at target-frame times t, composed from ``orbits``:
-    dicts with tp, P [d], e, w [rad], a [m], sini, share (signed:
+    dicts with tp, P [d], e, w [rad], a [m, relative orbit], sini, share (signed:
     +M_c/M on an orbit's primary side, -M_p/M on its companion side)."""
     Z = np.zeros_like(t)
     V = np.zeros_like(t)
@@ -91,17 +92,31 @@ def _independent_cz(jd_utc, orbits, star, gamma_ms, rv, retard=True):
     t_tdb = Time(jd_utc, format="jd", scale="utc", location=loc).tdb.jd
     obs = observer_terms(t_tdb, SITE, "builtin")
 
-    def reflex(t_bary):
+    def emit(t_bary):
         t_emit = np.array(t_bary, dtype=float)
         if retard:
             for _ in range(8):
                 Z, _ = _star_motion(t_emit, orbits)
                 t_emit = t_bary - Z / C_MPS / 86400.0
-        _, V = _star_motion(t_emit, orbits)
+        return t_emit
+
+    def reflex(t_bary):
+        _, V = _star_motion(emit(t_bary), orbits)
         return V, None, None
 
+    def potential(t_bary):
+        # The companions' potential at the star: G M_other / (r c^2).
+        t_emit = emit(t_bary)
+        phi = np.zeros_like(t_emit)
+        for o in orbits:
+            r_a, _, _, _ = _kepler(t_emit, o["tp"], o["P"], o["e"], o["w"])
+            phi = phi + o["gm_other"] / (o["a_rel"] * r_a * C_MPS**2)
+        return phi
+
     z0 = (1 + gamma_ms / C_MPS) / (1 + rv / C_MPS) - 1
-    cz, _ = predicted_cz(t_tdb, obs, star, EPOCH, z0=z0, v_reflex=reflex)
+    cz, _ = predicted_cz(
+        t_tdb, obs, star, EPOCH, z0=z0, v_reflex=reflex, phi_star=potential
+    )
     return cz
 
 
@@ -183,6 +198,7 @@ def _elements(system, model, start, shares):
     out = []
     for k, side in shares.items():
         share = mc[k] / mt[k] if side == "primary" else -mp[k] / mt[k]
+        m_other = mc[k] if side == "primary" else mp[k]
         out.append(
             {
                 "tp": tp[k],
@@ -192,6 +208,9 @@ def _elements(system, model, start, shares):
                 "a": a[k] * SOLRAD_M,
                 "sini": si[k],
                 "share": share,
+                # the RELATIVE orbit (the star's share above is of it)
+                "a_rel": a[k] * SOLRAD_M,
+                "gm_other": GM_SUN * m_other,
             }
         )
     return out

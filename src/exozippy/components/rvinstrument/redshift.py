@@ -185,25 +185,40 @@ def star_geometry(
     ``beta_sys`` 3-tuple of scalars: the star's true barycentric space
                  velocity over c (module docstring for the ``1 + rv/c``).
 
-    The star's position is taken at the reception instant ``t_tdb`` rather
-    than at ``t_bary``: they differ by <= 8.3 min, which turns the
-    direction by mu * 8 min (1e-12 rad for Barnard's star).
+    The star's position X(T) is the one at the barycentric arrival time
+    ``t_bary`` (the time argument the apparent astrometric motion is
+    defined in), found by one fixed-point step from the reception instant:
+    the first pass at ``t_tdb`` is off by up to 8.3 min, which turns
+    Barnard's star's direction by ~8e-10 rad (+/-0.07 mm/s); the second
+    is off by mu * (8.3 min) * v_obs/c, nothing.
     """
     r0, e, n = star_frame(ra, dec, xp)
     d0 = PC_AU * 1000.0 / parallax  # AU
     mu = [(pm_ra * e[k] + pm_dec * n[k]) * MAS_RAD for k in range(3)]  # rad/yr
-    T = (t_tdb - epoch) / JULIAN_YEAR_D  # yr
     rv_auyr = rv * MPS_TO_AU_PER_YR
-    X = [d0 * r0[k] + (d0 * mu[k] + rv_auyr * r0[k]) * T for k in range(3)]
-    rho = [X[k] - r_obs_au[:, k] for k in range(3)]
-    rho_norm = xp.sqrt(rho[0] ** 2 + rho[1] ** 2 + rho[2] ** 2)
-    rho_hat = tuple(rho[k] / rho_norm for k in range(3))
-    X_norm = xp.sqrt(X[0] ** 2 + X[1] ** 2 + X[2] ** 2)
-    x_dot_r = sum(X[k] * r_obs_au[:, k] for k in range(3))
     r_dot_r = np.sum(r_obs_au**2, axis=1)
-    t_bary = (
-        t_tdb + (2.0 * x_dot_r - r_dot_r) / (X_norm + rho_norm) / C_AU_PER_D
-    )
+
+    def at(t):
+        T = (t - epoch) / JULIAN_YEAR_D  # yr
+        return [
+            d0 * r0[k] + (d0 * mu[k] + rv_auyr * r0[k]) * T for k in range(3)
+        ]
+
+    def arrival(X):
+        rho = [X[k] - r_obs_au[:, k] for k in range(3)]
+        rho_norm = xp.sqrt(rho[0] ** 2 + rho[1] ** 2 + rho[2] ** 2)
+        X_norm = xp.sqrt(X[0] ** 2 + X[1] ** 2 + X[2] ** 2)
+        x_dot_r = sum(X[k] * r_obs_au[:, k] for k in range(3))
+        t_b = (
+            t_tdb
+            + (2.0 * x_dot_r - r_dot_r) / (X_norm + rho_norm) / C_AU_PER_D
+        )
+        return rho, rho_norm, t_b
+
+    _, _, t_bary = arrival(at(t_tdb))
+    X = at(t_bary)
+    rho, rho_norm, t_bary = arrival(X)
+    rho_hat = tuple(rho[k] / rho_norm for k in range(3))
     # True velocity: the apparent transverse motion stretched by the
     # emission-time compression (module docstring), m/s.
     stretch = 1.0 + rv / C_MPS
@@ -214,10 +229,27 @@ def star_geometry(
         "rho_hat": rho_hat,
         "t_bary": t_bary,
         "beta_sys": beta_sys,
+        "X": X,
     }
 
 
-def doppler_ratio(geom, obs, v_reflex, xp=np):
+def displace_star(geom, r_obs_au, delta_au, xp=np):
+    """``geom`` with the star moved by its own orbital displacement
+    ``delta_au`` (3-tuple of (N,), ICRS AU, from the barycenter of its
+    system), so ``rho_hat`` carries the astrometric wobble.  ``t_bary``
+    is left alone: it is the SYSTEM's arrival time, and the star's own
+    offset along the line of sight is the separate retardation
+    (``RVInstrument._emission_time``)."""
+    X = [geom["X"][k] + delta_au[k] for k in range(3)]
+    rho = [X[k] - r_obs_au[:, k] for k in range(3)]
+    rho_norm = xp.sqrt(rho[0] ** 2 + rho[1] ** 2 + rho[2] ** 2)
+    out = dict(geom)
+    out["X"] = X
+    out["rho_hat"] = tuple(rho[k] / rho_norm for k in range(3))
+    return out
+
+
+def doppler_ratio(geom, obs, v_reflex, xp=np, phi_star=None):
     """``1 + z_meas`` without the instrument zero point (WE14 eq. 28 as a
     forward model; module docstring).
 
@@ -225,7 +257,11 @@ def doppler_ratio(geom, obs, v_reflex, xp=np):
     dict (numpy constants); ``v_reflex`` -- ``(v_los, v_n, v_e)`` the star's
     reflex velocity in the orbit's sky frame (m/s; Z/away, X/North,
     Y/East), each (N,) or None for a component no model provides (no orbit,
-    or a sky orientation the system does not model).
+    or a sky orientation the system does not model).  ``phi_star`` --
+    (N,) or None: the potential of the star's companions AT the star over
+    c^2, ``sum GM_c/(r c^2)``, the gravitational redshift of its light
+    that varies with the orbital separation (its own surface potential is
+    a constant, in the zero point).
     """
     r0, e, n = geom["frame"]
     rho = geom["rho_hat"]
@@ -256,21 +292,28 @@ def doppler_ratio(geom, obs, v_reflex, xp=np):
         z_shapiro = z_shapiro + obs["shapiro_coef"][b] * perp_dot_beta / (
             1.0 + r_dot
         )
-    return star / observer * obs["one_plus_zgrav"] * (1.0 + z_shapiro)
+    ratio = star / observer * obs["one_plus_zgrav"] * (1.0 + z_shapiro)
+    if phi_star is not None:
+        ratio = ratio * (1.0 + phi_star)
+    return ratio
 
 
-def predicted_cz(t_tdb, obs, star, epoch, z0=0.0, v_reflex=None, xp=np):
+def predicted_cz(
+    t_tdb, obs, star, epoch, z0=0.0, v_reflex=None, xp=np, phi_star=None
+):
     """Convenience for tests and seeds: ``c z_meas`` (m/s) predicted for a
     star with parameters ``star = (ra, dec, pm_ra, pm_dec, parallax, rv)``
     (internal units) and an optional reflex ``v_reflex`` evaluated by the
     caller (it needs ``t_bary``; pass a callable ``f(t_bary) -> (v_los,
-    v_n, v_e)``).  Returns ``(cz, t_bary)``."""
+    v_n, v_e)``; ``phi_star`` likewise ``f(t_bary) -> (N,)``, the
+    companions' potential at the star over c^2).  Returns ``(cz, t_bary)``."""
     geom = star_geometry(t_tdb, obs["r_au"], *star, epoch, xp=xp)
     if v_reflex is None:
         refl = (None, None, None)
     else:
         refl = v_reflex(geom["t_bary"])
-    ratio = (1.0 + z0) * doppler_ratio(geom, obs, refl, xp=xp)
+    phi = None if phi_star is None else phi_star(geom["t_bary"])
+    ratio = (1.0 + z0) * doppler_ratio(geom, obs, refl, xp=xp, phi_star=phi)
     return C_MPS * (ratio - 1.0), geom["t_bary"]
 
 

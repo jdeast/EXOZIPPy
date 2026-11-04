@@ -19,7 +19,8 @@ model the fit uses), plus Gaussian noise:
 with the observatory state from astropy (builtin ephemeris) at the
 flux-weighted exposure midpoint (JD_UTC, column 1), and the reflex at the
 star's EMISSION time (its own light-travel time across the orbit,
-t_emit = t_B - Z_star(t_emit)/c).  Epochs are random
+t_emit = t_B - Z_star(t_emit)/c), and the planet's gravitational
+redshift of the star's light, G m_p/(r c^2) (edge-on, M_* = 0.64 Msun).  Epochs are random
 nights with the star above 35 deg and the Sun below -12 deg.
 
     python make_data.py          # rewrites Gaia4like.{HPF,NEID,FIES}.rv
@@ -41,6 +42,7 @@ TRUTH = {
     "omega": 210.0,  # omega_*, deg
     "K": 330.0,  # m/s
     "tc": 2460300.0,
+    "mstar": 0.64,  # Msun, the params file's start; the orbit is edge-on
 }
 #: The three ground sites (East longitude, latitude, height m): McDonald
 #: (HPF), Kitt Peak (NEID), Roque de los Muchachos (FIES).
@@ -103,6 +105,41 @@ def star_los_position(t, tc=None):
     )
     n = 2.0 * np.pi / (P * 86400.0)
     return K * np.sqrt(1 - e**2) / n * (1 - e * np.cos(E)) * np.sin(f + w)
+
+
+def companion_potential(t, tc=None):
+    """G m_p / (r c^2) at the star at target-frame time ``t``: the planet's
+    potential there (its gravitational redshift of the star's light).
+    m_p from K, P, e and the star's mass for an edge-on orbit; r from the
+    Keplerian separation a (1 - e cos E)."""
+    import astropy.constants as const
+
+    P, e, K = TRUTH["period"], TRUTH["ecc"], TRUTH["K"]
+    tc = TRUTH["tc"] if tc is None else tc
+    gm_sun = const.G.value * const.M_sun.value
+    Ps = P * 86400.0
+    ms = TRUTH["mstar"]
+    mp = 0.0
+    for _ in range(
+        50
+    ):  # K = (2 pi G/P)^(1/3) m_p / (M+m_p)^(2/3) / sqrt(1-e^2)
+        mp = (
+            K
+            * np.sqrt(1 - e**2)
+            * (ms + mp) ** (2.0 / 3.0)
+            / (2 * np.pi * gm_sun / Ps) ** (1.0 / 3.0)
+        )
+    a = (gm_sun * (ms + mp) * Ps**2 / (4 * np.pi**2)) ** (1.0 / 3.0)
+    w = np.radians(TRUTH["omega"])
+    f0 = 0.5 * np.pi - w
+    E0 = 2.0 * np.arctan(np.sqrt((1 - e) / (1 + e)) * np.tan(0.5 * f0))
+    tp = tc - (E0 - e * np.sin(E0)) * P / (2.0 * np.pi)
+    M = 2.0 * np.pi * (np.asarray(t) - tp) / P
+    E = M.copy()
+    for _ in range(60):
+        E = E - (E - e * np.sin(E) - M) / (1.0 - e * np.cos(E))
+    r = a * (1 - e * np.cos(E))
+    return gm_sun * mp / (r * 299792458.0**2)
 
 
 def emission_time(t_bary, tc=None):
@@ -172,6 +209,11 @@ def predict(name, jd_utc, reflex=True, star=None, tc=None):
         z0=z0,
         v_reflex=(
             (lambda tb: (keplerian_rv(emission_time(tb, tc), tc), None, None))
+            if reflex
+            else None
+        ),
+        phi_star=(
+            (lambda tb: companion_potential(emission_time(tb, tc), tc))
             if reflex
             else None
         ),

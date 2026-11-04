@@ -566,8 +566,9 @@ class RVInstrument(Instrument):
 
     def _reflex_sky(self, system, t):
         """The observed star's reflex velocity ACROSS the line of sight,
-        ``(v_north, v_east)`` in m/s at times ``t``, from the full orbit
-        state -- or ``(None, None)`` where the system does not model the
+        ``(v_north, v_east)`` in m/s, and its displacement there,
+        ``(p_north, p_east)`` in solRad, at times ``t``, from the full orbit
+        state -- or all None where the system does not model the
         orbit's sky orientation (no ``bigomega``: no astrometry).  Only
         Keplerian orbits: a Taylor orbit's sky terms are angular and need
         a parallax, and are < 1e-3 of a resolved reflex.  The
@@ -576,15 +577,15 @@ class RVInstrument(Instrument):
 
         orbits = system.orbit
         if "bigomega" not in orbits.manifest:
-            return None, None
+            return None, None, None, None
         members = orbits.star_membership(self.star_ndx[0])
         if not members:
-            return None, None
-        v_n = v_e = 0.0
+            return None, None, None, None
+        v_n = v_e = p_n = p_e = 0.0
         for o, role in members:
             omap = np.array([o])
             primary = role == "primary"
-            _, _, _, VX, VY, _ = orbits.state_vectors(
+            X, Y, _, VX, VY, _ = orbits.state_vectors(
                 t, omap, relative=not primary
             )
             frac = (
@@ -594,7 +595,51 @@ class RVInstrument(Instrument):
             )
             v_n = v_n + VX[:, 0] * frac
             v_e = v_e + VY[:, 0] * frac
-        return v_n * SOLRAD_PER_DAY_TO_MPS, v_e * SOLRAD_PER_DAY_TO_MPS
+            p_n = p_n + X[:, 0] * frac
+            p_e = p_e + Y[:, 0] * frac
+        return (
+            v_n * SOLRAD_PER_DAY_TO_MPS,
+            v_e * SOLRAD_PER_DAY_TO_MPS,
+            p_n,
+            p_e,
+        )
+
+    def _companion_potential(self, system, t):
+        """``sum_o G M_other,o / (r_o c^2)`` at the star, at times ``t``:
+        the gravitational redshift of the star's light in its companions'
+        potential, which varies with each orbit's separation ``r_o``
+        (``M_other`` the companion group on the primary side, the primary
+        group on the companion side).  For a star deep inside a hierarchy
+        the separation to an outer group is taken as that orbit's relative
+        separation (the inner offset is a fraction a_in/a_out of it).
+        A Taylor orbit has no separation and adds nothing.  None without a
+        Keplerian orbit."""
+        from exozippy.constants import C_LIGHT_RSUN_PER_DAY, G
+
+        from ..orbit import physics as orbit_physics
+
+        orbits = system.orbit
+        phi = None
+        for o, role in orbits.star_membership(int(self.star_ndx[0])):
+            o = int(o)
+            terms = orbit_physics.state_vector_terms(
+                t,
+                orbits.tp_target.value[o],
+                orbits.n.value[o],
+                orbits.ecc.value[o],
+                sinw=orbits.sinw.value[o],
+                cosw=orbits.cosw.value[o],
+                circular=orbits._all_circular(np.array([o])),
+            )
+            r = orbits.a.value[o] * terms.r_over_a
+            m_other = (
+                orbits.m_companion.value[o]
+                if role == "primary"
+                else orbits.m_primary.value[o]
+            )
+            term = G * m_other / (r * C_LIGHT_RSUN_PER_DAY**2)
+            phi = term if phi is None else phi + term
+        return phi
 
     def _emission_time(self, system, t_bary):
         """The star's EMISSION time for light reaching the barycenter at
@@ -617,6 +662,9 @@ class RVInstrument(Instrument):
         ``light_travel_time: false`` turns it off (default on, like every
         other retarded consumer); the orbits it retards then report their
         target-frame timing (Orbit._ltt_reporting_mask).
+
+        Returns ``(t_emit, z)``: ``z`` the star's summed toward-observer
+        displacement at ``t_bary`` (solRad), or None without any.
         """
         from .. import ltt
 
@@ -627,7 +675,7 @@ class RVInstrument(Instrument):
             ]
         )
         if not flags.any():
-            return t_bary
+            return t_bary, None
         orbits = system.orbit
         s = int(self.star_ndx[0])
         z = vz = az = 0.0
@@ -656,11 +704,11 @@ class RVInstrument(Instrument):
             # state_vectors' Z is AWAY; ltt's z is toward the observer.
             z, vz = z - Z[2][:, 0], vz - Z[5][:, 0]
         if isinstance(z, float):
-            return t_bary
+            return t_bary, None
         delay = ltt.solve_delay(z, vz, pt.zeros_like(z) + az)
         if not flags.all():
             delay = delay * flags.astype(float)
-        return t_bary - delay
+        return t_bary - delay, z
 
     def _raw_rv_model(self, system, time, blocks):
         """The likelihood's model when some file is raw: ``(model,
@@ -675,9 +723,9 @@ class RVInstrument(Instrument):
         file's ``gamma`` is its instrument-frame systemic velocity,
         ``c[(1 + z0_i)(1 + rv/c) - 1]``.
         """
-        from exozippy.constants import SOLRAD_PER_DAY_TO_MPS
+        from exozippy.constants import RSUN_TO_AU, SOLRAD_PER_DAY_TO_MPS
 
-        from .redshift import doppler_ratio, star_geometry
+        from .redshift import displace_star, doppler_ratio, star_geometry
 
         rows = self._raw_rows
         star = system.star
@@ -696,14 +744,33 @@ class RVInstrument(Instrument):
             xp=pt,
         )
         self._raw_t_bary_node = geom["t_bary"]
-        t_emit = self._emission_time(system, geom["t_bary"])
+        t_emit, z_toward = self._emission_time(system, geom["t_bary"])
         self._raw_t_emit_node = t_emit
         t_eval = pt.set_subtensor(time[rows], t_emit)
         kep, matrix = self._rv_model(system, t_eval, blocks, offset=None)
         offset = self.gamma.value[self.inst_map_tensor]
         v_los = kep[rows] * SOLRAD_PER_DAY_TO_MPS
-        v_n, v_e = self._reflex_sky(system, t_emit)
-        ratio = doppler_ratio(geom, self._raw_obs, (v_los, v_n, v_e), xp=pt)
+        v_n, v_e, p_n, p_e = self._reflex_sky(system, t_emit)
+        # The star's own orbital displacement moves the direction rho_hat
+        # (the astrometric wobble): along the line of sight always, across
+        # it where the sky orientation is modeled.
+        r0, e_hat, n_hat = geom["frame"]
+        delta = []
+        for k in range(3):
+            d = 0.0
+            if z_toward is not None:
+                d = d - z_toward * r0[k]
+            if p_n is not None:
+                d = d + p_n * n_hat[k] + p_e * e_hat[k]
+            delta.append(d * RSUN_TO_AU)
+        if any(not isinstance(d, float) for d in delta):
+            geom = displace_star(
+                geom, self._raw_obs["r_au"], tuple(delta), xp=pt
+            )
+        phi = self._companion_potential(system, t_emit)
+        ratio = doppler_ratio(
+            geom, self._raw_obs, (v_los, v_n, v_e), xp=pt, phi_star=phi
+        )
         gamma_ms = (
             self.gamma.value[self.inst_map[rows]] * SOLRAD_PER_DAY_TO_MPS
         )

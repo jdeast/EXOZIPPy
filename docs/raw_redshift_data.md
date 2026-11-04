@@ -66,6 +66,15 @@ secondary of a 1.0 + 0.3 Msun 3-day binary. EXOZIPPy's raw-redshift mode retards
 reflex; it exceeds 1 cm/s at K ~ 1.7 km/s, 10 cm/s at K ~ 5.5 km/s and 1 m/s at
 K ~ 17 km/s.
 
+### The companion's gravitational redshift at the star
+
+The star's light climbs out of its companion's potential, `G M_c / (r c^2)`, which
+varies with the orbital separation: 1.7-3.5 cm/s for a Gaia-4-like planet (12 M_J at
+~1.2 AU), 19-39 cm/s for a K = 3 km/s, 571-day binary. A Keplerian refit absorbs most of
+it, but only by biasing K and omega by about its amplitude divided by K. EXOZIPPy models
+it, together with the companion's position in the line of sight (the astrometric wobble
+of the direction).
+
 ### Coordinate, epoch and proper-motion errors in the correction
 
 | error in the star model | Gaia-4-like (78 mas/yr, 73 pc) | tau Ceti (1.9"/yr, 3.7 pc) | Barnard's star (10.4"/yr, 1.8 pc) |
@@ -94,8 +103,8 @@ own ephemeris.
 | threshold | what exceeds it |
 |---|---|
 | 1 m/s | the additive correction for any star; a pm error or wrong epoch for any star within ~10 pc; Barnard-class perspective acceleration |
-| 10 cm/s | a 1-arcsec position error; the companion cross term for K >~ 3 km/s |
-| 1 cm/s | the companion cross term at K >~ 300 m/s; a frozen pm at 70 pc; the star's light-travel time at K >~ 1.7 km/s |
+| 10 cm/s | a 1-arcsec position error; the companion cross term for K >~ 3 km/s; a stellar companion's gravitational redshift |
+| 1 cm/s | the companion cross term at K >~ 300 m/s; a giant planet's gravitational redshift; a frozen pm at 70 pc; the star's light-travel time at K >~ 1.7 km/s |
 
 ## What a release must carry, per spectrum
 
@@ -170,7 +179,9 @@ fitted parameters. The full description is in
   at their epoch, and `star.rv`) are the same parameters any astrometry in the fit reads.
 - The Roemer delay to each spectrum's barycentric arrival time is computed from that
   fitted star.
-- The star's own light-travel time across every one of its orbits is included.
+- The star's own light-travel time across every one of its orbits, its orbital
+  displacement in the line of sight, and its companions' gravitational redshift are
+  included.
 - Every orbit's reflex (Keplerian and Taylor) enters through the multiplicative
   relativistic Doppler relation of WE14, together with the observatory's barycentric
   velocity (Earth orbit + rotation with full Earth orientation, or a spacecraft

@@ -217,11 +217,11 @@ def test_gaia4_like_cross_term_and_pm_consistency_magnitudes():
       * computing the correction toward the star's catalog position frozen
         at its epoch (proper motion not applied) is 14 cm/s RMS, 2.9 cm/s
         RMS after a refit absorbs its offset and slope;
-      * the EXACT multiplicative correction followed by a Keplerian leaves
-        0.2 mm/s: for a fixed, known star the full model and a careful
-        barycorrpy + Keplerian fit agree -- what the mode adds is that the
-        star is FITTED (one star, every perspective) and that no step can
-        be applied inconsistently.
+      * even the EXACT multiplicative correction with the same, known star
+        followed by a Keplerian leaves 2.6 mm/s RMS after the refit: the
+        companion's gravitational redshift at the star (1.7-3.5 cm/s, mostly
+        absorbed into gamma/K) and the star's own light travel (0.4 mm/s),
+        which no corrected-RV fit models.
     """
     R = _gaia4_like_terms()
 
@@ -243,7 +243,7 @@ def test_gaia4_like_cross_term_and_pm_consistency_magnitudes():
     assert 0.02 < _postfit(R, frozen) < 0.04
 
     exact = mult - MD.keplerian_rv(R["tb"])
-    assert _postfit(R, exact) < 5e-4
+    assert 1e-3 < _postfit(R, exact) < 5e-3
 
 
 # ---------------------------------------------------------------------------
