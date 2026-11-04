@@ -479,6 +479,11 @@ lens:
     # (-180, 180] cut; recentered about its mode before reporting
     # (components/parameter.md, "Periodic parameters").
     periodic: {value: 360.0, unit: "deg"}
+    # Sampled directly on a window centered on the start, instead of through
+    # xalpha/yalpha, where the light curve measures it well enough that the
+    # latent posterior is a narrow ray (src/exozippy/angles.py).  `fitalpha:`
+    # on the companion's lens block overrides the automatic choice.
+    direction_latents: {pair: [xalpha, yalpha], expression: default}
     debug_print: true
     expressions:
       default:

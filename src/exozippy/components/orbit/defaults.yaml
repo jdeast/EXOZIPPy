@@ -346,6 +346,10 @@ orbit:
     # "Periodic parameters").  Every angle and epoch below carries the same
     # declaration; the epochs take the orbital period from `period`.
     periodic: {value: 360.0, unit: "deg"}
+    # Only the V_c/V_e orbits (`from_xy`) derive omega from direction
+    # latents, so only they are eligible for the direct coordinate
+    # (src/exozippy/angles.py); `fitomega:` on the orbit block overrides.
+    direction_latents: {pair: [xomega, yomega], expression: from_xy}
     expressions:
       default:
         func_name: "calc_omega"
@@ -394,6 +398,12 @@ orbit:
     latex: "\\Omega"
     description: "Longitude of Ascending Node"
     periodic: {value: 360.0, unit: "deg"}
+    # Derived from its direction latents, unless the data measure it well
+    # enough that the latent posterior is a narrow ray: then it is sampled
+    # directly on a window centered on the start (src/exozippy/angles.py;
+    # parameter.md, "Structural priors").  `fitbigomega:` on the orbit block
+    # overrides the automatic choice.
+    direction_latents: {pair: [xbigomega, ybigomega], expression: default}
     expressions:
       default:
         func_name: "calc_bigomega"

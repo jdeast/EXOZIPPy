@@ -38,6 +38,7 @@ the wrap-up are the rest.
 Marked 'slow'; excluded from fast CI with ``pytest -m "not slow"``.
 """
 
+import json
 import os
 import re
 import shutil
@@ -49,6 +50,7 @@ import pytest
 import yaml
 
 from exozippy.run import run_fit
+from exozippy.trace_meta import ANGLES_ATTR
 
 pytestmark = pytest.mark.slow
 
@@ -266,17 +268,29 @@ def test_run_fit_ob09020_trace_has_expected_variables(ob09020_result):
     Given the ob09020 example,
     When run_fit completes,
     Then the posterior carries the sampled microlensing, orbit, stellar and
-      instrument coordinates and the derived event parameters.
+      instrument coordinates and the derived event parameters -- the node
+      in whichever coordinate the run CHOSE for it (exozippy.angles: the
+      direction latents, or bigomega itself when the light curve measures
+      it well), read from the choice the trace records rather than pinned,
+      so the expectation follows the automatic switch both ways.
     """
     out_dir, _ = ob09020_result
     idata = az.from_netcdf(str(out_dir / f"{_NAME}_trace.nc"))
     posterior_vars = set(idata.posterior.data_vars)
+    direct = json.loads(idata.attrs.get(ANGLES_ATTR) or "{}")
+    node_direct = bool(direct.get("orbit.bigomega", {}).get("elements"))
+    if node_direct:
+        assert "orbit.bigomega_raw" in posterior_vars
+        assert "orbit.xbigomega_raw" not in posterior_vars
+    else:
+        assert "orbit.xbigomega_raw" in posterior_vars
+        assert "orbit.bigomega_raw" not in posterior_vars
 
     expected = {
         "source.t_0",
         "source.u_0",
         "orbit.logP",
-        "orbit.xbigomega",
+        "orbit.bigomega" if node_direct else "orbit.xbigomega",
         "star.logmass",
         "star.distance",
         "mulensinstrument.log_f_total",

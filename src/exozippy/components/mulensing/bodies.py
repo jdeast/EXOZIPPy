@@ -48,7 +48,7 @@ EVENT_KEYS = frozenset(
         "vbm_reltol",
     }
 )
-LENS_ENTRY_KEYS = frozenset({"body", "name", "orbit"})
+LENS_ENTRY_KEYS = frozenset({"body", "name", "orbit", "fitalpha"})
 SOURCE_ENTRY_KEYS = frozenset(
     {"body", "name", "fitu0te", "star_constrains_rho", "orbit"}
 )

@@ -531,13 +531,22 @@ is the single commonest source of a 180-degree offset in the literature (C21).
   `::test_multi_lens_frame_reduces_to_binary`, which is what pins the N-body layout against
   the binary rotation.
 
-### C16 -- `alpha` is sampled as an unconstrained pair
+### C16 -- `alpha` is sampled as an unconstrained pair, unless the light curve pins it
 
 `alpha = arctan2(yalpha, xalpha)` (`physics.calc_alpha`), with `xalpha` and `yalpha` the
 sampled coordinates. The angle therefore never wraps and needs no periodic boundary. A user
 seeding `lens.<name>.alpha` in degrees is propagated to the pair by the relaxation engine.
 `alpha`'s user unit is degrees and its internal unit is radians; both magnification
 backends take degrees, which is what `Lens._alpha_deg` converts to.
+
+Where the light curve measures `alpha` to better than 0.1 rad (5.7 deg) at the start, the
+pair's posterior is a narrow ray from the origin that a diagonal metric cannot straighten, so
+`alpha` itself is sampled instead, uniform on a full turn centered on the start -- its one
+boundary opposite the start, where a measured posterior has no mass. The switch is automatic
+and announced with a warning; `fitalpha:` on the companion's lens block overrides it
+(`src/exozippy/angles.py`; `components/parameter.md`, "A MEASURED angle is sampled
+directly"). Either way this is a parameterization choice and not a convention: the prior on
+`alpha` is uniform in both, and the reported `alpha` means C15.
 
 ### C24 -- lens orbital motion: `ds_dt`, `dalpha_dt`, and the gamma identities
 
