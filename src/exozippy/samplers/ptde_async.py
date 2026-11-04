@@ -269,6 +269,8 @@ def ptde_async_sample(
         lp_plausibility_ceiling=lp_plausibility_ceiling,
         collect_rung_timing=collect_rung_timing,
         store_hot_chains=store_hot_chains,
+        cores=cores,
+        eval_timeout=eval_timeout,
     )
     lp_guard, rng, de_mode_hop = run.lp_guard, run.rng, run.de_mode_hop
     if swap_schedule == "deo":
@@ -348,9 +350,9 @@ def ptde_async_sample(
     slot_list = [(k, i) for k in range(n_temps) for i in range(n_chains)]
     n_slots = len(slot_list)
 
-    pool, actual_cores = _common.create_pool(
-        cores, n_slots, "PTDE-async", logger
-    )
+    # Forked by prepare_ptde_run, which scored the start populations on it
+    # (review 2.6.45).
+    pool, actual_cores = run.pool, run.actual_cores
     logger.info(
         f"PTDE-async: {n_temps} rungs x {n_chains} chains = {n_slots} slots, "
         f"{actual_cores} cores  "
