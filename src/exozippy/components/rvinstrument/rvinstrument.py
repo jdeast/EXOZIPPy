@@ -592,7 +592,7 @@ class RVInstrument(Instrument):
         """
         orbits = system.orbit
         K_vec, omap = self._orbit_rv_terms(system, self.star_ndx[0])
-        # Taylor orbits (type: linear | quadratic) the observed star is the
+        # Taylor orbits (type: constant_acceleration | constant_jerk) the observed star is the
         # PRIMARY of -- Orbit._taylor_consumers refused the companion side
         # at stage 3.  Each is one more column, after the Keplerian ones.
         taylor = [o for o, _ in orbits.taylor_membership(self.star_ndx[0])]

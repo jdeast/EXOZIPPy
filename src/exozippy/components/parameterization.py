@@ -109,7 +109,7 @@ def restrict_active(entry, active, n_elements):
     """``entry`` with every element outside ``active`` made INACTIVE.
 
     For a component whose instances differ in KIND, not just in coordinate
-    choice: an orbit of `type: linear` has no period, eccentricity or mass at
+    choice: an orbit of `type: constant_acceleration` has no period, eccentricity or mass at
     all, so every Keplerian entry -- sampled, derived or reported, however a
     mode table already split it -- must leave that element out.  ``active``
     is ANDed into the entry's own ``mask``, and each expression selector
