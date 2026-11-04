@@ -1,0 +1,48 @@
+run:
+  name: "GaiaBH3_ground"
+
+prefix: "fitresults/GaiaBH3_ground"
+logger_level: INFO
+
+# Gaia BH3 (Gaia Collaboration, Panuzzo et al. 2024, A&A 686, L2): a 0.76
+# Msun metal-poor halo giant in an 11.6-yr, e = 0.73 orbit around a dark
+# 33 Msun black hole at 590 pc.  REAL Gaia DR4 epoch astrometry (the June
+# 2026 pre-release, read as DPAC ships it) plus the 17 Gaia RVS epoch RVs
+# plus the four ground-based RVs (UVES 2020, HERMES and SOPHIE 2023), which
+# the paper did not fit; they extend the RV baseline past the Gaia window.
+# See README.md.
+
+star:
+  - name: "G"
+    mist: False
+
+planet:
+  - name: "BH"
+
+orbit:
+  - name: "BH"
+
+rvinstrument:
+  - name: "GaiaRVS"
+    file: "GaiaBH3.GaiaRVS.rv"
+    time_scale: "tcb"            # the RVS epochs are BJD in TCB
+  - name: "Ground"
+    file: "GaiaBH3.ground.rv"
+    time_scale: "utc"            # the ground epochs are BJD in UTC
+
+astrometryinstrument:
+  - name: "GaiaDR4"
+    file: "GAIA_DR4_PRERELEASE_EPOCH_ASTROMETRY_RAW.xml"
+    mode: "gaia"                 # 1-D along-scan epoch astrometry
+    data_format: "gaia_epoch"    # the archive table itself, CCD by CCD
+    source_id: 4318465066420528000
+    epoch: 2457936.87477064      # J2017.5 TCB (the DR4 reference epoch) in BJD_TDB
+
+parameter_file: "gaiabh3_ground.params.yaml"
+
+sampler:
+  method: numpyro
+  tune: 1000
+  draws: 3000
+  target_accept: 0.95
+  recompute_trace: True
