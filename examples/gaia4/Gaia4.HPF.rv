@@ -1,0 +1,13 @@
+# Radial velocities of Gaia-4 from HPF, Stefansson et al. (2025), AJ 169, 107, Table 5
+# (machine-readable table ajada9e1t5_mrt.txt); relative RVs, one offset per instrument
+# BJD_TDB  RV[m/s]  err[m/s]
+2460039.707428    174.4  22.7
+2460120.745063    -36.5  14.1
+2460148.648947   -136.4  11.2
+2460161.621481   -196.9  26.4
+2460292.028558   -357.5  16.5
+2460359.862195      4.6  16.2
+2460365.827808     -9.0  15.6
+2460371.827772      7.2  16.9
+2460517.642454    150.0  11.0
+2460522.617242    197.3  12.5
