@@ -71,6 +71,10 @@ class _FakeSystem:
         # No report-only Deterministics (review 2.6.14) in this stand-in.
         return []
 
+    def inactive_element_masks(self):
+        # No inactive elements (review 2.11.26) in this stand-in.
+        return {}
+
 
 # ----------------------------------------------------------------------
 # get_draws(mode=...)

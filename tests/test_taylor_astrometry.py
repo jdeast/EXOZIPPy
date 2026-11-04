@@ -602,12 +602,12 @@ def test_a_companion_group_target_is_refused(tmp_path):
         System(config, user_params=up).prepare()
 
 
-def test_relative_astrometry_of_a_taylor_orbit_is_refused(tmp_path):
+def test_relative_astrometry_of_a_uniform_rotation_orbit_is_refused(tmp_path):
     """
-    Given a rel dataset naming a constant_acceleration orbit,
+    Given a rel dataset naming a uniform_rotation orbit (the lens's polar
+      frame; the Cartesian types ARE rel-readable, tests/test_taylor_rel.py),
     When the system is prepared,
-    Then it raises: only the absolute photocenter has sky-plane Taylor
-      terms.
+    Then it raises naming the relative reader's limits.
     """
     # Arrange
     rel = tmp_path / "r.rel"
@@ -629,7 +629,7 @@ def test_relative_astrometry_of_a_taylor_orbit_is_refused(tmp_path):
         "orbit": [
             {
                 "name": "outer",
-                "type": "constant_acceleration",
+                "type": "uniform_rotation",
                 "primary": ["A"],
                 "companion": ["B"],
             }

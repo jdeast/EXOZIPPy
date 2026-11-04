@@ -2002,6 +2002,20 @@ class Orbit(Component):
         # nothing else declared.  A system with only Keplerian orbits takes
         # neither branch, so its manifest is exactly what it always was.
         keplerian = self.is_keplerian
+        # The group masses are kept on the Taylor orbits a rel dataset
+        # reads with an acceleration: the relative vector is -(M/M_c) times
+        # the shared reflex state there (_relative_reflex_factor).
+        rel_massed = self._rel_mass_orbits()
+        massed = keplerian | rel_massed
+        for o in np.nonzero(rel_massed)[0]:
+            if "m_total" not in self.manifest or not self.companion_bodies[o]:
+                raise ValueError(
+                    f"[{self.prefix}.{self.names[o]}] a rel dataset sees "
+                    f"this type: {self.types[o]} orbit's acceleration as the "
+                    f"RELATIVE vector, -(M_total/M_companion) times the "
+                    f"primary's reflex, so both groups need bodies with "
+                    f"masses; name the companion in 'companion:'."
+                )
         if not keplerian.all():
             if not keplerian.any():
                 # Nothing Keplerian at all (an RV trend alone, or only
@@ -2010,10 +2024,15 @@ class Orbit(Component):
                 # declared wholly inactive -- the rule mode_manifest
                 # applies, and the reason every Keplerian consumer below has
                 # nothing to read.
-                self.manifest = {}
+                self.manifest = {
+                    k: v
+                    for k, v in self.manifest.items()
+                    if massed.any() and k in self._GROUP_MASS_KEYS
+                }
             for key in list(self.manifest):
+                kind = massed if key in self._GROUP_MASS_KEYS else keplerian
                 self.manifest[key] = restrict_active(
-                    self.manifest[key], keplerian, self.n_elements
+                    self.manifest[key], kind, self.n_elements
                 )
             self.taylor_epoch, self.taylor_rv_epoch = self._taylor_epochs(
                 system, self._taylor_consumer_map
@@ -2062,8 +2081,30 @@ class Orbit(Component):
         # A `rel` dataset naming the orbit: the companion group's position
         # relative to the primary group, a straight line on the sky (E/N,
         # mas and mas/yr) about the epoch.
+        # The constant and linear terms are the RELATIVE vector's own
+        # (nothing absorbs them in rel data); the acceleration and jerk are
+        # the one shared reflex state's, seen relative through the group
+        # masses (_relative_reflex_factor).
         "rel": {
             "constant_velocity": ("rel_dE", "rel_dN", "rel_vE", "rel_vN"),
+            "constant_acceleration": (
+                "rel_dE",
+                "rel_dN",
+                "rel_vE",
+                "rel_vN",
+                "accel_ra",
+                "accel_dec",
+            ),
+            "constant_jerk": (
+                "rel_dE",
+                "rel_dN",
+                "rel_vE",
+                "rel_vN",
+                "accel_ra",
+                "accel_dec",
+                "jerk_ra",
+                "jerk_dec",
+            ),
         },
     }
 
@@ -2305,10 +2346,11 @@ class Orbit(Component):
                 f"[{self.prefix}] relative (rel/lensrel) astrometry measures "
                 f"a star on Taylor orbit(s) "
                 f"{[name(o) for o in sorted(refused)]}; a rel dataset reads "
-                f"only the orbit it names, and only a type: "
-                f"constant_velocity one among the Taylor types (review "
-                f"8.8.14).  Give the orbit type: keplerian or "
-                f"constant_velocity."
+                f"only the orbit it names, and among the Taylor types only "
+                f"a Cartesian one (constant_velocity, constant_acceleration, "
+                f"constant_jerk; review 8.8.14) -- uniform_rotation is the "
+                f"lens's polar frame.  Give the orbit type: keplerian or a "
+                f"Cartesian Taylor type."
             )
 
     def _refuse_static_readers(self, system):
@@ -2521,11 +2563,21 @@ class Orbit(Component):
             pa = np.concatenate([x["pa"] for x in d])
             err = np.concatenate([x["err_sep"] for x in d])
             dt = (t - self.taylor_epoch[o]) / DAYS_PER_YEAR
+            # The orbit's own polynomial order, so curvature in the data does
+            # not bias the line; its constant and linear terms seed rel_*.
+            order = {
+                "constant_velocity": 1,
+                "constant_acceleration": 2,
+                "constant_jerk": 3,
+            }[self.types[o]]
             for axis, comp in (
                 ("E", sep * np.sin(pa)),
                 ("N", sep * np.cos(pa)),
             ):
-                if dt.size >= 2 and np.ptp(dt) > 0.0:
+                if dt.size > order and np.ptp(dt) > 0.0:
+                    coeffs = np.polyfit(dt, comp, order, w=1.0 / err)
+                    slope, offset = coeffs[-2], coeffs[-1]
+                elif dt.size >= 2 and np.ptp(dt) > 0.0:
                     slope, offset = np.polyfit(dt, comp, 1, w=1.0 / err)
                 else:
                     slope, offset = 0.0, float(np.mean(comp))
@@ -2694,6 +2746,12 @@ class Orbit(Component):
             return X, Y, zero, VX, VY, zero
         if typ == "constant_velocity" and relative:
             return self._relative_line(o, dt_d, parallax, lens_anchor)
+        if (
+            relative
+            and "rel" in self._taylor_consumer_map[o]
+            and lens_anchor is None
+        ):
+            return self._relative_accelerating(o, dt_d, parallax)
         if relative:
             raise NotImplementedError(
                 f"[{self.prefix}.{self.names[o]}] the relative separation "
@@ -2759,11 +2817,18 @@ class Orbit(Component):
             X = s0 * cos_a + VX * dt_y + zero
             Y = -s0 * sin_a + VY * dt_y + zero
             return X, Y, zero, VX + zero, VY + zero, zero
+        return self._relative_line_rel(o, dt_d, parallax)
+
+    def _relative_line_rel(self, o, dt_d, parallax):
+        """A rel dataset's straight line (rel_dE/dN + rel_vE/vN dt, mas and
+        mas/yr) in solRad (solRad/d), through ``parallax``."""
+        zero = pt.zeros_like(dt_d)
+        dt_y = dt_d / DAYS_PER_YEAR
         if "rel" not in self._taylor_consumer_map[o]:
             raise ValueError(
                 f"[{self.prefix}.{self.names[o]}] the relative straight "
-                f"line of a constant_velocity orbit is read by a lens "
-                f"(lens_anchor=) or a rel dataset; this orbit has neither."
+                f"line of a Taylor orbit is read by a lens (lens_anchor=) "
+                f"or a rel dataset; this orbit has neither."
             )
         if parallax is None:
             raise ValueError(
@@ -2777,6 +2842,51 @@ class Orbit(Component):
         VX = self.rel_vN.value[o] * to_solrad / DAYS_PER_YEAR + zero
         VY = self.rel_vE.value[o] * to_solrad / DAYS_PER_YEAR + zero
         return X, Y, zero, VX, VY, zero
+
+    def _relative_reflex_factor(self, o):
+        """-M_total / M_companion: the relative vector x_C - x_P over the
+        primary group's reflex x_P (x_P = -(M_c/M) x_rel, the photocenter
+        convention of AstrometryInstrument).  The group masses are the
+        member bodies' (m_primary, m_companion, m_total, kept active on a
+        rel-read accelerating Taylor orbit)."""
+        return -self.m_total.value[o] / self.m_companion.value[o]
+
+    def _relative_accelerating(self, o, dt_d, parallax):
+        """The relative sky vector of a rel-read constant_acceleration /
+        constant_jerk orbit, solRad (solRad/d): the rel dataset's own
+        straight line (rel_*, the constant and linear terms nothing absorbs
+        in relative data) plus the SHARED reflex acceleration and jerk seen
+        relative, -(M/M_c) (accel dt^2/2 + jerk dt^3/6).  One state: the
+        same accel_ra/accel_dec (jerk_*) the absolute astrometry and the RVs
+        read; the relative frame is a perspective on it, not new
+        coefficients."""
+        X0, Y0, _, VX0, VY0, zero = self._relative_line_rel(o, dt_d, parallax)
+        jerk = self.types[o] == "constant_jerk"
+        dt_y = dt_d / DAYS_PER_YEAR
+        to_solrad = AU_SOLRAD / parallax
+        k = self._relative_reflex_factor(o)
+        out = []
+        for comp in ("dec", "ra"):  # X = North, Y = East
+            a = (
+                self.accel_dec.value[o]
+                if comp == "dec"
+                else self.accel_ra.value[o]
+            )
+            pos = 0.5 * a * dt_y**2
+            vel = a * dt_y
+            if jerk:
+                j = (
+                    self.jerk_dec.value[o]
+                    if comp == "dec"
+                    else self.jerk_ra.value[o]
+                )
+                pos = pos + j * dt_y**3 / 6.0
+                vel = vel + 0.5 * j * dt_y**2
+            out.append(
+                (k * pos * to_solrad, k * vel * to_solrad / DAYS_PER_YEAR)
+            )
+        (dX, dVX), (dY, dVY) = out
+        return X0 + dX, Y0 + dY, zero, VX0 + dVX, VY0 + dVY, zero
 
     def taylor_radial_velocity(self, t, orbit_idx):
         """The RV consumer of Taylor orbit ``orbit_idx``: the line-of-sight
@@ -3153,13 +3263,24 @@ class Orbit(Component):
             # trip is the identity only to ~1e-15, and an unflipped draw has
             # no business moving at all -- a fold that perturbs the draws it
             # decided to leave alone is a fold nobody can check.
+            #
+            # The folded variable is a NEW array assigned through the xarray
+            # API, never a write into `posterior[key].values`: that buffer
+            # is whatever the sampler handed back, and a JAX sampler's
+            # (numpyro, blackjax) is READ-ONLY -- the "assignment destination
+            # is read-only" crash of review 1.3.11, which a bare `except` in
+            # System.fold_degenerate_draws then turned into unfolded draws in
+            # every report.
             for name, values in new_phys.items():
                 param, key = params[name]
                 slot = self._raw_slot(param, i)
-                old_raw = posterior[key].values[..., slot]
-                posterior[key].values[..., slot] = np.where(
-                    flip, param.element_raw_from_phys(i, values), old_raw
+                raw = np.array(posterior[key].values)
+                raw[..., slot] = np.where(
+                    flip,
+                    param.element_raw_from_phys(i, values),
+                    raw[..., slot],
                 )
+                posterior[key] = posterior[key].copy(data=raw)
 
             if verbose:
                 logger.info(
@@ -3313,6 +3434,22 @@ class Orbit(Component):
         return mask
 
     _GROUP_MASS_SIDE = {"m_primary": "primary", "m_companion": "companion"}
+    _GROUP_MASS_KEYS = ("m_primary", "m_companion", "m_total")
+
+    def _rel_mass_orbits(self):
+        """Per orbit: does a rel dataset read this ACCELERATING Taylor orbit
+        (constant_acceleration / constant_jerk)?  There the relative vector
+        needs the group masses, which are kept active (and reported) on it;
+        everywhere else a Taylor orbit has none."""
+        return np.array(
+            [
+                o in self._taylor_consumer_map
+                and "rel" in self._taylor_consumer_map[o]
+                and self.types[o] in ("constant_acceleration", "constant_jerk")
+                for o in range(self.n_elements)
+            ],
+            dtype=bool,
+        )
 
     # The chord expressions' deps that are NOT orbit parameters: the
     # transiting planet's geometry and the i180 sign, injected as context
