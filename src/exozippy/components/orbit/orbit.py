@@ -2510,7 +2510,9 @@ class Orbit(Component):
             return getattr(self, name).value[o]
         return 0.0
 
-    def _taylor_state(self, t, o, relative, parallax, lens_anchor):
+    def _taylor_state(
+        self, t, o, relative, parallax, lens_anchor, line_of_sight_only=False
+    ):
         """``state_vectors`` of ONE Taylor orbit ``o``: six (N_obs,) terms.
 
         Cartesian types: the primary group's reflex displacement from its
@@ -2525,7 +2527,9 @@ class Orbit(Component):
         the sky terms converted from the sampled ANGULAR coefficients with
         the anchor star's ``parallax`` (mas, AU -> solRad).  A component no
         consumer reads is structurally zero.  ``relative=True`` raises: the
-        relative separation needs a mass ratio no Taylor orbit has.
+        relative separation needs a mass ratio no Taylor orbit has.  With
+        ``line_of_sight_only`` (the RV consumer, which has no parallax to
+        give) the sky terms are not built and come back as None.
 
         uniform_rotation: the relative separation of a lens pair in the
         lens's own trajectory frame and Einstein radii, in the axis and sign
@@ -2581,7 +2585,9 @@ class Orbit(Component):
                 Z = Z + g2 * dt_d**3 / 6.0
         else:
             VZ = Z = zero
-        if "astrometry" in self._taylor_consumer_map[o]:
+        if line_of_sight_only:
+            X = Y = VX = VY = None
+        elif "astrometry" in self._taylor_consumer_map[o]:
             if parallax is None:
                 raise ValueError(
                     f"[{self.prefix}.{self.names[o]}] the sky components "
@@ -2626,12 +2632,15 @@ class Orbit(Component):
                 f"[{self.prefix}.{self.names[o]}] taylor_radial_velocity on "
                 f"a {self.types[o]} orbit; it has no Taylor coefficients."
             )
-        VZ = self.state_vectors(t, np.array([o]))[5][:, 0]
+        omap = np.array([o])
+        VZ = self.state_vectors(t, omap, line_of_sight_only=True)[5][:, 0]
         t_rv = float(self.taylor_rv_epoch[o])
         if t_rv != float(self.taylor_epoch[o]):
             VZ = (
                 VZ
-                - self.state_vectors(np.array([t_rv]), np.array([o]))[5][0, 0]
+                - self.state_vectors(
+                    np.array([t_rv]), omap, line_of_sight_only=True
+                )[5][0, 0]
             )
         return VZ
 
@@ -3829,7 +3838,13 @@ class Orbit(Component):
         return pt.arctan2(terms.sinf, terms.cosf)
 
     def state_vectors(
-        self, t, orbit_map, relative=False, parallax=None, lens_anchor=None
+        self,
+        t,
+        orbit_map,
+        relative=False,
+        parallax=None,
+        lens_anchor=None,
+        line_of_sight_only=False,
     ):
         """Full sky-frame state of an orbit's RELATIVE separation, in
         physical units: (X, Y, Z, VX, VY, VZ), each (N_obs, N_planets),
@@ -3883,8 +3898,10 @@ class Orbit(Component):
         ``orbit_map`` -- converting their sampled angular sky coefficients;
         ``uniform_rotation`` returns a lens pair's relative separation in
         its own frame and Einstein radii from ``lens_anchor = (s0, alpha0)``
-        per orbit (``relative=True`` only).  One call reads one KIND of
-        orbit; a mixed ``orbit_map`` raises.
+        per orbit (``relative=True`` only).  ``line_of_sight_only`` (Taylor
+        orbits only) builds Z and VZ alone, the X/Y/VX/VY slots None -- the
+        RV consumer's projection, which needs no parallax.  One call reads
+        one KIND of orbit; a mixed ``orbit_map`` raises.
         """
         orbit_map = np.asarray(orbit_map, dtype=int)
         kepler = self.is_keplerian[orbit_map]
@@ -3904,13 +3921,21 @@ class Orbit(Component):
                     None
                     if lens_anchor is None
                     else (lens_anchor[0][k], lens_anchor[1][k]),
+                    line_of_sight_only,
                 )
                 for k, o in enumerate(orbit_map)
             ]
             return tuple(
-                pt.stack([row[c] for row in rows], axis=1) for c in range(6)
+                None
+                if rows[0][c] is None
+                else pt.stack([row[c] for row in rows], axis=1)
+                for c in range(6)
             )
-        if parallax is not None or lens_anchor is not None:
+        if (
+            parallax is not None
+            or lens_anchor is not None
+            or line_of_sight_only
+        ):
             raise ValueError(
                 f"[{self.prefix}] parallax / lens_anchor are Taylor-orbit "
                 f"inputs; a Keplerian state carries its own amplitude `a`."
