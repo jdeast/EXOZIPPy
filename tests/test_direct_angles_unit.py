@@ -253,3 +253,26 @@ def test_a_half_turn_window_halves_the_threshold():
     """
     assert angles.threshold(np.pi) == pytest.approx(0.1)
     assert angles.threshold(0.5 * np.pi) == pytest.approx(0.05)
+
+
+def test_a_lens_companion_reads_its_fitalpha_and_a_bad_value_raises():
+    """
+    Given lens body entries with 'fitalpha: true' on the companion,
+    When the Lens reads its direct-angle requests,
+    Then element 1 (the companion) asks for the direct coordinate and the
+      primary asks nothing; a non-boolean value raises naming the body.
+    """
+    from test_mulens_body_config import _DummyConfigManager, _system_config
+
+    from exozippy.components.mulensing.lens import Lens
+
+    lens = [{"body": "star.Lens"}, {"body": "planet.b", "fitalpha": True}]
+    cm = _DummyConfigManager(_system_config(lens=lens))
+
+    flag, requests = Lens(lens, cm).direct_angle_requests("alpha")
+
+    assert flag == "fitalpha"
+    assert requests == [None, True]
+    lens[1]["fitalpha"] = "yes"
+    with pytest.raises(ValueError, match="fitalpha"):
+        Lens(lens, cm).direct_angle_requests("alpha")
