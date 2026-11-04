@@ -191,9 +191,12 @@ def _wobbles(system, point, t):
     nodes = []
     for i in range(inst.n_elements):
         beta = inst._sed_beta_node(system, i)
-        a_phot, omap = inst._photocenter_terms(system, i, beta)
-        dE, dN = system.orbit.get_sky_position(tt, a_phot, omap)
-        nodes += [pt.sum(dE, axis=1), pt.sum(dN, axis=1)]
+        scale, omap = inst._photocenter_terms(system, i, beta)
+        dE, dN = system.orbit.get_sky_position(tt, omap)
+        nodes += [
+            pt.sum(dE * scale[None, :], axis=1),
+            pt.sum(dN * scale[None, :], axis=1),
+        ]
     out = [np.asarray(x) for x in _at(model, nodes, _start(system, model))]
     return [(out[2 * k], out[2 * k + 1]) for k in range(inst.n_elements)]
 

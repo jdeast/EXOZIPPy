@@ -3484,18 +3484,26 @@ class Orbit(Component):
 
         return pt.arctan2(terms.sinf, terms.cosf)
 
-    def state_vectors(self, t, a_scale, orbit_map, relative=False):
-        """Full sky-frame state of an orbiting body:
-        (X, Y, Z, VX, VY, VZ), each (N_obs, N_planets).
+    def state_vectors(self, t, orbit_map, relative=False):
+        """Full sky-frame state of an orbit's RELATIVE separation, in
+        physical units: (X, Y, Z, VX, VY, VZ), each (N_obs, N_planets),
+        positions in solRad (the internal unit of ``a``) and velocities in
+        solRad/day.
 
         t: (N_obs,) vector of times [BJD_TDB]
-        a_scale: (N_planets,) amplitude scaling, e.g. the photocenter or
-                 relative semimajor axis in mas; positions come out in
-                 units of a_scale and velocities in a_scale/day
         orbit_map: integer map from planet slots to orbit elements
-        relative: False -> the primary/photocenter orbit around the
-                  barycenter (uses omega_*); True -> the companion's orbit
-                  relative to the primary (omega_* + 180 deg)
+        relative: True -> x_rel, the companion group relative to the
+                  primary group (omega_* + 180 deg); False -> -x_rel, the
+                  direction of the PRIMARY's own orbit about the barycenter
+                  (uses omega_*), at the relative orbit's full amplitude.
+
+        The amplitude is the relative semimajor axis ``a`` and nothing else
+        (review 4.8.3(d)).  Everything a consumer multiplies it by -- a mass
+        fraction for a body's own orbit about the barycenter, a flux
+        fraction for a photocenter, the parallax and RSUN_AU for an angle --
+        is the CALLER's, together with the unit conversion; until 4.8.3(d)
+        callers passed that product in as an ``a_scale`` and the state came
+        back in its units.
 
         Axes are skyframe.md's: X = North, Y = East, Z = distance growing
         AWAY from the observer, so dZ/dt carries the radial-velocity sign
@@ -3516,12 +3524,11 @@ class Orbit(Component):
 
         This is the accessor an N-body backend replaces (reviews 4.8.2,
         8.8.15): a consumer that can take a full state vector should take it
-        from here rather than re-projecting the elements itself.  The
-        `a_scale` factoring (the Keplerian's self-similarity) and the
-        `relative` omega-flip are Keplerian conveniences that will NOT
-        survive that swap -- an integrator emits physical units and
-        `relative` becomes a subtraction -- so new consumers should treat
-        both as this method's business, never re-derive them.
+        from here rather than re-projecting the elements itself.  It emits
+        physical units, as an integrator would.  The `relative` omega-flip
+        is a Keplerian convenience that will NOT survive that swap (it
+        becomes a subtraction, review 4.8.3(a)), so new consumers should
+        treat it as this method's business, never re-derive it.
         """
         t_grid = t[:, None]
         tp = self.tp_target.value[orbit_map][None, :]
@@ -3550,8 +3557,9 @@ class Orbit(Component):
             circular=self._all_circular(orbit_map),
         )
 
-        # Separation from the barycenter (or primary) in units of a_scale
-        r = a_scale[None, :] * terms.r_over_a
+        # The relative separation, solRad
+        a = self.a.value[orbit_map][None, :]
+        r = a * terms.r_over_a
 
         # Thiele-Innes projection (North, East), PA measured East of North:
         # at omega + f = 0 (ascending node) the body sits at PA = bigomega.
@@ -3563,24 +3571,24 @@ class Orbit(Component):
         Z = r * terms.sinwf * sini
 
         # d/dt of the above: vamp * the kernel's velocity phase terms.
-        vamp = n * a_scale[None, :] / terms.ecc_factor
+        vamp = n * a / terms.ecc_factor
         VX = vamp * (cosO * terms.vx_phase - sinO * terms.vz_phase * cosi)
         VY = vamp * (sinO * terms.vx_phase + cosO * terms.vz_phase * cosi)
         VZ = vamp * terms.vz_phase * sini
 
         return X, Y, Z, VX, VY, VZ
 
-    def get_sky_position(self, t, a_scale, orbit_map, relative=False):
+    def get_sky_position(self, t, orbit_map, relative=False):
         """
-        Vectorized sky-plane offsets of an orbiting body -- the position
-        half of `state_vectors` (whose docstring carries the conventions).
+        Vectorized sky-plane offsets of an orbit's relative separation --
+        the position half of `state_vectors` (whose docstring carries the
+        conventions and the sign of `relative`).
 
         Returns (dE, dN), each (N_obs, N_planets): offsets toward East and
-        North in the units of a_scale.
+        North in solRad.  The caller scales them (mass and flux fractions,
+        parallax, unit conversion).
         """
-        X, Y, _, _, _, _ = self.state_vectors(
-            t, a_scale, orbit_map, relative=relative
-        )
+        X, Y, _, _, _, _ = self.state_vectors(t, orbit_map, relative=relative)
         return Y, X
 
     def get_radial_velocity(self, t, K, orbit_map):
