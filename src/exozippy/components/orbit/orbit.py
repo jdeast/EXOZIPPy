@@ -3486,19 +3486,28 @@ class Orbit(Component):
 
         rv_cfg = cfg.get("rvinstrument", []) or []
         name_to_idx = {n: i for i, n in enumerate(self.names)}
-        # A raw-redshift RV file retards EVERY orbit its star is a body of
-        # (RVInstrument._emission_time): the observed star's reflex light
-        # leaves it at its own retarded time.  Corrected files do not.
+        # An RV file with light_travel_time on (the default; raw or
+        # corrected) retards EVERY Keplerian orbit its star is a body of
+        # (RVInstrument._emission_time): the star's reflex light leaves it
+        # at its own retarded time, so the orbit's Kepler epoch is the
+        # target frame's and its tc the OBSERVED conjunction, as for a
+        # transit.  (This branch only runs where the bodies resolved, so
+        # the physical a and masses the retardation needs exist.)
         rvi = (getattr(system, "active_components", None) or {}).get(
             "rvinstrument"
         )
-        if rvi is not None and any(
-            raw and ltt_on
-            for raw, ltt_on in zip(rvi.raw, rvi.light_travel_time)
-        ):
+        rv_flags = [] if rvi is None else list(rvi.light_travel_time)
+        if any(rv_flags):
             for star in sorted({int(x) for x in rvi.star_ndx}):
                 for o_idx, _role in self.star_membership(star):
                     mask[int(o_idx)] = 1.0
+            if len(set(rv_flags)) > 1:
+                logger.warning(
+                    "orbit: rvinstrument files disagree on "
+                    "light_travel_time; tc_target and the observed ts/tp "
+                    "treat every orbit of the observed star as retarded, "
+                    "an approximation where they mix on one orbit's data."
+                )
         for entry in rv_cfg:
             o_name = entry.get("rm")
             if o_name and bool(entry.get("light_travel_time", True)):
@@ -4395,7 +4404,8 @@ class Orbit(Component):
     def get_radial_velocity(self, t, K, orbit_map):
         """
         The optimized vectorized reflex RV signal.
-        t: (N_obs,) vector of times
+        t: (N_obs,) vector of times, or (N_obs, N_planets) -- one time
+           column per orbit (the RV instrument's per-orbit emission times)
         K: (N_planets,) vector of semi-amplitudes
 
         This is `state_vectors`' VZ with the amplitude collapsed: K already
@@ -4404,7 +4414,7 @@ class Orbit(Component):
         """
         # Broadcast time and orbital parameters into (N_obs, N_planets)
         # grids; the kernel does the Kepler solve (review 6.8.2 forwarding).
-        t_grid = t[:, None]
+        t_grid = t if t.ndim == 2 else t[:, None]
         tp = self.tp_target.value[orbit_map][None, :]
         n = self.n.value[orbit_map][None, :]
         ecc = self.ecc.value[orbit_map][None, :]

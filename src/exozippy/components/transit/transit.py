@@ -1153,10 +1153,14 @@ class Transit(Instrument):
             ltt_reflect_factor = (m_primary / m_total)[None, None, :]
             # Doppler beaming and ellipsoidal variation are the STAR's own
             # flux (its radial motion and its tidal shape), so they ride
-            # the star's delay -- a factor ~q, not ~1. Flat (N_planets,):
-            # these terms are evaluated per observation, not on the
-            # sub-exposure grid.
-            ltt_star_factor = m_companion / m_total
+            # the star's delay -- a factor ~q, not ~1. ltt.py's z is the
+            # companion-minus-primary separation TOWARD the observer, and
+            # the star sits at -(M_c/M) of it: the factor is NEGATIVE (it
+            # was +M_c/M, a sign error, until review 1.5.11; the RV path,
+            # RVInstrument._emission_time, has the same -M_c/M). Flat
+            # (N_planets,): these terms are evaluated per observation, not
+            # on the sub-exposure grid.
+            ltt_star_factor = -m_companion / m_total
 
         # 3. Limb Darkening Setup (per observation, mapped from each
         # instrument's Band). When every band uses the linear law, Band's

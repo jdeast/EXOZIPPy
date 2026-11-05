@@ -558,3 +558,82 @@ def test_mixed_group_ltt_gradient_is_finite(tmp_path):
         assert np.all(np.isfinite(idata.posterior[var].values)), (
             f"non-finite draws for {var}"
         )
+
+
+def test_beaming_and_ellipsoidal_ride_the_stars_own_retarded_time(tmp_path):
+    """
+    Given the wiring system with the 0.3 Msun companion, Doppler beaming
+      and ellipsoidal variation on (both the STAR's own light: its motion
+      and its tidal shape),
+    When transit's stellar-term retarded_time call is captured and
+      evaluated at the rows at tc and tc + P/2,
+    Then each delay equals, SIGNED, the exact solution (fixed point) of the star's own
+      retardation c d = -z_star(t - d), z_star = -(M_c/M) z_rel the star's
+      toward-observer position (ltt.py's z is companion-minus-primary): the
+      star is BEHIND the barycenter at transit, so its light is LATE there
+      (d > 0) and early at the secondary conjunction -- the sign
+      RVInstrument._emission_time uses for the RV reflex.  Until review
+      1.5.11 transit.py passed +M_c/M, which retards the star the wrong way
+      by 2 (M_c/M) a/c (hundreds of seconds here).
+    """
+    import astropy.constants as ac
+    import astropy.units as au
+
+    # Arrange
+    lc = _write_two_row_lc(tmp_path / "lc.dat")
+    cfg = _ltt_wiring_config(lc)
+    cfg["band"][0]["fitellip"] = True
+    cfg["planet"][0]["fitbeam"] = True
+    params = _ltt_wiring_params()
+    params["planet.0.log_q"] = {"initval": np.log10(_MASSIVE_Q), "sigma": 0.0}
+    params["band.TESS.ellipsoidal"] = {"initval": 300.0, "sigma": 0.0}
+    params["planet.0.beam"] = {"initval": 100.0, "sigma": 0.0}
+    real_retarded_time = ltt.retarded_time
+    calls = []
+
+    def _spy(*args, **kwargs):
+        result = real_retarded_time(*args, **kwargs)
+        calls.append(result[1])
+        return result
+
+    # Act
+    with mock.patch(
+        "exozippy.components.transit.transit.ltt.retarded_time",
+        side_effect=_spy,
+    ):
+        system = System(cfg, user_params=params)
+        system.prepare()
+        model = system.build_model()
+    with model:
+        point = system.get_internal_point(model, system.get_raw_start(model))
+    # The stellar terms' call is the flat (N,) one; the occultation
+    # geometry's is on the (N, 1, P) sub-exposure grid.
+    star_calls = [d for d in calls if d.ndim == 1]
+    assert star_calls, "no stellar-term retarded_time call was made"
+    delay = _eval_at_point(star_calls[0], model, point)
+    m_star = float(_eval_at_point(system.star.mass.value[0], model, point))
+    m_comp = float(_eval_at_point(system.planet.mass.value[0], model, point))
+    period = float(_eval_at_point(system.orbit.period.value[0], model, point))
+    tc_target = float(
+        _eval_at_point(system.orbit.tc_target.value[0], model, point)
+    )
+    gm = (ac.G * (m_star + m_comp) * au.M_sun).to(au.R_sun**3 / au.day**2)
+    a = float(np.cbrt(gm.value * period**2 / (4 * np.pi**2)))
+    c = ac.c.to(au.R_sun / au.day).value
+    n = 2 * np.pi / period
+    share = m_comp / (m_star + m_comp)
+    for row, t in enumerate((_TC, _TC + period / 2.0)):
+        d = 0.0
+        for _ in range(50):
+            # z_star(t_e) = -share * z_rel(t_e), z_rel = a cos(n (t_e - tc_target))
+            d = share * a * np.cos(n * ((t - tc_target) - d)) / c
+        # rel 1e-6, not 1e-7: solve_delay's root cancels at B ~ 1e-8 and
+        # loses ~1e-7 relative here (the strict xfail
+        # test_solve_delay_root_is_free_of_cancellation above); the old
+        # sign is off by 200%.
+        assert float(delay[row]) == pytest.approx(d, rel=1e-6)
+    # Late at transit (the star is behind), early at the secondary
+    # conjunction, by (M_c/M) a/c ~ 115 s here; the old sign would be
+    # the opposite.
+    assert float(delay[0]) * 86400.0 > 100.0
+    assert float(delay[1]) * 86400.0 < -100.0

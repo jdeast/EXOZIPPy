@@ -80,14 +80,15 @@ class RVInstrument(Instrument):
                     f"[{self.prefix}] unknown rm_model {m!r}; expected one of "
                     f"{sorted(_valid_rm)}."
                 )
-        # Light-travel-time (Roemer delay) correction on the RM occultation
-        # geometry (see components/rm.py, components/ltt.py) -- on by
-        # default (Jason's decision: transit/rm/astrometry on, rv/mulens
-        # off; matches EXOFASTv2). Only meaningful on a file that also sets
-        # `rm:`; harmless (unread) otherwise, same as rm_band/rm_model.
+        # Light-travel time, per file, on by default: the star's own
+        # retardation across its orbits on every reflex column (_rv_model,
+        # _emission_time; JDE 2026-11-04: "we should do it right and
+        # include the ltt term"), and the RM occultation geometry's own
+        # (components/rm.py, components/ltt.py) on a file with `rm:`.
         self.light_travel_time = [
             bool(c.get("light_travel_time", True)) for c in self.config
         ]
+        self._ltt_unsupported_warned = False
         self.total_detrend_cols = 0
         # data_format: raw_redshift -- the barycentric correction inside the
         # model (rvinstrument.md, "Raw redshifts").  Parsed here so a
@@ -880,7 +881,8 @@ class RVInstrument(Instrument):
     def _reflex_sky(self, system, t):
         """The observed star's reflex velocity ACROSS the line of sight,
         ``(v_north, v_east)`` in m/s, and its displacement there,
-        ``(p_north, p_east)`` in solRad, at times ``t``, from the full orbit
+        ``(p_north, p_east)`` in solRad, each orbit's at its own times
+        ``t[orbit]`` (``_orbit_emission_times``' dict), from the full orbit
         state -- or all None where the system does not model the
         orbit's sky orientation (no ``bigomega``: no astrometry).  Only
         Keplerian orbits: a Taylor orbit's sky terms are angular and need
@@ -899,7 +901,9 @@ class RVInstrument(Instrument):
             omap = np.array([o])
             primary = role == "primary"
             X, Y, _, VX, VY, _ = orbits.state_vectors(
-                t, omap, relative=not primary
+                t[int(o)],
+                omap,
+                relative=not primary,
             )
             frac = (
                 orbits.m_companion.value[o] / orbits.m_total.value[o]
@@ -918,7 +922,8 @@ class RVInstrument(Instrument):
         )
 
     def _companion_potential(self, system, t):
-        """``sum_o G M_other,o / (r_o c^2)`` at the star, at times ``t``:
+        """``sum_o G M_other,o / (r_o c^2)`` at the star, each orbit's at its
+        own times ``t[o]`` (``_orbit_emission_times``' dict):
         the gravitational redshift of the star's light in its companions'
         potential, which varies with each orbit's separation ``r_o``
         (``M_other`` the companion group on the primary side, the primary
@@ -936,7 +941,7 @@ class RVInstrument(Instrument):
         for o, role in orbits.star_membership(int(self.star_ndx[0])):
             o = int(o)
             terms = orbit_physics.state_vector_terms(
-                t,
+                t[o],
                 orbits.tp_target.value[o],
                 orbits.n.value[o],
                 orbits.ecc.value[o],
@@ -954,10 +959,13 @@ class RVInstrument(Instrument):
             phi = term if phi is None else phi + term
         return phi
 
-    def _emission_time(self, system, t_bary, files):
+    def _emission_time(
+        self, system, t_bary, files, keplerian=None, taylor=None
+    ):
         """The star's EMISSION time for light reaching the barycenter at
         ``t_bary``: retarded by the star's own reflex displacement along
-        the line of sight, summed over EVERY orbit it is a body of,
+        the line of sight, summed over the orbits ``keplerian``/``taylor``
+        (default every orbit it is a body of),
         ``t_emit = t_bary - Z_star(t_emit)/c`` with Z away from the
         observer -- the same retardation ``components/ltt.py`` applies to
         transits and RM, through its one implementation
@@ -978,6 +986,11 @@ class RVInstrument(Instrument):
 
         ``files`` -- (N,) the file index of each entry of ``t_bary`` (its
         ``light_travel_time:`` decides whether that entry is retarded).
+        ``keplerian`` / ``taylor`` -- the orbit indices whose displacement
+        to sum (None: every one of the star's).  The raw-redshift mode's
+        DIRECTION (the wobble in rho_hat) sums them all; each reflex
+        column's TIMING sums only its own subsystem
+        (``_orbit_emission_times``).
 
         Returns ``(t_emit, z)``: ``z`` the star's summed toward-observer
         displacement at ``t_bary`` (solRad), or None without any.
@@ -990,7 +1003,19 @@ class RVInstrument(Instrument):
         orbits = system.orbit
         s = int(self.star_ndx[0])
         z = vz = az = 0.0
-        for o, role in orbits.star_membership(s):
+        members = [
+            (o, role)
+            for o, role in orbits.star_membership(s)
+            if keplerian is None or int(o) in keplerian
+        ]
+        if members and not self._keplerian_ltt_supported(orbits):
+            # The same per-orbit decision rm.py and transit.py make
+            # (ltt.orbit_supports_ltt): an orbit whose bodies did not
+            # resolve has no physical a/masses, so no displacement to
+            # retard by.  Warned once; the Keplerian terms are then
+            # evaluated at the arrival time.
+            members = []
+        for o, role in members:
             o = int(o)
             if role == "primary":
                 factor = -orbits.m_companion.value[o] / orbits.m_total.value[o]
@@ -1010,6 +1035,8 @@ class RVInstrument(Instrument):
             )
             z, vz, az = z + zo, vz + vzo, az + azo
         for o, _role in orbits.taylor_membership(s):
+            if taylor is not None and int(o) not in taylor:
+                continue
             omap = np.array([int(o)])
             Z = orbits.state_vectors(t_bary, omap, line_of_sight_only=True)
             # state_vectors' Z is AWAY; ltt's z is toward the observer.
@@ -1020,6 +1047,93 @@ class RVInstrument(Instrument):
         if not flags.all():
             delay = delay * flags.astype(float)
         return t_bary - delay, z
+
+    def _keplerian_ltt_supported(self, orbits):
+        """Whether the star's Keplerian orbits carry what the star's
+        light-travel time needs (``ltt.orbit_supports_ltt`` plus ``sini``).
+        Warns once per component when they do not and some file asked for
+        the term (rvinstrument.md, "The star's own light-travel time")."""
+        from .. import ltt
+
+        if ltt.orbit_supports_ltt(orbits) and hasattr(orbits, "sini"):
+            return True
+        if not self._ltt_unsupported_warned:
+            self._ltt_unsupported_warned = True
+            logger.warning(
+                "[%s] light-travel-time correction of the RV reflex "
+                "disabled for the Keplerian orbits -- the orbit component "
+                "does not define %s (its bodies did not resolve). Set "
+                "light_travel_time: false on the RV files to silence this.",
+                self.prefix,
+                ", ".join(ltt.REQUIRED_ORBIT_PARAMS + ("sini",)),
+            )
+        return False
+
+    def _block_files(self, blocks):
+        """(N,) the file index of every row of a builder call's ``blocks``
+        (which tile the time vector, instrument.md); None when no file in
+        them has ``light_travel_time`` on."""
+        if not any(
+            self.light_travel_time[i] for i, rows in blocks if len(rows)
+        ):
+            return None
+        n = sum(len(rows) for _, rows in blocks)
+        files = np.full(n, -1, dtype=int)
+        for i, rows in blocks:
+            files[np.asarray(rows, dtype=int)] = i
+        if (files < 0).any():
+            # Every builder call lays its rows out as per-file blocks that
+            # tile the time vector (instrument.md); a gap is a caller bug.
+            raise ValueError(
+                f"[{self.prefix}] _rv_model blocks do not tile the time "
+                f"vector: rows {np.nonzero(files < 0)[0][:10].tolist()} "
+                f"belong to no file."
+            )
+        return files
+
+    def _orbit_emission_times(self, system, t, files):
+        """``{orbit index: emission times}`` for every orbit of the star
+        (Keplerian and Taylor), or None when ``files`` is None (no row
+        retarded).
+
+        Each orbit's reflex is retarded by the star's displacement in THAT
+        orbit and in the orbits NESTED inside it (an orbit whose bodies are
+        all bodies of this one: a Jacobi inner planet) -- the subsystem
+        whose light travel a transit of that orbit sees.  NOT by the
+        star's motion in an orbit outside it: that is the light-time effect
+        of an outer companion on the inner orbit (2.5 s for a Jupiter at
+        5 AU, HOURS for a stellar companion), which no other consumer
+        models -- transits evaluate the inner orbit against its own
+        barycenter (ltt.py, "MULTIPLE COMPANIONS", item 2) and every orbit's
+        period is the observed one -- so retarding the RVs alone by it puts
+        the RV and transit ephemerides of the inner orbit apart (on KELT-4's
+        hierarchical triple, 8.3 h).  Sibling orbits (both around the star
+        alone) are not nested in each other.  A Taylor orbit (an
+        unresolved outer companion) is retarded by its own displacement
+        only, and is nested in no Keplerian column.
+        """
+        if files is None:
+            return None
+        orbits = system.orbit
+        s = int(self.star_ndx[0])
+        kep = [int(o) for o, _ in orbits.star_membership(s)]
+        out, cache = {}, {}
+        for o in kep:
+            own = set(orbits.bodies(o))
+            subsystem = frozenset(
+                [o]
+                + [q for q in kep if q != o and set(orbits.bodies(q)) <= own]
+            )
+            if subsystem not in cache:
+                cache[subsystem] = self._emission_time(
+                    system, t, files, keplerian=subsystem, taylor=()
+                )[0]
+            out[o] = cache[subsystem]
+        for o, _ in orbits.taylor_membership(s):
+            out[int(o)] = self._emission_time(
+                system, t, files, keplerian=(), taylor=(int(o),)
+            )[0]
+        return out
 
     def _raw_rv_model(self, system, time, blocks):
         """The likelihood's model when some file is raw: ``(model,
@@ -1064,11 +1178,27 @@ class RVInstrument(Instrument):
             xp=pt,
         )
         self._raw_t_bary_node = geom["t_bary"]
-        t_emit, z_toward = self._emission_time(
+        # The DIRECTION carries the star's whole displacement (every orbit);
+        # each orbit's reflex its own subsystem's retardation.
+        _, z_toward = self._emission_time(
             system, geom["t_bary"], nodes["file"]
         )
-        self._raw_t_emit_node = t_emit
-        v_los, _ = self._rv_model(system, t_emit, nodes["blocks"], offset=None)
+        files = (
+            nodes["file"]
+            if any(self.light_travel_time[i] for i in set(nodes["file"]))
+            else None
+        )
+        t_emit = self._orbit_emission_times(system, geom["t_bary"], files)
+        v_los, _ = self._rv_model(
+            system, geom["t_bary"], nodes["blocks"], offset=None, t_emit=t_emit
+        )
+        if t_emit is None:
+            orbits = system.orbit
+            t_emit = {
+                int(o): geom["t_bary"]
+                for o, _ in orbits.star_membership(s)
+                + orbits.taylor_membership(s)
+            }
         v_los = v_los * SOLRAD_PER_DAY_TO_MPS
         kep, matrix = self._rv_model(system, time, blocks, offset=None)
         offset = self.gamma.value[self.inst_map_tensor]
@@ -1456,7 +1586,7 @@ class RVInstrument(Instrument):
             omap.append(o)
         return pt.stack(k_nodes), np.asarray(omap, dtype=int)
 
-    def _rv_model(self, system, t, blocks, offset=None):
+    def _rv_model(self, system, t, blocks, offset=None, t_emit=None):
         """The RV model on times ``t`` -- THE expression, built once.
 
         ``build_likelihood`` calls this with the data's ``pm.Data`` time
@@ -1476,6 +1606,21 @@ class RVInstrument(Instrument):
                       more than once; a file with no rows may be omitted).
         ``offset`` -- optional ``(N,)`` tensor added first (the likelihood's
                       ``gamma[inst_map]``), or None.
+        ``t_emit`` -- ``{orbit: emission times}`` for ``t``, when the
+                      caller has them already (the raw-redshift nodes);
+                      None forms them here (``_orbit_emission_times``),
+                      per file.
+
+        THE STAR'S OWN LIGHT-TRAVEL TIME.  ``t`` are arrival times
+        (BJD_TDB); every orbit column -- Keplerian and Taylor -- is
+        evaluated at the star's EMISSION time, retarded by its own
+        line-of-sight displacement in that orbit's own subsystem (~K^2/c
+        in velocity; ``_orbit_emission_times``), on the rows of every file with
+        ``light_travel_time`` on (the default).  The Rossiter-McLaughlin
+        anomaly is NOT: it is an occultation seam with its own retardation
+        (``rm.compute_rm_rv``), which reads the arrival times.  With the
+        key off on every file the graph is the arrival-time one, node for
+        node.
 
         Returns ``(rv_model, rv_matrix)``, both in the internal RV unit:
 
@@ -1500,6 +1645,10 @@ class RVInstrument(Instrument):
         """
         orbits = system.orbit
         K_vec, omap = self._orbit_rv_terms(system, self.star_ndx[0])
+        if t_emit is None:
+            t_emit = self._orbit_emission_times(
+                system, t, self._block_files(blocks)
+            )
         # Taylor orbits (type: constant_acceleration | constant_jerk) the observed star is the
         # PRIMARY of -- Orbit._taylor_consumers refused the companion side
         # at stage 3.  Each is one more column, after the Keplerian ones.
@@ -1512,12 +1661,23 @@ class RVInstrument(Instrument):
         columns = []
         if omap.size:
             columns.append(
-                orbits.get_radial_velocity(t, K_vec, omap)  # (N, n_member)
+                orbits.get_radial_velocity(
+                    t
+                    if t_emit is None
+                    else pt.stack([t_emit[int(o)] for o in omap], axis=1),
+                    K_vec,
+                    omap,
+                )  # (N, n_member)
             )
         if taylor:
             columns.append(
                 pt.stack(
-                    [orbits.taylor_radial_velocity(t, o) for o in taylor],
+                    [
+                        orbits.taylor_radial_velocity(
+                            t if t_emit is None else t_emit[int(o)], o
+                        )
+                        for o in taylor
+                    ],
                     axis=1,
                 )
             )
