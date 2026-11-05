@@ -394,6 +394,24 @@ class Lens(Component):
                     "on the primary's entry; exactly one companion for now."
                 ),
             },
+            {
+                "key": "fitalpha",
+                "kind": "option",
+                "accepts": [True, False],
+                "required": False,
+                "doc": (
+                    "On a companion's entry: sample the trajectory angle "
+                    "alpha directly (uniform on a full turn centered on its "
+                    "start) instead of through its direction latents "
+                    "xalpha/yalpha.  Default: decided automatically at the "
+                    "polished start -- direct when the light curve measures "
+                    "alpha to better than 5.7 deg, where the latents' "
+                    "posterior is a narrow ray -- with a warning when it "
+                    "switches.  true forces the direct coordinate, false the "
+                    "latents.  Not valid on the primary's entry or on a "
+                    "companion whose alpha comes from a keplerian orbit."
+                ),
+            },
         ]
 
     # ------------------------------------------------------------------

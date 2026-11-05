@@ -1,0 +1,55 @@
+run:
+  name: "Gaia4"
+
+prefix: "fitresults/Gaia4_jerk"
+logger_level: INFO
+
+# Gaia-4b (Stefansson et al. 2025, AJ 169, 107): an 11.8 M_J planet on a
+# 571-day orbit around a 0.64 Msun K/M dwarf at 73 pc.  REAL Gaia DR4
+# epoch astrometry (the June 2026 pre-release, read as DPAC ships it) plus
+# the HPF, NEID and FIES radial velocities.  See README.md.
+# VARIANT: + an unresolved outer companion as a constant 3-D jerk
+# (adds gammaddot and jerk_ra/jerk_dec to the acceleration terms).
+
+star:
+  - name: "A"
+    mist: False
+
+planet:
+  - name: "b"
+
+orbit:
+  - name: "b"
+    primary: ["A"]
+    companion: ["b"]
+  # An unresolved outer companion's reflex, as one constant 3-D jerk of
+  # the star: gammadot/gammaddot (line of sight) for the RVs,
+  # accel_ra/accel_dec and jerk_ra/jerk_dec (sky plane) for the DR4 epochs.
+  - name: "outer"
+    type: constant_jerk
+    primary: ["A"]
+
+rvinstrument:
+  - name: "HPF"
+    file: "Gaia4.HPF.rv"
+  - name: "NEID"
+    file: "Gaia4.NEID.rv"
+  - name: "FIES"
+    file: "Gaia4.FIES.rv"
+
+astrometryinstrument:
+  - name: "GaiaDR4"
+    file: "GAIA_DR4_PRERELEASE_EPOCH_ASTROMETRY_RAW.xml"
+    mode: "gaia"                 # 1-D along-scan epoch astrometry
+    data_format: "gaia_epoch"    # the archive table itself, CCD by CCD
+    source_id: 1457486023639239296
+    epoch: 2457936.87477064      # J2017.5 TCB (the DR4 reference epoch) in BJD_TDB
+
+parameter_file: "gaia4_jerk.params.yaml"
+
+sampler:
+  method: numpyro
+  tune: 1000
+  draws: 3000
+  target_accept: 0.95
+  recompute_trace: True

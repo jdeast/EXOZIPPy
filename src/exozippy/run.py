@@ -31,6 +31,16 @@ from exozippy.samplers.ptde_async import ptde_async_sample
 from exozippy.system import KNOWN_BLOCK_KEYS, System
 
 from . import reporting
+from .angles import (
+    adopt_direct_angles,
+    choose_direct_angles,
+)
+from .angles import (
+    has_auto_slots as has_auto_angle_slots,
+)
+from .angles import (
+    restore_from_trace as restore_direct_angles,
+)
 from .branches import (
     branch_summary_lines,
     is_branch_resolved,
@@ -970,6 +980,13 @@ def _run_fit(config, gui, user_params=None):
     # 3. Build the stellar system into a PyMC Graph
     system = System(config, user_params=user_params)
     system.prepare()  # this triggers I/O
+    # A trace about to be REUSED was sampled in whatever coordinates its run
+    # chose for each angle (exozippy.angles: the automatic direct-angle switch
+    # is decided from the polished start, which this path never computes), and
+    # its raw draws decode only through those -- so they are restored from the
+    # trace BEFORE the build, the way the whitening is restored after it.
+    if os.path.exists(str(prefix) + "_trace.nc") and not recompute_trace:
+        restore_direct_angles(system, str(prefix) + "_trace.nc")
     gui.phase("compiling")  # build_model + get_mcmc_init compile the graph
     model = system.build_model()
 
@@ -1027,7 +1044,14 @@ def _run_fit(config, gui, user_params=None):
     # than sitting on a mean.  The start is built below instead -- explicitly,
     # in raw coordinates -- and handed to each sampler by its own spelling
     # (review 5.3.3a; which branches consume it is review 1.3.6).
-    with model:
+    #
+    # An ExitStack rather than a bare `with model:`, so the automatic
+    # direct-angle switch below can LEAVE this model's context before it
+    # rebuilds: a pm.Model constructed inside another one's context becomes
+    # its sub-model, sharing its variable containers.
+    model_context = contextlib.ExitStack()
+    with model_context:
+        model_context.enter_context(model)
         # Build the raw starting point explicitly: 0 for logit params,
         # (initval - mu)/sigma for Gaussian-path params, so the physical
         # start is always our initval.
@@ -1100,6 +1124,7 @@ def _run_fit(config, gui, user_params=None):
         # the same driver for L-BFGS).  `polish_timeout` (seconds, default
         # polish.DEFAULT_POLISH_TIMEOUT_S, null = none) bounds the whole
         # polish's wall clock and stops it when spent.
+        angle_logp_fn = None
         if not reusing_trace:
             raw_starts_pre, _seed_indices_pre = system.get_raw_starts(model)
             polish_steps = resolve_polish_steps(
@@ -1134,6 +1159,12 @@ def _run_fit(config, gui, user_params=None):
                 )
                 raw_start = system.get_raw_start(model)
                 polished_start = True
+
+            # The automatic direct-angle switch needs a compiled logp; it is
+            # compiled ONCE here and shared with the probe below, so a model
+            # with latent angles pays no extra compile.
+            if has_auto_angle_slots(system):
+                angle_logp_fn = model.compile_logp()
 
             # Re-center the whitening anchor on the (now polished) start, so
             # raw = 0 IS the start and `model.initial_point()` is correct BY
@@ -1186,12 +1217,52 @@ def _run_fit(config, gui, user_params=None):
                 # OGLE-2013-BLG-0341 job on one core for 12.85 h.
                 cores=cores,
                 eval_timeout=eval_timeout,
+                logp_fn=angle_logp_fn,
             )
             if whiten_report is not None:
                 # The rescale re-expressed a polished (nonzero) start in
                 # the new raw coordinates; re-read it for every consumer
                 # below (a no-op for an unpolished all-zeros start).
                 raw_start = system.get_raw_start(model)
+
+        # The automatic DIRECT-ANGLE switch (exozippy.angles; JDE
+        # 2026-11-04/05): an angle sampled through direction latents that the
+        # data measure to better than DIRECT_ANGLE_MAX_SIGMA at this polished
+        # start -- conditionally (a probe along the circle) AND marginally
+        # (the Laplace covariance) -- is sampled directly instead, on a
+        # window centered here.  AFTER the probe, so the Hessian is taken in
+        # whitened coordinates; when nothing switches (two logp calls per
+        # angle) the model, the start and the whitening are untouched.  When
+        # something does, the model is rebuilt outside the old context, the
+        # polished point carried over, and the whitening measured again on
+        # the new model (that file supersedes the first).
+        if not reusing_trace:
+            angle_choices, _ = choose_direct_angles(
+                system, model, raw_start, angle_logp_fn
+            )
+            if angle_choices != (system.direct_angles or {}):
+                model_context.close()
+                model = adopt_direct_angles(
+                    system, model, raw_start, angle_choices
+                )
+                model_context.enter_context(model)
+                raw_start = system.get_raw_start(model)
+                # The same guard as the first call (reusing_trace is False on
+                # this path, so it reduces to measure_scales), kept in that
+                # spelling so the restore can never be gated on
+                # measure_scales alone (tests/test_run_whitening_reuse.py).
+                if reusing_trace or measure_scales:
+                    whiten_report = prepare_whitening(
+                        system,
+                        model,
+                        raw_start,
+                        whitening_path,
+                        trace_path,
+                        reusing_trace=reusing_trace,
+                        cores=cores,
+                        eval_timeout=eval_timeout,
+                    )
+                    raw_start = system.get_raw_start(model)
 
         # 1. Get your starting dictionaries (after the rescale, so the
         # diagnostic table reports the measured scales)

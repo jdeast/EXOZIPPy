@@ -8,8 +8,10 @@ Pipeline (see identify_modes):
      variables in the posterior group -- the ``*_raw`` companions that
      Parameter.build_pymc stores next to every sampled parameter.  The raw
      space has no bound pileups and no unit issues, and circular parameters
-     are already embedded (alpha is sampled as xalpha/yalpha), so Euclidean
-     clustering is meaningful there.
+     are already embedded (alpha is sampled as xalpha/yalpha) or, where the
+     data measure an angle well, sampled directly on a window whose seam
+     holds no mass (exozippy.angles), so Euclidean clustering is meaningful
+     there.
   2. Reject invalid draws: non-finite features or lp, implausible |lp|, or
      raw values astronomically far from the bulk (robust z-score).  These are
      runaway/stuck chains pinned at parameter bounds, not posterior modes.
