@@ -1,0 +1,25 @@
+# Settings that do not come from the event message. Production values follow
+# examples/DC2018/run_event.py (PTDE, EXOFASTv2-parity sizing); the container
+# reads the file named by $EXOZIPPY_FIT_SETTINGS (default: this one).
+sampler:
+  method: ptde_async
+  seed_polish: auto
+  n_temps: 8
+  T_max: 200.0
+  tune: 5000
+  draws: 50000
+  nthin: 1
+  eval_timeout: 10
+  recompute_trace: true
+# Per-mode bridge-sampling evidence weights: degenerate events leave chains
+# split across solutions with no mixing, so occupancy is not posterior mass.
+modes:
+  weights: evidence
+# Finite-source effects per architecture. A planetary caustic crossing needs
+# them; a PSPL event fit as PSPL does not.
+finite_source:
+  1S1L: false
+  1S2L: true
+# The architecture fit when the input event names none.  An architecture
+# search (fitting both and comparing evidence) is planned to replace this.
+default_architecture: 1S1L

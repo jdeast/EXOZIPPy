@@ -1,0 +1,9 @@
+# PLACEHOLDERS until WG14 assigns them -- see README.md, "Open questions".
+component_pipeline_name = 'exozippy_event_modeling'
+container_image_uri = 'docker.io/jdeast/exozippy_rges_pit:0.1.0'
+# The upstream that announces a new candidate event (WG5); name TBD.
+input_event_source_names = ['event_and_anomaly_detection_pipeline']
+required_s3_buckets = ['photometry_bucket', 'wg3_event_modeling_bucket']
+# 6 h: the framework sets the SQS visibility timeout to twice this, and SQS
+# allows at most 12 h.  A full binary-lens fit takes longer (README.md).
+upper_bound_run_time__seconds = 21600

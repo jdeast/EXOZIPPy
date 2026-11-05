@@ -1,0 +1,20 @@
+# EXOZIPPy as an RGES-PIT component pipeline.  Build from this directory:
+#     docker compose up --build --force-recreate
+#
+# python:3.14, not the template's 3.15: pytensor (through pymc) caps
+# EXOZIPPy at <3.15.  The full image, not -slim, because pytensor compiles
+# the model to C at run time and falls back to a much slower pure-Python
+# backend without a compiler.
+FROM python:3.14
+
+# Which EXOZIPPy to install: a tag, branch or commit of jdeast/EXOZIPPy.
+# Pin a tag or commit for a production image so it can be rebuilt exactly.
+ARG EXOZIPPY_REF=master
+
+WORKDIR /workspace
+RUN pip install --no-cache-dir \
+        "exozippy @ git+https://github.com/jdeast/EXOZIPPy@${EXOZIPPY_REF}" \
+        "nena_component_tools>=0.3.2,<0.4"
+COPY component_pipeline.py container_loop.py fit_settings.yaml fit_settings_quick.yaml ./
+
+CMD ["python", "./container_loop.py"]

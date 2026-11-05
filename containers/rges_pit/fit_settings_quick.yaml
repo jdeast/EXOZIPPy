@@ -1,0 +1,25 @@
+# Smoke-test settings: the production file (fit_settings.yaml) with a tiny
+# tune/draws, so `docker compose up` exercises the whole task in minutes.
+# The posterior it produces is NOT science.
+sampler:
+  method: ptde_async
+  seed_polish: auto
+  n_temps: 8
+  T_max: 200.0
+  tune: 300
+  draws: 300
+  nthin: 1
+  eval_timeout: 10
+  recompute_trace: true
+# Per-mode bridge-sampling evidence weights: degenerate events leave chains
+# split across solutions with no mixing, so occupancy is not posterior mass.
+modes:
+  weights: evidence
+# Finite-source effects per architecture. A planetary caustic crossing needs
+# them; a PSPL event fit as PSPL does not.
+finite_source:
+  1S1L: false
+  1S2L: true
+# The architecture fit when the input event names none.  An architecture
+# search (fitting both and comparing evidence) is planned to replace this.
+default_architecture: 1S1L
