@@ -273,6 +273,80 @@ class TimeSystem:
         )
         return out
 
+    def _to_observer_tdb(self, t, i, observer_location):
+        """File ``i``'s raw times as the OBSERVER's coordinate time JD_TDB
+        at reception -- what a component that models the light travel
+        itself needs (``rvinstrument``'s ``data_format: raw_redshift``,
+        whose Roemer delay is a function of the fitted star), where every
+        other reader wants a BJD_TDB tag (``_to_bjd_tdb``).
+
+        ``time_offset`` first, as always.  Then by ``time_frame``:
+
+        * ``jd`` -- the observer's own clock (a flux-weighted exposure
+          midpoint in UTC, typically): the scale converted to TDB at the
+          observer (astropy/erfa; the ground site's location enters the
+          topocentric TDB-TT term, ~2 us, and UT1 nothing);
+        * ``bjd`` -- barycentric tags (a spacecraft archive's, e.g. Gaia's
+          TCB): the scale converted to TDB, then the reception instant
+          solved from the observer's own position and the start direction
+          (``ephemeris.reception_instant``; a direction wrong by an arcsec
+          moves it by 2.4 ms);
+        * ``hjd`` raises: no instrument tags raw spectra heliocentrically.
+
+        The observer's place comes from ``observer_location``, the one
+        spelling in this mode, so ``time_location`` is refused by the host
+        at construction.
+        """
+        spec = self.time_specs[i]
+        if spec["offset"] != 0.0:
+            t = t + spec["offset"]
+        label = f"{self.prefix}[{self.names[i]}]"
+        if t.min() < _MIN_ABS_JD:
+            raise ValueError(
+                f"[{label}] the observer-time conversion needs absolute "
+                f"Julian Dates, but the smallest time after time_offset is "
+                f"{t.min():.3f}. Set time_offset to restore full JDs (e.g. "
+                f"2450000 for JD-2450000 data, 2400000.5 for MJD)."
+            )
+        from astropy.time import Time
+
+        from exozippy.ephemeris import _resolve_observer, reception_instant
+
+        kind, target = _resolve_observer(observer_location)
+        location = target if kind == "site" else None
+        if spec["frame"] == "jd":
+            out = Time(
+                t, format="jd", scale=spec["scale"], location=location
+            ).tdb.jd
+        elif spec["frame"] == "bjd":
+            t_tdb = Time(
+                t, format="jd", scale=spec["scale"], location=location
+            ).tdb.jd
+            coord = self._time_coord(i, label)
+            out = reception_instant(
+                t_tdb,
+                coord.ra.rad,
+                coord.dec.rad,
+                observer_location=observer_location,
+                ephemeris=spec["ephemeris"],
+            )
+        else:
+            raise ValueError(
+                f"[{label}] time_frame: {spec['frame']} cannot tag a raw "
+                f"spectrum; use jd (the observer's own clock) or bjd "
+                f"(barycentric tags)."
+            )
+        logger.info(
+            "[%s] converted %d times from %s_%s to the observer's JD_TDB "
+            "(median shift %+.3f s).",
+            label,
+            t.size,
+            spec["frame"].upper(),
+            spec["scale"].upper(),
+            float(np.median(out - t)) * 86400.0,
+        )
+        return out
+
     def _time_coord(self, i, label):
         """The target ICRS direction for file ``i``'s light-travel terms.
 

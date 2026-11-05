@@ -1,0 +1,41 @@
+star.A.mass:
+  initval: 0.64
+  sigma: 0.03
+star.A.radius:
+  initval: 0.62
+  sigma: 0.03
+star.A.ra:
+  initval: 209.5063
+  mu: 209.5063
+  sigma: 1.0e-6
+star.A.dec:
+  initval: 31.6955
+  mu: 31.6955
+  sigma: 1.0e-6
+star.A.pm_ra:
+  initval: -75.53
+  mu: -75.53
+  sigma: 0.02
+star.A.pm_dec:
+  initval: 17.97
+  mu: 17.97
+  sigma: 0.02
+star.A.distance:
+  initval: 73.37
+star.A.parallax:
+  mu: 13.63
+  sigma: 0.02
+star.A.rv:
+  initval: -20000.0
+  mu: -20000.0
+  sigma: 500.0
+orbit.b.period:
+  initval: 571.0
+orbit.b.tc:
+  initval: 2460300.0
+orbit.b.ecc:
+  initval: 0.35
+orbit.b.omega:
+  initval: 210.0
+planet.b.K:
+  initval: 330.0
