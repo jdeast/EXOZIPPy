@@ -772,6 +772,21 @@ ORIGINAL separation, both in the current coordinates, and warns below 1/4.
 Every round polishes every seed (a seed polished alone would get an infinite
 radius).
 
+**A seed opens inside its own trust region.** The opening population is
+jittered at one scale unit per coordinate, which puts a member ~sqrt(D) scale
+units from its seed; where a seed's radius is smaller than that, every member
+opened outside its region and `_accept` refused every move, the same failure
+as the carried regions above, in round 1. MOA-2008-BLG-379 (four seeds in D = 46,
+two pairs 3.8 scale units apart, radius 1.9) accepted 0 of 25,727 proposals per
+seed in a 92 min first round; with `trust_fraction: null` the same opening
+sweeps accepted 36-42 %. Opening inside the radius, its first round gained
++382 / +226 / +305 / +262 nats in 20 min, about what the old code reached 1 h 53
+min in (round 1 unmoved, then round 2 re-whitened at the same seeds). Such a seed now opens at `min(1, radius / (2 sqrt(D)))` scale units of
+jitter (a member's median distance half the radius) and logs it; a lone seed,
+or one whose radius is wider than its population's reach, opens as before,
+draw for draw. Tests:
+`tests/test_polish_trust_region.py::test_close_seeds_in_many_dimensions_still_move`.
+
 **Progress line.** Each heartbeat now reports the proposals each seed
 ACCEPTED since the previous line and an ETA from the CURRENT sweep rate
 ("eta<=4.5 min (73.4 sweeps/min) ... accepted since last line=[164/1837]"),
