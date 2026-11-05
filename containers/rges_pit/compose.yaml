@@ -1,0 +1,20 @@
+# Local run: fits every event in ./input_events with the quick (smoke-test)
+# settings and writes output events to ./output_events and products to
+# ./output_data.  See README.md, "Running it locally".
+services:
+  component_pipeline:
+    build:
+      context: .
+      dockerfile: Containerfile
+    image: docker.io/jdeast/exozippy_rges_pit:0.1.0
+    working_dir: /workspace
+    environment:
+      NENA_IN_EVENT_PIPELINE: "false"
+      EXOZIPPY_INPUT_ROOT: /workspace/input_data
+      EXOZIPPY_OUTPUT_ROOT: /workspace/output_data
+      EXOZIPPY_FIT_SETTINGS: /workspace/fit_settings_quick.yaml
+    volumes:
+      - ./input_events:/workspace/input_events:ro
+      - ./input_data:/workspace/input_data:ro
+      - ./output_events:/workspace/output_events
+      - ./output_data:/workspace/output_data
