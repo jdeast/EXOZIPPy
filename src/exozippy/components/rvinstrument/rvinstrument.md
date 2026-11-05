@@ -63,7 +63,7 @@ is what a published transit time and every other component's `tc` mean, so a joi
 transit + RV fit has one `tc`. In an RV-only fit it is a change of meaning: a seeded
 `tc` is now read as the observed conjunction, which moves the model's phase by that
 shift (21 s for kelt4 b, 0.07 m/s) -- the larger part of every RV-only example's
-start-logp move (the table is in the PR that made this change). A `tc` from an older,
+start-logp move (the per-example table is in #568). A `tc` from an older,
 unretarded fit is closer to the target-frame one (an RV-only fit's conjunction is the
 star's, which is late by only `(M_c/M) a sin i / c`); shift it by the seconds above, or
 set `light_travel_time: false` to keep the old model.
