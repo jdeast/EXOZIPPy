@@ -21,8 +21,60 @@ in `unit:` (default m/s), then optional detrend columns. The model is
 `gamma_i + sum over every orbit containing the star of its reflex` (Keplerian `K`
 phase terms and Taylor `VZ(t) - VZ(rv_epoch)` columns, `RVInstrument._rv_model`), plus a
 file's Rossiter-McLaughlin anomaly where `rm:` asks for one. `data_format` absent is
-byte-identical to the file before the key existed: the start logp of `kelt4_rvonly`,
-`hd80606_rvonly`, `toi3919`, `GaiaBH1`, `wasp18` and `hat3` is unchanged to the last bit.
+byte-identical to the file before the key existed.
+
+**The star's own light-travel time** (`light_travel_time:`, per file, default ON; JDE
+2026-11-04: "we should do it right and include the ltt term and recompute the logp").
+The times are BJD_TDB ARRIVAL times, and the reflex light left the star at its EMISSION
+time `t_emit = t - Z_star(t_emit)/c`, `Z_star` its own line-of-sight displacement. So
+every orbit column of `_rv_model` -- Keplerian and Taylor -- is evaluated at its own
+`t_emit` (`_orbit_emission_times` -> `_emission_time`, the raw-redshift mode's
+machinery, through `components/ltt.py`; per row, by the row's file), in the likelihood
+and on the plotted grid alike.
+
+**Which displacement retards which orbit.** Each orbit's reflex is retarded by the
+star's displacement in THAT orbit and in the orbits nested inside it (an orbit whose
+bodies are all bodies of this one -- a Jacobi inner planet), the subsystem whose light
+travel a transit of that orbit sees. Not by the star's motion in an orbit OUTSIDE it:
+that is the light-time effect of an outer companion on the inner orbit (`ltt.py`,
+"MULTIPLE COMPANIONS", item 2), 2.5 s for a Jupiter at 5 AU and HOURS for a stellar
+companion, which no other consumer models -- transits time the inner orbit against its
+own barycenter, and every period is the observed one. Retarding the RVs alone by it
+put the RV and transit ephemerides of KELT-4 b 8.3 h apart (the star is in a
+hierarchical triple): -2471 nats at the start, a model no joint fit could reconcile.
+Sibling orbits (both around the star alone) are not nested in each other; a Taylor
+orbit (an unresolved outer companion) is retarded by its own displacement only. The
+raw-redshift mode uses the same per-orbit times, and the star's WHOLE displacement for
+its direction (the wobble in `rho_hat`). Modeling the outer light-time effect is one
+change for every timing consumer at once, not for RVs alone. The
+Rossiter-McLaughlin anomaly is not: it is an occultation seam with its own retardation
+(`rm.compute_rm_rv`), and it reads the arrival times. The term is `~K^2/c`: 0.06 mm/s
+for kelt4, 3 cm/s at K = 3 km/s, 3 m/s at K = 30 km/s, tens of m/s on a close binary's
+secondary (`tests/test_rv_light_travel.py`, against an independent fixed-point
+retardation). The sign: ltt.py's `z` is companion-minus-primary toward the observer, so
+the star's own toward-observer displacement is `-(M_c/M) z` on an orbit's primary side
+and `+(M_p/M) z` on its companion side.
+
+With the key on, `Orbit._ltt_reporting_mask` counts the file as a retarding consumer of
+every Keplerian orbit of its star, exactly as a transit file is: the Kepler epoch is the
+target frame's (`tp_target` from `tc_target`), and `tc` is the OBSERVED conjunction --
+the time a transit would be seen, `(M_p - M_c)/M a sin i / c` before `tc_target`. That
+is what a published transit time and every other component's `tc` mean, so a joint
+transit + RV fit has one `tc`. In an RV-only fit it is a change of meaning: a seeded
+`tc` is now read as the observed conjunction, which moves the model's phase by that
+shift (21 s for kelt4 b, 0.07 m/s) -- the larger part of every RV-only example's
+start-logp move (the per-example table is in #568). A `tc` from an older,
+unretarded fit is closer to the target-frame one (an RV-only fit's conjunction is the
+star's, which is late by only `(M_c/M) a sin i / c`); shift it by the seconds above, or
+set `light_travel_time: false` to keep the old model.
+
+When it cannot apply: an orbit component without physical `a`/masses/`sini` (its
+bodies did not resolve) warns once (`_keplerian_ltt_supported`, the decision rm.py and
+transit.py make through `ltt.orbit_supports_ltt`) and its Keplerian columns are
+evaluated at the arrival time; a Taylor orbit retards by its own line-of-sight
+displacement (its acceleration and jerk terms) and needs no `a`. `light_travel_time:
+false` on every file is the arrival-time model node for node (no row is retarded, and
+`_rv_model` reads the time vector itself), so a fit that wants the old numbers sets it.
 
 ## Raw redshifts (`data_format: raw_redshift`)
 
@@ -125,7 +177,8 @@ In the graph, functions of the fitted parameters (`redshift.star_geometry`,
   (< 0.1 ms) is not modeled;
 - **the star's own light-travel time**: the reflex light leaves the star at its EMISSION
   time `t_emit = t_B - Z_star(t_emit)/c`, with `Z_star` the star's line-of-sight reflex
-  displacement summed over EVERY orbit it is a body of (`-(M_c/M) z` on an orbit's
+  displacement in each orbit's own subsystem -- that orbit and the orbits nested inside
+  it ("Which displacement retards which orbit", above) -- (`-(M_c/M) z` on an orbit's
   primary side, `+(M_p/M) z` on its companion side in `ltt.py`'s toward-observer `z`;
   a Taylor orbit's own `Z`). `RVInstrument._emission_time` builds it through
   `components/ltt.py`'s one implementation (`line_of_sight_kinematics` per orbit, the
@@ -135,9 +188,8 @@ In the graph, functions of the fitted parameters (`redshift.star_geometry`,
   `~K^2/c`: 0.43 mm/s peak (0.20 mm/s RMS) for the Gaia-4-like example, 3 cm/s for a
   K = 3 km/s, 3-day brown dwarf or M-dwarf companion, 3 m/s at K = 30 km/s and 53 m/s on
   the secondary of a 1.0 + 0.3 Msun 3-day binary (`tests/test_raw_redshift_orbits.py`).
-  `light_travel_time: false` on a raw file turns it off. The CORRECTED-velocity path does
-  not retard the reflex (it evaluates the orbit at the BJD_TDB tag), which is the same
-  omission; it is left as it is, byte-identical, and recorded as an open item;
+  `light_travel_time: false` on a raw file turns it off. The corrected-velocity path
+  retards the reflex the same way (above, "Corrected velocities");
 - **the star's total velocity** `beta_* = beta_sys + v_reflex / c`, with every orbit's
   reflex evaluated at `t_emit` through the same `_rv_model` columns a corrected file reads
   (Keplerian and Taylor, `orbit.md`): the line-of-sight part along `r0_hat` (the orbit's
@@ -428,9 +480,8 @@ WE14; the TEMPO comparison rules it out as a term this model misses).
 5. The astrometry's own track is still the linear tangent-plane model; moving it onto
    `redshift.star_geometry`'s 3-D motion would add the astrometric perspective terms
    (mas-level for Barnard's star over a decade) and is not part of this mode.
-7. The corrected-velocity path (`data_format: rv`) also evaluates the reflex at the
-   BJD_TDB tag, without the star's own light-travel time (`~K^2/c`); left unchanged and
-   byte-identical here, for a separate decision.
+7. Settled (JDE 2026-11-04): the corrected-velocity path retards the reflex too,
+   default on ("Corrected velocities").
 6. Default ephemeris `builtin` (0.27 cm/s against DE430); `time_ephemeris: de440` is
    one key away.
 

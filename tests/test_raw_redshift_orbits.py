@@ -81,9 +81,16 @@ def _star_motion(t, orbits):
     return Z, V
 
 
-def _independent_cz(jd_utc, orbits, star, gamma_ms, rv, retard=True):
+def _independent_cz(
+    jd_utc, orbits, star, gamma_ms, rv, retard=True, subsystems=None
+):
     """c z_meas predicted for the star at ``star`` (internal units) with
-    reflex composed by ``_star_motion`` at the RETARDED time."""
+    reflex composed by ``_star_motion``, each orbit's at its own RETARDED
+    time: retarded by the star's displacement in the orbits of
+    ``subsystems[k]`` (indices into ``orbits``; default: orbit k alone) --
+    the orbit and those nested inside it (RVInstrument._orbit_emission_times)."""
+    if subsystems is None:
+        subsystems = [[k] for k in range(len(orbits))]
     from astropy.coordinates import EarthLocation
     from astropy.time import Time
 
@@ -92,23 +99,26 @@ def _independent_cz(jd_utc, orbits, star, gamma_ms, rv, retard=True):
     t_tdb = Time(jd_utc, format="jd", scale="utc", location=loc).tdb.jd
     obs = observer_terms(t_tdb, SITE, "builtin")
 
-    def emit(t_bary):
+    def emit(t_bary, k):
         t_emit = np.array(t_bary, dtype=float)
         if retard:
+            sub = [orbits[q] for q in subsystems[k]]
             for _ in range(8):
-                Z, _ = _star_motion(t_emit, orbits)
+                Z, _ = _star_motion(t_emit, sub)
                 t_emit = t_bary - Z / C_MPS / 86400.0
         return t_emit
 
     def reflex(t_bary):
-        _, V = _star_motion(emit(t_bary), orbits)
+        V = 0.0
+        for k, o in enumerate(orbits):
+            V = V + _star_motion(emit(t_bary, k), [o])[1]
         return V, None, None
 
     def potential(t_bary):
         # The companions' potential at the star: G M_other / (r c^2).
-        t_emit = emit(t_bary)
-        phi = np.zeros_like(t_emit)
-        for o in orbits:
+        phi = np.zeros_like(np.asarray(t_bary, dtype=float))
+        for k, o in enumerate(orbits):
+            t_emit = emit(t_bary, k)
             r_a, _, _, _ = _kepler(t_emit, o["tp"], o["P"], o["e"], o["w"])
             phi = phi + o["gm_other"] / (o["a_rel"] * r_a * C_MPS**2)
         return phi
@@ -282,8 +292,11 @@ def test_two_planets_and_a_jacobi_orbit_match_the_independent_model(
       [A, b]),
     When the raw-redshift model is evaluated at the start,
     Then it equals the independent numpy composition -- each orbit's
-      reflex at the star's share M_c/M, Jacobi masses for c, both summed
-      into one velocity at the retarded time -- to < 0.1 mm/s.
+      reflex at the star's share M_c/M, Jacobi masses for c, summed into one
+      velocity, each at its own retarded time: b's by the star's motion in
+      b, c's by its motion in c AND in b (nested inside c) -- to < 0.1 mm/s.
+      Retarding b by c's motion too (the outer orbit's light-time effect on
+      the inner one, which no transit models) would miss by more.
     """
     (system, model, start), jd = two_planet_jacobi
     assert [r for _, r in system.orbit.star_membership(0)] == [
@@ -294,12 +307,20 @@ def test_two_planets_and_a_jacobi_orbit_match_the_independent_model(
     (gamma,) = _at(model, start, [system.rvinstrument.gamma.value])
     star = _star_start(system, model, start, 0)
     gamma_ms = float(gamma[0]) * system.rvinstrument._rv_factor()
-    ind = _independent_cz(jd, orbits, star, gamma_ms, star[5])
+    ind = _independent_cz(
+        jd, orbits, star, gamma_ms, star[5], subsystems=[[0], [0, 1]]
+    )
     mod = _model_cz(system, model, start)
     assert np.max(np.abs(mod - ind)) < 1e-4
+    summed = _independent_cz(
+        jd, orbits, star, gamma_ms, star[5], subsystems=[[0, 1], [0, 1]]
+    )
+    assert np.max(np.abs(summed - ind)) > 1e-3
     # and the composition is not trivially one orbit: dropping c moves it
     # by its full ~K.
-    alone = _independent_cz(jd, orbits[:1], star, gamma_ms, star[5])
+    alone = _independent_cz(
+        jd, orbits[:1], star, gamma_ms, star[5], subsystems=[[0]]
+    )
     assert np.max(np.abs(alone - ind)) > 50.0
 
 

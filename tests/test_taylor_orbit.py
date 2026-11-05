@@ -87,9 +87,13 @@ def test_the_trend_is_the_taylor_series_about_the_epoch(tmp_path, otype):
     """
     Given a star whose only orbit is a Taylor orbit, with seeded coefficients,
     When the RV model is evaluated at the start,
-    Then it is exactly gamma + gammadot (t - epoch) [+ gammaddot (t -
+    Then it is exactly gamma + gammadot (t' - epoch) [+ gammaddot (t' -
       epoch)**2 / 2] -- a DERIVATIVE, not EXOFASTv2's QUAD coefficient --
-      with no constant term of its own (gamma carries it).
+      with no constant term of its own (gamma carries it), at the star's
+      EMISSION time t' = t - Z(t')/c, Z = gammadot dt^2/2 [+ gammaddot
+      dt^3/6] the trend's own line-of-sight displacement (the star's light
+      travel time, on by default; solved here by fixed point, independently
+      of RVInstrument._emission_time's Taylor solve).
     """
     rv = _write_rv(tmp_path / "t.rv")
     orbit = {"name": "trend", "type": otype, "primary": ["A"]}
@@ -106,7 +110,12 @@ def test_the_trend_is_the_taylor_series_about_the_epoch(tmp_path, otype):
         _at_start(system, model, rvi._rv_model_data_node) * rvi._rv_factor()
     )
     epoch = system.orbit.taylor_epoch[0]
+    gdd = 0.006 if otype == "constant_jerk" else 0.0
     dt = rvi.time - epoch
+    for _ in range(10):
+        z_m = (-1.25 * dt**2 / 2.0 + gdd * dt**3 / 6.0) * 86400.0
+        dt = rvi.time - epoch - z_m / 299792458.0 / 86400.0
+    assert np.max(np.abs(dt - (rvi.time - epoch))) * 86400.0 > 0.1
     expected = 300.0 - 1.25 * dt
     if otype == "constant_jerk":
         expected = expected + 0.5 * 0.006 * dt**2
@@ -166,6 +175,10 @@ def test_a_trend_beside_a_planet_adds_to_the_keplerian(tmp_path):
             },
         ],
         planets=[{"name": "b"}],
+        # The column bookkeeping at the arrival time: with the star's light
+        # travel on, the planet's displacement would retard the trend
+        # column too (tests/test_rv_light_travel.py covers the composition).
+        rv_extra={"light_travel_time": False},
     )
     params = {
         "orbit.b.period": {"initval": 7.43},

@@ -62,9 +62,9 @@ A corrected-RV fit evaluates the reflex at the barycentric arrival time; the lig
 the star earlier or later by its own line-of-sight displacement over c, which is worth
 `~K^2 / c` in velocity: 0.4 mm/s for K = 330 m/s, 3 cm/s for K = 3 km/s (a brown dwarf
 or M-dwarf companion on a 3-day orbit), 3 m/s for K = 30 km/s, and 53 m/s on the
-secondary of a 1.0 + 0.3 Msun 3-day binary. EXOZIPPy's raw-redshift mode retards the
-reflex; it exceeds 1 cm/s at K ~ 1.7 km/s, 10 cm/s at K ~ 5.5 km/s and 1 m/s at
-K ~ 17 km/s.
+secondary of a 1.0 + 0.3 Msun 3-day binary. EXOZIPPy retards the reflex in both the
+raw-redshift and the corrected-velocity mode; it exceeds 1 cm/s at K ~ 1.7 km/s, 10 cm/s
+at K ~ 5.5 km/s and 1 m/s at K ~ 17 km/s.
 
 ### The companion's gravitational redshift at the star
 

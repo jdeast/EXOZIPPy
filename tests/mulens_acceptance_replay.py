@@ -174,6 +174,18 @@ ob140939 +0.2652, ob140939_today +0.3578, ob161003 +0.4590, ob170114
 -0.6682.  The presplit ob161003 recording was made under the 3-population
 Galactic model, removed in review 1.7.6, so its two galacticmodel terms are
 accepted as moved there (test_mulens_acceptance_b.py, _GALACTIC_TERMS).
+
+The ob09020 fixture was re-recorded when corrected RVs began carrying the
+star's own light-travel time (rvinstrument.md, "Corrected velocities";
+default on).  The lens orbit L is now retarded by the RVs, so its Kepler
+epoch is the target frame's (`tc_target = tc + 201.9 s` at the start) and
+the sampled conjunction is read as the OBSERVED one
+(Orbit._ltt_reporting_mask).  Two moves, both explained:
+`RV:mulensinstrument.model` 33686.1274 -> 33772.7157 (+86.5883) is that
+epoch shift and nothing else -- the old model with its seed moved by the
+same 201.9 s reproduces it to 7.9e-6 nats -- and `RV:rvinstrument.model`
+4.9944 -> 4.9903 (-0.0041) is the epoch shift (-0.0067) plus the star's
+own retardation (+0.0026).  Every other term is bit-identical.
 """
 
 import glob
