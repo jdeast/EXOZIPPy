@@ -982,8 +982,9 @@ running.
 
 **The start-dispersion probe runs ONCE per run, not once per rung.** With
 `measure_scales: false` there are no whitening scales to hand PTDE, so
-`_make_starts` probes the start itself (`whitening.probe_scales`, a serial
-loop of ~18 logp calls per raw element). `build_rung_populations` called it
+`_make_starts` probes the start itself (`whitening.probe_scales`, ~18 logp
+calls per raw element; given the sampler's cores and `eval_timeout` since
+2.6.45, so it pools exactly when the whitening probe would). `build_rung_populations` called it
 once per rung and each call re-derived identical scales: the probe is a
 deterministic function of (seed 0, logp_fn), with no RNG and no temperature.
 It now probes on the first rung and shares the result (`probe_cache`), which
@@ -993,6 +994,39 @@ integration test, 58 raw elements at 0.37 s per logp: 6.6 minutes per
 probe, two of them 800 s of that fixture's 992 s locally -- and an
 eight-rung run with `measure_scales: false` paid it eight times. (The default,
 measured whitening, hands PTDE its scales and never probed per rung.)
+
+**The start build runs on the sampler's pool, and the rung report evaluates
+nothing** (review 2.6.45). `prepare_ptde_run` forks the pool right after
+`set_worker_globals` -- before the build, not after the prologue -- and hands
+it to `build_rung_populations` in a `StartEvaluator`, which scores candidates
+one per worker under `eval_timeout` (a timed-out candidate is -inf, redrawn
+like a bound hit, and the pool is recycled). The sampler then takes the same
+pool from `run.pool`. Before this, on OGLE-2013-BLG-0341 (124 chains x 8
+rungs, ~225 s per three-lens logp) two serial main-process loops stood
+between the polish and the first step: the build (one call per jittered
+candidate plus retries, and the seeds again on every rung) and
+`report_rung_dispersion`, which re-evaluated every chain of every rung --
+992 calls, ~62 h -- for a log line. Both fits spent the rest of a 72 h wall
+there. The report now reads the logps each start was accepted on
+(`start_lps`), and the seeds' own logps are scored once per run
+(`seed_lp_cache`), so the build costs the K seeds plus one call per jittered
+candidate, and the main process makes no logp call at all when there is a
+pool.
+
+**The pooled build is bit-identical to the serial one.** The jitter loop
+draws from `rng` one candidate at a time and the next draw depends on
+whether the last was accepted, so a batch SPECULATES: either the following
+chains' first tries (assuming each succeeds) or the current chain's next
+retries (assuming each fails). The rng state is saved after every draw; at
+the first outcome that breaks the speculation the rest of the batch is
+discarded and the rng rewound to just after the last draw used. A batch is
+at most one candidate per worker, so the waste is idle-worker time, not
+wall time; with no pool the width is 1 and the loop IS the old serial loop,
+draw for draw. `tests/test_ptde_init_logp_calls.py` counts the calls
+(serial: seeds + jittered candidates, report 0; pooled, and end to end
+through both samplers: 0 in the main process) and pins pooled == serial
+with retries. PTDE's own first sweep ("initial evaluation", chains x rungs)
+still re-scores the starts; it was already pooled and under `eval_timeout`.
 
 `_make_starts` measures the population it built against the probe scales and
 warns when the between-chain spread is under 1.0x of them
