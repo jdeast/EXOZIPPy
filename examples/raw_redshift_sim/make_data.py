@@ -19,8 +19,10 @@ model the fit uses), plus Gaussian noise:
 with the observatory state from astropy (builtin ephemeris) at the
 flux-weighted exposure midpoint (JD_UTC, column 1), and the reflex at the
 star's EMISSION time (its own light-travel time across the orbit,
-t_emit = t_B - Z_star(t_emit)/c), and the planet's gravitational
-redshift of the star's light, G m_p/(r c^2) (edge-on, M_* = 0.64 Msun).  Epochs are random
+t_emit = t_B - Z_star(t_emit)/c), the planet's gravitational
+redshift of the star's light, G m_p/(r c^2) (edge-on, M_* = 0.64 Msun), and
+the star's whole reflex SPEED in the time dilation gamma_* (its transverse
+part, up to 0.25 mm/s here, entered with review 8.5.10).  Epochs are random
 nights with the star above 35 deg and the Sun below -12 deg.
 
 Every spectrum is an EXPOSURE, not an instant: 10-30 min long, its photon
@@ -104,6 +106,29 @@ def keplerian_rv(t, tc=None):
         np.sqrt(1 + e) * np.sin(0.5 * E), np.sqrt(1 - e) * np.cos(0.5 * E)
     )
     return K * (np.cos(f + w) + e * np.cos(w))
+
+
+def transverse_speed2(t, tc=None):
+    """The star's squared reflex speed ACROSS the line of sight (m^2/s^2)
+    at target-frame time ``t``.  For this edge-on orbit the transverse
+    velocity is the in-plane one along the line of nodes,
+    ``-K [sin(f + omega_*) + e sin omega_*]``, the partner of
+    ``keplerian_rv``'s ``K [cos(f + omega_*) + e cos omega_*]``.  It enters the time dilation gamma_* (rvinstrument.md, "Without
+    astrometry"); the node, which nothing here measures, does not."""
+    P, e, K = TRUTH["period"], TRUTH["ecc"], TRUTH["K"]
+    tc = TRUTH["tc"] if tc is None else tc
+    w = np.radians(TRUTH["omega"])
+    f0 = 0.5 * np.pi - w
+    E0 = 2.0 * np.arctan(np.sqrt((1 - e) / (1 + e)) * np.tan(0.5 * f0))
+    tp = tc - (E0 - e * np.sin(E0)) * P / (2.0 * np.pi)
+    M = 2.0 * np.pi * (np.asarray(t) - tp) / P
+    E = M.copy()
+    for _ in range(60):
+        E = E - (E - e * np.sin(E) - M) / (1.0 - e * np.cos(E))
+    f = 2.0 * np.arctan2(
+        np.sqrt(1 + e) * np.sin(0.5 * E), np.sqrt(1 - e) * np.cos(0.5 * E)
+    )
+    return (K * (np.sin(f + w) + e * np.sin(w))) ** 2
 
 
 def star_los_position(t, tc=None):
@@ -294,6 +319,11 @@ def predict(name, jd_utc, reflex=True, star=None, tc=None, exps=None):
         ),
         phi_star=(
             (lambda tb: companion_potential(emission_time(tb, tc), tc))
+            if reflex
+            else None
+        ),
+        v_perp2=(
+            (lambda tb: transverse_speed2(emission_time(tb, tc), tc))
             if reflex
             else None
         ),

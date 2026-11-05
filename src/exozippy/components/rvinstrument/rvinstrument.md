@@ -76,6 +76,17 @@ displacement (its acceleration and jerk terms) and needs no `a`. `light_travel_t
 false` on every file is the arrival-time model node for node (no row is retarded, and
 `_rv_model` reads the time vector itself), so a fit that wants the old numbers sets it.
 
+**What a corrected velocity does NOT model.** The light-travel time is the only
+target-system term this path adds to `gamma + reflex`. It models no second-order source
+terms: not the star's time dilation (the transverse Doppler effect, `|v|^2 / 2c`; on an
+eccentric orbit it varies by `~2 e (K / sin i)^2 / c`, 4.5 m/s peak-to-peak for an e = 0.4,
+K = 38 km/s binary, and its circular-orbit part is a constant), not the companions'
+gravitational redshift at the star (19-39 cm/s for a K = 3 km/s, 571-day binary; a
+Keplerian refit hides most of it by biasing K and omega), and not the star's orbital
+displacement in the direction `rho_hat` (0.5 mm/s for a binary). A barycentric correction applied to the data cannot
+supply them either: it corrects the observer, not the source. Where they matter, fit raw
+redshifts (`data_format: raw_redshift`, below), which model all three.
+
 ## Raw redshifts (`data_format: raw_redshift`)
 
 The barycentric correction "in all its glory", inside the model: a file carries what the
@@ -196,10 +207,10 @@ In the graph, functions of the fitted parameters (`redshift.star_geometry`,
   Z axis), and -- where the system models the orbit's sky orientation (`bigomega`, i.e.
   astrometry is present) -- the transverse part from `Orbit.state_vectors` scaled to the
   star's own reflex (`M_c/M` on the primary side, `M_p/M` on the companion side;
-  `RVInstrument._reflex_sky`). Without `bigomega` the transverse reflex is unknown and
-  left out: it enters only through `gamma_*`'s `beta_sys . beta_reflex` term, at most
-  `|V_perp| K / c` (3 cm/s for the Gaia-4-like example, a periodic signal at the orbit's
-  period);
+  `RVInstrument._reflex_sky`). Without `bigomega` the transverse reflex VECTOR is unknown,
+  but its SPEED is not: the time dilation `gamma_*` still gets the star's whole orbital
+  speed (`RVInstrument._reflex_transverse_speed2`, review 8.5.10), and what is left out
+  is the node-dependent rest ("Without astrometry", below);
 - **the companions' gravitational redshift at the star**, `phi_* = sum_o G M_other,o /
   (r_o c^2)` with `r_o` each orbit's separation at `t_emit`
   (`RVInstrument._companion_potential`): 1.7-3.5 cm/s for the Gaia-4-like planet, 19-39
@@ -223,6 +234,70 @@ star's true line-of-sight velocity, so `K` here is the true velocity semi-amplit
 the period it pairs with is the observed one -- the two differ from the rest-frame pair
 by `1 + rv/c` (~7e-5 at 20 km/s), which only Kepler's third law notices (a 1e-4-level
 mass, common to every EXOZIPPy and EXOFASTv2 fit; open item below).
+
+### Without astrometry: the time dilation, and what remains
+
+`gamma_* = 1/sqrt(1 - beta_*^2)` needs the star's whole speed. Before review 8.5.10,
+without `bigomega`, `beta_*^2` carried the line-of-sight reflex but not the transverse
+one, so on a circular orbit -- whose true `|v|^2` is constant and lands in the zero
+point -- the model added a spurious `K^2/(4c) cos(2 phase)`: 0.75 m/s at K = 30 km/s,
+8.3 m/s at 100 km/s (1.19 m/s on the K = 37.7 km/s test binary), at twice the orbital
+frequency, so no Keplerian refit absorbs it (0.53 and 5.8 m/s RMS left). That is worse
+than leaving the time dilation out altogether. It matters for SB1s and the hosts of
+circumbinary planets.
+
+**The fix.** A rotation about the line of sight does not change a speed, so each orbit's
+transverse reflex speed comes from its own elements and inclination,
+`|V_perp|^2 = (n a / sqrt(1 - e^2))^2 (vx_phase^2 + cos^2 i vz_phase^2)` in the kernel's
+phase terms (`Orbit.transverse_speed2`; `orbit.md`, "One kernel above the solve"), scaled
+by the star's share (`M_c/M` primary side, `M_p/M` companion side), each orbit at its own
+emission time, and added to `beta^2` alone (`redshift.doppler_ratio(v_perp2=...)`):
+
+    beta_*^2 = |beta_sys + beta_los r0_hat|^2 + sum_o |beta_perp,o|^2
+
+So the star's `|v|^2` is exact for one orbit, `(n a)^2 (1 + 2 e cos f + e^2) / (1 - e^2)`
+times its share squared, independent of omega and i, and its line-of-sight cross terms
+with the systemic velocity and between orbits are modeled. An eccentric orbit's time
+dilation varies by `~2 e (K / sin i)^2 / c` (4.5 m/s peak-to-peak on the e = 0.4,
+cos i = 0.3 test binary), so it reads `sin i`: every Keplerian orbit has a `cos i`, sampled
+under the isotropic prior where nothing measures it, and that is the inclination used --
+the physics, not a default. A Taylor orbit adds nothing here: it has no inclination or
+orbital speed, its transverse motion exists only where astrometry reads it (and is then
+left out of the 3-D path too, "Not modeled" below), and it would enter only as a slow
+`v_t,sys . Delta v_perp / c` drift (~1 cm/s for 100 m/s of transverse change at
+v_t = 30 km/s) that the Taylor terms themselves absorb.
+
+**What remains, the cost of fitting raw redshifts without astrometry**
+(`tests/test_raw_redshift_time_dilation.py`, against the full 3-D model at three nodes):
+
+- the **systemic-reflex transverse cross term** `2 beta_sys,perp . beta_reflex,perp` in
+  `beta^2`, i.e. `v_t,sys . v_perp / c`: up to `v_t,sys (K / sin i) / c` (2.7 m/s at
+  v_t = 27 km/s and K = 30 km/s; 3.4 m/s measured on the test binary against a bound of 3.40),
+  at the ORBITAL frequency and in phase quadrature with the RV, so a Keplerian absorbs it
+  exactly (< 0.02 mm/s left, eccentric orbits included) by a phase shift -- `tc` moves by
+  up to `(v_t,sys / c)(P / 2 pi) / sin i` (12 s at P = 10 d, v_t = 27 km/s) -- and a
+  fractional K change of order `v_t,sys / c`. It is the one term whose sign depends on
+  the node; its mean over an unknown node is zero, which is why it is dropped rather
+  than guessed;
+- the **reflex's transverse projection on the line of sight** `rho_hat . beta_perp`:
+  `rho_hat` leaves the epoch direction `r0_hat` by the star's proper motion since the
+  epoch and its parallax, so `v_perp` leaks into the measured velocity by that angle
+  (44-590 mm/s peak-to-peak for the Gaia-4-like star 7 yr from its epoch at K = 30-100
+  km/s). Its constant part is again a phase and K shift; what a Keplerian cannot absorb
+  is the change of the angle over the baseline, 0.6-2 mm/s RMS at K = 30 km/s and 2-7
+  mm/s at 100 km/s over 400 days (`|v_perp| mu T` grows with the proper motion: ~1.5 m/s
+  per year for Barnard's star at 30 km/s);
+- **between orbits**, `|sum_o v_o|^2` has the cross terms `2 v_i,perp . v_j,perp`, which
+  depend on the RELATIVE node. They average to zero over it, so the sum of squares above
+  is the expectation, exact for one orbit; the dropped term is up to `v_i v_j / c` at the
+  sum and difference frequencies: 0.15 mm/s for two planets of 300 and 150 m/s, ~1 mm/s
+  for a 10 m/s circumbinary planet around a 30 km/s SB1 host, ~1 m/s for a star in a
+  30 km/s inner binary with a 10 km/s outer orbit (largest for coplanar orbits, which
+  circumbinary systems often are).
+
+With `bigomega` (astrometry of the orbit) none of these is left out: the 3-D path sums
+the full reflex vectors (`_reflex_sky`) and never reads the speed-only term (the test
+builds it with that term made to raise, so its graph is the one from before).
 
 ### The exposure average
 
@@ -327,8 +402,10 @@ of any one instrument is not, and is not claimed.
   epochs 2015-2026: `c z_B` agrees to **0.12 mm/s worst with DE430** on both sides at
   every epoch with the star above the horizon (0.28 mm/s for Barnard's star at J2000), and
   to **0.27 cm/s worst with the builtin (erfa) ephemeris**, the default, which the
-  committed test uses. Before three refinements this model has and barycorrpy does not
-  the DE430 agreement was 0.017 cm/s; the differences now are, each confirmed against
+  committed test uses. Before three refinements this model has and barycorrpy does not,
+  the DE430 agreement was 0.017 cm/s at WORST (Barnard's star at J2000) and ~0.002 mm/s
+  for the other stars; the current model departs from barycorrpy deliberately, and the
+  differences now are, each confirmed against
   PINT and TEMPO2 by an independent comparison: `X(T)` at `t_B` (barycorrpy propagates
   the star to the observer's TDB; Barnard's star against PINT goes from 0.063 mm/s with
   barycorrpy to 0.015 mm/s here, so up to 0.09 mm/s of the difference is barycorrpy's);
@@ -343,9 +420,14 @@ of any one instrument is not, and is not claimed.
   it) (tau Ceti from the CTIO
   1.5-m, 6097 epochs 2000-2015, TEMPO2 in `-tempo1` prediction mode with DE405; WE14
   sec. 5.1 and its online table, as redistributed in barycorrpy's repository as
-  `barycorrpy/data/New_tempo_check.txt`): this model and barycorrpy agree with each
-  other to 0.002 mm/s and differ from TEMPO identically, by 0.33 mm/s RMS (mean -0.10
-  mm/s), with DE405 or DE430 alike. That residual is WE14's sidereal-day signature
+  `barycorrpy/data/New_tempo_check.txt`): BEFORE the three refinements above, this
+  model and barycorrpy agreed with each other to 0.002 mm/s and differed from TEMPO
+  identically, by 0.33 mm/s RMS (mean -0.10 mm/s), with DE405 or DE430 alike. The
+  current model departs from barycorrpy deliberately, by up to 0.12 mm/s with the star
+  above the horizon (mostly the 0.065 mm/s constant of the Moon and planet potentials;
+  up to 0.09 mm/s from evaluating `X(T)` at `t_B`, for Barnard's star), and PINT and
+  TEMPO2 side with this model on those differences (previous bullet). The attribution of
+  the TEMPO residual below is unaffected by them. That residual is WE14's sidereal-day signature
   (0.37 mm/s amplitude), and it is **polar motion**: recomputing the observatory velocity
   without polar motion removes the sidereal term entirely (amplitude 0.37 -> 0.013 mm/s,
   RMS 0.33 -> 0.15 mm/s), so TEMPO's `-tempo1` prediction mode leaves polar motion out,
@@ -464,7 +546,9 @@ perspectives -- and that no step can be applied inconsistently.
 The tropospheric Doppler term (0.1-1 mm/s at 20-60 deg elevation; it needs pressure
 data); Earth's J2 and the geoid clock offset (a per-site constant of -0.09 to -0.21 mm/s,
 above, absorbed by each zero point); the Shapiro delay on `t_B` (< 0.1 ms); a Taylor orbit's transverse reflex and transverse displacement (its sky terms are angular and need a parallax; < 1e-3 of a
-resolved reflex); the TDB-vs-SI velocity scale (L_B = 1.55e-8: 0.5 mm/s at 30 km/s, as in
+resolved reflex); without astrometry, the node-dependent transverse terms ("Without
+astrometry", above: absorbed by a Keplerian to < 0.02 mm/s, plus 0.6-7 mm/s of projection
+on the moving line of sight); the TDB-vs-SI velocity scale (L_B = 1.55e-8: 0.5 mm/s at 30 km/s, as in
 WE14; the TEMPO comparison rules it out as a term this model misses).
 
 ### Open decisions (for JDE)
@@ -475,8 +559,10 @@ WE14; the TEMPO comparison rules it out as a term this model misses).
 3. The orbit evaluated at the in-graph `t_B` (observed frame, consistent with every other
    component) with `K` the true velocity amplitude; the `1 + rv/c` between observed and
    rest-frame period in Kepler's law is not applied anywhere in EXOZIPPy.
-4. The transverse reflex is included only where `bigomega` exists (astrometry in the
-   system); otherwise up to `|V_perp| K / c` (3 cm/s here) is left out.
+4. The transverse reflex VECTOR is included only where `bigomega` exists (astrometry in
+   the system); otherwise its speed enters the time dilation and the node-dependent rest
+   is left out ("Without astrometry"), with several orbits' transverse speeds added in
+   quadrature (the expectation over their unknown relative node).
 5. The astrometry's own track is still the linear tangent-plane model; moving it onto
    `redshift.star_geometry`'s 3-D motion would add the astrometric perspective terms
    (mas-level for Barnard's star over a decade) and is not part of this mode.
@@ -485,4 +571,4 @@ WE14; the TEMPO comparison rules it out as a term this model misses).
 6. Default ephemeris `builtin` (0.27 cm/s against DE430); `time_ephemeris: de440` is
    one key away.
 
-Tests: `tests/test_raw_redshift.py`.
+Tests: `tests/test_raw_redshift.py`, `tests/test_raw_redshift_orbits.py`, `tests/test_raw_redshift_time_dilation.py`.

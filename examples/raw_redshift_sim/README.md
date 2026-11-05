@@ -18,7 +18,9 @@ orbit, the fit's `orbit.b.tc` is the OBSERVED (virtual transit) time and its
 `tc_target` the target-frame one, as for a transit fit, so the fitted `tc` sits the
 planet's light travel (hundreds of seconds) from the value in `make_data.py`. The reflex
 is evaluated at the star's emission time (its own light-travel time across
-the orbit, 0.4 mm/s here). Each file holds the flux-weighted exposure midpoint in JD_UTC, `c * z_meas` in m/s (the
+the orbit, 0.4 mm/s here), and the star's time dilation uses its whole reflex speed:
+with no astrometry the node is unknown, but the transverse speed is not (up to 0.25
+mm/s here; `rvinstrument.md`, "Without astrometry"). Each file holds the flux-weighted exposure midpoint in JD_UTC, `c * z_meas` in m/s (the
 redshift against the template before any barycentric correction) and its error; the
 config reads them with `data_format: raw_redshift`, `time_frame: jd`, `time_scale: utc`,
 the site as `observer_location` and `epoch: 2457389.0` for the star's astrometric

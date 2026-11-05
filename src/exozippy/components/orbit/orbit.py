@@ -4388,6 +4388,62 @@ class Orbit(Component):
 
         return X, Y, Z, VX, VY, VZ
 
+    def orbit_terms(self, t, o):
+        """``physics.state_vector_terms`` of Keplerian orbit ``o`` (an int)
+        at times ``t`` (N,), in the 1-D form the raw-redshift consumers
+        share (``RVInstrument._companion_potential`` and
+        ``transverse_speed2``): one Kepler solve per orbit for both, which
+        matters for the JAX compile of a raw-redshift model."""
+        o = int(o)
+        return physics.state_vector_terms(
+            t,
+            self.tp_target.value[o],
+            self.n.value[o],
+            self.ecc.value[o],
+            sinw=self.sinw.value[o],
+            cosw=self.cosw.value[o],
+            circular=self._all_circular(np.array([o])),
+        )
+
+    def transverse_speed2(self, t, o, terms=None):
+        """The squared SKY-PLANE speed of Keplerian orbit ``o``'s relative
+        separation, ``VX^2 + VY^2`` of ``state_vectors``, (N,) in
+        (solRad/day)^2 at times ``t`` -- the half of the state that does
+        NOT need the node.  A rotation about the line of sight
+        (``bigomega``) leaves the transverse speed unchanged, so where
+        nothing models the node (no astrometry) a consumer that needs only
+        |v|^2 -- the raw-redshift mode's time dilation (rvinstrument.md,
+        "Without astrometry") -- reads it here instead of inventing a node:
+
+            |V_perp|^2 = (n a / sqrt(1 - e^2))^2 (vx_phase^2 + cos^2 i vz_phase^2)
+
+        with the kernel's phase terms; ``|V|^2 = |V_perp|^2 + VZ^2 =
+        (n a)^2 (1 + 2 e cos f + e^2) / (1 - e^2)``, independent of omega
+        and i.  The ``relative`` omega + 180 flip of ``state_vectors``
+        changes the signs of both phase terms, so it is the same for the
+        primary's reflex and the relative orbit (scale by the caller's
+        mass fraction).  It reads the orbit's ``cos i`` -- every Keplerian
+        orbit has one, sampled under the isotropic prior where nothing
+        measures it, and that is the inclination used.  ``terms`` --
+        ``orbit_terms(t, o)`` when the caller already has them (one Kepler
+        solve shared).  Keplerian orbits only: a Taylor orbit has no
+        inclination or orbital speed (its sky terms are angular and exist
+        only where astrometry reads them), so one raises.
+        """
+        o = int(o)
+        if not self.is_keplerian[o]:
+            raise ValueError(
+                f"[{self.prefix}] transverse_speed2 needs a Keplerian orbit; "
+                f"orbit {o} is {self.types[o]!r}."
+            )
+        if terms is None:
+            terms = self.orbit_terms(t, o)
+        vamp = self.n.value[o] * self.a.value[o] / terms.ecc_factor
+        return pt.sqr(vamp) * (
+            pt.sqr(terms.vx_phase)
+            + pt.sqr(self.cosi.value[o] * terms.vz_phase)
+        )
+
     def get_sky_position(self, t, orbit_map, relative=False):
         """
         Vectorized sky-plane offsets of an orbit's relative separation --

@@ -107,7 +107,9 @@ def compiled_state_functions():
             ]
             state_fn = pytensor.function(
                 inputs=free_inputs + [t_var, a_var],
-                outputs=list(state) + list(state_rel) + [dE, dN],
+                outputs=list(state)
+                + list(state_rel)
+                + [dE, dN, orbit_comp.transverse_speed2(t_var, 0)[:, None]],
                 on_unused_input="ignore",
             )
             rv_fn = pytensor.function(
@@ -223,3 +225,27 @@ def test_relative_is_the_exact_negation(case, compiled_state_functions):
     absolute, rel, _ = _eval_state(state_fn, case, t)
     for a, r, name in zip(absolute, rel, "X Y Z VX VY VZ".split()):
         np.testing.assert_allclose(r, -a, rtol=0, atol=1e-13, err_msg=name)
+
+
+@pytest.mark.parametrize("case", _CASES, ids=_IDS)
+def test_transverse_speed_needs_no_node(case, compiled_state_functions):
+    """
+    Given: one set of elements, at its own node and at a different one,
+    When: Orbit.transverse_speed2 (the raw-redshift time dilation's input
+          without astrometry, review 8.5.10) is evaluated,
+    Then: it equals VX^2 + VY^2 of state_vectors at EITHER node, and with
+          VZ^2 it is the vis-viva speed (n a)^2 (2 / (r/a) - 1).
+    """
+    state_fn, _ = compiled_state_functions
+    omega, ecc, bigom, cosi = case
+    t = np.linspace(_TC, _TC + _P_DAYS, 101)
+    for node in (bigom, bigom + 1.9):
+        out = state_fn(*_free_vals(omega, ecc, node, cosi), t, np.array([1.0]))
+        X, Y, Z, VX, VY, VZ = (np.asarray(o)[:, 0] for o in out[:6])
+        v2 = np.asarray(out[14])[:, 0]
+        np.testing.assert_allclose(v2, VX**2 + VY**2, rtol=1e-12, atol=1e-15)
+    n_val = 2.0 * np.pi / _P_DAYS
+    r_a = np.sqrt(X**2 + Y**2 + Z**2)
+    np.testing.assert_allclose(
+        v2 + VZ**2, n_val**2 * (2.0 / r_a - 1.0), rtol=1e-10
+    )
