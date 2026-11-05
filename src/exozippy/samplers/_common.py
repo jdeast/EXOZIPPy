@@ -1275,8 +1275,16 @@ def resolve_start_dispersion(spec, temperatures, n_params, log=None):
     return disp, desc
 
 
-def report_rung_dispersion(populations, scales, temperatures, logp_fn, log):
+def report_rung_dispersion(populations, scales, temperatures, rung_lps, log):
     """Per-rung start spread and start logp -- 8.4.7's observability half.
+
+    ``rung_lps[k][i]`` is the logp of ``populations[k][i]`` AS THE BUILD
+    SCORED IT (_make_starts' ``start_lps``): every start is accepted on a
+    finite logp, so the number is already in hand and this report costs no
+    evaluation at all.  It used to re-evaluate every chain of every rung
+    serially in the main process -- 124 chains x 8 rungs = 992 calls, no
+    pool and no eval_timeout, ~62 h at OGLE-2013-BLG-0341's ~225 s per
+    three-lens logp, for a log line (review 2.6.45).
 
     The knob is useless without this.  Before 8.4.7 the ONLY witness to the
     start population was the single "PTDE init:" line, measured on T=1, and
@@ -1286,8 +1294,16 @@ def report_rung_dispersion(populations, scales, temperatures, logp_fn, log):
     logp per rung is what makes it checkable, and is what lets 7.4.5's "all
     rungs seed off one pool" question be answered.
     """
-    for k, (starts, T) in enumerate(zip(populations, temperatures)):
-        lps = np.array([float(logp_fn(s)) for s in starts], dtype=float)
+    for k, (starts, T, lps) in enumerate(
+        zip(populations, temperatures, rung_lps, strict=True)
+    ):
+        lps = np.asarray(lps, dtype=float)
+        if lps.shape != (len(starts),):
+            raise ValueError(
+                f"report_rung_dispersion: rung {k} has {len(starts)} starts "
+                f"but {lps.size} start logps; the build must score every "
+                f"start it returns."
+            )
         finite = lps[np.isfinite(lps)]
         spread_txt = ""
         if scales is not None and len(starts) > 1:
@@ -1686,6 +1702,65 @@ def log_eval_timeout(
 # ---------------------------------------------------------------------------
 
 
+class StartEvaluator:
+    """Scores start-population candidates, serially or on the sampler pool.
+
+    The start build used to call ``logp_fn`` once per candidate in the main
+    process -- 124 chains x 8 rungs plus retries on OGLE-2013-BLG-0341, at
+    ~225 s per call, with the sampler's cores idle and no eval_timeout
+    (review 2.6.45).  With a pool the candidates of one batch go out
+    together, one per worker, each under ``eval_timeout`` (a timed-out
+    candidate scores -inf, which the build redraws exactly like a bound
+    hit, and the pool is recycled because a hung worker never rejoins).
+    Without one (``cores: 1``) it is the old in-process call, and ``width``
+    is 1, which makes _make_starts' batches single draws: the serial path
+    is the pre-2.6.45 loop, call for call.
+
+    The pool's workers evaluate the logp installed by set_worker_globals,
+    which prepare_ptde_run sets to the same ``logp_fn`` it passes here.
+    ``pool`` is the live pool after any recycle; the owner reads it back.
+    """
+
+    def __init__(
+        self, logp_fn, pool=None, cores=1, eval_timeout=None, label="PTDE init"
+    ):
+        if pool is not None and int(cores) < 2:
+            raise ValueError(
+                f"StartEvaluator: a pool was passed with cores={cores}; "
+                f"create_pool returns a pool only for cores > 1."
+            )
+        self.logp_fn = logp_fn
+        self.pool = pool
+        self.cores = int(cores) if pool is not None else 1
+        self.eval_timeout = eval_timeout
+        self.label = label
+        self.n_timed_out = 0
+
+    @property
+    def width(self):
+        """How many candidates one batch may usefully hold."""
+        return self.cores
+
+    def __call__(self, points):
+        if self.pool is None:
+            return [float(self.logp_fn(p)) for p in points]
+        raw, timed_out = _map_logp_timeout(
+            self.pool, points, self.eval_timeout
+        )
+        if _PTDE_COLLECT_TIMING:
+            raw = [r[0] for r in raw]
+        if timed_out:
+            self.n_timed_out += len(timed_out)
+            logger.error(
+                f"{self.label}: {len(timed_out)} start candidate(s) exceeded "
+                f"eval_timeout={self.eval_timeout:.0f}s and score -inf "
+                f"(redrawn like a bound hit); recycling the worker pool.  "
+                f"First one (raw): {format_raw_proposal(points[timed_out[0]])}"
+            )
+            self.pool = recycle_pool(self.pool, self.cores)
+        return [float(v) for v in raw]
+
+
 def _make_starts(
     n_chains,
     raw_starts,
@@ -1698,6 +1773,10 @@ def _make_starts(
     dispersion=None,
     label="PTDE init",
     probe_cache=None,
+    *,
+    evaluator=None,
+    seed_lp_cache=None,
+    start_lps=None,
 ):
     """Generate n_chains starting points near one or more seeds (P4).
 
@@ -1753,6 +1832,26 @@ def _make_starts(
     n_elements x O(10) serial logp calls each: on the ob09020 integration
     test (58 raw elements, 2 rungs) that was half of the fixture's cost.
 
+    ``evaluator`` (a StartEvaluator; default: serial calls of ``logp_fn``)
+    scores the candidates, and the scale probe, when it runs, gets its
+    cores and eval_timeout.  Jitter draws go to it in BATCHES drawn in
+    exactly the order the one-at-a-time loop draws them: a batch is either
+    the next chains' first tries (speculating that each succeeds) or the
+    current chain's next retries (speculating that each fails), the rng
+    state is saved after every draw, and at the first outcome that breaks
+    the speculation the rest of the batch is discarded and the rng rewound
+    to just after the last draw actually used.  The population is
+    therefore bit-identical for any pool width; a width of 1 IS the serial
+    loop (review 2.6.45).
+
+    ``seed_lp_cache`` (optional, a dict seed-index -> lp) shares the seeds'
+    own logps across calls around the same seeds, as ``probe_cache`` shares
+    the probe: every rung's exact-start chains sit at the same seeds.
+
+    ``start_lps`` (optional, a list) is extended with the logp of every
+    returned start, in order -- each start was accepted on that very
+    number, so report_rung_dispersion needs no evaluation of its own.
+
     Returns (starts, chain_seed_index) where chain_seed_index[j] is the original
     seed index that chain j was drawn from (for trace-attr provenance).
     """
@@ -1781,8 +1880,33 @@ def _make_starts(
             f"around the one seed."
         )
 
+    if evaluator is None:
+        evaluator = StartEvaluator(logp_fn, label=label)
+    if seed_lp_cache is None:
+        seed_lp_cache = {}
+
+    def _seed_lps(wanted):
+        missing = [s for s in dict.fromkeys(wanted) if s not in seed_lp_cache]
+        if missing:
+            got = evaluator([raw_starts[s] for s in missing])
+            seed_lp_cache.update(zip(missing, got))
+        return [seed_lp_cache[s] for s in wanted]
+
+    # Cap the number of chains that start EXACTLY at a seed. With K ~
+    # n_chains (a params.2-style posterior-draw seed set), every chain
+    # would otherwise start at a previous-run posterior draw with zero
+    # jitter -- and since the DE population's spread IS the proposal
+    # generator, the restart could then never explore beyond the previous
+    # posterior, entrenching whatever that run missed. At least half the
+    # chains always get the factor-scaled jitter.
+    max_exact = max(1, n_chains // 2)
+
     if raw_scales is not None:
-        map_lp = float(logp_fn(raw_starts[0]))
+        # The seeds the exact-start chains will ask for, scored in ONE batch
+        # (a seed with a non-finite lp sends the loop to the next one, which
+        # is then scored on demand).  Seed 0 is the "MAP lp" of the log line.
+        n_cand = min(K, n_chains) if not overdisperse else min(K, max_exact)
+        map_lp = _seed_lps(list(range(max(1, n_cand))))[0]
         scales = {
             k: np.asarray(
                 raw_scales.get(k, np.ones_like(np.asarray(v, dtype=float))),
@@ -1795,9 +1919,16 @@ def _make_starts(
     else:
         # Probe scales once from seed 0 (the canonical MAP-ish start); the same
         # per-parameter jitter scale is reused around every seed.
-        map_lp, scales = _probe_scales(raw_starts[0], logp_fn)
+        map_lp, scales = _probe_scales(
+            raw_starts[0],
+            logp_fn,
+            cores=evaluator.cores,
+            eval_timeout=evaluator.eval_timeout,
+        )
         if probe_cache is not None:
             probe_cache["map_lp"], probe_cache["scales"] = map_lp, scales
+    # The probe's map_lp is float(logp_fn(raw_starts[0])): seed 0's own lp.
+    seed_lp_cache.setdefault(0, map_lp)
     n_params = sum(v.size for v in raw_starts[0].values())
     # ``dispersion`` is the ABSOLUTE per-rung value from
     # resolve_start_dispersion (review 8.4.7).  None keeps the pre-8.4.7
@@ -1828,14 +1959,6 @@ def _make_starts(
     starts = []
     chain_seed_index = []
     seed_seen = set()
-    # Cap the number of chains that start EXACTLY at a seed. With K ~
-    # n_chains (a params.2-style posterior-draw seed set), every chain
-    # would otherwise start at a previous-run posterior draw with zero
-    # jitter -- and since the DE population's spread IS the proposal
-    # generator, the restart could then never explore beyond the previous
-    # posterior, entrenching whatever that run missed. At least half the
-    # chains always get the factor-scaled jitter.
-    max_exact = max(1, n_chains // 2)
     n_exact = 0
     # Rejected jitter draws, by CAUSE (review 2.4.23): -inf is a hard bound
     # and the retry loop exists for it; NaN is a model bug that the same
@@ -1862,51 +1985,93 @@ def _make_starts(
             f"exactly at their round-robin seed (no jitter), from {K} seeds."
         )
         warn_if_seed_population_degenerate(K, n_params, "PTDE init", logger)
-    for j in range(n_chains):
+
+    def _wants_exact(jj, seen):
+        return not overdisperse or (
+            (jj % K) not in seen and n_exact < max_exact
+        )
+
+    def _draw(center, niter):
+        eff = factor / np.exp(niter / 1000.0)
+        if _jitter is not None:
+            return _jitter(center, scales, eff, rng)
+        return {
+            k: v + eff * scales[k] * rng.standard_normal(v.shape)
+            for k, v in center.items()
+        }
+
+    width = max(1, int(evaluator.width))
+    j = 0  # the chain being placed
+    niter = 0  # jitter draws chain j has already spent
+    jittering = False  # chain j has left (or skipped) the exact branch
+    while j < n_chains:
         s = j % K
         center = raw_starts[s]
         # First chain of each seed group starts exactly at the solved seed
         # (up to the overdispersion budget above); with overdisperse false,
         # every chain does.
-        if not overdisperse or (s not in seed_seen and n_exact < max_exact):
-            lp0 = float(logp_fn(center))
-            if np.isnan(lp0):
-                # A seed is a point the user or the relaxation engine
-                # CLAIMS is a valid start.  -inf there is a seed outside the
-                # support, which jittering can repair; NaN is the model
-                # failing to evaluate at the claimed start, and jittering
-                # away from it would hide exactly the bug a NaN reports.
-                raise ValueError(
-                    f"{label}: the model's logp is NaN at seed "
-                    f"{seed_indices[s]} exactly (not -inf: this is not a "
-                    f"bound hit but a model that cannot evaluate its own "
-                    f"start -- a 0*inf / where-trap or an unguarded "
-                    f"sqrt/log).  Raw seed: {format_raw_proposal(center)}"
+        if not jittering:
+            if _wants_exact(j, seed_seen):
+                lp0 = _seed_lps([s])[0]
+                if np.isnan(lp0):
+                    # A seed is a point the user or the relaxation engine
+                    # CLAIMS is a valid start.  -inf there is a seed outside
+                    # the support, which jittering can repair; NaN is the
+                    # model failing to evaluate at the claimed start, and
+                    # jittering away from it would hide exactly the bug a
+                    # NaN reports.
+                    raise ValueError(
+                        f"{label}: the model's logp is NaN at seed "
+                        f"{seed_indices[s]} exactly (not -inf: this is not a "
+                        f"bound hit but a model that cannot evaluate its own "
+                        f"start -- a 0*inf / where-trap or an unguarded "
+                        f"sqrt/log).  Raw seed: {format_raw_proposal(center)}"
+                    )
+                if np.isfinite(lp0):
+                    starts.append({k: v.copy() for k, v in center.items()})
+                    chain_seed_index.append(seed_indices[s])
+                    if start_lps is not None:
+                        start_lps.append(lp0)
+                    seed_seen.add(s)
+                    n_exact += 1
+                    logger.debug(
+                        f"PTDE init chain {j}: exact seed {seed_indices[s]} "
+                        f"(lp={lp0:.1f})"
+                    )
+                    j += 1
+                    continue
+                logger.warning(
+                    f"PTDE init: seed {seed_indices[s]} exact start has "
+                    f"non-finite lp; jittering to find a finite start."
                 )
-            if np.isfinite(lp0):
-                starts.append({k: v.copy() for k, v in center.items()})
-                chain_seed_index.append(seed_indices[s])
-                seed_seen.add(s)
-                n_exact += 1
-                logger.debug(
-                    f"PTDE init chain {j}: exact seed {seed_indices[s]} "
-                    f"(lp={lp0:.1f})"
-                )
-                continue
-            logger.warning(
-                f"PTDE init: seed {seed_indices[s]} exact start has non-finite "
-                f"lp; jittering to find a finite start."
-            )
-        for niter in range(max_iter):
-            eff = factor / np.exp(niter / 1000.0)
-            if _jitter is not None:
-                prop = _jitter(center, scales, eff, rng)
-            else:
-                prop = {
-                    k: v + eff * scales[k] * rng.standard_normal(v.shape)
-                    for k, v in center.items()
-                }
-            lp = float(logp_fn(prop))
+            jittering, niter = True, 0
+
+        # One batch of jitter draws, in the serial loop's own draw order.
+        # A chain that has already failed speculates on failing again (its
+        # next retries); otherwise the batch speculates that every draw
+        # succeeds (the following chains' first tries), stopping before a
+        # chain that would take the exact branch instead.
+        retrying = niter > 0
+        if retrying:
+            plan = [(j, n) for n in range(niter, min(niter + width, max_iter))]
+        else:
+            plan = [(j, 0)]
+            seen = seed_seen | {s}
+            jj = j + 1
+            while len(plan) < width and jj < n_chains:
+                if _wants_exact(jj, seen):
+                    break
+                plan.append((jj, 0))
+                seen.add(jj % K)
+                jj += 1
+        props, states = [], []
+        for jc, n in plan:
+            props.append(_draw(raw_starts[jc % K], n))
+            states.append(rng.bit_generator.state)
+        lps = evaluator(props)
+
+        for e, ((jc, n), prop, lp) in enumerate(zip(plan, props, lps)):
+            sc = jc % K
             if np.isnan(lp):
                 n_nan_hits += 1
                 if first_nan is None:
@@ -1915,30 +2080,43 @@ def _make_starts(
                 n_bound_hits += 1
             if np.isfinite(lp):
                 starts.append(prop)
-                chain_seed_index.append(seed_indices[s])
-                seed_seen.add(s)
+                chain_seed_index.append(seed_indices[sc])
+                if start_lps is not None:
+                    start_lps.append(lp)
+                seed_seen.add(sc)
                 logger.debug(
-                    f"PTDE init chain {j} (seed {seed_indices[s]}): accepted after "
-                    f"{niter} retries (lp={lp:.1f}, dlp={lp - map_lp:.1f})"
+                    f"PTDE init chain {jc} (seed {seed_indices[sc]}): accepted "
+                    f"after {n} retries (lp={lp:.1f}, dlp={lp - map_lp:.1f})"
                 )
+                j, niter, jittering = jc + 1, 0, False
+                as_planned = not retrying
+            else:
+                if n % 200 == 0 and n > 0:
+                    logger.warning(
+                        f"PTDE init chain {jc}: {n} retries still seeking "
+                        f"finite lp (eff={factor / np.exp(n / 1000.0):.3g})"
+                    )
+                j, niter, jittering = jc, n + 1, True
+                if niter >= max_iter:
+                    raise RuntimeError(
+                        f"PTDE chain {jc} initialization failed after "
+                        f"{max_iter} retries ({n_bound_hits} jitter draws so "
+                        f"far hit -inf, {n_nan_hits} returned NaN).  Check "
+                        f"initval/bounds in your params.yaml -- a parameter "
+                        f"may be starting outside its prior bounds"
+                        + (
+                            "; the NaNs are a model bug, not a bound."
+                            if n_nan_hits
+                            else "."
+                        )
+                    )
+                as_planned = retrying
+            if not as_planned and e + 1 < len(plan):
+                # The rest of the batch was drawn for an outcome that did
+                # not happen: discard it and rewind the rng to just after
+                # this draw, where the serial loop would stand.
+                rng.bit_generator.state = states[e]
                 break
-            if niter % 200 == 0 and niter > 0:
-                logger.warning(
-                    f"PTDE init chain {j}: {niter} retries still seeking finite lp "
-                    f"(eff={eff:.3g})"
-                )
-        else:
-            raise RuntimeError(
-                f"PTDE chain {j} initialization failed after {max_iter} retries "
-                f"({n_bound_hits} jitter draws so far hit -inf, {n_nan_hits} "
-                f"returned NaN).  Check initval/bounds in your params.yaml -- a "
-                f"parameter may be starting outside its prior bounds"
-                + (
-                    "; the NaNs are a model bug, not a bound."
-                    if n_nan_hits
-                    else "."
-                )
-            )
     if n_nan_hits:
         logger.error(
             f"{label}: {n_nan_hits} jitter draw(s) returned a NaN logp and "
@@ -2039,6 +2217,7 @@ def build_rung_populations(
     overdisperse=None,
     n_params=None,
     log=logger,
+    evaluator=None,
 ):
     """One start population PER RUNG, each at its own dispersion (8.4.7).
 
@@ -2059,6 +2238,11 @@ def build_rung_populations(
     list.  An EXPLICIT non-flat request alongside it is refused rather than
     silently ignored; the non-flat DEFAULT is not, since raising on that
     would break every existing initvals run.
+
+    ``evaluator`` (a StartEvaluator, default serial) scores every
+    candidate; prepare_ptde_run hands it the sampler's pool and
+    eval_timeout, so the build runs on the cores the sampler will use
+    rather than one at a time in the main process (review 2.6.45).
 
     Returns ``(t1_starts, chain_seed_index, populations, dispersions, desc)``
     where ``populations`` is a list of per-rung start lists.
@@ -2131,7 +2315,12 @@ def build_rung_populations(
     # the scale probe (when raw_scales was not handed in) is measured ONCE
     # and shared; see _make_starts' probe_cache.
     probe_cache = {}
+    seed_lp_cache = {}
+    rung_lps = []
+    if evaluator is None:
+        evaluator = StartEvaluator(logp_fn)
     for k in range(n_rungs):
+        lps_k = []
         starts, idx = _make_starts(
             n_chains,
             raw_starts,
@@ -2144,8 +2333,12 @@ def build_rung_populations(
             dispersion=float(dispersions[k]),
             label="PTDE init" if k == 0 else f"PTDE init rung {k}",
             probe_cache=probe_cache,
+            evaluator=evaluator,
+            seed_lp_cache=seed_lp_cache,
+            start_lps=lps_k,
         )
         populations.append(starts)
+        rung_lps.append(lps_k)
         if k == 0:
             t1_starts, chain_seed_index = starts, idx
 
@@ -2158,7 +2351,9 @@ def build_rung_populations(
             ).reshape(np.shape(v))
             for k, v in raw_starts[0].items()
         }
-    report_rung_dispersion(populations, scales_for_report, temps, logp_fn, log)
+    report_rung_dispersion(
+        populations, scales_for_report, temps, rung_lps, log
+    )
     return t1_starts, chain_seed_index, populations, dispersions, desc
 
 
@@ -2785,6 +2980,8 @@ class PtdeRun:
         "lp_guard",
         "de_mode_hop",
         "draws",
+        "pool",
+        "actual_cores",
     )
 
     def __init__(self, **kw):
@@ -2816,8 +3013,19 @@ def prepare_ptde_run(
     lp_plausibility_ceiling,
     collect_rung_timing,
     store_hot_chains,
+    cores=None,
+    eval_timeout=None,
 ):
-    """Build the shared prologue for either PTDE sampler.  See PtdeRun."""
+    """Build the shared prologue for either PTDE sampler.  See PtdeRun.
+
+    The worker pool is forked HERE, right after set_worker_globals, rather
+    than by the sampler after the prologue: the start-population build is
+    n_rungs x n_chains logp evaluations (plus retries), and it ran serially
+    in the main process with no eval_timeout while every core it was about
+    to be given sat idle (review 2.6.45).  The pool is returned in
+    ``run.pool`` / ``run.actual_cores`` for the sampler to use and shut
+    down; it is shut down here if the build raises.
+    """
     de_mode_hop = validate_shared_ptde_args(swap_schedule, de_mode_hop, label)
     lp_guard = LpPlausibilityGuard(lp_plausibility_ceiling, label, log)
     rng = np.random.default_rng(seed)
@@ -2850,51 +3058,67 @@ def prepare_ptde_run(
         f"gamma={gamma:.4f}"
     )
 
-    t1_starts, chain_seed_index, rung_starts, _dispersions, _disp_desc = (
-        build_rung_populations(
-            model,
-            system,
-            n_chains,
-            logp_fn,
-            rng,
-            raw_start,
-            temperatures,
-            start_dispersion,
-            initvals=initvals,
-            raw_starts=raw_starts,
-            seed_indices=seed_indices,
-            raw_scales=raw_scales,
-            n_params=n_params,
-            log=log,
+    # Fork AFTER set_worker_globals so the children inherit the logp fn.
+    pool, actual_cores = create_pool(cores, n_temps * n_chains, label, log)
+    evaluator = StartEvaluator(
+        logp_fn,
+        pool=pool,
+        cores=actual_cores,
+        eval_timeout=eval_timeout,
+        label=f"{label} init",
+    )
+    try:
+        t1_starts, chain_seed_index, rung_starts, _dispersions, _disp_desc = (
+            build_rung_populations(
+                model,
+                system,
+                n_chains,
+                logp_fn,
+                rng,
+                raw_start,
+                temperatures,
+                start_dispersion,
+                initvals=initvals,
+                raw_starts=raw_starts,
+                seed_indices=seed_indices,
+                raw_scales=raw_scales,
+                n_params=n_params,
+                log=log,
+                evaluator=evaluator,
+            )
         )
-    )
 
-    plot_start_ensemble(
-        system,
-        t1_starts,
-        raw_to_phys_batched,
-        raw_var_names,
-        out_var_names,
-        plot_prefix,
-        log,
-    )
+        plot_start_ensemble(
+            system,
+            t1_starts,
+            raw_to_phys_batched,
+            raw_var_names,
+            out_var_names,
+            plot_prefix,
+            log,
+        )
 
-    layout = RawLayout(raw_start, model_keys)
-    hot = HotChainRecorder(
-        store_hot_chains,
-        system,
-        n_temps,
-        n_chains,
-        n_params,
-        model_keys,
-        raw_start,
-        raw_to_phys,
-        raw_var_names,
-        draws,
-        layout,
-        label,
-        log,
-    )
+        layout = RawLayout(raw_start, model_keys)
+        hot = HotChainRecorder(
+            store_hot_chains,
+            system,
+            n_temps,
+            n_chains,
+            n_params,
+            model_keys,
+            raw_start,
+            raw_to_phys,
+            raw_var_names,
+            draws,
+            layout,
+            label,
+            log,
+        )
+    except BaseException:
+        if evaluator.pool is not None:
+            _shutdown_pool(evaluator.pool)
+        raise
+    pool = evaluator.pool  # a timeout during the build recycles it
     return PtdeRun(
         label=label,
         log=log,
@@ -2919,6 +3143,8 @@ def prepare_ptde_run(
         lp_guard=lp_guard,
         de_mode_hop=de_mode_hop,
         draws=draws,
+        pool=pool,
+        actual_cores=actual_cores,
     )
 
 

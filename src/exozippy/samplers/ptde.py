@@ -1279,6 +1279,8 @@ def ptde_sample(
         lp_plausibility_ceiling=lp_plausibility_ceiling,
         collect_rung_timing=collect_rung_timing,
         store_hot_chains=store_hot_chains,
+        cores=cores,
+        eval_timeout=eval_timeout,
     )
     # Names the step loop below reads.  Bound once here rather than threaded
     # through as run.* so the loop body stays the diff-free part.
@@ -1313,11 +1315,10 @@ def ptde_sample(
         for pop in rung_starts
     ]
 
-    # start pool AFTER set_worker_globals so fork children inherit the logp fn
     total_proposals = n_temps * n_chains
-    pool, actual_cores = _common.create_pool(
-        cores, total_proposals, "PTDE", logger
-    )
+    # Forked by prepare_ptde_run, which scored the start populations on it
+    # (review 2.6.45).
+    pool, actual_cores = run.pool, run.actual_cores
     logger.info(
         f"PTDE: {n_temps} rungs × {n_chains} chains = {total_proposals} proposals/step, "
         f"{actual_cores} cores  "
