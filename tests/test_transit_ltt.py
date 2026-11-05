@@ -464,7 +464,7 @@ def test_ltt_off_build_likelihood_reproduces_pre_ltt_model_values(tmp_path):
 
 def _mixed_group_config(lc0, lc1):
     """Two transit files sharing a band/orbit/planet, both default ninterp=1
-    (so _oversample_groups puts their rows in the SAME group) -- inst0 left
+    (so _exposure_groups puts their rows in the SAME group) -- inst0 left
     at the light_travel_time default (True), inst1 explicitly False. This is
     the genuinely-mixed case the group loop's pt.where branch exists for.
     """

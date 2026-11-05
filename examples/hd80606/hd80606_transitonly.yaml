@@ -36,7 +36,7 @@ transit:
   - name: "TESS-S21"
     file: "n20200213.TESS.TESS.HD80606.S21.0120.SPOC.dat"
     band: "TESS"
-    exptime: 2.0
+    exptime_s: 120 # exposure time in seconds (2 min)
 
 band:
   - name: "TESS"

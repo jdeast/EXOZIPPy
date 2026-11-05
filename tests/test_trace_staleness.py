@@ -939,7 +939,7 @@ def test_a_cosmetic_file_key_does_not_change_the_hash():
 
 def test_a_model_affecting_numeric_key_now_changes_the_hash():
     """
-    Given exptime, which sets the exposure-smearing window and so changes
+    Given exptime_s, which sets the exposure-smearing window and so changes
     the model,
     When the hash is compared against the config without it,
     Then it differs.
@@ -949,9 +949,9 @@ def test_a_model_affecting_numeric_key_now_changes_the_hash():
     mode: a forgotten cosmetic key costs an honest re-run, where a
     forgotten model key cost silently-reused foreign draws.
     """
-    assert structural_hash(_with_transit_key(exptime=30.0)) != structural_hash(
-        _LTT_BASE
-    )
+    assert structural_hash(
+        _with_transit_key(exptime_s=1800.0)
+    ) != structural_hash(_LTT_BASE)
 
 
 def test_instance_config_reaches_the_payload_so_a_mismatch_can_name_it():

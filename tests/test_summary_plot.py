@@ -353,8 +353,8 @@ def test_an_unknown_instrument_name_raises_with_a_suggestion():
 
 
 def _transits(rows, stated=True):
-    """A transit component stand-in: (name, band, exptime_min, label), each
-    file's exptime stated in its config and accepted unless ``stated`` is
+    """A transit component stand-in: (name, band, exptime_s, label), each
+    file's exptime_s stated in its config and accepted unless ``stated`` is
     False."""
     from exozippy.components.transit.transit import Transit
 
@@ -362,7 +362,7 @@ def _transits(rows, stated=True):
     return SimpleNamespace(
         names=[r[0] for r in rows],
         band_names=[r[1] for r in rows],
-        exptime_min=[r[2] for r in rows],
+        exptime_s=[r[2] for r in rows],
         plot_label=labels,
         exptime_stated=[stated] * len(rows),
         display_label=lambda i: labels[i] or rows[i][0],
@@ -417,13 +417,13 @@ def test_tess_files_are_grouped_by_cadence_and_nothing_else_is():
     """
     transit = _transits(
         [
-            ("TESS_UT20210916", "TESS", 10.0, None),
-            ("TESS_UT20211107", "TESS", 10.0, None),
-            ("Acton-Sky-Portal_UT20221219", "Sloang", 1.0, None),
-            ("LO_OSC_UT20221222", "Kepler", 1.0, None),
-            ("TESS_UT20231016", "TESS", 2.0, None),
-            ("LCO-McD-0m35_UT20231019", "Sloang", 1.0, None),
-            ("TESS_UT20231112", "TESS", 2.0, None),
+            ("TESS_UT20210916", "TESS", 600.0, None),
+            ("TESS_UT20211107", "TESS", 600.0, None),
+            ("Acton-Sky-Portal_UT20221219", "Sloang", 60.0, None),
+            ("LO_OSC_UT20221222", "Kepler", 60.0, None),
+            ("TESS_UT20231016", "TESS", 120.0, None),
+            ("LCO-McD-0m35_UT20231019", "Sloang", 60.0, None),
+            ("TESS_UT20231112", "TESS", 120.0, None),
         ]
     )
 
@@ -445,10 +445,10 @@ def test_a_tess_group_takes_its_members_common_label():
     """
     transit = _transits(
         [
-            ("S43", "TESS", 10.0, "TESS"),
-            ("S45", "TESS", 10.0, "TESS"),
-            ("S71", "TESS", 2.0, "TESS"),
-            ("S98", "TESS", 200.0 / 60.0, "TESS FFI"),
+            ("S43", "TESS", 600.0, "TESS"),
+            ("S45", "TESS", 600.0, "TESS"),
+            ("S71", "TESS", 120.0, "TESS"),
+            ("S98", "TESS", 200.0, "TESS FFI"),
         ]
     )
 
@@ -463,13 +463,13 @@ def test_a_tess_group_takes_its_members_common_label():
 
 def test_a_tess_group_with_no_stated_exptime_is_not_given_a_cadence():
     """
-    Given two TESS sectors whose config sets no exptime (so the fit uses
-      the inert 1-minute default, which is not their cadence),
+    Given two TESS sectors whose config sets no exptime_s (so the fit uses
+      the inert 60 s default, which is not their cadence),
     When the default grouping is formed,
     Then they share one row labelled just "TESS", not "TESS 60 s".
     """
     transit = _transits(
-        [("S16", "TESS", 1.0, None), ("S22", "TESS", 1.0, None)],
+        [("S16", "TESS", 60.0, None), ("S22", "TESS", 60.0, None)],
         stated=False,
     )
 
@@ -485,7 +485,7 @@ def test_two_tess_groups_with_one_label_raise_rather_than_overwrite():
       replaced by the other.
     """
     transit = _transits(
-        [("S16", "TESS", 1.0, None), ("S22", "TESS", 2.0, "TESS 60 s")]
+        [("S16", "TESS", 60.0, None), ("S22", "TESS", 120.0, "TESS 60 s")]
     )
 
     with pytest.raises(ValueError, match=r"\['S16'\] and \['S22'\]"):
@@ -500,7 +500,7 @@ def test_two_single_file_rows_may_share_a_label():
       under the same label, as two rows of one telescope.
     """
     transit = _transits(
-        [("LCO_1", "Sloang", 1.0, "LCO"), ("LCO_2", "Sloang", 1.0, "LCO")]
+        [("LCO_1", "Sloang", 60.0, "LCO"), ("LCO_2", "Sloang", 60.0, "LCO")]
     )
 
     assert _default_groups(transit) == {}
@@ -1464,7 +1464,7 @@ def _kelt4_config():
                 "name": "TESS_S48",
                 "file": "n20220130.TESS.TESS.TIC165297570.S48.0120.SPOC.dat",
                 "band": "TESS",
-                "exptime": 2.0,
+                "exptime_s": 120.0,
                 "ninterp": 1.0,
             }
         ],
