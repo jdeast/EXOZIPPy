@@ -1081,6 +1081,37 @@ def _run_fit(config, gui, user_params=None):
         build_internal_start = system.get_internal_point(model, raw_start)
         polished_start = False
 
+        # Every component's plot at the BUILD start (`_start`: the model at
+        # the seeds the user wrote, plus what the relaxation engine derived
+        # from them), written NOW -- before the seed polish, the whitening
+        # probe and the startup table, which can take tens of minutes.  The
+        # `_start` plots are the quick look ("is my start in the ball
+        # park?") a user iterates the params file against; written after
+        # the polish (as they were until 2026-11), a bad seed cost a whole
+        # polish to discover (JDE, 2026-11-05).  `build_internal_start` is
+        # plain numbers, so nothing after this (polish, whitening rescale,
+        # angle switch) can change what it plots.
+        #
+        # Two sets on purpose: when the seed polish runs, the model is
+        # plotted again at the POLISHED start (`_polished`, below).  The
+        # `_start` plots used to be drawn at the polished point, so a polish
+        # that had walked into another basin -- examples/ob09020's DE polish
+        # dropped the lens companion and inflated every err_scale -- was
+        # invisible, since the only picture of "the start" was the picture
+        # of where the polish ended (JDE, 2026-09-25).  With both, the seeds
+        # and what the polish made of them can be compared by eye.
+        for comp in system.active_components.values():
+            comp.plot(
+                system,
+                [build_internal_start],
+                filename_prefix=str(prefix) + "_start",
+            )
+        logger.info(
+            f"Start plots written: {prefix}_start_* -- the model at your "
+            f"starting values, before the seed polish.  Check them now; if "
+            f"the start is far off, stop the fit and adjust the params file."
+        )
+
         # Data-driven whitening: measure every raw element's true local
         # scale from the relaxation-engine start and rescale the model's
         # whitening in place (Parameter.set_whitening), then measure the
@@ -1330,22 +1361,9 @@ def _run_fit(config, gui, user_params=None):
         # convert raw starting point to the internal starting point
         internal_start = system.get_internal_point(model, raw_start)
 
-        # Every component's plot at the BUILD start (`_start`: the model at
-        # the seeds the user wrote) and, when the seed polish ran, at the
-        # POLISHED start the sampler will begin from (`_polished`).  Two
-        # sets on purpose: the `_start` plots used to be drawn at the
-        # polished point, so a polish that had walked into another basin
-        # -- examples/ob09020's DE polish dropped the lens companion and
-        # inflated every err_scale -- was invisible, since the only picture
-        # of "the start" was the picture of where the polish ended (JDE,
-        # 2026-09-25).  With both, the seeds and what the polish made of
-        # them can be compared by eye.
-        for comp in system.active_components.values():
-            comp.plot(
-                system,
-                [build_internal_start],
-                filename_prefix=str(prefix) + "_start",
-            )
+        # The plots at the POLISHED start the sampler will begin from
+        # (`_polished`), the second of the two sets; the `_start` set was
+        # written right after the build start was taken (above).
         if polished_start:
             for comp in system.active_components.values():
                 comp.plot(
