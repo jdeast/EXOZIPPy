@@ -6,9 +6,9 @@ b ~ 0.44, e = 0, quadratic TESS limb darkening u1 = 0.4 / u2 = 0.2),
 observed across one transit from one exposure before ingress to one
 exposure after egress at two cadences:
 
-  - 2-minute cadence, unsmeared (no exptime/ninterp keys: the default,
+  - 2-minute cadence, unsmeared (no exptime_s/ninterp keys: the default,
     instantaneous model)
-  - 30-minute cadence, smeared with exptime=30 / ninterp=10 (EXOFASTv2's
+  - 30-minute cadence, smeared with exptime_s=1800 / ninterp=10 (EXOFASTv2's
     midpoint-Riemann sub-exposure grid, exofast_chi2v2.pro)
 
 To guarantee both codes integrate the same physical system, the scenario
@@ -62,7 +62,12 @@ CONFIG = {
     "band": [{"name": "TESS", "filter": "TESS", "ld_law": "quadratic"}],
     "transit": [
         {"name": "TESS2min", "band": "TESS"},
-        {"name": "TESS30min", "band": "TESS", "exptime": 30.0, "ninterp": 10},
+        {
+            "name": "TESS30min",
+            "band": "TESS",
+            "exptime_s": 1800.0,
+            "ninterp": 10,
+        },
     ],
 }
 
@@ -82,7 +87,10 @@ USER_PARAMS = {
     "band.TESS.q2": {"initval": 1.0 / 3.0, "sigma": 0.0},
 }
 
+# EXOZIPPy's exposure times are SECONDS (exptime_s); EXOFASTv2's are
+# minutes, which is what the IDL template below is written in.
 EXPTIME30_MIN = 30.0
+EXPTIME30_S = 60.0 * EXPTIME30_MIN
 NINTERP30 = 10
 
 
@@ -324,7 +332,7 @@ def main():
         "smeared": {
             "time": t30.tolist(),
             "flux": f30_idl.tolist(),
-            "exptime": EXPTIME30_MIN,
+            "exptime_s": EXPTIME30_S,
             "ninterp": NINTERP30,
         },
     }

@@ -59,7 +59,7 @@ transit:
   - name: "TESS_S48"
     file: "n20220130.TESS.TESS.TIC165297570.S48.0120.SPOC.dat"
     band: "TESS"
-    exptime: 2.0 # exposure time in minutes
+    exptime_s: 120 # exposure time in seconds (2 min)
     ninterp: 1.0 # number of model points to compute for each data point to account for long cadence smearing. Defaults to 1 point/3 minutes
 #    fitspline: False
 #    splinespace: 0.75

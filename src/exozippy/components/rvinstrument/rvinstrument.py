@@ -44,6 +44,11 @@ class RVInstrument(Instrument):
     prose_noun = "radial velocity"
     # The fitted trend is ADDED to the model (Instrument.DETREND_SPACE).
     DETREND_SPACE = "additive"
+    # The raw-redshift exposure average reads its own ninterp: (Gauss nodes,
+    # rvinstrument.md "The exposure average"), so the base's refusal of the
+    # exposure keys on a non-smearing child leaves that one alone; a
+    # corrected file's ninterp: is refused by RAW_ONLY_KEYS.
+    OWN_EXPOSURE_KEYS = ("ninterp",)
 
     def __init__(self, config, config_manager):
         super().__init__(config, config_manager)

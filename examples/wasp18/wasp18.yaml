@@ -39,7 +39,7 @@ transit:
   - name: "TESS_S02"
     file: "n20180823.TESS.TESS.WASP-18.S02.0120.SPOC.dat"
     band: "TESS"
-    exptime: 2.0 # exposure time in minutes
+    exptime_s: 120 # exposure time in seconds (2 min)
     ninterp: 1   # model points per data point for cadence smearing
                  # (1 = no smearing; fine at 2-min cadence)
 

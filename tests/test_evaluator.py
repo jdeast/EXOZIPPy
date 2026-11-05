@@ -87,7 +87,7 @@ _TRANSIT_CONFIG = {
             "name": "TESS_S48",
             "file": "n20220130.TESS.TESS.TIC165297570.S48.0120.SPOC.dat",
             "band": "TESS",
-            "exptime": 2.0,
+            "exptime_s": 120.0,
             "ninterp": 1.0,
         }
     ],

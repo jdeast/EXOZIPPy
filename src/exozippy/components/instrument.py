@@ -57,6 +57,14 @@ full-length pinned vectors like the GP hyperparameters, and a file cannot set
 both ``gp:`` and ``likelihood:`` (celerite2's closed-form marginal is
 Gaussian-only).  Off by default everywhere: with no ``likelihood:`` key the
 model is byte-for-byte what it was before this feature existed.
+
+Exposure smearing is owned here too: the per-file ``exptime_s:`` (SECONDS)
+and ``ninterp:`` keys, the per-row partition into sub-exposure node groups,
+and ``smear``, the one helper a child's model builder calls to average its
+model over each exposure (components/exposure.py holds the rules; the
+design is in instrument.md, "Exposure smearing").  A child opts in with
+``supports_exposure = True`` and an ``EXPOSURE_RULE``; every other child
+REFUSES the keys rather than ignoring them.
 """
 
 import copy
@@ -69,6 +77,7 @@ import pytensor.tensor as pt
 import sympy as sp
 
 from ..physics_registry import register_physics
+from . import exposure as exposure_rules
 from . import gp as gp_support
 from . import likelihood as robust_support
 from .component import Component
@@ -524,6 +533,19 @@ class Instrument(TimeSystem, Component):
     # pair in DETREND_SPACES, never a child's own spelling (review 1.6.7).
     DETREND_SPACE = None
 
+    # Exposure smearing (instrument.md, "Exposure smearing").  A child whose
+    # model builder averages its model over each exposure through ``smear``
+    # sets ``supports_exposure = True`` and names its quadrature rule, a key
+    # of ``exposure.RULES`` ("midpoint" or "gauss").  A child that does not
+    # smear REFUSES the ``exptime_s:``/``ninterp:`` keys, naming itself, so a
+    # stated exposure is never silently ignored.  ``OWN_EXPOSURE_KEYS`` lists
+    # the keys a non-smearing child reads ITSELF and the base must therefore
+    # leave alone (rvinstrument's raw-redshift ``ninterp:``, #565, until its
+    # exposure average is folded into ``smear``).
+    supports_exposure = False
+    EXPOSURE_RULE = None
+    OWN_EXPOSURE_KEYS = ()
+
     def __init__(self, component_config, config_manager):
         super().__init__(component_config, config_manager)
         # Every instrument reads its data from per-element files and tracks a
@@ -566,6 +588,7 @@ class Instrument(TimeSystem, Component):
         self._load_plot_styles()
         self._load_gp_config()
         self._load_likelihood_config()
+        self._load_exposure_config()
 
     # ------------------------------------------------------------------
     # Per-instrument plot styling (config, not Parameters -- no sampling)
@@ -2131,6 +2154,255 @@ class Instrument(TimeSystem, Component):
     # was wrong for celerite2; transit's own turned out to be fixable rather
     # than fundamental, and is gone too (exoplanet-core >= 0.4.0 makes the
     # limb-darkening op JAX-differentiable).
+
+    # ------------------------------------------------------------------
+    # Exposure smearing (instrument.md, "Exposure smearing")
+    # ------------------------------------------------------------------
+    #: The inert exposure time a file that states none carries, in seconds.
+    #: It is never smeared over (such a file has ninterp 1, a lone node at
+    #: the timestamp); its one reader is transit's tc-information estimate
+    #: (``timing.transit_information``), where it is a floor on the ingress
+    #: duration, and the value is the one that estimate always used.
+    INERT_EXPTIME_S = 60.0
+
+    #: The per-file keys the base parses.
+    EXPOSURE_KEYS = ("exptime_s", "ninterp")
+
+    def _load_exposure_config(self):
+        """Read the per-file ``exptime_s:`` / ``ninterp:`` keys (at
+        construction, in ``__init__``).
+
+        For a child with ``supports_exposure`` this populates, per element,
+        ``self.exptime_s`` (the exposure time in SECONDS; the inert
+        ``INERT_EXPTIME_S`` where none is stated or the stated one is
+        rejected), ``self.ninterp`` (sub-exposure nodes, 1 = the
+        instantaneous model) and ``self.exptime_stated`` (whether
+        ``exptime_s`` is the file's own, stated and accepted).
+
+        Three outcomes per file, each deliberate:
+
+        - the retired ``exptime:`` (MINUTES) RAISES on every component,
+          naming the replacement and the converted value: read as seconds,
+          an old ``exptime: 30`` would silently smear over 30 s instead of
+          30 min (config.md, the one-spelling rule; instrument.md);
+        - a non-numeric value RAISES naming the file and the value (review
+          2.14.3): ``exptime_s: "abc"`` is a typo with no sensible fallback;
+        - an out-of-range combination (``ninterp < 1``, ``exptime_s <= 0``,
+          or ``ninterp > 1`` with no ``exptime_s`` to smear over) WARNS and
+          falls back to the instantaneous model -- user input, not an
+          internal invariant, so the rope-not-gates rule applies.
+
+        A child without ``supports_exposure`` RAISES on either key (except
+        the ones it lists in ``OWN_EXPOSURE_KEYS``), naming itself.
+        """
+        for i, c in enumerate(self.config):
+            if "exptime" in c:
+                raise ValueError(
+                    self._retired_exptime_message(i, c["exptime"])
+                )
+        if not self.supports_exposure:
+            for i, c in enumerate(self.config):
+                stated = [
+                    k
+                    for k in self.EXPOSURE_KEYS
+                    if k in c and k not in self.OWN_EXPOSURE_KEYS
+                ]
+                if stated:
+                    raise NotImplementedError(
+                        f"[{self.prefix}[{self.names[i]}]] exposure smearing "
+                        f"({', '.join(stated)}) is not supported by the "
+                        f"{self.prefix} component: its model is evaluated at "
+                        f"each timestamp. Remove the key."
+                    )
+            return
+        if self.EXPOSURE_RULE not in exposure_rules.RULES:
+            raise ValueError(
+                f"{type(self).__name__} sets supports_exposure but its "
+                f"EXPOSURE_RULE {self.EXPOSURE_RULE!r} is not one of "
+                f"{sorted(exposure_rules.RULES)}."
+            )
+        n = len(self.config)
+        self.exptime_s = [self.INERT_EXPTIME_S] * n
+        self.ninterp = [1] * n
+        self.exptime_stated = [False] * n
+        for i, c in enumerate(self.config):
+            where = f"{self.prefix}[{self.names[i]}]"
+            try:
+                exptime = float(c.get("exptime_s", self.INERT_EXPTIME_S))
+                ninterp = int(c.get("ninterp", 1))
+            except (TypeError, ValueError) as e:
+                raise ValueError(
+                    f"[{where}] exptime_s/ninterp must be numeric (the "
+                    f"exposure duration in seconds and the number of "
+                    f"sub-exposure nodes); got "
+                    f"exptime_s={c.get('exptime_s', '<unset>')!r}, "
+                    f"ninterp={c.get('ninterp', '<unset>')!r}: {e}"
+                ) from e
+            if (
+                ninterp < 1
+                or exptime <= 0
+                or (ninterp > 1 and "exptime_s" not in c)
+            ):
+                logger.warning(
+                    f"{self.prefix} {self.names[i]}: invalid exposure "
+                    f"smearing config (exptime_s="
+                    f"{c.get('exptime_s', '<unset>')} s, "
+                    f"ninterp={c.get('ninterp', '<unset>')}): needs "
+                    f"ninterp >= 1 and, when ninterp > 1, an explicit "
+                    f"exptime_s > 0. Ignoring -- defaulting to ninterp=1 "
+                    f"(no smearing)."
+                )
+                exptime, ninterp = self.INERT_EXPTIME_S, 1
+            else:
+                self.exptime_stated[i] = "exptime_s" in c
+            self.exptime_s[i] = exptime
+            self.ninterp[i] = ninterp
+
+    def _retired_exptime_message(self, i, value):
+        """The migration message for the retired per-file ``exptime:``."""
+        try:
+            hint = (
+                f" For this file write 'exptime_s: {60.0 * float(value):g}' "
+                f"(= {float(value):g} min)."
+            )
+        except (TypeError, ValueError):
+            hint = ""
+        return (
+            f"[{self.prefix}[{self.names[i]}]] 'exptime:' is retired: it was "
+            f"the exposure time in MINUTES. The exposure time is now "
+            f"'exptime_s:', in SECONDS, so an old value cannot be read in "
+            f"the wrong unit.{hint}"
+        )
+
+    @staticmethod
+    def _exposure_config_schema():
+        """The shared ``exptime_s`` / ``ninterp`` config-schema entries; a
+        child with ``supports_exposure`` appends them."""
+        return [
+            {
+                "key": "exptime_s",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Exposure time of every point in this file, in SECONDS "
+                    "(e.g. 1800 for a 30-minute cadence). The model is "
+                    "averaged over each exposure on ninterp sub-exposure "
+                    "nodes. Read only with ninterp > 1."
+                ),
+            },
+            {
+                "key": "ninterp",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Sub-exposure nodes per point for exposure smearing "
+                    "(default 1: the model at the timestamp). Needs "
+                    "exptime_s when > 1."
+                ),
+            },
+        ]
+
+    @staticmethod
+    def _blocks_inst_map(blocks):
+        """The per-row instrument index (numpy) of a builder's row blocks
+        ``[(inst_idx, rows), ...]`` (instrument.md, the builder contract)."""
+        n_rows = int(sum(len(rows) for _, rows in blocks))
+        inst_map = np.empty(n_rows, dtype=int)
+        for inst_idx, rows in blocks:
+            inst_map[np.asarray(rows, dtype=int)] = int(inst_idx)
+        return inst_map
+
+    def _exposure_partition(self, inst_map):
+        """The sub-exposure node groups of rows with per-row instrument
+        index ``inst_map``: ``exposure.partition`` on each row's own file's
+        exposure time (in days) and node count, with this child's
+        ``EXPOSURE_RULE``.  A list of ``(rows, offsets, weights)``."""
+        if not self.supports_exposure:
+            raise TypeError(
+                f"{type(self).__name__} does not declare supports_exposure; "
+                f"it has no exposure description to partition."
+            )
+        inst_map = np.asarray(inst_map, dtype=int)
+        exptime_days = (
+            np.asarray(self.exptime_s, dtype=float)
+            / exposure_rules.SECONDS_PER_DAY
+        )
+        ninterp = np.asarray(self.ninterp, dtype=int)
+        return exposure_rules.partition(
+            exptime_days[inst_map], ninterp[inst_map], self.EXPOSURE_RULE
+        )
+
+    def _record_exposure_groups(self, time, inst_map):
+        """Record the data's node groups as ``self._exposure_groups``, a
+        list of ``(rows, grid, weights)`` with ``grid`` the concrete
+        ``(n_g, k_g)`` sub-exposure times -- the partition ``smear`` makes
+        of the likelihood's rows, materialized on the data's own times: the
+        inspectable record of what the likelihood smears over
+        (tests/test_transit_exptime_ninterp.py)."""
+        time = np.asarray(time, dtype=float)
+        self._exposure_groups = []
+        for rows, offsets, weights in self._exposure_partition(inst_map):
+            if offsets is None:
+                grid = time[rows][:, None]
+            else:
+                grid = time[rows][:, None] + offsets
+            self._exposure_groups.append((rows, grid, weights))
+
+    def smear(self, fn, t, blocks):
+        """The exposure-averaged model on times ``t``, in ROW order.
+
+        ``fn(t_sub, rows)`` builds the instantaneous model on one node
+        group: ``rows`` the (numpy) row indices of ``t`` in the group,
+        ``t_sub`` the ``(n_g, k_g)`` tensor of their sub-exposure times
+        (``k_g = 1``, the timestamp itself, for an unsmeared row).  It
+        returns a TUPLE of tensors, each ``(n_g, k_g, ...)``; every member
+        is averaged over its node axis with the SAME weights and comes back
+        ``(N, ...)`` in the row order of ``t``.  The tuple is what makes the
+        helper observable-shape-agnostic: a child with a vector observable
+        (astrometry's (dE, dN)) averages the vector's components together,
+        on one partition, and forms its observable from the averaged vector
+        afterwards.
+
+        ``blocks`` is the builder contract's ``[(inst_idx, rows), ...]``
+        (instrument.md), so the plot grid and the data smear identically.
+        Groups are built per node count (``exposure.partition``); with
+        ``ninterp == 1`` everywhere there is exactly one group of width 1 and
+        the result is ``fn``'s own output at the timestamps.
+        """
+        groups = self._exposure_partition(self._blocks_inst_map(blocks))
+        inverse_order = np.argsort(np.concatenate([g[0] for g in groups]))
+        per_member = None
+        for rows, offsets, weights in groups:
+            t_rows = t[rows][:, None]  # (n_g, 1)
+            if offsets is None:
+                t_sub = t_rows
+            else:
+                t_sub = t_rows + pt.constant(offsets)  # (n_g, k_g)
+            out = fn(t_sub, rows)
+            if not isinstance(out, tuple):
+                raise TypeError(
+                    f"{type(self).__name__}.smear: the model function must "
+                    f"return a tuple of tensors, got {type(out).__name__}."
+                )
+            if per_member is None:
+                per_member = [[] for _ in out]
+            elif len(out) != len(per_member):
+                raise ValueError(
+                    f"{type(self).__name__}.smear: the model function "
+                    f"returned {len(out)} members for one node group and "
+                    f"{len(per_member)} for another."
+                )
+            w_g = pt.constant(weights)  # (k_g,)
+            for m, x in enumerate(out):
+                # Weighted mean over this group's own nodes (weights sum to
+                # 1); with k_g == 1 an identity (single column, weight 1).
+                w_b = w_g[(None, slice(None)) + (None,) * (x.ndim - 2)]
+                per_member[m].append(pt.sum(x * w_b, axis=1))
+        return tuple(
+            pt.concatenate(parts)[inverse_order] for parts in per_member
+        )
 
     def add_parameter(self, model, param_name, system, context_nodes=None):
         """Stage 6, plus the detrend coefficients' whitening scale.

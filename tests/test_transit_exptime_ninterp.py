@@ -1,9 +1,13 @@
 """
-Tests for exptime/ninterp exposure-time smearing on the transit component:
-  - exptime/ninterp are fixed per-instrument properties read straight off
-    the config (like self.files/self.band_names), not fitted parameters
-  - invalid smearing configs (ninterp < 1, exptime <= 0, or ninterp > 1
-    without an exptime) warn at load and fall back to no smearing
+Tests for exptime_s/ninterp exposure-time smearing on the transit component
+(the machinery is the Instrument base's -- instrument.md, "Exposure
+smearing" -- with transit its first caller):
+  - exptime_s (SECONDS) / ninterp are fixed per-instrument properties read
+    straight off the config at construction, not fitted parameters
+  - the retired minutes key exptime: raises naming its replacement, and a
+    component that does not smear refuses the keys
+  - invalid smearing configs (ninterp < 1, exptime_s <= 0, or ninterp > 1
+    without an exptime_s) warn and fall back to no smearing
   - the sub-exposure grid is EXOFASTv2's midpoint Riemann rule: ninterp
     cell centers across [-exptime/2, +exptime/2], never the exposure edges
   - ninterp==1 must reproduce the pre-existing instantaneous model exactly,
@@ -126,7 +130,7 @@ def test_ninterp_one_matches_instantaneous_model(tmp_path_factory):
     t = np.linspace(TC - 0.55 * T14, TC + 0.55 * T14, 401)
     lc = _write_lc(d / "lc.dat", t)
 
-    config = _config([lc], [{"exptime": 30.0, "ninterp": 1}])
+    config = _config([lc], [{"exptime_s": 1800.0, "ninterp": 1}])
     system = System(config, user_params=_params())
     system.prepare()
     model = system.build_model()
@@ -138,7 +142,7 @@ def test_ninterp_one_matches_instantaneous_model(tmp_path_factory):
     model_instant = system_instant.build_model()
     reference = _model_flux_at_initial_point(system_instant, model_instant)
 
-    assert system.transit.exptime_min == [30.0]
+    assert system.transit.exptime_s == [1800.0]
     np.testing.assert_allclose(model_flux, reference, atol=1e-12)
 
 
@@ -147,11 +151,11 @@ def test_invalid_smearing_config_warns_and_falls_back(
 ):
     """
     Given four transit instruments -- three with invalid smearing configs
-    (ninterp=0; a negative exptime; ninterp>1 with no exptime at all) and
-    one valid control (exptime=30, ninterp=3),
-    When load_data runs (via system.prepare()),
+    (ninterp=0; a negative exptime_s; ninterp>1 with no exptime_s at all)
+    and one valid control (exptime_s=1800, ninterp=3),
+    When the system is constructed and prepared,
     Then each invalid instrument gets one warning naming it and is reset to
-    the inert defaults (ninterp=1, exptime=1: no smearing), while the valid
+    the inert defaults (ninterp=1, exptime_s=60: no smearing), while the valid
     instrument is untouched and gets no warning -- a bad config degrades to
     the instantaneous model loudly instead of crashing in the grid builder
     or silently smearing over a made-up exposure time.
@@ -164,20 +168,20 @@ def test_invalid_smearing_config_warns_and_falls_back(
         lcs,
         [
             {"ninterp": 0},
-            {"exptime": -5.0, "ninterp": 3},
+            {"exptime_s": -300.0, "ninterp": 3},
             {"ninterp": 3},
-            {"exptime": 30.0, "ninterp": 3},
+            {"exptime_s": 1800.0, "ninterp": 3},
         ],
     )
-    system = System(config, user_params=_params())
     with caplog.at_level(logging.WARNING, logger="exozippy"):
+        system = System(config, user_params=_params())
         system.prepare()
 
     tr = system.transit
     assert tr.ninterp == [1, 1, 1, 3]
-    assert tr.exptime_min == [1.0, 1.0, 1.0, 30.0]
-    # Only the accepted exptime is the file's own (the summary figure labels
-    # a TESS row with its cadence by this): the rejected -5 is not.
+    assert tr.exptime_s == [60.0, 60.0, 60.0, 1800.0]
+    # Only the accepted exptime_s is the file's own (the summary figure
+    # labels a TESS row with its cadence by this): the rejected -300 is not.
     assert tr.exptime_stated == [False, False, False, True]
 
     smearing_warnings = [
@@ -191,7 +195,7 @@ def test_invalid_smearing_config_warns_and_falls_back(
     # The fallback really disables smearing: only the valid instrument's
     # rows land in a width-3 group.
     groups_by_width = {
-        grid.shape[1]: rows for rows, grid, weights in tr._oversample_groups
+        grid.shape[1]: rows for rows, grid, weights in tr._exposure_groups
     }
     assert set(groups_by_width.keys()) == {1, 3}
     inst3_rows = np.nonzero(tr.inst_map == 3)[0]
@@ -213,14 +217,18 @@ def test_long_exptime_with_ninterp_smooths_ingress_egress(tmp_path_factory):
     t = np.linspace(TC - 0.55 * T14, TC + 0.55 * T14, 801)
 
     lc_instant = _write_lc(d / "lc_instant.dat", t)
-    config_instant = _config([lc_instant], [{"exptime": 30.0, "ninterp": 1}])
+    config_instant = _config(
+        [lc_instant], [{"exptime_s": 1800.0, "ninterp": 1}]
+    )
     system_instant = System(config_instant, user_params=_params())
     system_instant.prepare()
     model_instant = system_instant.build_model()
     flux_instant = _model_flux_at_initial_point(system_instant, model_instant)
 
     lc_smeared = _write_lc(d / "lc_smeared.dat", t)
-    config_smeared = _config([lc_smeared], [{"exptime": 60.0, "ninterp": 21}])
+    config_smeared = _config(
+        [lc_smeared], [{"exptime_s": 3600.0, "ninterp": 21}]
+    )
     system_smeared = System(config_smeared, user_params=_params())
     system_smeared.prepare()
     model_smeared = system_smeared.build_model()
@@ -256,7 +264,7 @@ def test_mixed_ninterp_across_instruments_is_grouped_per_instrument(
 
     config = _config(
         [lc0, lc1],
-        [{"ninterp": 1}, {"exptime": 60.0, "ninterp": 3}],
+        [{"ninterp": 1}, {"exptime_s": 3600.0, "ninterp": 3}],
     )
     system = System(config, user_params=_params())
     system.prepare()
@@ -264,7 +272,7 @@ def test_mixed_ninterp_across_instruments_is_grouped_per_instrument(
     tr = system.transit
     groups_by_width = {
         grid.shape[1]: (rows, grid, weights)
-        for rows, grid, weights in tr._oversample_groups
+        for rows, grid, weights in tr._exposure_groups
     }
     assert set(groups_by_width.keys()) == {1, 3}
 
@@ -279,7 +287,7 @@ def test_mixed_ninterp_across_instruments_is_grouped_per_instrument(
     rows1, grid1, weights1 = groups_by_width[3]
     assert sorted(rows1) == list(inst1_rows)
     order1 = np.argsort(rows1)
-    exptime_days = 60.0 / 1440.0
+    exptime_days = 3600.0 / 86400.0
     # Midpoint Riemann cell centers, (j + 0.5)/3 - 0.5: NOT the exposure
     # edges +/- exptime/2 (EXOFASTv2 parity, exofast_chi2v2.pro).
     expected_offsets = np.array([-1.0, 0.0, 1.0]) / 3.0 * exptime_days
@@ -311,21 +319,24 @@ def test_shared_ninterp_different_exptime_broadcasts_per_observation(
 
     config = _config(
         [lc0, lc1],
-        [{"exptime": 30.0, "ninterp": 3}, {"exptime": 60.0, "ninterp": 3}],
+        [
+            {"exptime_s": 1800.0, "ninterp": 3},
+            {"exptime_s": 3600.0, "ninterp": 3},
+        ],
     )
     system = System(config, user_params=_params())
     system.prepare()
 
     tr = system.transit
-    assert len(tr._oversample_groups) == 1
-    rows, grid, weights = tr._oversample_groups[0]
+    assert len(tr._exposure_groups) == 1
+    rows, grid, weights = tr._exposure_groups[0]
     assert grid.shape == (12, 3)
     np.testing.assert_allclose(weights, [1 / 3, 1 / 3, 1 / 3])
 
     unit_offsets = np.array([-1.0, 0.0, 1.0]) / 3.0  # midpoint cell centers
     order = np.argsort(rows)
     times = np.concatenate([t0, t1])
-    exptime_days = np.array([30.0] * 5 + [60.0] * 7) / 1440.0
+    exptime_days = np.array([1800.0] * 5 + [3600.0] * 7) / 86400.0
     expected = times[:, None] + unit_offsets[None, :] * exptime_days[:, None]
     np.testing.assert_allclose(grid[order], expected)
 
@@ -354,7 +365,10 @@ def test_mixed_ninterp_model_flux_matches_instantaneous_only_for_ninterp_one(
 
     config = _config(
         [lc0, lc1],
-        [{"exptime": 30.0, "ninterp": 1}, {"exptime": 60.0, "ninterp": 21}],
+        [
+            {"exptime_s": 1800.0, "ninterp": 1},
+            {"exptime_s": 3600.0, "ninterp": 21},
+        ],
     )
     system = System(config, user_params=_params())
     system.prepare()
@@ -402,7 +416,7 @@ def test_plotted_model_matches_likelihood_model(tmp_path_factory):
     t = np.linspace(TC - 0.55 * T14, TC + 0.55 * T14, 401)
     lc = _write_lc(d / "lc.dat", t)
 
-    config = _config([lc], [{"exptime": 60.0, "ninterp": 21}])
+    config = _config([lc], [{"exptime_s": 3600.0, "ninterp": 21}])
     system = System(config, user_params=_params())
     system.prepare()
     model = system.build_model()
@@ -425,8 +439,9 @@ def test_plotted_model_matches_likelihood_model(tmp_path_factory):
 
 def test_non_numeric_exptime_names_the_instrument(tmp_path_factory):
     """
-    Given a transit instrument whose exptime is the string "abc",
-    When load_data runs (via system.prepare()),
+    Given a transit instrument whose exptime_s is the string "abc",
+    When the system is constructed (the base parses the exposure keys at
+    construction, like mask: and columns:),
     Then it raises a ValueError naming the instrument and the offending
     value, chaining the original conversion error -- the bare float() used
     to surface it as "could not convert string to float: 'abc'" with no
@@ -436,9 +451,147 @@ def test_non_numeric_exptime_names_the_instrument(tmp_path_factory):
     d = tmp_path_factory.mktemp("bad_exptime")
     t = np.linspace(TC - 0.1, TC + 0.1, 5)
     lcs = [_write_lc(d / "lc0.dat", t), _write_lc(d / "lc1.dat", t)]
-    config = _config(lcs, [{"exptime": "abc", "ninterp": 3}, {}])
+    config = _config(lcs, [{"exptime_s": "abc", "ninterp": 3}, {}])
 
-    system = System(config, user_params=_params())
     with pytest.raises(ValueError, match=r"transit\[inst0\].*abc") as excinfo:
-        system.prepare()
+        System(config, user_params=_params())
     assert isinstance(excinfo.value.__cause__, ValueError)
+
+
+def test_the_retired_minutes_key_raises_naming_exptime_s(tmp_path_factory):
+    """
+    Given a transit instrument written with the retired exptime: 30 (the
+    exposure time in MINUTES before the base owned it),
+    When the system is constructed,
+    Then it raises naming the instrument, the new key exptime_s and the
+    converted value 1800 -- read as seconds, the old value would silently
+    smear over 30 s instead of 30 min, so it is never accepted.
+    """
+    d = tmp_path_factory.mktemp("retired_exptime")
+    lc = _write_lc(d / "lc.dat", np.linspace(TC - 0.1, TC + 0.1, 5))
+    config = _config([lc], [{"exptime": 30, "ninterp": 10}])
+
+    with pytest.raises(
+        ValueError, match=r"transit\[inst0\].*exptime_s: 1800.*= 30 min"
+    ):
+        System(config, user_params=_params())
+
+
+def test_a_component_that_does_not_smear_refuses_the_keys():
+    """
+    Given an rvinstrument file carrying exptime_s (the RV model is evaluated
+    at each timestamp: its exposure averaging is not wired yet),
+    When the system is constructed,
+    Then it raises naming the component and the key, instead of ignoring a
+    stated exposure.
+    """
+    config = {
+        "star": [{"name": "A", "mist": False}],
+        "planet": [{"name": "b"}],
+        "orbit": [{"name": "b"}],
+        "rvinstrument": [
+            {"name": "HIRES", "file": "unused.rv", "exptime_s": 600.0}
+        ],
+    }
+    with pytest.raises(
+        NotImplementedError, match=r"rvinstrument\[HIRES\].*exptime_s"
+    ):
+        System(config, user_params=_params())
+
+
+def _smear_host(exptime_s, ninterp, rule):
+    """An object carrying just the base's exposure description, so
+    Instrument.smear can be exercised without a model."""
+    from types import SimpleNamespace
+
+    from exozippy.components.instrument import Instrument
+
+    host = SimpleNamespace(
+        supports_exposure=True,
+        EXPOSURE_RULE=rule,
+        exptime_s=exptime_s,
+        ninterp=ninterp,
+    )
+    host._blocks_inst_map = Instrument._blocks_inst_map
+    host._exposure_partition = lambda im: Instrument._exposure_partition(
+        host, im
+    )
+    return host, Instrument.smear
+
+
+@pytest.mark.parametrize("rule", ["midpoint", "gauss"])
+def test_smear_averages_every_tuple_member_with_one_set_of_weights(rule):
+    """
+    Given two files with different node counts (1 and 4) interleaved in the
+    row blocks, and a model returning a TUPLE -- a scalar observable
+    (n_g, k_g) and a 2-vector observable (n_g, k_g, 2) --
+    When Instrument.smear builds the exposure average,
+    Then every member comes back (N, ...) in ROW order, each equal to the
+    rule-weighted mean of the model at that row's own sub-exposure nodes:
+    the helper is observable-shape agnostic, which is what lets a vector
+    observable be averaged as a vector before anything is projected from it.
+    """
+    import pytensor.tensor as pt
+
+    from exozippy.components import exposure
+
+    host, smear = _smear_host([60.0, 1800.0], [1, 4], rule)
+    t_np = np.array([0.0, 0.3, 0.1, 0.4, 0.2])
+    blocks = [(0, np.array([0, 2])), (1, np.array([1, 3, 4]))]
+
+    def model(tt):
+        return np.sin(40.0 * tt), np.stack([tt**2, np.cos(30.0 * tt)], -1)
+
+    def fn(t_sub, rows):
+        return (
+            pt.sin(40.0 * t_sub),
+            pt.stack([t_sub**2, pt.cos(30.0 * t_sub)], axis=-1),
+        )
+
+    t = pt.dvector("t")
+    scalar, vector = smear(host, fn, t, blocks)
+    got_s, got_v = pytensor.function([t], [scalar, vector])(t_np)
+
+    frac, w = exposure.RULES[rule](4)
+    expect_s = np.empty(5)
+    expect_v = np.empty((5, 2))
+    for r, tr in enumerate(t_np):
+        if r in (0, 2):
+            sub = np.array([tr])
+            ww = np.ones(1)
+        else:
+            sub = tr + frac * 1800.0 / 86400.0
+            ww = w
+        ms, mv = model(sub)
+        expect_s[r] = np.sum(ms * ww)
+        expect_v[r] = np.sum(mv * ww[:, None], axis=0)
+    np.testing.assert_allclose(got_s, expect_s, rtol=0, atol=1e-14)
+    np.testing.assert_allclose(got_v, expect_v, rtol=0, atol=1e-14)
+
+
+def test_the_two_rules_integrate_what_they_promise():
+    """
+    Given the midpoint rule (EXOFASTv2's grid) and the Gauss-Legendre rule,
+    When each averages polynomials over one unit exposure,
+    Then midpoint's nodes are EXOFASTv2's (j + 0.5)/n - 0.5 cell centers
+    with weights 1/n, exact through degree 1 only, while n-node
+    Gauss-Legendre is exact through degree 2n - 1 -- the convergence gap
+    that makes a Gauss rule the better default where parity does not bind.
+    """
+    from exozippy.components import exposure
+
+    x, w = exposure.midpoint_rule(10)
+    # EXOFASTv2 spells it dindgen(n)/n - (n-1)/(2n); equal to rounding.
+    np.testing.assert_allclose(
+        x, np.arange(10) / 10 - (10 - 1) / (2 * 10), rtol=0, atol=1e-15
+    )
+    np.testing.assert_array_equal(w, np.full(10, 0.1))
+    # mean of x^2 over [-1/2, 1/2] is 1/12; midpoint misses it.
+    assert abs(np.sum(w * x**2) - 1.0 / 12.0) > 1e-4
+
+    for n in (1, 2, 3, 5):
+        x, w = exposure.gauss_legendre_rule(n)
+        assert np.sum(w) == pytest.approx(1.0, abs=1e-15)
+        for deg in range(2 * n):
+            exact = 0.0 if deg % 2 else 0.5**deg / (deg + 1)
+            assert np.sum(w * x**deg) == pytest.approx(exact, abs=1e-15)

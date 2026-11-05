@@ -727,7 +727,7 @@ def test_thermal_on_primary_transit_is_still_a_dip_below_baseline(
 def test_thermal_eclipse_is_exposure_smeared(tmp_path_factory):
     """
     Given fitthermal on (5000 ppm, fixed) AND exposure smearing
-    (exptime=60 min, ninterp=21) on a light curve finely sampling the
+    (exptime_s=3600, ninterp=21) on a light curve finely sampling the
     secondary eclipse,
     When the actual likelihood mu is evaluated,
     Then it equals the plotted model at the same times (the same
@@ -747,7 +747,7 @@ def test_thermal_eclipse_is_exposure_smeared(tmp_path_factory):
     np.savetxt(lc, np.column_stack([t, flux, err]))
 
     config = _config(lc, fitthermal=True)
-    config["transit"][0]["exptime"] = 60.0
+    config["transit"][0]["exptime_s"] = 3600.0
     config["transit"][0]["ninterp"] = 21
     system = System(config, user_params=_params(_THERMAL_PPM))
     system.prepare()

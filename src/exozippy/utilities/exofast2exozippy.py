@@ -880,6 +880,20 @@ def _bool_array(val, n, keyword):
     return flags
 
 
+def _exptime_minutes_to_seconds(v, val):
+    """One EXOFASTv2 ``exptime`` entry (MINUTES) as EXOZIPPy's
+    ``exptime_s`` (SECONDS).  A value that is not a number RAISES: it is an
+    IDL expression the converter could not evaluate, and guessing would
+    smear every point over a made-up exposure."""
+    if isinstance(v, (bool, str)) or not isinstance(v, (int, float)):
+        raise ValueError(
+            f"exptime={val!r}: cannot convert {v!r} to a number of minutes. "
+            "Set it to a literal value in the driver (e.g. exptime=30) and "
+            "convert again"
+        )
+    return 60.0 * float(v)
+
+
 def convert(pro_path, outdir, base, priorfile_override=None):
     pro_path = Path(pro_path).expanduser().resolve()
     pro_dir = pro_path.parent
@@ -998,13 +1012,19 @@ def convert(pro_path, outdir, base, priorfile_override=None):
         else:
             info(f"'{key}={val}' is the default (all planets modeled)")
 
-    # per-file cadence smearing
+    # per-file cadence smearing.  EXOFASTv2's exptime is in MINUTES;
+    # EXOZIPPy's exposure time is `exptime_s:`, in SECONDS (instrument.md,
+    # "Exposure smearing"), so it is converted HERE, at the boundary, and no
+    # minutes value ever reaches an emitted config.
     exptime = take("exptime")
     ninterp = take("ninterp")
     if take("longcadence"):
         exptime = exptime or 30.0
         ninterp = ninterp or 10
-        info("longcadence -> exptime: 30 min, ninterp: 10 on every transit")
+        info(
+            "longcadence -> exptime_s: 1800 (30 min), ninterp: 10 on every "
+            "transit"
+        )
     for key, val in (("exptime", exptime), ("ninterp", ninterp)):
         if val is None:
             continue
@@ -1016,7 +1036,10 @@ def convert(pro_path, outdir, base, priorfile_override=None):
             )
             continue
         for t, v in zip(transits, vals):
-            t[key] = v
+            if key == "exptime":
+                t["exptime_s"] = _exptime_minutes_to_seconds(v, val)
+            else:
+                t[key] = v
 
     # per-file Kepler-spline detrending (mkss.pro: a scalar applies to every
     # transit, an array is per transit in the sorted-filename order above).
@@ -1940,8 +1963,11 @@ def _emit_config(
             L.append(f'  - name: "{t["name"]}"')
             L.append(f'    file: "{t["file"].name}"')
             L.append(f'    band: "{t["band"]}"')
-            if "exptime" in t:
-                L.append(f"    exptime: {t['exptime']} # minutes")
+            if "exptime_s" in t:
+                L.append(
+                    f"    exptime_s: {t['exptime_s']:g} # seconds "
+                    f"({t['exptime_s'] / 60.0:g} min)"
+                )
             if "ninterp" in t:
                 L.append(f"    ninterp: {int(t['ninterp'])}")
             if t.get("fitspline"):

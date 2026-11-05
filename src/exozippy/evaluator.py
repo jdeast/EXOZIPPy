@@ -143,7 +143,7 @@ def _gather_files(obj: Any) -> List[str]:
 #:
 #: This is a DENYLIST, and the direction matters.  Nearly every key inside a
 #: component instance selects part of the model -- `light_travel_time`, `gp`,
-#: `likelihood`, `mask`, `ld_law`, `data_format`, `rm`, `exptime`, `ninterp`,
+#: `likelihood`, `mask`, `ld_law`, `data_format`, `rm`, `exptime_s`, `ninterp`,
 #: `band`, `star_ndx`, the SED's `mag`/`err` photometry, all of it -- so an
 #: allowlist is a list of everything, maintained by hand, and one forgotten
 #: entry is a SILENT failure: the trace reloads under a model it was never

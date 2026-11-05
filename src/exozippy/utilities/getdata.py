@@ -70,6 +70,9 @@ import numpy as np
 # list it either. So it ranked a value that cannot be returned, first.
 
 # Short cadence first (120, 200, 20 s), then the long-cadence FFI products.
+# In SECONDS, MAST's unit and EXOZIPPy's: the exposure time a file name
+# carries here (e.g. "0120") is the transit config's `exptime_s:` as written,
+# no conversion (components/instrument.md, "Exposure smearing").
 EXPTIME_PRIORITY = (120, 200, 20, 300, 600, 1800)
 
 AUTHOR_PRIORITY = (

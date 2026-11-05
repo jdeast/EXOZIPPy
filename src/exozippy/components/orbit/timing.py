@@ -29,6 +29,7 @@ regardless.
 
 import numpy as np
 
+from ..exposure import SECONDS_PER_DAY
 from .physics import mean_anomaly_at_conjunction
 
 # Days per year and the AU in solar radii, for Kepler's third law in the
@@ -270,7 +271,7 @@ def transit_shape(period, ar, p, cosi, ecc, omega):
     return T0 * root, T0 * p / root
 
 
-def transit_information(t, sigma, tc, period, depth, T, tau, exptime=0.0):
+def transit_information(t, sigma, tc, period, depth, T, tau, exptime_s=0.0):
     """Per-point Fisher information on the conjunction time of a transit
     (1/day^2): Carter et al. (2008) eq. (23), ``sigma_tc = Q^-1 T
     sqrt(theta / 2)`` with ``Q = sqrt(Gamma T) delta / sigma`` and ``theta
@@ -292,10 +293,13 @@ def transit_information(t, sigma, tc, period, depth, T, tau, exptime=0.0):
 
     An exposure longer than the ingress smears the ingress over it (Price &
     Rogers 2014, ApJ 794, 92), so ``max(tau, exptime)`` stands in for
-    ``tau``.  ``sigma`` is in units of the fractional depth.
+    ``tau``.  ``exptime_s`` is the exposure time in SECONDS, the unit of
+    every exposure time in EXOZIPPy (instrument.md, "Exposure smearing");
+    ``t``, ``tc``, ``period``, ``T`` and ``tau`` are days.  ``sigma`` is in
+    units of the fractional depth.
     """
     t = np.asarray(t, dtype=float)
-    tau_eff = max(float(tau), float(exptime))
+    tau_eff = max(float(tau), float(exptime_s) / SECONDS_PER_DAY)
     phase = (t - tc) / period
     dt = (phase - np.round(phase)) * period
     inside = np.abs(dt) < 0.5 * (T + tau_eff)

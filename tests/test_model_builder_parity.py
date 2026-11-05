@@ -158,7 +158,7 @@ def _transit_config(lc_file, sed_file):
                 "name": "inst0",
                 "file": lc_file,
                 "band": "V",
-                "exptime": 30.0,
+                "exptime_s": 1800.0,
                 "ninterp": 4,
                 "seddeblend": True,
             }
