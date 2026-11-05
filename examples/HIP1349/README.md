@@ -14,7 +14,9 @@ poetry run exozippy hip1349.yaml
 
 `get_hipparcos_iad.py` downloads the IAD from the ESA Hipparcos tools
 service, reconstructs the full along-scan coordinate relative to the
-J1991.25 catalog position, and validates:
+J1991.25 catalog position (both through `exozippy-getdata "HIP 1349"
+--hipparcos-iad`, which writes the same file for any Hipparcos star), and
+validates:
 
 - epoch self-consistency of the proper-motion partials;
 - our Earth-ephemeris along-scan parallax factors against the
