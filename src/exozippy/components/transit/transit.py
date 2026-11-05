@@ -15,7 +15,7 @@ from exozippy.outputs.texutils import latex_escape
 
 from .. import ltt
 from ..orbit import physics as orbit_physics
-from . import physics, spline
+from . import physics, ramp, spline
 
 
 class Transit(Instrument):
@@ -51,6 +51,7 @@ class Transit(Instrument):
         )
         self._load_spline_config()
         self._load_dilution_config()
+        self._load_ramp_config()
 
     # EXOFASTv2's sed_frac_uncertainty (exofast_multised.pro): the fractional
     # systematic error on each star's SED-predicted band flux, propagated to
@@ -277,6 +278,27 @@ class Transit(Instrument):
             self.fitspline.append(bool(fit))
             self.splinespace.append(float(space))
 
+    def _load_ramp_config(self):
+        """Read the per-file ``fitramp:`` key (at construction).
+
+        EXOFASTv2's per-transit FITRAMP (exofast_chi2v2.pro): the file's
+        model is multiplied by an exponential detector ramp with its own
+        ``transit.<name>.ramp_amp`` / ``ramp_tau`` (see ``_lc_model``).
+        Populates ``self.fitramp[i]`` (bool).  Absent everywhere, neither
+        parameter exists and the model is byte-for-byte what it was before
+        this feature existed.  Validated strictly, like ``fitspline``:
+        EXOFASTv2's 0/1 spelling raises.
+        """
+        self.fitramp = []
+        for i, c in enumerate(self.config):
+            fit = c.get("fitramp", False)
+            if not isinstance(fit, (bool, np.bool_)):
+                raise ValueError(
+                    f"[{self.prefix}[{self.names[i]}]] fitramp must be true "
+                    f"or false; got {fit!r}."
+                )
+            self.fitramp.append(bool(fit))
+
     def _ltt_active(self, orbits):
         """Per-file light-travel-time flags, forced off when the orbit
         cannot supply the parameters the correction needs.
@@ -442,12 +464,32 @@ class Transit(Instrument):
                     "new spline segment. Used only with fitspline: true."
                 ),
             },
+            {
+                "key": "fitramp",
+                "kind": "option",
+                "accepts": [True, False],
+                "required": False,
+                "doc": (
+                    "Multiply this file's model by an exponential detector "
+                    "ramp 1 - A*(1 - exp(-(t - t0)/tau)), t0 the file's "
+                    "earliest time (EXOFASTv2's FITRAMP; JWST/Spitzer), "
+                    "fitting transit.<name>.ramp_amp and ramp_tau. Default "
+                    "false."
+                ),
+            },
         ]
 
     def load_data(self, system):
         """Stage 1: Load CSVs and generate data-driven bounds/inits."""
         self.baseline_init = [1.0] * self.n_elements
         self.jittervar_lower = [0.0] * self.n_elements
+        # fitramp: per file, the ramp's zero point (the file's MINIMUM time,
+        # so an unsorted file cannot shift it), its time span (for tau's
+        # upper bound) and the data-derived (A, tau) start.  NaN / None on
+        # files without a ramp.
+        self.ramp_t0 = [np.nan] * self.n_elements
+        self.ramp_span = [np.nan] * self.n_elements
+        self.ramp_seed = [None] * self.n_elements
 
         # Fixed instrument properties (not fitted parameters), read straight
         # off the config like self.files/self.band_names: exptime is the
@@ -510,6 +552,8 @@ class Transit(Instrument):
             )
             self.baseline_init[i] = np.median(df.iloc[:, 1].values)
             self.jittervar_lower[i] = self._jitter_floor(df.iloc[:, 2].values)
+            if self.fitramp[i]:
+                self._seed_ramp_file(i, df)
 
             # fitspline: the spline columns join this file's detrend block;
             # without it the accumulator reads the block off df exactly as
@@ -541,6 +585,36 @@ class Transit(Instrument):
         # window at stage 2 from whatever start it can see).
         self.bls_signal = None
         self._seed_from_bls(system)
+
+    def _seed_ramp_file(self, i, df):
+        """Stage 1, ``fitramp`` files: the ramp's zero point, span and start.
+
+        ``t0`` is the file's minimum time and the span its range; a file
+        whose times do not span a positive interval has no ramp to fit and
+        RAISES.  The ``(baseline, A, tau)`` seed is ``ramp.seed_ramp``'s
+        least-squares fit of the decaying form; under the ``-A`` form
+        ``baseline`` is the flux at ``t0``, so it replaces the median as this
+        file's ``baseline_init`` (the median sits near the LATE level,
+        ``baseline * (1 - A)``).  Files without a ramp keep the median.
+        """
+        time = df.iloc[:, 0].values.astype(float)
+        span = float(np.max(time) - np.min(time))
+        if not np.isfinite(span) or span <= 0 or time.size < 3:
+            raise ValueError(
+                f"[{self.prefix}[{self.names[i]}]] fitramp needs at least 3 "
+                f"points spanning a positive time interval; got "
+                f"{time.size} point(s) over {span} d."
+            )
+        self.ramp_t0[i] = float(np.min(time))
+        self.ramp_span[i] = span
+        base, amp, tau = ramp.seed_ramp(
+            time,
+            df.iloc[:, 1].values,
+            df.iloc[:, 2].values,
+            ramp.TAU_FLOOR,
+        )
+        self.ramp_seed[i] = (amp, tau)
+        self.baseline_init[i] = base
 
     def _spline_columns(self, i, df):
         """File ``i``'s detrend block with its spline columns appended.
@@ -912,6 +986,24 @@ class Transit(Instrument):
             if any(self.deblend_stars):
                 self._hint_dilute_from_sed(system)
 
+        # Exponential ramp (EXOFASTv2's FITRAMP): parameters only where a
+        # file fits one, through the same OPT-IN pin as dilute.  tau's
+        # per-file upper bound, 10 x the file's span, goes through the
+        # "overrides" channel (resolve takes the tighter of it and a user
+        # bound); NaN leaves the pinned files' elements alone.  With both
+        # bounds finite tau is on the logit transform -- no hard chi2 wall.
+        if any(self.fitramp):
+            amp_entry = pin_unselected(self.n_elements, self.fitramp)
+            tau_entry = pin_unselected(self.n_elements, self.fitramp)
+            tau_overrides = dict(tau_entry.get("overrides", {}))
+            tau_overrides["upper"] = [
+                ramp.TAU_SPAN_FACTOR * s if fit else np.nan
+                for fit, s in zip(self.fitramp, self.ramp_span)
+            ]
+            self.manifest["ramp_amp"] = amp_entry
+            self.manifest["ramp_tau"] = {"overrides": tau_overrides}
+            self._hint_ramp()
+
     def _hint_baseline(self):
         """Push each light curve's median flux as a PRECEDENCE_DERIVED_DATA hint.
 
@@ -948,6 +1040,18 @@ class Transit(Instrument):
                 )
                 continue
             self.config_manager.add_hint(f"{self.prefix}.{i}.baseline", val)
+
+    def _hint_ramp(self):
+        """Push each ramp file's data-derived ``(A, tau)`` start
+        (``_seed_ramp_file``) as PRECEDENCE_DERIVED_DATA hints, so a user
+        ``initval`` still wins.  Pinned (non-ramp) elements keep the
+        defaults.yaml start, which is what their pin holds."""
+        for i, seed in enumerate(self.ramp_seed):
+            if seed is None:
+                continue
+            amp, tau = seed
+            self.config_manager.add_hint(f"{self.prefix}.{i}.ramp_amp", amp)
+            self.config_manager.add_hint(f"{self.prefix}.{i}.ramp_tau", tau)
 
     def _add_sed_deblend_prior(self, system):
         """Stage 7: the SED constraint on ``dilute`` (EXOFASTv2's SEDDEBLEND).
@@ -1032,9 +1136,10 @@ class Transit(Instrument):
         The full equation, and how detrending and a GP compose with it, is
         in ``components/instrument.md`` ("The transit light-curve model").
 
-        Returns ``(lc_model, planet_terms)``:
+        Returns ``(lc_model, planet_terms, ramp)``:
 
-        ``lc_model`` ``(N,)`` -- ``baseline * rel`` with ``rel`` as above:
+        ``lc_model`` ``(N,)`` -- ``baseline * ramp * rel`` with ``rel`` as
+            above (``ramp`` is 1 except on ``fitramp`` files' rows):
             transit/eclipse/thermal/reflection exposure-smeared on each
             row's own sub-exposure grid, beaming + ellipsoidal un-smeared
             at the flat per-observation time.  WITHOUT the detrend term,
@@ -1043,12 +1148,18 @@ class Transit(Instrument):
         ``planet_terms`` ``(N, N_planets)`` -- the change planet p's step
             makes to the running model, IN THE DATA'S FLUX UNITS
             (``baseline`` times the change to ``rel``), so
-            ``baseline[inst] + sum(planet_terms, axis=1)`` reproduces
-            ``lc_model`` for ANY planet count.  The ellipsoidal factor
+            ``ramp * (baseline[inst] + sum(planet_terms, axis=1))``
+            reproduces ``lc_model`` for ANY planet count.  The terms carry
+            NO ramp, so a phased model curve on a grid away from the data
+            is ramp-free; the phased panels divide the ramp out of the
+            DATA.  The ellipsoidal factor
             multiplies the running total (1 + the earlier planets), exactly
             as it does in the model itself; the old plot path folded only
             the baseline in per planet, which was exact for one planet and
             an approximation for more (reviews 1.5.6, 7.14.1).
+        ``ramp`` ``(N,)`` -- the per-row ramp factor (``_ramp_profile``);
+            ones when no file sets ``fitramp``, and then not multiplied in
+            at all, so ``lc_model`` is bit-identical to the ramp-free build.
 
         The op sequence inside the planet loop is the one the likelihood
         always had -- including associations kept for a 1-ulp reason (see
@@ -1528,10 +1639,50 @@ class Transit(Instrument):
             planet_terms.append(baseline_obs * step)
 
         # 5. The normalization multiplies the WHOLE astrophysical model
-        # (EXOFASTv2's ``modelflux *= f0``): flux = baseline * rel.
-        lc_model = baseline_obs * lc_model
+        # (EXOFASTv2's ``modelflux *= f0``): flux = baseline * rel.  A
+        # fitramp file's exponential ramp multiplies with it (6.), after the
+        # sub-exposure average, as in EXOFASTv2 (it is not smeared).
+        if "ramp_amp" in self.manifest:
+            ramp_obs = self._ramp_profile(t, blocks, baseline_obs)
+            lc_model = (baseline_obs * ramp_obs) * lc_model
+        else:
+            ramp_obs = pt.ones_like(baseline_obs)
+            lc_model = baseline_obs * lc_model
 
-        return lc_model, pt.stack(planet_terms, axis=1)
+        return lc_model, pt.stack(planet_terms, axis=1), ramp_obs
+
+    def _ramp_profile(self, t, blocks, like):
+        """6. The per-row exponential ramp (EXOFASTv2's FITRAMP), ``(N,)``.
+
+        For a ``fitramp`` file's rows,
+        ``R = 1 - A * (1 - exp(-(t - t0) / tau)) = 1 + A * expm1(-dt / tau)``
+        with ``t0`` the file's MINIMUM time: ``R(t0) = 1`` exactly and
+        ``R -> 1 - A`` late.  EXOFASTv2's ``-A`` reparameterization (its
+        comment: the leading term "looks a lot like F0"), so ``baseline`` is
+        the flux at ``t0``.  ``expm1`` keeps ``R`` exact near ``t0``.
+        TODO: if the baseline-A covariance is bad for a short tau, try the
+        plain ``1 + A * exp(-dt / tau)`` form (baseline = the late level).
+
+        Every other row is exactly 1.0 by construction (``set_subtensor``
+        onto ones, never ``pt.where``).  ``dt`` is clamped at 0 so a plot
+        grid that starts before the data (the phased window sits at the
+        seeded epoch, possibly periods away) cannot overflow; on data rows
+        ``dt >= 0`` already, and the clamp acts on a time, not a parameter,
+        so it has no gradient to trap.
+        """
+        ramp_obs = pt.ones_like(like)
+        amp = self.ramp_amp.value
+        tau = self.ramp_tau.value
+        for inst_idx, rows in blocks:
+            if not self.fitramp[inst_idx] or len(rows) == 0:
+                continue
+            rows = np.asarray(rows, dtype=int)
+            dt = pt.maximum(t[rows] - self.ramp_t0[inst_idx], 0.0)
+            ramp_obs = pt.set_subtensor(
+                ramp_obs[rows],
+                1.0 + amp[inst_idx] * pt.expm1(-dt / tau[inst_idx]),
+            )
+        return ramp_obs
 
     def _data_blocks(self):
         """The data's own row blocks, ``[(i, rows_i), ...]`` in file order.
@@ -1564,11 +1715,12 @@ class Transit(Instrument):
         # the plotted model AT the observations (the phased panels' "other
         # planets" cleaning), and tests compile a one-off function from
         # _model_flux_node.
-        lc_model, planet_terms = self._lc_model(
+        lc_model, planet_terms, ramp_obs = self._lc_model(
             system, time, self._data_blocks()
         )
         self._lc_physical_node = lc_model
         self._lc_planet_terms_node = planet_terms
+        self._lc_ramp_node = ramp_obs
 
         # Detrending: the shared base mechanism (additive here) -- the one
         # place the likelihood meets the trend, inverted onto the plotted
@@ -1726,7 +1878,9 @@ class Transit(Instrument):
                 (i, np.arange(i * n_grid, (i + 1) * n_grid))
                 for i in range(self.n_elements)
             ]
-            lc_full_node, lc_matrix = self._lc_model(system, t_input, blocks)
+            lc_full_node, lc_matrix, _ = self._lc_model(
+                system, t_input, blocks
+            )
 
             # Retain the symbolic nodes and their time input so plot_data
             # can derive param_deps (graph walk) and hand the GUI the
@@ -1742,13 +1896,16 @@ class Transit(Instrument):
             )
             phys = getattr(self, "_lc_physical_node", None)
             terms = getattr(self, "_lc_planet_terms_node", None)
+            ramp_node = getattr(self, "_lc_ramp_node", None)
             self._lc_data_fn = (
                 pytensor.function(
                     inputs=param_symbols,
-                    outputs=[phys, terms],
+                    outputs=[phys, terms, ramp_node],
                     on_unused_input="ignore",
                 )
-                if phys is not None and terms is not None
+                if phys is not None
+                and terms is not None
+                and ramp_node is not None
                 else None
             )
 
@@ -1781,8 +1938,14 @@ class Transit(Instrument):
     def _eval_lc_data(self, param_values):
         """The likelihood's own model at the observations: ``(lc_physical,
         planet_terms)`` as ``(N_obs,)`` and ``(N_obs, N_planets)``."""
-        phys, terms = self._lc_data_fn(*param_values)
-        return np.asarray(phys), np.asarray(terms)
+        phys, terms, _ = self._eval_lc_data_and_ramp(param_values)
+        return phys, terms
+
+    def _eval_lc_data_and_ramp(self, param_values):
+        """``_eval_lc_data`` plus the per-observation ramp factor ``(N_obs,)``
+        (ones without ``fitramp``), from the SAME compiled call."""
+        phys, terms, ramp_vals = self._lc_data_fn(*param_values)
+        return np.asarray(phys), np.asarray(terms), np.asarray(ramp_vals)
 
     def _lc_at_times(self, param_values, i, t):
         """Instrument ``i``'s plotted model at arbitrary times ``t``.
@@ -1866,7 +2029,7 @@ class Transit(Instrument):
         every instrument's panel.
         """
         param_values = self._point_to_plot_params(point, system)
-        _, data_terms = self._eval_lc_data(param_values)
+        _, data_terms, data_ramp = self._eval_lc_data_and_ramp(param_values)
         # The fitted trend is a per-observation term no pretty-grid curve
         # carries, so it comes off the data through the shared base inverse
         # of the likelihood's own combination (Instrument.detrend_corrected);
@@ -1889,6 +2052,9 @@ class Transit(Instrument):
             # (N_obs, N_planets): each planet's term at every observation,
             # from the likelihood's own node.
             "data_terms": data_terms,
+            # (N_obs,): the fitramp factor at every observation, from the
+            # same node (exactly 1.0 on files without a ramp).
+            "data_ramp": data_ramp,
             "grid": {},
         }
 
@@ -1953,12 +2119,20 @@ class Transit(Instrument):
         other_terms = np.sum(data_terms[:, other_mask], axis=1)
 
         baseline = self._point_value(point, self.baseline, i)
+        # The data are baseline * ramp * (1 + sum of steps), and the
+        # planet terms carry no ramp, so the data side divides by
+        # baseline * ramp while the model curve divides by baseline alone
+        # (it is a grid at the seeded epoch, where no ramp applies).
+        # Without fitramp the ramp is exactly 1.0, so every product below
+        # is exact and this is bit-for-bit the ramp-free expression.
+        ramp_rows = shared["data_ramp"][rows]
+        norm = baseline * ramp_rows
         cleaned_flux = (
             shared["flux_corrected"][rows]
-            - baseline
-            - other_terms
+            - norm
+            - other_terms * ramp_rows
             - shared["extra_signals"][rows]
-        ) / baseline
+        ) / norm
         data_phases = ((self.time[rows] - tc_ref) / P_ref + 0.5) % 1.0 - 0.5
 
         return {
@@ -1968,7 +2142,7 @@ class Transit(Instrument):
             "y_model": y_planet[sort_m] / baseline,
             "x_data": data_phases * P_ref,
             "y_data": cleaned_flux,
-            "yerr_data": shared["err_corrected"][rows] / baseline,
+            "yerr_data": shared["err_corrected"][rows] / norm,
         }
 
     def plot(self, system, points, filename_prefix="debug"):
@@ -2066,8 +2240,16 @@ class Transit(Instrument):
         baseline_label = getattr(
             getattr(self, "baseline", None), "label", None
         )
+        # The fitramp factor reaches the phased DATA the same way (it is
+        # divided out there, and the planet terms carry none of it).
+        ramp_labels = [
+            getattr(self, name).label
+            for name in ("ramp_amp", "ramp_tau")
+            if name in getattr(self, "manifest", {})
+        ]
         numpy_deps = (
             ([baseline_label] if baseline_label else [])
+            + ramp_labels
             + self.detrend_dep_labels()
             + self.gp_dep_labels()
         )
@@ -2219,7 +2401,11 @@ class Transit(Instrument):
                             + " in "
                             + latex_escape(self.names[i])
                             + ", other planets removed and normalized "
-                            + "by the baseline."
+                            + (
+                                "by the baseline and the exponential ramp."
+                                if self.fitramp[i]
+                                else "by the baseline."
+                            )
                             + self.detrend_caption()
                         ),
                         # The phased DATA re-folds with tc/P and its cleaning

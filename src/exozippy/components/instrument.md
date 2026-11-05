@@ -85,6 +85,27 @@ Rulings, each of which looks like an omission and is not:
 
 Tests: `tests/test_transit_fitspline.py`.
 
+### `fitramp`: an exponential detector ramp (transit only)
+
+`transit`'s per-file `fitramp: true` is EXOFASTv2's FITRAMP (exofast_chi2v2.pro, "exponential ramp (e.g., Spitzer & JWST)"): the settling of an IR detector's response at the start of a time series. It adds `transit.<name>.ramp_amp` (A) and `ramp_tau` (tau, days) on that file only (`pin_unselected`, the `dilute` pattern) and multiplies the model, in `Transit._lc_model` step 5 next to the baseline and after the sub-exposure average (not smeared, as in EXOFASTv2):
+
+```
+R(t) = 1 - A * (1 - exp(-(t - t0) / tau))       # = 1 + A * expm1(-dt / tau)
+lc   = baseline * R * rel ;  mu = lc + X . c
+```
+
+Rulings, each of which looks like an omission and is not:
+
+- **The `-A` form, so `baseline` is the flux at `t0`.** EXOFASTv2 subtracts A from `1 + A exp(...)` because the leading term "looks a lot like F0"; `R(t0) = 1` and `R -> 1 - A` late. Its comment reasons from a Taylor series valid for tau much longer than the visit; for a short JWST ramp it may INCREASE the baseline-A covariance (the baseline is then pinned by the few earliest points). TODO, not built: try the plain `1 + A exp(-dt/tau)` form (baseline = the late level) if that covariance is bad.
+- **`t0` is the file's MINIMUM time,** not EXOFASTv2's `bjd[0]`, so an unsorted file cannot shift it.
+- **tau is on the logit transform over [1e-5 d, 10 x span]**, not behind EXOFASTv2's `chi2 = infinity` rejection. The upper bound is EXOFASTv2's `10 * timerange`, per file, through the manifest `"overrides"` channel; the lower is a strictly positive floor (`ramp.TAU_FLOOR`, defaults.yaml), since at tau <= 0 the exponential overflows. Two finite bounds is the standard uniform prior here, with finite gradients up to both walls (tested under numpyro).
+- **A is bounded [-1, 1]** where EXOFASTv2 leaves it free: an unbounded element here would carry an implicit `N(initval, init_scale)` prior.
+- **The seed is not EXOFASTv2's.** mkss.pro seeds A and tau with a `curvefit` of `ramp_func`, which evaluates `exp(a1 * (t0 - t))` and steers toward `a1 < 0` -- a GROWING exponential, the opposite sign from the chi2 model (and without its `-A` or F0). `components/transit/ramp.py` instead fits the decaying form by weighted least squares on a log grid of tau (linear in the two amplitudes at fixed tau), clipping the transit, and also seeds the ramp file's `baseline` at the fitted level at `t0`.
+- **The planet terms carry no ramp.** `ramp * (baseline + sum(planet_terms)) == lc`. A phased model curve is a grid at the seeded epoch, possibly periods from the data, where no ramp applies, so it is divided by the baseline alone, while the phased DATA and error bars are divided by `baseline * ramp` at the data, read from the likelihood's own node (`_lc_data_fn`'s third output). Without `fitramp` that ramp is exactly 1.0 and the panel is bit-for-bit the ramp-free expression. On plot grids `t - t0` is clamped at 0 so a grid before the data cannot overflow; on data rows it is already non-negative.
+- **Composition with detrending** is the `fitspline` approximation again: EXOFASTv2's `f0 * R * (rel + X . c')` vs `baseline * R * rel + X . c` here.
+
+Tests: `tests/test_transit_fitramp.py`.
+
 ## The plotted model IS the likelihood code: one expression builder per component
 
 **A data component has ONE builder of its model expression, and both `build_likelihood` and `compile_plotters` call it** -- `Transit._lc_model(system, t, blocks)`, `RVInstrument._rv_model(system, t, blocks, offset=None)`, and the template they were modeled on, `AstrometryInstrument._rel_model(system, i, t_node)`. The builder takes a time TENSOR plus concrete per-file row BLOCKS (`[(inst_idx, rows), ...]`, the row indices of `t` each file owns). The likelihood passes its `pm.Data` time vector and the files' own blocks (`Instrument.rows(i)`, materialized -- see that method for the JAX reason); the plotters pass a symbolic grid laid out in the same per-file blocks (`_PLOT_GRID_N` rows per block) and compile it ONCE against `system.plot_params`. So the plotted curve is literally the likelihood code run on other times, and every per-file choice -- band and limb darkening, `exptime`/`ninterp` smearing, the light-travel-time gate, SED dilution, baseline, `rm:` -- resolves from the block a row belongs to exactly as it does for a data row. JDE's ruling (2026-09-14): *"the whole point of the contract is to ensure we're not writing the same code twice ... the plotting code should be running the compiled likelihood code directly to generate its models to plot/subtract."* Reviews 1.5.5, 1.5.6; the audit that found them, 7.14.1.
