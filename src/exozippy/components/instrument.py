@@ -2396,13 +2396,59 @@ class Instrument(TimeSystem, Component):
                 )
             w_g = pt.constant(weights)  # (k_g,)
             for m, x in enumerate(out):
-                # Weighted mean over this group's own nodes (weights sum to
-                # 1); with k_g == 1 an identity (single column, weight 1).
-                w_b = w_g[(None, slice(None)) + (None,) * (x.ndim - 2)]
-                per_member[m].append(pt.sum(x * w_b, axis=1))
+                per_member[m].append(self._node_mean(x, w_g))
         return tuple(
             pt.concatenate(parts)[inverse_order] for parts in per_member
         )
+
+    @staticmethod
+    def _node_mean(x, w):
+        """The weighted mean of ``x`` (``(n, k, ...)``) over its node axis
+        1 with weights ``w`` (``(k,)`` tensor, summing to 1); with k == 1 an
+        identity (single column, weight 1).  The one averaging step of
+        ``smear`` and ``smear_file``."""
+        w_b = w[(None, slice(None)) + (None,) * (x.ndim - 2)]
+        return pt.sum(x * w_b, axis=1)
+
+    def exposure_nodes(self, i):
+        """File ``i``'s sub-exposure node offsets in DAYS and their weights,
+        ``(offsets (k,), weights (k,))`` from this child's ``EXPOSURE_RULE``
+        and the file's ``exptime_s`` / ``ninterp``.  One node at offset 0
+        for an unsmeared file."""
+        if not self.supports_exposure:
+            raise TypeError(
+                f"{type(self).__name__} does not declare supports_exposure; "
+                f"it has no exposure description."
+            )
+        k = int(self.ninterp[i])
+        if k == 1:
+            return np.zeros(1), np.ones(1)
+        frac, weights = exposure_rules.RULES[self.EXPOSURE_RULE](k)
+        return frac * (
+            self.exptime_s[i] / exposure_rules.SECONDS_PER_DAY
+        ), weights
+
+    def smear_file(self, fn, t, i):
+        """``smear`` for a time vector that belongs to ONE file, ``i``, of
+        any (even symbolic) length: every row shares the file's nodes, so
+        the sub-exposure times are ``t[:, None] + offsets[None, :]``,
+        ``(N, k)``, with no row partition.  ``fn(t_sub)`` returns a tuple
+        of ``(N, k, ...)`` tensors; each comes back node-averaged,
+        ``(N, ...)``.  The child that keeps one dataset per file
+        (astrometry) uses this; the concatenating children use ``smear``.
+        """
+        offsets, weights = self.exposure_nodes(i)
+        t_sub = pt.as_tensor_variable(t)[:, None] + pt.constant(
+            offsets[None, :]
+        )
+        out = fn(t_sub)
+        if not isinstance(out, tuple):
+            raise TypeError(
+                f"{type(self).__name__}.smear_file: the model function must "
+                f"return a tuple of tensors, got {type(out).__name__}."
+            )
+        w = pt.constant(weights)
+        return tuple(self._node_mean(x, w) for x in out)
 
     def add_parameter(self, model, param_name, system, context_nodes=None):
         """Stage 6, plus the detrend coefficients' whitening scale.
