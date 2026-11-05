@@ -997,8 +997,25 @@ class Star(Component):
                     target in pl.dep_paths
                     for pl in cm.links.get(source, {}).values()
                 )
+                hand = link.get("initval")
+                if (
+                    set(link) == {"initval"}
+                    and hand.origin == "orbit"
+                    and hand.dep_paths == [source]
+                ):
+                    # This pass's OWN link, from an earlier stage-3 run:
+                    # System.prepare runs stage 3 a second time after a
+                    # topology revision or a start re-read (e.g. the
+                    # mulensinstrument flux bootstrap), and the solve-input
+                    # snapshot it restores is taken AFTER the first stage 3,
+                    # so the link is still there.  Re-assert it -- the
+                    # manifest was rebuilt, so the sigma pin must be
+                    # re-applied -- rather than reading it as the user's
+                    # (which warned "NOT made" on every link it had made).
+                    pin.append(i)
+                    added.setdefault((i, a), []).append(param)
+                    continue
                 if link:
-                    hand = link.get("initval")
                     same = (
                         set(link) == {"initval"}
                         and hand.dep_paths == [source]
