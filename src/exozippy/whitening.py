@@ -1559,6 +1559,33 @@ def load_whitening(system, path):
     return True
 
 
+def restore_whitening_for_resume(system, path):
+    """Restore the whitening a resumed NUTS checkpoint was sampled under.
+
+    The checkpoint's fresh run polished its start, measured these scales
+    and saved them (anchor included) before its first draw, so a resume
+    restores them instead of polishing and probing again: its chains
+    continue from saved raw positions, which mean the same physical points
+    only in these coordinates.  run.py calls this only when the file
+    exists.  A file that does not apply to this build means the config
+    changed under the checkpoint, so it raises rather than re-measuring:
+    resuming those chains in other coordinates would splice two fits.
+    """
+    reason = _apply_whitening_file(system, path)
+    if reason is not None:
+        raise StaleWhiteningError(
+            f"STALE WHITENING: {path} does not describe the model this "
+            f"config builds ({reason}), and a NUTS checkpoint is being "
+            f"resumed in the coordinates it describes. Delete the checkpoint "
+            f"(*_nutsckpt.pkl) to start the fit over."
+        )
+    logger.info(
+        "Whitening restored from %s for the NUTS checkpoint being resumed: "
+        "no polish or probe.",
+        path,
+    )
+
+
 def restore_whitening_for_trace(system, path, trace_path):
     """Restore the whitening a REUSED trace was sampled under.
 
