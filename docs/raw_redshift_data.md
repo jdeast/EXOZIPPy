@@ -257,6 +257,18 @@ fitted parameters. The full description is in
 - Each instrument keeps one zero point, which absorbs the template, the star's
   gravitational redshift and convective blueshift. The star's absolute rv comes from a
   prior, such as a Gaia radial velocity.
+- The star's time dilation uses its whole orbital speed. With astrometry of the orbit
+  (its node) the reflex is a full 3-D vector. Without it, the transverse SPEED still
+  enters (it needs only the inclination), and what cannot be modeled is the part that
+  depends on the node: the cross term between the systemic transverse velocity and the
+  transverse reflex (up to `v_t K / c`, 2.7 m/s at 27 x 30 km/s, at the orbital
+  frequency and exactly absorbed by a Keplerian as a `tc` shift of up to
+  `(v_t / c) P / 2 pi`, 12 s at P = 10 d), the transverse reflex projected on the line of
+  sight as the star's direction moves (0.6-2 mm/s after a refit at K = 30 km/s over 400
+  days for a Gaia-4-like proper motion), and the cross terms between two orbits'
+  transverse velocities (up to `v_i v_j / c`; ~1 m/s for a star in a 30 km/s inner
+  binary with a 10 km/s outer orbit). This is the residual cost of fitting raw
+  redshifts without astrometry (`rvinstrument.md`, "Without astrometry").
 
 The cross terms, the proper-motion and perspective terms and the coordinate epoch are
 therefore never separate steps that can be skipped or applied inconsistently. The

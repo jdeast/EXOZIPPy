@@ -27,8 +27,10 @@ import pytest
 
 from exozippy.components.rvinstrument.redshift import (
     barycentric_redshift,
+    doppler_ratio,
     observer_terms,
     predicted_cz,
+    star_geometry,
 )
 from exozippy.constants import C_MPS
 
@@ -224,6 +226,46 @@ def test_a_spacecraft_velocity_is_its_ephemeris_derivative():
     v_fd = dx / (2 * h) * (149597870700.0 / 86400.0)
     assert np.max(np.abs(v - v_fd)) < 1e-3
     assert np.all(np.abs(np.linalg.norm(v, axis=1) - 3.0e4) < 2.0e3)
+
+
+def test_a_transverse_speed_enters_the_time_dilation_alone():
+    """
+    Given a companion-free star and a reflex given once as a 3-D vector and
+      once as its line-of-sight part plus its transverse SPEED (review
+      8.5.10; the model without astrometry),
+    When doppler_ratio is evaluated both ways,
+    Then they differ by what the speed-only form cannot know -- the cross
+      term v_sys,perp . v_perp / c in gamma_* and the transverse reflex's
+      projection on rho_hat -- to < 1 mm/s of a ~3 m/s difference, and
+      giving the speed together with the vector raises (it would count the
+      transverse motion twice).
+    """
+    t = np.linspace(2460000.0, 2460010.0, 11)
+    obs = observer_terms(t, "-104.0147,30.6814,2026", "builtin")
+    star = (
+        np.radians(209.5063),
+        np.radians(31.6955),
+        -75.53,
+        17.97,
+        13.63,
+        -2.0e4,
+    )
+    geom = star_geometry(t, obs["r_au"], *star, 2457389.0)
+    ph = 2 * np.pi * (t - t[0]) / 10.0
+    v_los, v_n, v_e = 3e4 * np.cos(ph), -3e4 * np.sin(ph), 1e4 * np.sin(ph)
+    full = doppler_ratio(geom, obs, (v_los, v_n, v_e))
+    speed = doppler_ratio(
+        geom, obs, (v_los, None, None), v_perp2=v_n**2 + v_e**2
+    )
+    _, e_hat, n_hat = geom["frame"]
+    v_perp = [v_n * n_hat[k] + v_e * e_hat[k] for k in range(3)]
+    cross = sum(geom["beta_sys"][k] * v_perp[k] for k in range(3))
+    proj = sum(geom["rho_hat"][k] * v_perp[k] for k in range(3))
+    diff = C_MPS * (full - speed)
+    assert np.max(np.abs(diff - (cross + proj))) < 1e-3
+    assert np.max(np.abs(cross)) > 1.0
+    with pytest.raises(ValueError, match="count it twice"):
+        doppler_ratio(geom, obs, (v_los, v_n, v_e), v_perp2=v_n**2)
 
 
 # ---------------------------------------------------------------------------

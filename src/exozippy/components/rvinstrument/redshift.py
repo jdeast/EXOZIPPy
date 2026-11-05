@@ -348,7 +348,7 @@ def displace_star(geom, r_obs_au, delta_au, xp=np):
     return out
 
 
-def doppler_ratio(geom, obs, v_reflex, xp=np, phi_star=None):
+def doppler_ratio(geom, obs, v_reflex, xp=np, phi_star=None, v_perp2=None):
     """``1 + z_meas`` without the instrument zero point (WE14 eq. 28 as a
     forward model; module docstring).
 
@@ -361,10 +361,28 @@ def doppler_ratio(geom, obs, v_reflex, xp=np, phi_star=None):
     c^2, ``sum GM_c/(r c^2)``, the gravitational redshift of its light
     that varies with the orbital separation (its own surface potential is
     a constant, in the zero point).
+
+    ``v_perp2`` -- (N,) or None: the SQUARED transverse reflex speed
+    (m^2/s^2) where the sky orientation is not modeled (``v_n``/``v_e``
+    None).  The time dilation ``gamma_*`` needs the star's whole speed,
+    and its transverse reflex speed needs only each orbit's inclination,
+    not its node (``RVInstrument._reflex_transverse_speed2``), so it
+    enters ``beta^2`` alone: ``beta^2 = |beta_sys + beta_los r0_hat|^2 +
+    v_perp2 / c^2``.  What that leaves out is the node-dependent cross
+    term ``2 beta_sys,perp . beta_reflex,perp`` (and the reflex's
+    transverse projection on ``rho_hat``; rvinstrument.md, "Without
+    astrometry").  Given together with ``v_n``/``v_e`` it would count the
+    transverse motion twice, so that raises.
     """
     r0, e, n = geom["frame"]
     rho = geom["rho_hat"]
     v_los, v_n, v_e = v_reflex
+    if v_perp2 is not None and (v_n is not None or v_e is not None):
+        raise ValueError(
+            "doppler_ratio: v_perp2 is the transverse reflex speed for a "
+            "system WITHOUT a modeled sky orientation; it was given "
+            "together with v_n/v_e, which would count it twice."
+        )
     beta = []
     for k in range(3):
         b = geom["beta_sys"][k]
@@ -376,6 +394,8 @@ def doppler_ratio(geom, obs, v_reflex, xp=np, phi_star=None):
             b = b + v_e * e[k] / C_MPS
         beta.append(b)
     beta2 = beta[0] ** 2 + beta[1] ** 2 + beta[2] ** 2
+    if v_perp2 is not None:
+        beta2 = beta2 + v_perp2 / C_MPS**2
     gamma_star = 1.0 / xp.sqrt(1.0 - beta2)
     star = gamma_star * (1.0 + sum(rho[k] * beta[k] for k in range(3)))
     bo = obs["beta"]
@@ -400,21 +420,34 @@ def doppler_ratio(geom, obs, v_reflex, xp=np, phi_star=None):
 
 
 def predicted_cz(
-    t_tdb, obs, star, epoch, z0=0.0, v_reflex=None, xp=np, phi_star=None
+    t_tdb,
+    obs,
+    star,
+    epoch,
+    z0=0.0,
+    v_reflex=None,
+    xp=np,
+    phi_star=None,
+    v_perp2=None,
 ):
     """Convenience for tests and seeds: ``c z_meas`` (m/s) predicted for a
     star with parameters ``star = (ra, dec, pm_ra, pm_dec, parallax, rv)``
     (internal units) and an optional reflex ``v_reflex`` evaluated by the
     caller (it needs ``t_bary``; pass a callable ``f(t_bary) -> (v_los,
     v_n, v_e)``; ``phi_star`` likewise ``f(t_bary) -> (N,)``, the
-    companions' potential at the star over c^2).  Returns ``(cz, t_bary)``."""
+    companions' potential at the star over c^2; ``v_perp2`` likewise, the
+    squared transverse reflex speed, ``doppler_ratio``).  Returns
+    ``(cz, t_bary)``."""
     geom = star_geometry(t_tdb, obs["r_au"], *star, epoch, xp=xp)
     if v_reflex is None:
         refl = (None, None, None)
     else:
         refl = v_reflex(geom["t_bary"])
     phi = None if phi_star is None else phi_star(geom["t_bary"])
-    ratio = (1.0 + z0) * doppler_ratio(geom, obs, refl, xp=xp, phi_star=phi)
+    vp2 = None if v_perp2 is None else v_perp2(geom["t_bary"])
+    ratio = (1.0 + z0) * doppler_ratio(
+        geom, obs, refl, xp=xp, phi_star=phi, v_perp2=vp2
+    )
     return C_MPS * (ratio - 1.0), geom["t_bary"]
 
 

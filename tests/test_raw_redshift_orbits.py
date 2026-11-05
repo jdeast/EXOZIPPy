@@ -17,6 +17,9 @@ tested is exactly the orbit composition and the retardation:
 * a binary's SECONDARY: the observed star on the companion side;
 * the size of the retardation (rvinstrument.md, "The star's own light
   travel time").
+
+The time dilation's transverse reflex speed (review 8.5.10) is tested on
+this harness in tests/test_raw_redshift_time_dilation.py.
 """
 
 import numpy as np
@@ -81,14 +84,51 @@ def _star_motion(t, orbits):
     return Z, V
 
 
+def _star_velocity3(t, o, bigomega=None):
+    """One orbit's contribution to the star's velocity (m/s) at
+    target-frame times t: ``(VZ, VX, VY, vperp2)`` -- the line of sight
+    (away), North and East (None without ``bigomega`` [rad]), and the
+    squared transverse SPEED from vis-viva, ``|v|^2 = n^2 a^3 (2/r - 1/a)``
+    less the line-of-sight part, which needs no node."""
+    r_a, s_wf, c_wf, vphase = _kepler(t, o["tp"], o["P"], o["e"], o["w"])
+    n = 2 * np.pi / (o["P"] * 86400.0)
+    e, a, si, ci = o["e"], o["a"], o["sini"], o["cosi"]
+    vamp = o["share"] * n * a / np.sqrt(1 - e**2)
+    VZ = vamp * vphase * si
+    v2 = o["share"] ** 2 * n**2 * a**2 * (2.0 / r_a - 1.0)
+    vperp2 = v2 - VZ**2
+    if bigomega is None:
+        return VZ, None, None, vperp2
+    vx = -(s_wf + e * np.sin(o["w"]))
+    cO, sO = np.cos(bigomega), np.sin(bigomega)
+    VX = vamp * (cO * vx - sO * vphase * ci)
+    VY = vamp * (sO * vx + cO * vphase * ci)
+    return VZ, VX, VY, vperp2
+
+
 def _independent_cz(
-    jd_utc, orbits, star, gamma_ms, rv, retard=True, subsystems=None
+    jd_utc,
+    orbits,
+    star,
+    gamma_ms,
+    rv,
+    retard=True,
+    subsystems=None,
+    transverse="speed",
+    bigomega=None,
 ):
     """c z_meas predicted for the star at ``star`` (internal units) with
     reflex composed by ``_star_motion``, each orbit's at its own RETARDED
     time: retarded by the star's displacement in the orbits of
     ``subsystems[k]`` (indices into ``orbits``; default: orbit k alone) --
-    the orbit and those nested inside it (RVInstrument._orbit_emission_times)."""
+    the orbit and those nested inside it (RVInstrument._orbit_emission_times).
+
+    ``transverse`` -- what the time dilation sees across the line of
+    sight: "speed" each orbit's transverse SPEED, the squares summed (the
+    model without astrometry); "none" nothing (the model before review
+    8.5.10); "sky" the full 3-D velocity vector, each orbit at its node
+    ``bigomega[k]`` [rad] (the model with astrometry, less the sky
+    wobble of rho_hat)."""
     if subsystems is None:
         subsystems = [[k] for k in range(len(orbits))]
     from astropy.coordinates import EarthLocation
@@ -110,9 +150,23 @@ def _independent_cz(
 
     def reflex(t_bary):
         V = 0.0
+        if transverse == "sky":
+            VX = VY = 0.0
+            for k, o in enumerate(orbits):
+                vz, vx, vy, _ = _star_velocity3(
+                    emit(t_bary, k), o, bigomega[k]
+                )
+                V, VX, VY = V + vz, VX + vx, VY + vy
+            return V, VX, VY
         for k, o in enumerate(orbits):
             V = V + _star_motion(emit(t_bary, k), [o])[1]
         return V, None, None
+
+    def vperp2(t_bary):
+        return sum(
+            _star_velocity3(emit(t_bary, k), o)[3]
+            for k, o in enumerate(orbits)
+        )
 
     def potential(t_bary):
         # The companions' potential at the star: G M_other / (r c^2).
@@ -125,7 +179,14 @@ def _independent_cz(
 
     z0 = (1 + gamma_ms / C_MPS) / (1 + rv / C_MPS) - 1
     cz, _ = predicted_cz(
-        t_tdb, obs, star, EPOCH, z0=z0, v_reflex=reflex, phi_star=potential
+        t_tdb,
+        obs,
+        star,
+        EPOCH,
+        z0=z0,
+        v_reflex=reflex,
+        phi_star=potential,
+        v_perp2=vperp2 if transverse == "speed" else None,
     )
     return cz
 
@@ -198,8 +259,8 @@ def _at(model, point, nodes):
 def _elements(system, model, start, shares):
     """The orbits' start elements, as numpy, for the independent model."""
     o = system.orbit
-    names = ["tp_target", "period", "ecc", "omega", "a", "sini"]
-    tp, P, e, w, a, si = _at(
+    names = ["tp_target", "period", "ecc", "omega", "a", "sini", "cosi"]
+    tp, P, e, w, a, si, ci = _at(
         model, start, [getattr(o, k).value for k in names]
     )
     mp, mc, mt = _at(
@@ -217,6 +278,7 @@ def _elements(system, model, start, shares):
                 "w": w[k],
                 "a": a[k] * SOLRAD_M,
                 "sini": si[k],
+                "cosi": ci[k],
                 "share": share,
                 # the RELATIVE orbit (the star's share above is of it)
                 "a_rel": a[k] * SOLRAD_M,
