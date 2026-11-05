@@ -38,10 +38,12 @@ logger = logging.getLogger(__name__)
 # One (band, star) registration by one limb-darkening consumer.  `star` is
 # the star index whose atmosphere that consumer's limb darkening describes,
 # or None when the consumer cannot determine it on its own (see
-# Band.ld_consumers).  `label` names the consumer in error messages; `kind`
-# is what reads it -- one of Band.LD_CONSUMER_KINDS -- for the questions that
-# depend on WHICH consumer it is (only some may carry the Claret tie).
-LDConsumer = namedtuple("LDConsumer", "label band star kind")
+# Band.ld_consumers).  `label` names the consumer in error messages.  There
+# is deliberately no record of WHAT KIND of consumer it is: nothing about a
+# band's limb darkening -- the Claret tie included -- may depend on whether a
+# transit, an RM block, a Doppler tomography dataset or a microlensing light
+# curve reads it.
+LDConsumer = namedtuple("LDConsumer", "label band star")
 
 # The Claret tie's start-value seed keeps the sampled Kipping coordinates
 # (or a linear u1) this far inside [0, 1]: a start ON the edge has no raw
@@ -100,16 +102,6 @@ class Band(Component):
     # the Claret tables (ATLAS, three axes) or the PHOENIX tables generated
     # from specific intensities (band/ldgrid.py; four axes, A_V the fourth).
     LD_SOURCES = ("claret", "phoenix")
-
-    # What can read a band's limb darkening (LDConsumer.kind).
-    LD_CONSUMER_KINDS = ("transit", "mulens", "rm", "dopptom")
-
-    # The consumers whose band may carry the Claret tie (star_constrains_ld).
-    # Finite-source microlensing is deliberately absent -- out of scope for
-    # now (components/sed/sed.md, "The Claret limb-darkening tie"): a source
-    # star's Teff/logg are usually weakly constrained, and an explicit tie on
-    # a microlensing-only band raises rather than being ignored.
-    CLARET_TIE_KINDS = ("transit", "rm", "dopptom")
 
     # The label Star.structure_consumers files the tie's readership under.
     # Declared here, read there through the component, so the two cannot
@@ -207,8 +199,10 @@ class Band(Component):
                     "explicit true raises instead. With it on, the star is "
                     "held inside the tables' range (Teff 3500-10000 K, logg "
                     "2.0-5.0, [Fe/H] -2.0 to +1.0), and a star that STARTS "
-                    "outside it raises: set false on its bands. Transit, RM "
-                    "and Doppler-tomography bands only."
+                    "outside it raises: set false on its bands. The star "
+                    "is whichever star the band's limb darkening describes "
+                    "(a transit host, the RM star, a microlensing source), "
+                    "whatever reads it."
                 ),
             },
             {
@@ -441,25 +435,19 @@ class Band(Component):
         for i in candidates:
             explicit = self.star_constrains_ld[i] is True
             where = f"{self.prefix}.{self.names[i]}.star_constrains_ld"
-            kinds = {c.kind for c in consumers if c.band == i}
             reason, level = None, logging.WARNING
-            if not kinds & set(self.CLARET_TIE_KINDS):
-                # Nothing that reads limb darkening the tie applies to: for
-                # an unset band that is simply not a case for it (INFO).
+            # The tie is a property of the BAND -- its filter and its star --
+            # never of what reads it: a transit, an RM block, a Doppler
+            # tomography dataset and a finite-source microlensing light curve
+            # all read the same (u1, u2).  The one consumer question is
+            # whether ANYTHING reads them.
+            if not any(c.band == i for c in consumers):
+                # For an unset band that is simply not a case for it (INFO).
                 level = logging.INFO
-                if "mulens" in kinds:
-                    reason = (
-                        "the Claret limb-darkening tie is not implemented "
-                        "for microlensing light curves yet; this band is read "
-                        "only by a finite-source microlensing light curve"
-                    )
-                else:
-                    reason = (
-                        "nothing in this topology reads this band's limb "
-                        "darkening through a transit, a Rossiter-McLaughlin "
-                        "(rvinstrument rm:) block or a Doppler tomography "
-                        "dataset, so there is nothing to tie"
-                    )
+                reason = (
+                    "nothing in this topology reads this band's limb "
+                    "darkening, so there is nothing to tie"
+                )
             elif i in unnamed_bands and self.star_ndx_declared[i] is None:
                 reason = (
                     "this band's light curve covers planets around more than "
@@ -546,9 +534,9 @@ class Band(Component):
         name_to_idx = {name: i for i, name in enumerate(self.names)}
         out = []
 
-        def _mark(label, idx, star, kind):
+        def _mark(label, idx, star):
             if idx is not None and 0 <= idx < self.n_elements:
-                out.append(LDConsumer(label, int(idx), star, kind))
+                out.append(LDConsumer(label, int(idx), star))
 
         def _cfg(comp_name):
             comp = getattr(system, comp_name, None)
@@ -569,7 +557,6 @@ class Band(Component):
                 f"transit[{name}]",
                 name_to_idx.get(c.get("band")),
                 transit_host,
-                "transit",
             )
 
         # Microlensing: the magnification only takes u1 when the source is
@@ -602,7 +589,6 @@ class Band(Component):
                     f"mulensinstrument[{name}]",
                     name_to_idx.get(c.get("band")),
                     src,
-                    "mulens",
                 )
 
         # Rossiter-McLaughlin: rvinstrument `rm:` reads the `rm_band` band, or
@@ -617,7 +603,6 @@ class Band(Component):
                 f"rvinstrument[{name}].rm",
                 idx,
                 self._rm_host_star(system, c.get("rm")),
-                "rm",
             )
 
         # Doppler tomography: the shadow amplitude is the blocked
@@ -635,7 +620,6 @@ class Band(Component):
                 f"dopptom[{name}]",
                 idx,
                 self._rm_host_star(system, c.get("orbit")),
-                "dopptom",
             )
 
         return out

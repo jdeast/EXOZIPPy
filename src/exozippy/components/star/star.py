@@ -90,11 +90,23 @@ def _mass_reader_star_indices(system):
     that an evolutionary model constrains through its distance
     (microlensing) and its radius/teff (SED): the track then had to fit the
     star at its seed-0 mass.
+
+    The Claret limb-darkening tie reads it too: its tables are interpolated
+    at the star's logg = calc_logg_from_logmass(logmass, radius), and the
+    tables' logg range is a soft barrier on it.  Pinning the mass of a
+    microlensing source whose band is tied (the tie applies to any band,
+    components/sed/sed.md) would leave that barrier pressing on the radius
+    alone -- i.e. on rho -- against an arbitrary fixed mass: examples/
+    ob161045's giant source started at logg 1.68 (13.4 Rsun at a pinned
+    0.316 Msun), 466 nats into the barrier.
     """
     out = set()
     for comp in system.get_all_components():
         if isinstance(comp, StellarRelation):
             out |= {int(s) for s in comp.star_indices}
+    band = in_topology(system, "band")
+    if isinstance(band, Component):
+        out |= {int(s) for s in band.claret_tie_stars(system).values()}
     return out
 
 
