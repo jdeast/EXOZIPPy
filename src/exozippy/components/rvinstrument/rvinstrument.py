@@ -921,7 +921,7 @@ class RVInstrument(Instrument):
             p_e,
         )
 
-    def _reflex_transverse_speed2(self, system, t):
+    def _reflex_transverse_speed2(self, system, t, terms):
         """The observed star's squared transverse reflex SPEED, m^2/s^2,
         where the sky orientation is NOT modeled (``_reflex_sky`` returned
         None: no ``bigomega``), each orbit's at its own times ``t[orbit]``
@@ -935,7 +935,9 @@ class RVInstrument(Instrument):
         the transverse speed unchanged, so each orbit supplies it from its
         own elements and inclination (``Orbit.transverse_speed2``), scaled
         by the star's share (``M_c/M`` on the primary side, ``M_p/M`` on
-        the companion side, as ``_reflex_sky``).
+        the companion side, as ``_reflex_sky``).  ``terms`` -- the
+        per-orbit ``Orbit.orbit_terms`` ``_companion_potential`` already
+        built, so the Kepler solve is not repeated.
 
         Several orbits: their transverse velocities add as vectors whose
         relative orientation is the unknown relative node, so the sum of
@@ -958,14 +960,12 @@ class RVInstrument(Instrument):
                 if role == "primary"
                 else orbits.m_primary.value[o] / orbits.m_total.value[o]
             )
-            v2 = (
-                v2
-                + pt.sqr(frac)
-                * orbits.transverse_speed2(t[o], np.array([o]))[:, 0]
+            v2 = v2 + pt.sqr(frac) * orbits.transverse_speed2(
+                t[o], o, terms=terms[o]
             )
         return v2 * SOLRAD_PER_DAY_TO_MPS**2
 
-    def _companion_potential(self, system, t):
+    def _companion_potential(self, system, t, terms=None):
         """``sum_o G M_other,o / (r_o c^2)`` at the star, each orbit's at its
         own times ``t[o]`` (``_orbit_emission_times``' dict):
         the gravitational redshift of the star's light in its companions'
@@ -975,25 +975,19 @@ class RVInstrument(Instrument):
         the separation to an outer group is taken as that orbit's relative
         separation (the inner offset is a fraction a_in/a_out of it).
         A Taylor orbit has no separation and adds nothing.  None without a
-        Keplerian orbit."""
+        Keplerian orbit.  ``terms`` -- a dict to fill with each orbit's
+        ``Orbit.orbit_terms`` (the one Kepler solve the time dilation
+        reuses, ``_reflex_transverse_speed2``)."""
         from exozippy.constants import C_LIGHT_RSUN_PER_DAY, G
-
-        from ..orbit import physics as orbit_physics
 
         orbits = system.orbit
         phi = None
         for o, role in orbits.star_membership(int(self.star_ndx[0])):
             o = int(o)
-            terms = orbit_physics.state_vector_terms(
-                t[o],
-                orbits.tp_target.value[o],
-                orbits.n.value[o],
-                orbits.ecc.value[o],
-                sinw=orbits.sinw.value[o],
-                cosw=orbits.cosw.value[o],
-                circular=orbits._all_circular(np.array([o])),
-            )
-            r = orbits.a.value[o] * terms.r_over_a
+            kt = orbits.orbit_terms(t[o], o)
+            if terms is not None:
+                terms[o] = kt
+            r = orbits.a.value[o] * kt.r_over_a
             m_other = (
                 orbits.m_companion.value[o]
                 if role == "primary"
@@ -1263,12 +1257,13 @@ class RVInstrument(Instrument):
             geom = displace_star(
                 geom, nodes["obs"]["r_au"], tuple(delta), xp=pt
             )
-        phi = self._companion_potential(system, t_emit)
+        terms = {}
+        phi = self._companion_potential(system, t_emit, terms=terms)
         # Without the sky orientation the time dilation still gets the
         # star's whole reflex SPEED (review 8.5.10,
-        # _reflex_transverse_speed2).
+        # _reflex_transverse_speed2), from the same Kepler solves.
         v_perp2 = (
-            self._reflex_transverse_speed2(system, t_emit)
+            self._reflex_transverse_speed2(system, t_emit, terms)
             if v_n is None
             else None
         )

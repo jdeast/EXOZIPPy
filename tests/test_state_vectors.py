@@ -109,7 +109,7 @@ def compiled_state_functions():
                 inputs=free_inputs + [t_var, a_var],
                 outputs=list(state)
                 + list(state_rel)
-                + [dE, dN, orbit_comp.transverse_speed2(t_var, omap)],
+                + [dE, dN, orbit_comp.transverse_speed2(t_var, 0)[:, None]],
                 on_unused_input="ignore",
             )
             rv_fn = pytensor.function(

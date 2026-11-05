@@ -402,8 +402,10 @@ of any one instrument is not, and is not claimed.
   epochs 2015-2026: `c z_B` agrees to **0.12 mm/s worst with DE430** on both sides at
   every epoch with the star above the horizon (0.28 mm/s for Barnard's star at J2000), and
   to **0.27 cm/s worst with the builtin (erfa) ephemeris**, the default, which the
-  committed test uses. Before three refinements this model has and barycorrpy does not
-  the DE430 agreement was 0.017 cm/s; the differences now are, each confirmed against
+  committed test uses. Before three refinements this model has and barycorrpy does not,
+  the DE430 agreement was 0.017 cm/s at WORST (Barnard's star at J2000) and ~0.002 mm/s
+  for the other stars; the current model departs from barycorrpy deliberately, and the
+  differences now are, each confirmed against
   PINT and TEMPO2 by an independent comparison: `X(T)` at `t_B` (barycorrpy propagates
   the star to the observer's TDB; Barnard's star against PINT goes from 0.063 mm/s with
   barycorrpy to 0.015 mm/s here, so up to 0.09 mm/s of the difference is barycorrpy's);
@@ -418,9 +420,14 @@ of any one instrument is not, and is not claimed.
   it) (tau Ceti from the CTIO
   1.5-m, 6097 epochs 2000-2015, TEMPO2 in `-tempo1` prediction mode with DE405; WE14
   sec. 5.1 and its online table, as redistributed in barycorrpy's repository as
-  `barycorrpy/data/New_tempo_check.txt`): this model and barycorrpy agree with each
-  other to 0.002 mm/s and differ from TEMPO identically, by 0.33 mm/s RMS (mean -0.10
-  mm/s), with DE405 or DE430 alike. That residual is WE14's sidereal-day signature
+  `barycorrpy/data/New_tempo_check.txt`): BEFORE the three refinements above, this
+  model and barycorrpy agreed with each other to 0.002 mm/s and differed from TEMPO
+  identically, by 0.33 mm/s RMS (mean -0.10 mm/s), with DE405 or DE430 alike. The
+  current model departs from barycorrpy deliberately, by up to 0.12 mm/s with the star
+  above the horizon (mostly the 0.065 mm/s constant of the Moon and planet potentials;
+  up to 0.09 mm/s from evaluating `X(T)` at `t_B`, for Barnard's star), and PINT and
+  TEMPO2 side with this model on those differences (previous bullet). The attribution of
+  the TEMPO residual below is unaffected by them. That residual is WE14's sidereal-day signature
   (0.37 mm/s amplitude), and it is **polar motion**: recomputing the observatory velocity
   without polar motion removes the sidereal term entirely (amplitude 0.37 -> 0.013 mm/s,
   RMS 0.33 -> 0.15 mm/s), so TEMPO's `-tempo1` prediction mode leaves polar motion out,
