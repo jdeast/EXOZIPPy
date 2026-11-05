@@ -841,7 +841,13 @@ class Instrument(TimeSystem, Component):
     # Shared file reading: columns, mask, time system, sort
     # ------------------------------------------------------------------
     def _read_data(
-        self, i, roles, detrend=False, shared_roles=(), observer_time=None
+        self,
+        i,
+        roles,
+        detrend=False,
+        shared_roles=(),
+        observer_time=None,
+        row_index=False,
     ):
         """Read data file ``i`` into canonical column order, ready to use.
 
@@ -874,6 +880,12 @@ class Instrument(TimeSystem, Component):
         ``data_format: raw_redshift``): step 3 then delivers the OBSERVER's
         coordinate time JD_TDB at reception (``_to_observer_tdb``) instead
         of a BJD_TDB tag.  None (every other reader) is step 3 as above.
+
+        ``row_index`` -- True returns ``(df, rows)`` instead: ``rows`` the
+        0-based ON-DISK row of each returned row (comment lines not
+        counted, the ``mask:`` convention), in the returned (sorted) order
+        -- for a side file keyed by exposure (``rvinstrument``'s
+        ``exposure_meter:``).
         """
         if roles[0] != "time":
             raise ValueError(
@@ -890,6 +902,11 @@ class Instrument(TimeSystem, Component):
             )
         df = self._read_table(i)
         df = self._select_columns(df, i, roles, detrend, shared_roles)
+        if row_index:
+            # Carried through the mask and the sort as one more column (not
+            # a positional one: every role and detrend column keeps its
+            # place), then split off.
+            df["_disk_row"] = np.arange(len(df))
         df = self._apply_mask(df, i)
         raw_t = df.iloc[:, 0].values.astype(float)
         if observer_time is None:
@@ -897,7 +914,11 @@ class Instrument(TimeSystem, Component):
         else:
             t = self._to_observer_tdb(raw_t, i, observer_time)
         df[df.columns[0]] = t
-        return self._sort_by_time(df)
+        df = self._sort_by_time(df)
+        if not row_index:
+            return df
+        rows = df.pop("_disk_row").values.astype(int)
+        return df, rows
 
     def _read_table(self, i):
         """File ``i`` as a DataFrame of its on-disk columns, unaltered.

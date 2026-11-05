@@ -74,6 +74,9 @@ rvinstrument:
   2457389.0, Gaia DR3's J2016.0). One star, one set of astrometric parameters, one epoch:
   with absolute astrometry in the system the astrometry's reference epoch is used and a
   raw file's `epoch:` that disagrees raises; without it every raw file must name it.
+- **The exposure**: optional columns named in `columns:` (`exptime`, `t_rms`,
+  `t_skew3`, in seconds of the file's own time scale), an optional `exposure_meter:`
+  file, and `ninterp:` for the nodes ("The exposure average", below).
 - **`star.rv` must carry a prior** (next section). `observer_location` and `epoch` on a
   corrected file raise. Corrected and raw files may be mixed in one system; the raw rows
   are written into the likelihood's model with `pt.set_subtensor` on their concrete rows.
@@ -169,6 +172,78 @@ the period it pairs with is the observed one -- the two differ from the rest-fra
 by `1 + rv/c` (~7e-5 at 20 km/s), which only Kepler's third law notices (a 1e-4-level
 mass, common to every EXOZIPPy and EXOFASTv2 fit; open item below).
 
+### The exposure average
+
+A spectrum is an exposure, not an instant: its measured redshift is the PHOTON-WEIGHTED
+MEAN of the instantaneous one, and the correction is not linear in time, so the model at
+the flux-weighted midpoint is itself an error (Tronsgaard, Buchhave, Wright, Eastman &
+Blackman 2019, MNRAS 489, 2395; bib key `Tronsgaard:2019`). Its leading term is the
+curvature of the Earth's rotation, `<v> - v(<t>) = v'' Var(t) / 2`, with `v''` up to
+`omega_E^2 * 465 m/s * cos(lat) cos(dec) = 2.5e-6 m/s^2` six hours from the meridian. For
+a uniform exposure of length T (Var = T^2/12) that is **1.33 m/s (T / 1 h)^2 cos(lat)
+cos(dec) sin(HA)** -- 0.33 m/s for 30 min and 1.3 m/s for 60 min at worst; Tronsgaard et
+al. give `1.32 m/s cos(lat) cos(dec) sin(HA) (T / 1 h)^2`. The third moment adds
+`v''' mu_3 / 6`: 9 mm/s for a 1-hour exposure whose flux ramps linearly to zero, 1 mm/s
+at 30 min. An orbit's own curvature enters the same way (a K = 30 km/s, 2-day binary:
+meters per second).
+
+So the model's prediction for a raw row is the photon-weighted mean of the FULL
+instantaneous model -- the barycentric terms, the reflex of every orbit at its own
+retarded emission time, the astrometric wobble and the companion potential -- over
+quadrature nodes in the exposure. In `RVInstrument._raw_rv_model` the nodes are the rows
+of the geometry, `_rv_model` runs on their emission times, and an `inc_subtensor` segment
+sum by a constant index forms each row's mean. Per exposure, the most complete
+description it has wins (`RVInstrument._exposure_nodes`; the rules are in `redshift.py`):
+
+1. **`exposure_meter: <file>`**, the full record. Long format, one row per meter bin:
+   `t_mid` (the exposure's midpoint EXACTLY as the data file's time column writes it --
+   that is how a bin finds its exposure: within 1e-6 d, and no match or two matches
+   raise; bins of a masked exposure are ignored), `t` (the bin center, in the data file's
+   time system), `dt` (the bin width, s) and `counts`. Each bin is a uniform box of
+   photons. The model uses the `ninterp`-node Gauss rule OF THAT PHOTON DISTRIBUTION
+   (Golub-Welsch on the discrete measure, `redshift.weighted_exposure_rule`): positive
+   weights, nodes inside the record, and the photon-weighted mean of every polynomial of
+   degree `2 ninterp - 1` reproduced exactly, so a 1000-bin record costs 3 model
+   evaluations, not 1000. A meter whose photon-weighted mean time differs from the tag by
+   more than 1 s warns (the model uses the meter). Box bins are an assumption: a flux
+   gradient inside a bin moves the mean time by ~`dt^2 f' / (12 f)`. For a linear ramp to
+   zero over a 10-min exposure that is 1 s (3 cm/s) in 60-s bins and 0.03 mm/s in 2-s
+   bins.
+2. **`t_rms` (and `t_skew3`) columns**: the flux-weighted RMS of the photon arrival times
+   about the flux-weighted midpoint (s) and their third central moment (s^3; needs
+   `t_rms`). The 2-node rule with exactly those moments (`redshift.moment_rule`) is
+   exact for every cubic in time, which covers the curvature and the skew terms. What it
+   cannot know is the 4th moment: 0.43 mm/s at 60 min for a uniform exposure and 0.26
+   mm/s for the ramp, scaling as T^4.
+3. **`exptime` column** (s): uniform flux over `[t - exptime/2, t + exptime/2]`,
+   `ninterp`-node Gauss-Legendre. (Its `t_rms` is `exptime / sqrt(12)`; the column adds
+   the shape.)
+4. **Nothing**: one node at the tag, the model at the midpoint, wrong by the Tronsgaard
+   term above. That is what corrected-RV practice does, and the reason
+   `docs/raw_redshift_data.md` asks a release for the meter record.
+
+**`ninterp:`** (default 3, `redshift.DEFAULT_EXPOSURE_NODES`) is read by rules 1 and 3.
+Gaussian rules converge far faster than the transit component's midpoint grid, which is
+built for light curves with kinks at contact; the redshift is smooth. Against a
+4001-point Simpson reference, a 60-min exposure 5 h from the meridian is off by 1.2 m/s
+with 1 node, 0.47 mm/s with 2 and 1.3e-4 mm/s with 3. With a K = 100 km/s, P = 1 d binary
+on top, every n >= 3 sits at the float64 time-resolution floor (~0.1 mm/s for that K: a
+JD carries 40 us). The cost is `ninterp` times the raw rows' geometry and Kepler solves.
+
+The exposure columns are not detrend columns (they are split off before the detrend
+block), and a corrected file refuses them (`columns:` names an unknown role). The plots
+read the tag: `self.time` is the start star's BJD_TDB of the midpoint. The seed
+correction is photon-averaged like the model.
+
+Tests (`tests/test_raw_redshift.py`): the rules' moment exactness; the averaged
+correction against barycorrpy integrated densely
+(`tests/fixtures/raw_redshift/barycorrpy_exposure.txt`: two sites x two stars x hour
+angles -5..+5 h x 10/30/60 min, uniform and ramp exposures), where the averaging shift,
+up to 1.13 m/s, agrees to 0.0012 mm/s with Gauss-Legendre, 0.034 mm/s with a 2-s meter
+and 0.43/0.26 mm/s with the moment rules; convergence with a fast binary; and the
+example's likelihood against `make_data.py`'s 9-point-per-step integration, for all
+three kinds of input.
+
 ### The instrument zero point, and what the data constrain
 
 Each raw file keeps its own `gamma`, and in this mode `gamma_i` is that instrument's
@@ -235,37 +310,36 @@ of any one instrument is not, and is not claimed.
   0.003 mm/s). The comparison script is `scripts/compare_tempo_zb.py`; the table itself
   is not committed (it is redistributed under barycorrpy's GPL-3.0, this repository is
   BSD-3), so the script takes its path.
-- **Against PINT, TEMPO2 and TEMPO** (informational; an independent comparison by a
-  separate agent, five sites x stars x epochs; the method and install recipe are in
-  `docs/timing_code_crosscheck.md`):
+- **Against PINT, the regression reference** (`tests/test_raw_redshift.py`, fixture
+  `tests/fixtures/raw_redshift/pint_zb.txt`, regenerated by the script beside it, which
+  records the PINT version, kernel, clock and IERS settings; PINT is not a dependency):
+  four sites x three stars (tau Ceti, Gaia-4-like, Barnard's) x six epochs 2023-2025 on
+  DE432s on both sides. Per (site, star) the two differ by the observatory clock
+  constant below plus at most 0.032 mm/s; the test pins 0.05 mm/s and the constant's
+  range. Marked `network` (it needs the 10 MB DE432s kernel) and skipped, never run on
+  the builtin ephemeris, without it.
+- **Against native TEMPO2, the independent cross-check** (informational, by hand; the
+  method, install recipe and full table are in `docs/timing_code_crosscheck.md`), five
+  sites x four stars, 640 epochs over 2023-2025 and 1835 through one night, DE440, per
+  (site, star) constant removed:
 
-  | comparison (per-case constant removed) | RMS | max |
+  | comparison | RMS | max |
   |---|---|---|
-  | this model - PINT | 0.019 mm/s | 0.063 mm/s |
-  | this model - native TEMPO2 | 0.022 mm/s | 0.064 mm/s |
-  | PINT - native TEMPO2 | 0.015 mm/s | 0.048 mm/s |
-  | this model - TEMPO1 | 0.21 mm/s | 0.61 mm/s |
-  | this model, polar motion OFF - TEMPO1 | 0.03 mm/s | 0.13 mm/s |
-  | this model with the exact Shapiro term and the extra bodies (now the default) - PINT | 0.012 mm/s | 0.042 mm/s |
+  | this model - PINT | 0.012-0.015 mm/s | 0.050 mm/s |
+  | this model - native TEMPO2 | 0.016-0.018 mm/s | 0.078 mm/s |
+  | PINT - native TEMPO2 | 0.013-0.015 mm/s | 0.060 mm/s |
 
-  The TEMPO1 residual is entirely polar motion, which TEMPO1 lacks. This is the same
-  effect as the 0.33 mm/s against the WE14 TEMPO set above. The per-site constant
-  between this model and the TT-based codes is closed: it is the observatory clock
-  term `(GM_E/r + v_rot^2/2 - W0)/c` (the geoid potential W0) plus the bodies
-  barycorrpy omits. The prediction matches the measured constant to <= 0.006 mm/s at
-  every site:
-
-  | site | clock term | omitted bodies | predicted | measured vs PINT |
-  |---|---|---|---|---|
-  | Keck | -0.210 | -0.066 | -0.276 | -0.279 mm/s |
-  | Kitt Peak | -0.087 | -0.066 | -0.153 | -0.158 mm/s |
-  | McDonald | -0.092 | -0.066 | -0.157 | -0.162 mm/s |
-  | La Palma | -0.113 | -0.066 | -0.179 | -0.183 mm/s |
-  | Las Campanas | -0.116 | -0.065 | -0.181 | -0.185 mm/s |
-
-  The omitted bodies are now modeled (`redshift.GRAVITY_BODIES`). The clock term is a
-  constant per site, which each instrument's `z0_i` absorbs, so it is not modeled.
-  The float64 floor of one JD time stamp (~40 us) is 0.0004 mm/s RMS.
+  The per-site constant between this model and the TT-based codes is the observatory
+  clock term `(GM_E/r + v_rot^2/2 - W0)/c` (the geoid potential W0): -0.21 mm/s at Keck,
+  -0.087 at Kitt Peak, -0.092 at McDonald, -0.113 at La Palma, -0.116 at Las Campanas.
+  Before the Moon and the remaining planets were added to `redshift.GRAVITY_BODIES` the
+  measured constant was this plus 0.066 mm/s, and the sum matched to <= 0.006 mm/s at
+  every site. The clock term is a constant per site, which each instrument's `z0_i`
+  absorbs, so it is not modeled. The float64 floor of one JD time stamp (~40 us) is
+  0.0004 mm/s RMS.
+- **TEMPO1** (historical): 0.21 mm/s RMS, 0.63 max, all of it polar motion, which TEMPO1
+  lacks (with polar motion off here: 0.03 mm/s RMS). The same effect as the 0.33 mm/s
+  against the WE14 TEMPO set above.
 - **Against PEXO** (Feng et al. 2019; an independent comparison run by a separate
   agent, scripts not in this repository). For single stars at ground sites this model
   matches PEXO to <= 0.015 mm/s once each term is attributed. The attributed terms:
@@ -293,7 +367,7 @@ of any one instrument is not, and is not claimed.
   mm/s and < 1 mm/s.
 - **Recovery** on the simulated example (`examples/raw_redshift_sim`): the likelihood's
   graph reproduces the numpy forward model that made the data to < 1 mm/s at the truth;
-  a MAP fit recovers K (327.9 against 330 m/s) and the three zero points (within 1.8 m/s), P within its loose 1.3-orbit constraint (578.8 against 571 d); C and JAX gradients are finite and
+  a MAP fit recovers K (328.1 against 330 m/s) and the three zero points (within 1.8 m/s), P within its loose 1.3-orbit constraint (577.7 against 571 d), with every spectrum exposure-averaged; C and JAX gradients are finite and
   agree in every coordinate (ra, dec, pm, distance, rv, the orbit).
 
 ### What a corrected-RV fit misses: a Gaia-4-like system
@@ -330,7 +404,8 @@ perspectives -- and that no step can be applied inconsistently.
   reflex)`), so every corrected-mode panel and residual applies unchanged; without a
   point (the data-only preview) a raw file is drawn as measured.
 - The prose (`rvinstrument.raw_redshift`, section `orbits`) states the in-model correction
-  and cites `Wright:2014`.
+  and cites `Wright:2014`; where some spectrum is exposure-averaged, a second sentence
+  (`rvinstrument.exposure_average`) says so and cites `Tronsgaard:2019`.
 
 ### Not modeled, with their size
 

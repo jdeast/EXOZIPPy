@@ -14,6 +14,8 @@ from exozippy.constants import C_MPS
 from exozippy.outputs.prose import get_collector
 from exozippy.outputs.texutils import latex_escape
 
+from .redshift import DEFAULT_EXPOSURE_NODES
+
 #: ``data_format:`` values.  ``rv`` (the default, and what an absent key
 #: means) is today's file: barycentric-corrected velocities, modeled as
 #: gamma + the reflex.  ``raw_redshift`` is the measured c z before any
@@ -23,7 +25,19 @@ DATA_FORMAT_RV = "rv"
 RAW_REDSHIFT = "raw_redshift"
 DATA_FORMATS = (DATA_FORMAT_RV, RAW_REDSHIFT)
 #: Keys that exist only on a raw_redshift file.
-RAW_ONLY_KEYS = ("observer_location", "epoch")
+RAW_ONLY_KEYS = ("observer_location", "epoch", "exposure_meter", "ninterp")
+#: The optional column roles that resolve each exposure in time
+#: (rvinstrument.md, "The exposure average"), all in SECONDS of the file's
+#: own time scale: ``exptime`` the duration of a uniform-flux exposure (the
+#: FITS EXPTIME), ``t_rms`` the flux-weighted RMS of the photon arrival
+#: times about the flux-weighted midpoint, ``t_skew3`` (s^3) their third
+#: central moment (needs ``t_rms``).  Read only when ``columns:`` names
+#: them, in this order after time/rv/err.
+EXPOSURE_ROLES = ("exptime", "t_rms", "t_skew3")
+#: An exposure_meter: group's midpoint matches a data-file tag when the
+#: two differ by less than this (days, in the file's own units after
+#: time_offset): 0.0864 s.  Write the midpoint exactly as in the data file.
+METER_MATCH_TOL_D = 1e-6
 
 
 class RVInstrument(Instrument):
@@ -161,6 +175,23 @@ class RVInstrument(Instrument):
                 f"star.ra/dec/pm_ra/pm_dec (e.g. 2457389.0 for Gaia DR3's "
                 f"J2016.0); got {ep!r}."
             )
+        n = c.get("ninterp", None)
+        if n is not None and (
+            isinstance(n, bool)
+            or not isinstance(n, (int, np.integer))
+            or n < 1
+        ):
+            raise ValueError(
+                f"{where}: ninterp: is the number of Gauss nodes per "
+                f"exposure (a positive integer; default "
+                f"{DEFAULT_EXPOSURE_NODES}); got {n!r}."
+            )
+        meter = c.get("exposure_meter")
+        if meter is not None and (not isinstance(meter, str) or not meter):
+            raise ValueError(
+                f"{where}: exposure_meter: is the path of the exposure-meter "
+                f"file (columns: t_mid, t, dt, counts); got {meter!r}."
+            )
         # Resolve the location now, so a typo fails at construction.
         from exozippy.ephemeris import _resolve_observer
 
@@ -287,8 +318,47 @@ class RVInstrument(Instrument):
                     "astrometry, whose epoch it must then equal."
                 ),
             },
+            {
+                "key": "exposure_meter",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "raw_redshift only: path of an exposure-meter file, "
+                    "one row per meter bin: t_mid (the exposure's midpoint "
+                    "exactly as the data file writes it), t (bin center, "
+                    "the data file's time system), dt (bin width, s), "
+                    "counts. The model averages each spectrum's predicted "
+                    "redshift over its photons (Tronsgaard et al. 2019); "
+                    "overrides the exposure columns for that exposure."
+                ),
+            },
+            {
+                "key": "ninterp",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "raw_redshift only: Gauss nodes per exposure for the "
+                    "photon-weighted average (default "
+                    f"{DEFAULT_EXPOSURE_NODES}, converged to < 0.001 mm/s "
+                    "for 1-hour exposures); read only with an exptime "
+                    "column or an exposure_meter."
+                ),
+            },
             cls._mask_config_schema(),
-            cls._columns_config_schema(("time", "rv", "err")),
+            cls._columns_config_schema(
+                ("time", "rv", "err"),
+                note=(
+                    "A raw_redshift file may also name exposure columns, "
+                    "in seconds of its own time scale: 'exptime' (a "
+                    "uniform-flux exposure's duration), 't_rms' (the "
+                    "flux-weighted RMS of the photon arrival times about "
+                    "the midpoint) and 't_skew3' (their third central "
+                    "moment, s^3; needs t_rms); the predicted redshift is "
+                    "averaged over the exposure they describe."
+                ),
+            ),
             *cls._time_config_schema(),
             cls._plot_style_config_schema(),
             cls._label_config_schema(),
@@ -388,16 +458,20 @@ class RVInstrument(Instrument):
         """Read raw file ``i``: ``(df, t_bary, v_seed)``.
 
         ``df`` -- the shared reader's frame, its time column the OBSERVER's
-        coordinate time JD_TDB at reception (``_to_observer_tdb``);
+        coordinate time JD_TDB at reception (``_to_observer_tdb``), any
+        ``exptime`` column split off (it is not a detrend column);
         ``t_bary`` -- each spectrum's BJD_TDB at the START star (what the
         plots, the GP's ordering and every seed read as ``self.time``; the
         likelihood forms its own from the fitted star);
         ``v_seed`` -- the redshifts corrected with the start star, m/s:
-        ``c[(1 + z_B)(1 + z_meas) - 1]`` (``redshift.barycentric_redshift``).
+        ``c[(1 + z_B)(1 + z_meas) - 1]`` (``redshift.barycentric_redshift``),
+        with ``1/(1 + z_B)`` photon-averaged over the exposure where it is
+        resolved, as the model does.
 
         The observer's barycentric state and the solar-system potential
-        at each epoch are parameter-independent and computed here, once
-        (``redshift.observer_terms``).
+        at each sub-exposure node are parameter-independent and computed
+        here, once (``redshift.observer_terms``); the nodes and their
+        photon weights come from ``_exposure_nodes``.
         """
 
         from .redshift import (
@@ -407,11 +481,30 @@ class RVInstrument(Instrument):
         )
 
         loc = self.observers[i]
-        df = self._read_data(
-            i, roles=("time", "rv", "err"), detrend=True, observer_time=loc
+        spec = self.column_specs[i] or {}
+        extra = tuple(r for r in EXPOSURE_ROLES if r in spec)
+        if "t_skew3" in extra and "t_rms" not in extra:
+            raise ValueError(
+                f"[{self.prefix}.{self.names[i]}] columns: t_skew3 (the "
+                f"third central moment of the photon arrival times) needs "
+                f"t_rms (their RMS) as well."
+            )
+        roles = ("time", "rv", "err") + extra
+        df, disk_rows = self._read_data(
+            i, roles=roles, detrend=True, observer_time=loc, row_index=True
         )
+        moments = {}
+        for k, role in enumerate(extra):
+            moments[role] = df.pop(3 + k).values.astype(float)
+        df.columns = range(df.shape[1])
         t_tdb = df.iloc[:, 0].values.astype(float)
-        obs = observer_terms(t_tdb, loc, self.time_specs[i]["ephemeris"])
+        node_row, t_node, w_node = self._exposure_nodes(
+            i, t_tdb, moments, disk_rows
+        )
+        eph = self.time_specs[i]["ephemeris"]
+        averaged = t_node.size > t_tdb.size
+        obs = observer_terms(t_tdb, loc, eph)
+        obs_node = observer_terms(t_node, loc, eph) if averaged else obs
         star = self._seed_star(i)
         ep = self.config[i].get("epoch")
         # The seed's epoch: the file's own, else its midpoint -- the
@@ -420,11 +513,203 @@ class RVInstrument(Instrument):
         # (_reference_epoch), when the astrometry has loaded.
         epoch = float(ep) if ep is not None else 0.5 * (t_tdb[0] + t_tdb[-1])
         t_bary = star_geometry(t_tdb, obs["r_au"], *star, epoch)["t_bary"]
-        z_b = barycentric_redshift(t_tdb, obs, star, epoch)
+        if averaged:
+            # 1 + z_meas = (1 + z_true) <1/(1 + z_B)>: the photon mean of
+            # the instantaneous ratio, with z_true the star's constant one.
+            inv = np.bincount(
+                node_row,
+                weights=w_node
+                / (1.0 + barycentric_redshift(t_node, obs_node, star, epoch)),
+                minlength=t_tdb.size,
+            )
+            z_b = 1.0 / inv - 1.0
+        else:
+            z_b = barycentric_redshift(t_tdb, obs, star, epoch)
         cz = df.iloc[:, 1].values * float(self.units[i].to(u.m / u.s))
         v_seed = C_MPS * ((1.0 + z_b) * (1.0 + cz / C_MPS) - 1.0)
-        self._raw_files[i] = {"t_tdb": t_tdb, "obs": obs}
+        self._raw_files[i] = {
+            "t_tdb": t_tdb,
+            "node_row": node_row,
+            "node_t_tdb": t_node,
+            "node_w": w_node,
+            "node_obs": obs_node,
+        }
         return df, np.asarray(t_bary, dtype=float), v_seed
+
+    def _exposure_nodes(self, i, t_tdb, moments, disk_rows):
+        """Raw file ``i``'s sub-exposure quadrature: ``(row, t, w)``, one
+        entry per node -- the file-local row (index into ``t_tdb``) it
+        belongs to, its observer JD_TDB and its photon weight (each row's
+        summing to 1).  rvinstrument.md, "The exposure average".
+
+        Per exposure, the most complete description it has wins:
+
+        1. its ``exposure_meter:`` bins -> the ``ninterp``-node Gauss rule
+           of the meter's photon distribution, each bin a uniform box
+           (``redshift.weighted_exposure_rule``; exact to degree
+           2 ninterp - 1);
+        2. its ``t_rms`` (and ``t_skew3``) columns -> the 2-node rule with
+           exactly those moments about the tag (``redshift.moment_rule``;
+           exact to degree 3, so its error is the photon distribution's
+           unknown 4th moment: < 0.5 mm/s for a 1-hour exposure);
+        3. its ``exptime`` column -> ``ninterp``-node Gauss-Legendre over
+           ``[t - exptime/2, t + exptime/2]``, uniform flux;
+        4. nothing -> one node at the tag (the model at the flux-weighted
+           midpoint: up to 1.3 m/s (exposure / 1 h)^2 off, Tronsgaard et
+           al. 2019).
+        """
+        from .redshift import (
+            moment_rule,
+            uniform_exposure_rule,
+            weighted_exposure_rule,
+        )
+
+        c = self.config[i]
+        where = f"[{self.prefix}.{self.names[i]}]"
+        n = int(c.get("ninterp", DEFAULT_EXPOSURE_NODES))
+        N = t_tdb.size
+        for role, vals in moments.items():
+            ok = np.isfinite(vals)
+            if role != "t_skew3":
+                ok &= vals > 0.0
+            if not ok.all():
+                raise ValueError(
+                    f"{where} {role} column: must be "
+                    + ("finite" if role == "t_skew3" else "positive (s)")
+                    + f"; data rows {sorted(int(r) for r in disk_rows[~ok])} "
+                    f"are not ({vals[~ok][:5].tolist()})."
+                )
+        meter = self._read_exposure_meter(i, disk_rows)
+        if "ninterp" in c and not meter and "exptime" not in moments:
+            logger.warning(
+                "%s ninterp: %d is unread: it sets the nodes of an exptime "
+                "column or an exposure_meter:, and the file has neither.",
+                where,
+                n,
+            )
+        x_u, w_u = uniform_exposure_rule(n)
+        rows, ts, ws = [], [], []
+        bare, worst = [], 0.0
+        for j in range(N):
+            if j in meter:
+                t_k, w_k = weighted_exposure_rule(*meter[j], n)
+                # The meter's photon-weighted mean time IS the flux-weighted
+                # midpoint the file's time column claims to be.
+                worst = max(worst, abs(float(np.sum(w_k * t_k)) - t_tdb[j]))
+            elif "t_rms" in moments:
+                skew = moments["t_skew3"][j] if "t_skew3" in moments else 0.0
+                x, w_k = moment_rule(moments["t_rms"][j], skew)
+                t_k = t_tdb[j] + x / 86400.0
+            elif "exptime" in moments:
+                t_k = t_tdb[j] + x_u * (moments["exptime"][j] / 86400.0)
+                w_k = w_u
+            else:
+                t_k, w_k = np.array([t_tdb[j]]), np.array([1.0])
+                if meter:
+                    bare.append(int(disk_rows[j]))
+            rows.append(np.full(t_k.size, j, dtype=int))
+            ts.append(t_k)
+            ws.append(w_k)
+        if bare:
+            logger.warning(
+                "%s exposure_meter: no bins for data rows %s and no "
+                "exposure columns: those spectra are modeled at their "
+                "midpoints (up to ~1.3 m/s (exposure/1 h)^2 off; "
+                "Tronsgaard et al. 2019).",
+                where,
+                bare,
+            )
+        if worst * 86400.0 > 1.0:
+            logger.warning(
+                "%s exposure_meter: a spectrum's photon-weighted mean time "
+                "differs from its time-column tag by up to %.1f s; the model "
+                "uses the meter (the tag only places the plotted point).",
+                where,
+                worst * 86400.0,
+            )
+        return np.concatenate(rows), np.concatenate(ts), np.concatenate(ws)
+
+    def _read_exposure_meter(self, i, disk_rows):
+        """Raw file ``i``'s ``exposure_meter:`` file as ``{row: (t, counts)}``
+        keyed by the file-local (sorted, unmasked) row, each bin expanded
+        into its 3-node Gauss-Legendre sub-points (a bin is a uniform box
+        of photons: its moments through degree 5 are then exact), times
+        converted exactly as the data's (``_to_observer_tdb``).  ``{}``
+        without one.
+
+        The file (long format; rvinstrument.md, docs/raw_redshift_data.md):
+        whitespace columns ``t_mid t dt counts``, ``#`` comments.
+        ``t_mid`` is the exposure's midpoint EXACTLY as the data file's
+        time column writes it, which is how a bin finds its exposure
+        (within ``METER_MATCH_TOL_D``; no match, or more than one, raises
+        -- a bin of a masked exposure is ignored); ``t`` the bin center in
+        the data file's own time system, ``dt`` its width (s), ``counts``
+        the photons (or anything proportional) in it.
+        """
+        from .redshift import uniform_exposure_rule
+
+        path = self.config[i].get("exposure_meter")
+        if path is None:
+            return {}
+        where = f"[{self.prefix}.{self.names[i]}] exposure_meter: {path!r}"
+        try:
+            tab = np.loadtxt(path, comments="#", ndmin=2)
+        except (OSError, ValueError) as e:
+            raise ValueError(
+                f"{where} could not be read as four numeric columns "
+                f"(t_mid, t, dt, counts): {e}"
+            ) from e
+        if tab.shape[1] != 4 or tab.shape[0] == 0:
+            raise ValueError(
+                f"{where} must have four columns (t_mid, t, dt[s], counts) "
+                f"and at least one row; got shape {tab.shape}."
+            )
+        t_mid, t, dt, counts = tab.T
+        if not np.all(np.isfinite(dt) & (dt > 0.0)):
+            raise ValueError(f"{where}: dt (bin width, s) must be > 0.")
+        if not np.all(np.isfinite(counts) & (counts >= 0.0)):
+            raise ValueError(f"{where}: counts must be finite and >= 0.")
+        # The data file's tags as written, every on-disk row (masked ones
+        # too, so a masked exposure's bins are recognized, not unmatched).
+        spec = self.column_specs[i] or {}
+        roles = ("time", "rv", "err") + tuple(
+            r for r in EXPOSURE_ROLES if r in spec
+        )
+        tags = (
+            self._select_columns(self._read_table(i), i, roles, detrend=True)
+            .iloc[:, 0]
+            .values.astype(float)
+        )
+        local = {int(r): j for j, r in enumerate(disk_rows)}
+        out_t, out_c, out_row = [], [], []
+        x3, w3 = uniform_exposure_rule(3)
+        t_obs = self._to_observer_tdb(t, i, self.observers[i])
+        for m in np.unique(t_mid):
+            hit = np.nonzero(np.abs(tags - m) < METER_MATCH_TOL_D)[0]
+            if hit.size != 1:
+                raise ValueError(
+                    f"{where}: t_mid {m!r} matches "
+                    + ("no" if hit.size == 0 else f"{hit.size}")
+                    + f" data-file time tags within {METER_MATCH_TOL_D} d; "
+                    f"write each exposure's midpoint exactly as the data "
+                    f"file does."
+                )
+            r = int(hit[0])
+            if r not in local:
+                continue  # a masked exposure
+            sel = t_mid == m
+            if not np.any(counts[sel] > 0.0):
+                raise ValueError(
+                    f"{where}: exposure t_mid {m!r} has no counts."
+                )
+            sub_t = (
+                t_obs[sel][:, None] + x3[None, :] * dt[sel][:, None] / 86400.0
+            )
+            sub_c = counts[sel][:, None] * w3[None, :]
+            out_row.append(local[r])
+            out_t.append(sub_t.ravel())
+            out_c.append(sub_c.ravel())
+        return {r: (tt, cc) for r, tt, cc in zip(out_row, out_t, out_c)}
 
     def _seed_star(self, i):
         """The start star for file ``i``'s seeds, internal units:
@@ -467,19 +752,28 @@ class RVInstrument(Instrument):
         )
 
     def _concat_raw_observers(self):
-        """The raw files' observer terms, concatenated in row order, and
-        the rows they sit on (``self._raw_rows``, a concrete index array:
-        the likelihood writes the raw model into exactly those rows)."""
+        """The raw files' sub-exposure nodes (``_exposure_nodes``),
+        concatenated in row order, and the rows they sit on
+        (``self._raw_rows``, a concrete index array: the likelihood writes
+        the raw model into exactly those rows).
+
+        ``self._raw_nodes``: ``t_tdb`` (M,), ``obs`` (``observer_terms`` at
+        the nodes), ``row`` (M,) the position in ``_raw_rows`` each node
+        averages into, ``w`` (M,) its photon weight, ``file`` (M,) its file
+        index, ``blocks`` the per-file node blocks (``_rv_model``'s
+        ``blocks``), and ``averaged`` -- False when every spectrum is one
+        node (no exposure information anywhere), the model then the one
+        at each midpoint.
+        """
         idx = [i for i in range(self.n_elements) if self.raw[i]]
         self._raw_rows = np.concatenate(
             [np.arange(*self.row_ranges[i]) for i in idx]
         ).astype(int)
-        parts = [self._raw_files[i]["obs"] for i in idx]
-        self._raw_t_tdb = np.concatenate(
-            [self._raw_files[i]["t_tdb"] for i in idx]
-        )
-        self._raw_obs = {
-            key: np.concatenate([p[key] for p in parts], axis=axis)
+        f = [self._raw_files[i] for i in idx]
+        row_off = np.cumsum([0] + [p["t_tdb"].size for p in f])
+        node_off = np.cumsum([0] + [p["node_t_tdb"].size for p in f])
+        obs = {
+            key: np.concatenate([p["node_obs"][key] for p in f], axis=axis)
             for key, axis in (
                 ("r_au", 0),
                 ("beta", 0),
@@ -490,6 +784,24 @@ class RVInstrument(Instrument):
                 ("shapiro_beta", 1),
             )
         }
+        self._raw_nodes = {
+            "t_tdb": np.concatenate([p["node_t_tdb"] for p in f]),
+            "obs": obs,
+            "row": np.concatenate(
+                [p["node_row"] + row_off[k] for k, p in enumerate(f)]
+            ).astype(int),
+            "w": np.concatenate([p["node_w"] for p in f]),
+            "file": np.concatenate(
+                [np.full(p["node_t_tdb"].size, i) for i, p in zip(idx, f)]
+            ).astype(int),
+            "blocks": [
+                (i, np.arange(node_off[k], node_off[k + 1]))
+                for k, i in enumerate(idx)
+            ],
+        }
+        self._raw_nodes["averaged"] = bool(
+            self._raw_nodes["t_tdb"].size > self._raw_rows.size
+        )
 
     def _reference_epoch(self, system):
         """The BJD_TDB epoch star.ra/dec/pm_ra/pm_dec refer to.
@@ -642,7 +954,7 @@ class RVInstrument(Instrument):
             phi = term if phi is None else phi + term
         return phi
 
-    def _emission_time(self, system, t_bary):
+    def _emission_time(self, system, t_bary, files):
         """The star's EMISSION time for light reaching the barycenter at
         ``t_bary``: retarded by the star's own reflex displacement along
         the line of sight, summed over EVERY orbit it is a body of,
@@ -664,17 +976,15 @@ class RVInstrument(Instrument):
         other retarded consumer); the orbits it retards then report their
         target-frame timing (Orbit._ltt_reporting_mask).
 
+        ``files`` -- (N,) the file index of each entry of ``t_bary`` (its
+        ``light_travel_time:`` decides whether that entry is retarded).
+
         Returns ``(t_emit, z)``: ``z`` the star's summed toward-observer
         displacement at ``t_bary`` (solRad), or None without any.
         """
         from .. import ltt
 
-        flags = np.array(
-            [
-                bool(self.light_travel_time[i])
-                for i in self.inst_map[self._raw_rows]
-            ]
-        )
+        flags = np.array([bool(self.light_travel_time[i]) for i in files])
         if not flags.any():
             return t_bary, None
         orbits = system.orbit
@@ -718,23 +1028,32 @@ class RVInstrument(Instrument):
         Corrected rows are ``gamma + reflex`` exactly as without raw files.
         Raw rows are ``c z_meas`` predicted by ``redshift.doppler_ratio``
         from the FITTED star (direction, Roemer delay to ``t_B``, space
-        velocity) and the reflex of every orbit evaluated at ``t_B`` --
-        the same ``_rv_model`` columns, evaluated on a time vector whose
-        raw rows are the in-graph barycentric arrival times.  Each raw
-        file's ``gamma`` is its instrument-frame systemic velocity,
-        ``c[(1 + z0_i)(1 + rv/c) - 1]``.
+        velocity) and the reflex of every orbit -- the same ``_rv_model``
+        columns -- evaluated at each sub-exposure node's own retarded
+        emission time, and averaged over the exposure with the nodes'
+        photon weights (``_raw_nodes``; rvinstrument.md, "The exposure
+        average"): the measured redshift is the photon-weighted mean of
+        the instantaneous one, and the correction is not linear in time
+        (Tronsgaard et al. 2019).  Each raw file's ``gamma`` is its
+        instrument-frame systemic velocity, ``c[(1 + z0_i)(1 + rv/c) - 1]``.
+
+        ``matrix`` and ``kep`` are the corrected-mode columns on the data's
+        own time vector (``time``: for a raw row, the START star's BJD_TDB
+        of its tag), so the plots draw a raw point as ``gamma + reflex(tag)
+        + its likelihood residual``, on the plotted curve within the noise.
         """
         from exozippy.constants import RSUN_TO_AU, SOLRAD_PER_DAY_TO_MPS
 
         from .redshift import displace_star, doppler_ratio, star_geometry
 
         rows = self._raw_rows
+        nodes = self._raw_nodes
         star = system.star
         s = int(self.star_ndx[0])
         rv = star.rv.value[s]
         geom = star_geometry(
-            self._raw_t_tdb,
-            self._raw_obs["r_au"],
+            nodes["t_tdb"],
+            nodes["obs"]["r_au"],
             star.ra.value[s],
             star.dec.value[s],
             star.pm_ra.value[s],
@@ -745,12 +1064,14 @@ class RVInstrument(Instrument):
             xp=pt,
         )
         self._raw_t_bary_node = geom["t_bary"]
-        t_emit, z_toward = self._emission_time(system, geom["t_bary"])
+        t_emit, z_toward = self._emission_time(
+            system, geom["t_bary"], nodes["file"]
+        )
         self._raw_t_emit_node = t_emit
-        t_eval = pt.set_subtensor(time[rows], t_emit)
-        kep, matrix = self._rv_model(system, t_eval, blocks, offset=None)
+        v_los, _ = self._rv_model(system, t_emit, nodes["blocks"], offset=None)
+        v_los = v_los * SOLRAD_PER_DAY_TO_MPS
+        kep, matrix = self._rv_model(system, time, blocks, offset=None)
         offset = self.gamma.value[self.inst_map_tensor]
-        v_los = kep[rows] * SOLRAD_PER_DAY_TO_MPS
         v_n, v_e, p_n, p_e = self._reflex_sky(system, t_emit)
         # The star's own orbital displacement moves the direction rho_hat
         # (the astrometric wobble): along the line of sight always, across
@@ -766,12 +1087,18 @@ class RVInstrument(Instrument):
             delta.append(d * RSUN_TO_AU)
         if any(not isinstance(d, float) for d in delta):
             geom = displace_star(
-                geom, self._raw_obs["r_au"], tuple(delta), xp=pt
+                geom, nodes["obs"]["r_au"], tuple(delta), xp=pt
             )
         phi = self._companion_potential(system, t_emit)
         ratio = doppler_ratio(
-            geom, self._raw_obs, (v_los, v_n, v_e), xp=pt, phi_star=phi
+            geom, nodes["obs"], (v_los, v_n, v_e), xp=pt, phi_star=phi
         )
+        if nodes["averaged"]:
+            # The photon-weighted mean over each exposure's nodes: a
+            # segment sum by a CONSTANT index (duplicates accumulate).
+            ratio = pt.inc_subtensor(
+                pt.zeros(rows.size)[nodes["row"]], nodes["w"] * ratio
+            )
         gamma_ms = (
             self.gamma.value[self.inst_map[rows]] * SOLRAD_PER_DAY_TO_MPS
         )
@@ -1400,6 +1727,18 @@ class RVInstrument(Instrument):
             key=f"{self.prefix}.raw_redshift",
             rank=22,
         )
+        if self._raw_nodes["averaged"]:
+            get_collector(system).add(
+                "Because the barycentric correction is not linear in time, "
+                "each predicted redshift is the photon-weighted mean of the "
+                "instantaneous model over its exposure "
+                r"\citep{Tronsgaard:2019}, from the exposure-meter record, "
+                "the photon-time moments or the exposure time, whichever "
+                "each spectrum provides.",
+                section="orbits",
+                key=f"{self.prefix}.exposure_average",
+                rank=23,
+            )
 
     # Points per block on a plotted model grid; one size for the unphased
     # span and the phased period window so both share one compiled layout.

@@ -141,6 +141,71 @@ def test_barycorrpy_recovers_a_constant_velocity_from_the_forward_model():
     )
 
 
+PINT_FIXTURE = FIXTURE.parent / "pint_zb.txt"
+
+
+@pytest.mark.network
+def test_barycentric_redshift_matches_pint_the_regression_reference():
+    """
+    Given PINT's c z_B (pint-pulsar 1.1.8, DE432s, IAU 2006/2000A with polar
+      motion; tests/fixtures/raw_redshift/pint_zb.txt and the script beside
+      it, which records the method and every setting) for four sites x
+      three stars (tau Ceti, a Gaia-4-like star, Barnard's star) x six
+      epochs 2023-2025,
+    When redshift.barycentric_redshift computes the same with the same
+      kernel,
+    Then per (site, star) it differs by a constant plus <= 0.05 mm/s
+      (measured 0.032 mm/s worst), and the constant is the site's: -0.08
+      to -0.22 mm/s, the same for every star at one site to 0.03 mm/s.
+      The constant is a convention, not an error: PINT counts the
+      observer's clock in TT (on the geoid), this model in the observer's
+      own proper time in the full potential, which differs by
+      (U_site - W0)/c -- -0.09 mm/s at McDonald, -0.21 at Keck's 4160 m --
+      and any instrument zero point absorbs it.  The residual is the two
+      models' genuine differences (the Shapiro form, the Earth-orientation
+      interpolation), 100x the float64 time floor (0.0004 mm/s RMS,
+      docs/timing_code_crosscheck.md), so the tolerance sits just above
+      what was measured: a regression of 0.02 mm/s in any term trips it.
+
+    Needs the DE432s kernel (10 MB; astropy fetches and caches it by name):
+    marked network, and skipped -- never run on the builtin ephemeris,
+    which differs by mm/s -- when it cannot be loaded.
+    """
+    import importlib.util
+
+    from astropy.coordinates import solar_system_ephemeris
+
+    try:
+        with solar_system_ephemeris.set("de432s"):
+            pass
+    except Exception as exc:  # no network, no cache
+        pytest.skip(f"DE432s kernel unavailable: {exc}")
+    spec = importlib.util.spec_from_file_location(
+        "make_pint_fixture", PINT_FIXTURE.parent / "make_pint_fixture.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    rows = np.loadtxt(PINT_FIXTURE)
+    worst, means = 0.0, {}
+    for a, (name, lon, lat, alt) in enumerate(mod.SITES):
+        for b, star in enumerate(mod.STARS):
+            sel = (rows[:, 0] == a) & (rows[:, 1] == b)
+            assert sel.sum() >= 4, (name, star[0])
+            t_tdb, obs = _observer(
+                (name, lon, lat, alt), rows[sel, 2] + 2400000.5, "de432s"
+            )
+            st, ep = _internal(star)
+            r = C_MPS * barycentric_redshift(t_tdb, obs, st, ep) - rows[sel, 3]
+            means.setdefault(a, []).append(float(np.mean(r)))
+            worst = max(worst, float(np.max(np.abs(r - np.mean(r)))))
+    assert worst < 5e-5, (
+        f"worst |EXOZIPPy - PINT - const| = {worst * 1e3:.4f} mm/s"
+    )
+    for a, m in means.items():
+        assert np.ptp(m) < 3e-5, (mod.SITES[a][0], m)
+        assert -2.5e-4 < np.mean(m) < -5e-5, (mod.SITES[a][0], m)
+
+
 def test_a_spacecraft_velocity_is_its_ephemeris_derivative():
     """
     Given the shipped Gaia ephemeris (positions only, 1-day grid),
@@ -159,6 +224,174 @@ def test_a_spacecraft_velocity_is_its_ephemeris_derivative():
     v_fd = dx / (2 * h) * (149597870700.0 / 86400.0)
     assert np.max(np.abs(v - v_fd)) < 1e-3
     assert np.all(np.abs(np.linalg.norm(v, axis=1) - 3.0e4) < 2.0e3)
+
+
+# ---------------------------------------------------------------------------
+# 1b. The photon-weighted exposure average (Tronsgaard et al. 2019)
+# ---------------------------------------------------------------------------
+
+EXPOSURE_FIXTURE = FIXTURE.parent / "barycorrpy_exposure.txt"
+
+
+def test_the_exposure_rules_reproduce_the_photon_moments():
+    """
+    Given a skewed, cloud-dipped exposure-meter record (500 samples),
+    When the three exposure rules are built,
+    Then the meter's 3-node Gauss rule reproduces its photon-weighted mean
+      of t^k for k <= 5 (relative 1e-12), with positive weights inside the
+      record; the 3-node uniform rule integrates t^k exactly for k <= 5
+      over the exposure; and the 2-node moment rule has exactly the given
+      mean (0), RMS and third central moment.
+    """
+    from exozippy.components.rvinstrument.redshift import (
+        moment_rule,
+        uniform_exposure_rule,
+        weighted_exposure_rule,
+    )
+
+    rng = np.random.default_rng(5)
+    t = np.sort(rng.uniform(0.0, 1.0, 500))
+    counts = (1.2 - t) * (1.0 - 0.8 * np.exp(-0.5 * ((t - 0.4) / 0.1) ** 2))
+    nodes, w = weighted_exposure_rule(t, counts, 3)
+    assert w.size == 3 and np.all(w > 0) and np.sum(w) == pytest.approx(1.0)
+    assert np.all((nodes > t.min()) & (nodes < t.max()))
+    p = counts / counts.sum()
+    for k in range(6):
+        np.testing.assert_allclose(
+            np.sum(w * nodes**k), np.sum(p * t**k), rtol=1e-12
+        )
+    x, wu = uniform_exposure_rule(3)
+    for k in range(6):
+        exact = (0.5 ** (k + 1) - (-0.5) ** (k + 1)) / (k + 1)
+        assert np.sum(wu * x**k) == pytest.approx(exact, abs=1e-15)
+    x, wm = moment_rule(300.0, 2.0e7)
+    assert np.sum(wm) == pytest.approx(1.0)
+    assert np.sum(wm * x) == pytest.approx(0.0, abs=1e-9)
+    assert np.sum(wm * x**2) == pytest.approx(300.0**2)
+    assert np.sum(wm * x**3) == pytest.approx(2.0e7)
+
+
+def _read_exposure_fixture():
+    rows = []
+    for line in EXPOSURE_FIXTURE.read_text().splitlines():
+        if line.startswith("#"):
+            continue
+        a, b, shape, start, T, tmid, bmid, beff = line.split()
+        rows.append(
+            (int(a), int(b), shape, *map(float, (start, T, tmid, bmid, beff)))
+        )
+    return rows
+
+
+def _effective_cz_b(site, star, jd_utc, w):
+    """c z_B,eff = c (1/<1/(1 + z_B)> - 1) over nodes ``jd_utc`` (UTC)
+    with weights ``w``: the correction the model's photon-weighted mean
+    of 1 + z_meas implies for a companion-free star."""
+    t_tdb, obs = _observer(site, np.asarray(jd_utc, dtype=float))
+    st, ep = _internal(star)
+    zb = barycentric_redshift(t_tdb, obs, st, ep)
+    return C_MPS * (1.0 / np.sum(w / (1.0 + zb)) - 1.0)
+
+
+def test_the_exposure_average_matches_barycorrpy_integrated_densely():
+    """
+    Given barycorrpy's c z_B integrated over whole exposures (1001-point
+      Simpson; tests/fixtures/raw_redshift/barycorrpy_exposure.txt): two
+      sites x two stars x hour angles -5..+5 h x 10/30/60 min, for a
+      uniform exposure and for one whose flux ramps linearly to zero,
+    When the model's rules average the same correction --
+      the 3-node Gauss-Legendre rule (an exptime column) and the 2-node
+      moment rule (t_rms) for the uniform exposures; the exposure-meter
+      rule (2-s bins, 3 nodes) and the moment rule with and without the
+      third moment for the ramps --
+    Then the averaging SHIFT (exposure mean minus midpoint, up to 1.13 m/s
+      here) agrees with barycorrpy's to (measured): 0.0012 mm/s for
+      Gauss-Legendre; 0.034 mm/s for the meter (the 2-s bins' box
+      assumption, ~dt^2); 0.43 mm/s at 60 min for the uniform moment rule
+      and 0.26 mm/s with t_skew3 on the ramps (the unknown 4th moment,
+      ~T^4); and the third moment is NOT negligible: without it the ramps
+      are off by 9.1 mm/s at 60 min (1.1 mm/s at 30 min).  The absolute
+      correction agrees to < 1 mm/s (the builtin ephemeris vs DE430).
+    """
+    from exozippy.components.rvinstrument.redshift import (
+        moment_rule,
+        uniform_exposure_rule,
+        weighted_exposure_rule,
+    )
+
+    stars, sites, _ = _read_fixture()
+    worst = {}
+    biggest_shift = 0.0
+    for a, b, shape, start, T, tmid, bmid, beff in _read_exposure_fixture():
+        site, star = sites[a], stars[b]
+        d = T / 86400.0
+        mid = _effective_cz_b(site, star, [tmid], np.array([1.0]))
+        if shape == "uniform":
+            x, w = uniform_exposure_rule(3)
+            rules = {"gl3": (tmid + x * d, w)}
+            x, w = moment_rule(T / np.sqrt(12.0))
+            rules["moments"] = (tmid + x / 86400.0, w)
+        else:
+            nb = int(T / 2.0)
+            c = (np.arange(nb) + 0.5) / nb
+            x3, w3 = uniform_exposure_rule(3)
+            sub = (c[:, None] + x3[None, :] / nb).ravel()
+            cnt = ((1.0 - c)[:, None] * w3[None, :]).ravel()
+            rules = {"meter": weighted_exposure_rule(start + sub * d, cnt, 3)}
+            x, w = moment_rule(T / np.sqrt(18.0), T**3 / 135.0)
+            rules["moments_skew"] = (tmid + x / 86400.0, w)
+            x, w = moment_rule(T / np.sqrt(18.0), 0.0)
+            rules["moments_noskew"] = (tmid + x / 86400.0, w)
+        biggest_shift = max(biggest_shift, abs(beff - bmid))
+        for name, (tt, w) in rules.items():
+            e = _effective_cz_b(site, star, tt, w)
+            shift_err = abs((e - mid) - (beff - bmid))
+            key = (name, T)
+            worst[key] = max(worst.get(key, 0.0), shift_err)
+            if name != "moments_noskew":
+                assert abs(e - beff) < 1e-3, (name, a, b, T, e - beff)
+    assert biggest_shift > 1.0
+    for T in (600.0, 1800.0, 3600.0):
+        assert worst[("gl3", T)] < 1e-5
+        assert worst[("meter", T)] < 5e-5
+        assert worst[("moments", T)] < 6e-4
+        assert worst[("moments_skew", T)] < 4e-4
+    assert worst[("moments_noskew", 3600.0)] > 5e-3
+
+
+def test_three_nodes_converge_with_a_fast_binary_on_top():
+    """
+    Given a K = 30 km/s, P = 2 d reflex on top of the Earth's rotation,
+      1-hour exposures 5 h from the meridian,
+    When the 3-node Gauss-Legendre average is compared with a 2001-point
+      Simpson average of the same instantaneous model,
+    Then they agree to < 0.05 mm/s (measured: at the float64 time
+      resolution floor, ~0.04 mm/s for this K), where the midpoint model
+      alone is off by meters per second.
+    """
+    from exozippy.components.rvinstrument.redshift import uniform_exposure_rule
+
+    stars, sites, _ = _read_fixture()
+    st, ep = _internal(stars[1])
+    K, P, t0 = 3.0e4, 2.0, 2460400.5
+
+    def refl(tb):
+        return (K * np.sin(2.0 * np.pi * (tb - t0) / P), None, None)
+
+    def mean_cz(jd_utc, w):
+        t_tdb, obs = _observer(sites[0], jd_utc)
+        return np.sum(w * predicted_cz(t_tdb, obs, st, ep, v_reflex=refl)[0])
+
+    x_dense = np.linspace(-0.5, 0.5, 2001)
+    w_dense = np.ones(2001)
+    w_dense[1:-1:2], w_dense[2:-1:2] = 4.0, 2.0
+    w_dense /= w_dense.sum()
+    x3, w3 = uniform_exposure_rule(3)
+    T = 3600.0 / 86400.0
+    for mid in (2460400.41, 2460400.83, 2460401.27):
+        ref = mean_cz(mid + x_dense * T, w_dense)
+        assert abs(mean_cz(mid + x3 * T, w3) - ref) < 5e-5
+        assert abs(mean_cz(np.array([mid]), np.array([1.0])) - ref) > 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -262,6 +495,7 @@ def _raw_entry(**over):
         "time_frame": "jd",
         "time_scale": "utc",
         "epoch": MD.TRUTH["epoch"],
+        "columns": {"time": 0, "rv": 1, "err": 2, "exptime": 3},
     }
     e.update(over)
     return {k: v for k, v in e.items() if v is not None}
@@ -286,6 +520,8 @@ def _cfg(entry):
         ({"time_frame": None}, "time_frame: said explicitly"),
         ({"epoch": "J2016"}, "reference epoch"),
         ({"data_format": None}, "belongs to data_format: raw_redshift"),
+        ({"ninterp": 0}, "number of Gauss nodes"),
+        ({"exposure_meter": 3}, "path of the exposure-meter"),
     ],
 )
 def test_the_raw_keys_are_validated_at_construction(over, match):
@@ -316,6 +552,24 @@ def _prepare(entry, params):
     system = System(_cfg(entry), user_params=p)
     system.prepare()
     return system
+
+
+def test_an_exposure_meter_bin_must_find_exactly_one_exposure(tmp_path):
+    """
+    Given an exposure_meter: file whose t_mid is not any data-file tag (off
+      by 0.9 s, ten times the matching tolerance),
+    When the system is prepared,
+    Then it raises naming the t_mid -- a bin that found no exposure would
+      otherwise be silently dropped and its spectrum modeled without it.
+    """
+    tag = np.loadtxt(EXAMPLE / "Gaia4like.HPF.rv")[0, 0]
+    meter = tmp_path / "bad.expmeter"
+    meter.write_text(f"{tag + 1e-5:.8f} {tag:.8f} 30.0 100.0\n")
+    with pytest.raises(ValueError, match="matches no data-file time tags"):
+        _prepare(
+            _raw_entry(exposure_meter=str(meter)),
+            {"star.A.rv": {"mu": -2.0e4, "sigma": 500.0}},
+        )
 
 
 def test_star_rv_needs_a_prior():
@@ -373,7 +627,11 @@ def test_a_corrected_file_is_untouched():
       declares none of the raw-mode kinematics -- the byte-identity of
       every shipped RV fit rests on this (rvinstrument.md).
     """
-    entry = {"name": "HPF", "file": str(EXAMPLE / "Gaia4like.HPF.rv")}
+    entry = {
+        "name": "HPF",
+        "file": str(EXAMPLE / "Gaia4like.HPF.rv"),
+        "columns": {"time": 0, "rv": 1, "err": 2},
+    }
     s = _prepare(entry, {})
     assert s.rvinstrument.rv_seed is s.rvinstrument.rv
     assert not any(s.rvinstrument.raw)
@@ -426,7 +684,11 @@ def test_the_likelihood_is_the_forward_model_at_the_truth(example):
     Given the example built with its starts at the injected truth,
     When the likelihood's model node is evaluated there,
     Then it equals the numpy forward model that simulated the data (before
-      noise) to < 1 mm/s -- the residual is the start's logit round trip.
+      noise) to < 1 mm/s -- the residual is the start's logit round trip --
+      with every spectrum the photon-weighted mean over its exposure
+      (make_data.py integrates each 30-s flux step on its own 9-point
+      grid; the model reads an exptime column for HPF, t_rms/t_skew3 for
+      NEID and the exposure meter for FIES).
       The numpy model is handed the graph's TARGET-frame conjunction: a raw
       file retards the orbit, so the fitted `tc` is the OBSERVED (virtual
       transit) time, tc_target plus the planet's light travel
@@ -439,17 +701,17 @@ def test_the_likelihood_is_the_forward_model_at_the_truth(example):
         _at(system, model, start, system.orbit.tc_target.value)[0]
     )
     assert abs(tc_target - MD.TRUTH["tc"]) * 86400.0 > 100.0
-    truth = np.concatenate(
-        [
-            MD.predict(
-                name,
-                np.loadtxt(EXAMPLE / f"Gaia4like.{name}.rv")[:, 0],
-                tc=tc_target,
-            )[0]
-            for name in MD.SITES
-        ]
-    )
+    truth, instant = [], []
+    for name in MD.SITES:
+        jd = np.loadtxt(EXAMPLE / f"Gaia4like.{name}.rv")[:, 0]
+        exps = MD.exposures(name, jd)
+        truth.append(MD.predict(name, jd, tc=tc_target, exps=exps)[0])
+        instant.append(MD.predict(name, jd, tc=tc_target)[0])
+    truth, instant = np.concatenate(truth), np.concatenate(instant)
     assert np.max(np.abs(mod - truth)) < 1e-3
+    # ... and the exposure average is not vacuous: each spectrum's model
+    # differs from the instantaneous one at its midpoint by up to 0.2 m/s.
+    assert np.max(np.abs(instant - truth)) > 0.1
 
 
 @pytest.mark.slow

@@ -23,7 +23,23 @@ t_emit = t_B - Z_star(t_emit)/c), and the planet's gravitational
 redshift of the star's light, G m_p/(r c^2) (edge-on, M_* = 0.64 Msun).  Epochs are random
 nights with the star above 35 deg and the Sun below -12 deg.
 
-    python make_data.py          # rewrites Gaia4like.{HPF,NEID,FIES}.rv
+Every spectrum is an EXPOSURE, not an instant: 10-30 min long, its photon
+flux piecewise constant on 30-s steps, and its c*z_meas the photon-weighted
+mean of the instantaneous forward model (Tronsgaard et al. 2019), integrated
+on a 9-point midpoint grid per step (``exposures`` / ``predict``).  The
+three files carry the three levels of exposure information the model reads
+(rvinstrument.md, "The exposure average"):
+
+* HPF  -- uniform flux, an ``exptime`` column (s);
+* NEID -- passing clouds, the photon arrival times' RMS ``t_rms`` (s) and
+          third central moment ``t_skew3`` (s^3) as columns;
+* FIES -- passing clouds, the full exposure-meter record in
+          ``Gaia4like.FIES.expmeter`` (t_mid, bin center t, dt [s], counts),
+          plus the ``exptime`` column a release carries anyway.
+
+The time column is each exposure's flux-weighted midpoint.
+
+    python make_data.py   # rewrites Gaia4like.{HPF,NEID,FIES}.rv, .expmeter
 """
 
 import numpy as np
@@ -58,6 +74,10 @@ N_PER_SITE = 25
 ERR = 10.0  # m/s
 SEED = 7
 SPAN = (2459950.0, 2460700.0)  # JD_UTC
+#: Exposures: lengths 10-30 min on 30-s flux steps; clouds on NEID and FIES.
+STEP_S = 30.0
+EXPOSURE_SEED = {"HPF": 11, "NEID": 12, "FIES": 13}
+CLOUDY = {"HPF": False, "NEID": True, "FIES": True}
 
 
 def gamma_truth(name):
@@ -172,11 +192,71 @@ def night_times(site, n, rng):
     return np.sort(np.array(out))
 
 
-def predict(name, jd_utc, reflex=True, star=None, tc=None):
+def exposures(name, jd_mid):
+    """Site ``name``'s exposure around each flux-weighted midpoint
+    ``jd_mid`` (JD_UTC): a list of ``(starts, flux)`` -- the JD_UTC start
+    of each 30-s step and the photon rate in it.  Deterministic per site
+    (its own seed, independent of the noise draws)."""
+    rng = np.random.default_rng(EXPOSURE_SEED[name])
+    out = []
+    for t in np.atleast_1d(jd_mid):
+        n = int(rng.integers(20, 61))  # 10-30 min
+        flux = np.ones(n)
+        if CLOUDY[name]:
+            # One or two passing clouds, each a Gaussian dip to 5-90 %.
+            x = (np.arange(n) + 0.5) / n
+            for _ in range(int(rng.integers(1, 3))):
+                c, w = rng.uniform(0.0, 1.0), rng.uniform(0.05, 0.3)
+                flux = flux * (
+                    1.0
+                    - rng.uniform(0.1, 0.95)
+                    * np.exp(-0.5 * ((x - c) / w) ** 2)
+                )
+        steps = (np.arange(n) + 0.5) * STEP_S  # step centers, s from start
+        mean = np.sum(flux * steps) / np.sum(flux)
+        out.append((t + (np.arange(n) * STEP_S - mean) / 86400.0, flux))
+    return out
+
+
+def exposure_moments(exp):
+    """``(exptime, t_rms, t_skew3)`` in s, s, s^3 of one ``exposures``
+    entry: the photon distribution of boxes of width STEP_S."""
+    starts, flux = exp
+    c = (starts - starts[0]) * 86400.0 + 0.5 * STEP_S
+    p = flux / np.sum(flux)
+    mu = np.sum(p * c)
+    d = c - mu
+    # Box moments about mu: E[(d + u)^k], u uniform on +/- STEP_S/2.
+    h2 = STEP_S**2 / 12.0
+    var = np.sum(p * (d**2 + h2))
+    m3 = np.sum(p * (d**3 + 3.0 * d * h2))
+    return len(flux) * STEP_S, np.sqrt(var), m3
+
+
+def predict(name, jd_utc, reflex=True, star=None, tc=None, exps=None):
     """The noise-free c*z_meas (m/s) at JD_UTC ``jd_utc`` for site
     ``name``; ``star`` overrides the truth's (ra, dec, pm_ra, pm_dec,
     parallax, rv) in internal units; ``tc`` the TARGET-frame conjunction
-    (default the truth's -- see the README on tc vs tc_target)."""
+    (default the truth's -- see the README on tc vs tc_target).
+
+    ``exps`` -- the ``exposures`` list for ``jd_utc``, or None for the
+    model at each instant.  With it, each c*z_meas is the photon-weighted
+    mean over its exposure (9-point midpoint grid per 30-s step), and the
+    other returns are still at the midpoints."""
+    if exps is not None:
+        sub = (np.arange(9) + 0.5) / 9.0
+        t, w, g = [], [], []
+        for k, (starts, flux) in enumerate(exps):
+            tt = starts[:, None] + sub[None, :] * STEP_S / 86400.0
+            t.append(tt.ravel())
+            w.append(np.repeat(flux / np.sum(flux) / 9.0, 9))
+            g.append(np.full(tt.size, k))
+        t, w, g = np.concatenate(t), np.concatenate(w), np.concatenate(g)
+        cz_sub = predict(name, t, reflex=reflex, star=star, tc=tc)[0]
+        cz = np.bincount(g, weights=w * cz_sub, minlength=len(exps))
+        return (cz,) + predict(name, jd_utc, reflex=reflex, star=star, tc=tc)[
+            1:
+        ]
     import astropy.units as u
     from astropy.coordinates import EarthLocation
     from astropy.time import Time
@@ -225,18 +305,47 @@ def main():
     rng = np.random.default_rng(SEED)
     for name, site in SITES.items():
         jd = night_times(site, N_PER_SITE, rng)
-        cz, _, _, _ = predict(name, jd)
+        exps = exposures(name, jd)
+        cz, _, _, _ = predict(name, jd, exps=exps)
         cz = cz + rng.normal(0.0, ERR, cz.size)
+        mom = np.array([exposure_moments(e) for e in exps])
+        head = (
+            "SIMULATED raw redshifts -- NOT REAL DATA (make_data.py).\n"
+            "JD_UTC (flux-weighted exposure midpoint)  c*z_meas [m/s]  "
+            "err [m/s]  "
+        )
+        if name == "NEID":
+            cols = [jd, cz, np.full(cz.size, ERR), mom[:, 1], mom[:, 2]]
+            fmt = "%.8f %.4f %.2f %.3f %.6e"
+            head += "t_rms [s]  t_skew3 [s^3]"
+        else:
+            cols = [jd, cz, np.full(cz.size, ERR), mom[:, 0]]
+            fmt = "%.8f %.4f %.2f %.1f"
+            head += "exptime [s]"
         np.savetxt(
             f"Gaia4like.{name}.rv",
-            np.column_stack([jd, cz, np.full(cz.size, ERR)]),
-            fmt="%.8f %.4f %.2f",
-            header=(
-                "SIMULATED raw redshifts -- NOT REAL DATA (make_data.py).\n"
-                "JD_UTC (flux-weighted exposure midpoint)  c*z_meas [m/s]  "
-                "err [m/s]"
-            ),
+            np.column_stack(cols),
+            fmt=fmt,
+            header=head,
         )
+        if name == "FIES":
+            rows = []
+            for t_mid, (starts, flux) in zip(jd, exps):
+                for t0, f in zip(starts, flux):
+                    rows.append(
+                        (t_mid, t0 + 0.5 * STEP_S / 86400.0, STEP_S, f * 1e4)
+                    )
+            np.savetxt(
+                f"Gaia4like.{name}.expmeter",
+                np.array(rows),
+                fmt="%.8f %.8f %.1f %.1f",
+                header=(
+                    "SIMULATED exposure meter -- NOT REAL DATA "
+                    "(make_data.py).\n"
+                    "t_mid (as in Gaia4like.FIES.rv)  t (bin center, "
+                    "JD_UTC)  dt [s]  counts"
+                ),
+            )
 
 
 if __name__ == "__main__":

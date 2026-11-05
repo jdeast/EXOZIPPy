@@ -102,19 +102,23 @@ own ephemeris.
 
 | threshold | what exceeds it |
 |---|---|
-| 1 m/s | the additive correction for any star; a pm error or wrong epoch for any star within ~10 pc; Barnard-class perspective acceleration |
-| 10 cm/s | a 1-arcsec position error; the companion cross term for K >~ 3 km/s; a stellar companion's gravitational redshift |
+| 1 m/s | the additive correction for any star; the correction at the midpoint of a 60-min exposure far from the meridian; a pm error or wrong epoch for any star within ~10 pc; Barnard-class perspective acceleration |
+| 10 cm/s | a 1-arcsec position error; the correction at the midpoint of a typical 30-60 min exposure; the companion cross term for K >~ 3 km/s; a stellar companion's gravitational redshift |
 | 1 cm/s | the companion cross term at K >~ 300 m/s; a giant planet's gravitational redshift; a frozen pm at 70 pc; the star's light-travel time at K >~ 1.7 km/s |
 
 ## What a release must carry, per spectrum
 
 1. **The flux-weighted (photon-weighted) exposure midpoint**, and the time scale and
    frame it is in. Usually UTC at the observatory: say "JD_UTC" or "MJD_UTC", never a
-   bare "JD". The exposure-meter weighting matters at the 1 cm/s level (WE14 sec. 6).
+   bare "JD". A midpoint wrong by 1 minute moves the correction by up to 2 m/s near the
+   meridian (Tronsgaard et al. 2019).
 2. **The observatory.** Give geodetic longitude (East positive), latitude and height above
    the WGS84 ellipsoid to ~10 m, or ITRF XYZ. For a spacecraft, give the ephemeris it used
    (a NAIF id, or the Horizons query).
-3. **The exposure time.** Needed to judge smearing, and for any later re-weighting.
+3. **The exposure itself, not just its midpoint** (see "The exposure: what to release
+   and why" below). In order of preference: the exposure-meter record (a side file); the
+   RMS and third moment of the photon arrival times; at the very least the exposure
+   time.
 4. **`c * z_meas` and its uncertainty**, in m/s, defined as `c (lambda_obs / lambda_ref -
    1)`. This is NOT the output of a log or relativistic "velocity" formula, which differ
    by `c z^2 / 2` (1.5 m/s at 30 km/s). If the pipeline works in `ln(lambda)`, convert
@@ -132,6 +136,64 @@ own ephemeris.
 7. Optionally, the pipeline's own BERV and the star model it used (coordinates, epoch,
    pm, parallax, rv). This lets a reader audit the correction, not just redo it.
 
+## The exposure: what to release and why
+
+A spectrum integrates photons over its whole exposure, so its redshift is the
+photon-weighted MEAN of the instantaneous redshift. The barycentric correction is not
+linear in time, so a correction evaluated once at the photon-weighted midpoint is wrong
+by the curvature term. Nearly every pipeline evaluates it that way (Tronsgaard,
+Buchhave, Wright, Eastman & Blackman 2019, MNRAS 489, 2395):
+
+    <v> - v(<t>) ~ v'' Var(t) / 2 + v''' mu_3(t) / 6
+
+The Earth's rotation dominates `v''`, up to `2.5e-6 m/s^2` six hours from the meridian.
+For a uniform exposure of length T that is **1.33 m/s x (T / 1 h)^2 x cos(lat) cos(dec)
+sin(HA)**: 0.33 m/s for 30 min and 1.3 m/s for 60 min at worst, ~10 cm/s typically.
+Tronsgaard et al. give the same expression with 1.32 m/s. The term is not a constant: it
+changes sign across the meridian and grows with the exposure time, so no offset absorbs
+it. A skewed exposure (clouds rolling in, a target setting) adds the third-moment term
+`v''' mu_3 / 6`: 9 mm/s for a 1-hour exposure whose flux ramps linearly to zero, 1 mm/s
+at 30 min. A companion's own curvature adds to both (meters per second for a close
+binary). EXOZIPPy models the average (`src/exozippy/components/rvinstrument/rvinstrument.md`,
+"The exposure average"), and to do so it needs to know the exposure.
+
+What a release can carry, best first:
+
+| what is released | what EXOZIPPy does | residual (1-hour exposure, worst geometry) |
+|---|---|---|
+| the exposure-meter record (side file, below) | the Gauss rule of the recorded photon distribution | < 0.001 mm/s from the rule; the meter's bins add ~`dt^2 f' / (12 f)` of mean time (0.03 mm/s for 2-s bins on a ramp) |
+| `t_rms` and `t_skew3` columns (photon-time RMS and third central moment) | a 2-node rule with exactly those moments | 0.3-0.4 mm/s (the unknown 4th moment; scales as T^4) |
+| `t_rms` alone | the same rule, symmetric | up to 9 mm/s on a strongly skewed exposure (1 mm/s at 30 min) |
+| `exptime` alone | uniform flux over the exposure | exact on a clear night; under clouds the true `Var(t)` can differ from `T^2/12` by tens of percent, which is tens of cm/s |
+| nothing | the model at the midpoint | the full term, 1.3 m/s x (T / 1 h)^2 |
+
+The exposure-meter record is the standard to aim for. It is small (one line per meter
+bin), it makes the average exact to well below 1 mm/s, and nothing in it depends on a
+model. The two moment columns are the compact minimum. The exposure time is the fallback
+for an archive that kept nothing else.
+
+**The exposure-meter side file** is in long format, one per data file, named with
+`exposure_meter:`:
+
+```
+# t_mid: the exposure's flux-weighted midpoint EXACTLY as in the data file
+# t: bin center, same time scale and frame as the data file; dt: bin width [s]
+# columns: t_mid  t  dt[s]  counts
+2460401.732514 2460401.727343 30.0 39520
+2460401.732514 2460401.727690 30.0 38724
+...
+```
+
+A bin finds its exposure by `t_mid`, matched to the data file's time column within 1e-6
+d (0.09 s). A `t_mid` that matches no exposure, or two, is an error. Use bins as short as
+the meter allows: each bin is taken to be uniform inside, which moves the mean time by
+about `dt^2 f' / (12 f)` when the flux changes within it.
+
+**The moment columns**: `t_rms` [s] is the photon-weighted RMS of the arrival times about
+the photon-weighted midpoint, `sqrt(sum_j N_j (t_j - t_mid)^2 / sum_j N_j)` over the
+meter's bins (plus `dt_j^2 / 12` for the spread inside each bin). `t_skew3` [s^3] is the
+photon-weighted third central moment. Both are in the file's own time scale.
+
 ## A file layout EXOZIPPy reads directly
 
 One whitespace-delimited text file per instrument and observatory. `#` header lines
@@ -146,12 +208,12 @@ carry the metadata as `key: value` pairs. The data columns follow, in this order
 # zero_point: template = co-added observed spectrum of this star (relative)
 # corrections_applied: simultaneous LFC drift; CTI
 # corrections_not_applied: barycentric (none of it), telluric
-# columns: JD_UTC  cz[m/s]  cz_err[m/s]  exptime[s]
-2460401.732514 -24103.112 0.31 900
+# columns: JD_UTC  cz[m/s]  cz_err[m/s]  exptime[s]  t_rms[s]  t_skew3[s^3]
+2460401.732514 -24103.112 0.31 900 251.8 -1.2e6
 ...
 ```
 
-EXOZIPPy reads the first three columns as written:
+EXOZIPPy reads the columns as written, with the exposure-meter record beside them:
 
 ```yaml
 rvinstrument:
@@ -162,8 +224,12 @@ rvinstrument:
     time_frame: jd
     time_scale: utc
     epoch: 2457389.0          # the epoch of the star.ra/dec/pm you give
-    columns: {time: 0, rv: 1, err: 2}
+    columns: {time: 0, rv: 1, err: 2, exptime: 3, t_rms: 4, t_skew3: 5}
+    exposure_meter: "star.GCLEF.expmeter"   # overrides the columns where present
 ```
+
+Each exposure uses the most complete description it has: its meter bins, else its
+moment columns, else its exposure time, else (none of them) the model at the midpoint.
 
 The `#` lines are ignored by the reader, which is the point of putting the metadata
 there: the file stays the document of record. If a release interleaves several
@@ -186,6 +252,8 @@ fitted parameters. The full description is in
   relativistic Doppler relation of WE14, together with the observatory's barycentric
   velocity (Earth orbit + rotation with full Earth orientation, or a spacecraft
   ephemeris) and the solar-system gravitational and Shapiro terms.
+- Each spectrum's prediction is the photon-weighted mean of that whole instantaneous
+  model over its exposure (Tronsgaard et al. 2019), from whatever the release gives.
 - Each instrument keeps one zero point, which absorbs the template, the star's
   gravitational redshift and convective blueshift. The star's absolute rv comes from a
   prior, such as a Gaia radial velocity.
