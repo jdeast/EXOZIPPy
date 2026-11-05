@@ -207,6 +207,35 @@ def test_a_hierarchy_chains_to_the_root_anchor(files, model_root):
 
 
 @pytest.mark.slow
+def test_a_second_stage_3_pass_keeps_the_links_without_a_warning(
+    files, model_root, caplog
+):
+    """
+    Given a prepared system whose orbit group linked B to A,
+    When stage 3 runs again -- as System.prepare does after a topology
+    revision or a start re-read (the mulensinstrument flux bootstrap), from
+    a solve-input snapshot taken after the first stage 3 --
+    Then the pass recognizes the links as its own: they stay origin
+    "orbit", B's elements stay pinned, and no "NOT made" warning names a
+    link nobody wrote in the params file.
+    """
+    system = _prepare(
+        _config(files, model_root, [ORBITS["static"]]), _params()
+    )
+    with caplog.at_level(
+        logging.WARNING, logger="exozippy.components.star.star"
+    ):
+        system.star.register_parameters(system)
+    assert not any("NOT made" in r.message for r in caplog.records)
+    assert _orbit_links(system) == {
+        f"star.1.{p}": f"star.0.{p}" for p in LINKED
+    }
+    for p in LINKED:
+        sigma = (system.star.manifest[p] or {})["overrides"]["sigma"]
+        assert sigma[1] == 0.0, p
+
+
+@pytest.mark.slow
 def test_a_user_soft_link_breaks_exactly_that_link(files, model_root, caplog):
     """
     Given a soft link the user wrote on B's age (sigma > 0),
