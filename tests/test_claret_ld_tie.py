@@ -417,35 +417,77 @@ def test_an_unset_band_is_tied_by_default(tmp_path, synthetic_claret_tables):
     assert Band.CLARET_CONSUMER_LABEL in labels
 
 
-def test_an_unset_band_the_tie_cannot_serve_is_skipped_with_a_warning(
-    tmp_path, synthetic_claret_tables, caplog
+def test_an_unset_band_with_no_table_raises_naming_the_remedies(
+    tmp_path, synthetic_claret_tables
 ):
     """
-    Given an unset band with no Claret table (Gaia G) next to a tableable one,
+    Given an unset band whose limb darkening a transit reads and whose
+    filter has no Claret table (Gaia G), next to a tableable one,
     When the system is prepared,
-    Then the G band is skipped with a WARNING naming it and the remedy --
-    an explicit true would raise (test_a_filter_with_no_claret_table_raises
-    covers the lookup) -- while the TESS band is tied.
+    Then it RAISES rather than quietly leaving the band untied, naming the
+    band and all three ways out: ld_source: phoenix, claret_filter: (with
+    the nearest Claret band), and star_constrains_ld: false (JDE
+    2026-11-06).
     """
-    import logging
-
     bands = [
         {"name": "TESS", "filter": "TESS"},
         {"name": "G", "filter": "Gaia.G"},
     ]
-    with caplog.at_level(logging.WARNING, logger="exozippy"):
-        system = _prepared(tmp_path, bands, ["TESS", "G"])
+    with pytest.raises(ValueError) as err:
+        _prepared(tmp_path, bands, ["TESS", "G"])
+    msg = str(err.value)
+    assert "band.G:" in msg
+    for remedy in (
+        "ld_source: phoenix",
+        "claret_filter:",
+        "star_constrains_ld: false",
+        "nearest Claret band",
+    ):
+        assert remedy in msg, (remedy, msg)
 
-    np.testing.assert_array_equal(
-        system.band.manifest["du1"]["mask"], [True, False]
-    )
-    msgs = [r.getMessage() for r in caplog.records]
+
+def test_claret_filter_ties_a_band_to_the_named_table_and_says_so(
+    tmp_path, synthetic_claret_tables, caplog
+):
+    """
+    Given a Gaia G band with claret_filter: TESS,
+    When the system is prepared,
+    Then the band is tied to the TESS table, its filter stays Gaia G, and
+    the fit warns that the limb darkening is an APPROXIMATION.
+    """
+    import logging
+
+    bands = [{"name": "G", "filter": "Gaia.G", "claret_filter": "TESS"}]
+    with caplog.at_level(logging.WARNING, logger="exozippy"):
+        system = _prepared(tmp_path, bands, ["G"])
+
+    assert system.band._claret_tables[0].band == "TESS"
+    assert system.band.filter_names[0] == "Gaia.G"
     assert any(
-        "G:" in m
-        and "OFF for this band" in m
-        and "star_constrains_ld: false" in m
-        for m in msgs
-    ), msgs
+        "APPROXIMATION" in r.getMessage() and "TESS" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+@pytest.mark.parametrize(
+    "extra, match",
+    [
+        ({"claret_filter": "NoSuchFilter"}, "claret_filter"),
+        ({"claret_filter": "TESS", "ld_source": "phoenix"}, "ld_source"),
+    ],
+)
+def test_a_claret_filter_that_cannot_be_honored_raises(
+    tmp_path, synthetic_claret_tables, extra, match
+):
+    """
+    Given a claret_filter naming no Claret table, or one on a band whose
+    ld_source is phoenix (built through the band's own filter),
+    When the system is prepared,
+    Then it raises naming the key -- never ignored.
+    """
+    bands = [{"name": "G", "filter": "Gaia.G", **extra}]
+    with pytest.raises(ValueError, match=match):
+        _prepared(tmp_path, bands, ["G"])
 
 
 # --------------------------------------------------------------------------

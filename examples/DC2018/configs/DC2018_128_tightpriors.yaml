@@ -55,9 +55,11 @@ galacticmodel:
 band:
 - name: "W149"
   filter: "Roman/WFI.F146"
+  star_constrains_ld: false
   ld_law: "linear"
 - name: "Z087"
   filter: "Roman/WFI.F087"
+  star_constrains_ld: false
   ld_law: "linear"
 
 mulensinstrument:

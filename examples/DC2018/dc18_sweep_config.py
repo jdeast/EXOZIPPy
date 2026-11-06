@@ -372,7 +372,19 @@ def build(event, outdir, draws, tune, cores, t_max):
         ],
         "galacticmodel": [{"name": name, "anchor_idx": 1}],
         "band": (
-            [{"name": b, "filter": f, "ld_law": "linear"} for b, f in BANDS]
+            # Neither Roman filter has a Claret table, so the limb-
+            # darkening tie must be chosen explicitly (it raises otherwise).
+            # false is what these fits always did (an unset band without a
+            # table used to be skipped); ld_source: phoenix would tie them.
+            [
+                {
+                    "name": b,
+                    "filter": f,
+                    "ld_law": "linear",
+                    "star_constrains_ld": False,
+                }
+                for b, f in BANDS
+            ]
             + [
                 {
                     "name": "Ks_bcgrid",
