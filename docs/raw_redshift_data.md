@@ -164,7 +164,7 @@ What a release can carry, best first:
 | the exposure-meter record (side file, below) | the Gauss rule of the recorded photon distribution | < 0.001 mm/s from the rule; the meter's bins add ~`dt^2 f' / (12 f)` of mean time (0.03 mm/s for 2-s bins on a ramp) |
 | `t_rms` and `t_skew3` columns (photon-time RMS and third central moment) | a 2-node rule with exactly those moments | 0.3-0.4 mm/s (the unknown 4th moment; scales as T^4) |
 | `t_rms` alone | the same rule, symmetric | up to 9 mm/s on a strongly skewed exposure (1 mm/s at 30 min) |
-| `exptime` alone | uniform flux over the exposure | exact on a clear night; under clouds the true `Var(t)` can differ from `T^2/12` by tens of percent, which is tens of cm/s |
+| `exptime_s` alone | uniform flux over the exposure | exact on a clear night; under clouds the true `Var(t)` can differ from `T^2/12` by tens of percent, which is tens of cm/s |
 | nothing | the model at the midpoint | the full term, 1.3 m/s x (T / 1 h)^2 |
 
 The exposure-meter record is the standard to aim for. It is small (one line per meter
@@ -224,7 +224,7 @@ rvinstrument:
     time_frame: jd
     time_scale: utc
     epoch: 2457389.0          # the epoch of the star.ra/dec/pm you give
-    columns: {time: 0, rv: 1, err: 2, exptime: 3, t_rms: 4, t_skew3: 5}
+    columns: {time: 0, rv: 1, err: 2, exptime_s: 3, t_rms: 4, t_skew3: 5}
     exposure_meter: "star.GCLEF.expmeter"   # overrides the columns where present
 ```
 

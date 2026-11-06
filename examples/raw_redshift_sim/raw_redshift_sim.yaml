@@ -28,7 +28,7 @@ rvinstrument:
     # Each spectrum is an exposure: the model averages over its photons
     # (rvinstrument.md, "The exposure average").  HPF: uniform flux, the
     # exposure time in s.
-    columns: {time: 0, rv: 1, err: 2, exptime: 3}
+    columns: {time: 0, rv: 1, err: 2, exptime_s: 3}
   - name: "NEID"
     file: "Gaia4like.NEID.rv"
     data_format: raw_redshift
@@ -45,8 +45,8 @@ rvinstrument:
     time_frame: jd
     time_scale: utc
     epoch: 2457389.0
-    # The full exposure-meter record; it overrides the exptime column.
-    columns: {time: 0, rv: 1, err: 2, exptime: 3}
+    # The full exposure-meter record; it overrides the exptime_s column.
+    columns: {time: 0, rv: 1, err: 2, exptime_s: 3}
     exposure_meter: "Gaia4like.FIES.expmeter"
 
 parameter_file: "raw_redshift_sim.params.yaml"
