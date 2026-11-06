@@ -757,6 +757,12 @@ def test_the_likelihood_is_the_forward_model_at_the_truth(example):
 
 
 @pytest.mark.slow
+# The JAX compile of the full raw-redshift model dominates: ~305 s cold on a
+# workstation, 410-577 s on GitHub runners, and it crossed the 600 s suite default
+# on #570 and #571's CI.  1200 s leaves 2x headroom over the worst CI time.
+# It stays in the suite (not skipped) because it is the only check that the
+# raw-redshift gradient is finite under JAX.
+@pytest.mark.timeout(1200)
 def test_gradients_are_finite_on_both_backends(example):
     """
     Given the example at its start,
