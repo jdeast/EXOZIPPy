@@ -76,6 +76,76 @@ def claret_band_lookup(filter_label: str) -> tuple[str | None, str | None]:
     return names.pop(), None
 
 
+# Effective wavelength (Angstrom, SVO WavelengthEff) of the filter each
+# Claret table describes, through the alias table's rows for it: Cousins R/I
+# and Johnson U/B/V for the Johnson-Cousins set, 2MASS for J H K, SDSS for
+# Sloan, IRAC for Spitzer.  Used ONLY to name the nearest table in the error
+# for a band with no table of its own (``nearest_claret_band``) -- a hint for
+# the user's ``claret_filter:``, never applied by the code.  Hard-coded so
+# the error never needs the network; CoRoT is absent because the alias table
+# has no CoRoT row to measure.
+CLARET_LAMBDA_EFF = {
+    "U": 3551,
+    "B": 4370,
+    "V": 5468,
+    "R": 6357,
+    "I": 7829,
+    "J": 12350,
+    "H": 16620,
+    "K": 21590,
+    "Sloanu": 3608,
+    "Sloang": 4672,
+    "Sloanr": 6141,
+    "Sloani": 7458,
+    "Sloanz": 8923,
+    "Kepler": 5978,
+    "TESS": 7453,
+    "Spit36": 35075,
+    "Spit45": 44366,
+    "Spit58": 56281,
+    "Spit80": 75891,
+    "Stromu": 3447,
+    "Stromv": 4111,
+    "Stromb": 4663,
+    "Stromy": 5472,
+}
+
+
+def nearest_claret_band(filter_label: str, candidates) -> str:
+    """A sentence naming the Claret table nearest ``filter_label`` in
+    effective wavelength, among ``candidates`` (the tables that exist for
+    the band's law) -- for the error that asks the user to choose.
+
+    The filter's own effective wavelength comes from its SVO profile
+    (``filters.filter.Filter``, shipped or cached, downloaded otherwise).
+    This builds a MESSAGE: when the profile cannot be had, the sentence
+    says why instead of naming a band, and the error it goes into is
+    raised either way.
+    """
+    from exozippy.components.sed.bc_grid import resolve_filter_name
+    from exozippy.filters.filter import Filter
+
+    svo = resolve_filter_name(filter_label, _load_alias_table(), alias="SVO")
+    if "/" not in svo:
+        return (
+            f"filter {filter_label!r} has no SVO identity, so no nearest "
+            f"Claret band can be named"
+        )
+    try:
+        lam = float(Filter(svo).WavelengthEff)
+    except Exception as exc:  # network / SVO: the message says so
+        return (
+            f"the nearest Claret band could not be found: the profile of "
+            f"{svo} is unavailable ({type(exc).__name__}: {exc})"
+        )
+    pool = {b: w for b, w in CLARET_LAMBDA_EFF.items() if b in candidates}
+    best = min(pool, key=lambda b: abs(pool[b] - lam))
+    return (
+        f"the nearest Claret band in effective wavelength is {best} "
+        f"({pool[best]:.0f} A, against {lam:.0f} A for {svo})"
+    )
+
+
 def claret_band_name(filter_label: str, where: str) -> str:
     """The Claret table name of a band's ``filter:`` label. Strict: every
     way of not having one RAISES, naming ``where``."""

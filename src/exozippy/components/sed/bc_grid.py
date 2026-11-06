@@ -110,9 +110,18 @@ _FILTERNAMES_ = "filternames.txt"
 # "Generic/Cousins.I".  Spell the filter out ("Bessell.I", "Cousins.I", or
 # any full SVO id) whenever you mean something else; the map is only ever
 # consulted for the bare label.
+#
+# "U", "B" and "V" name two rows each the same way -- Bessell in the Keivan
+# and Claret columns, Johnson in the Claret column, since Claret & Bloemen's
+# U B V are the Johnson-Cousins system and Generic/Johnson.U/B/V read them.
+# A bare U/B/V has always resolved to Bessell (the row typed first); the map
+# makes that a decision rather than file order.
 AMBIGUOUS_FILTER_ALIASES = {
     "I": "Cousins_I",
     "R": "Cousins_R",
+    "U": "Bessell_U",
+    "B": "Bessell_B",
+    "V": "Bessell_V",
 }
 
 
