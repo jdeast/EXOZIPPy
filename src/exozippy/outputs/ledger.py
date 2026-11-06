@@ -897,6 +897,79 @@ def hot_status_to_text(status):
     return "\n".join(lines) + "\n"
 
 
+def _dedup_by_midpoint(candidates, lp_of_row, cores, eval_timeout, status):
+    """The hot-chain discovery's midpoint test; returns the kept candidates.
+
+    ``candidates`` is [(lp, packed raw row)] sorted best first;
+    ``lp_of_row(row)`` is the model logp at a packed row (-inf on failure).
+    A candidate is a duplicate of a kept one when lp at their midpoint is
+    within 1 nat of the lower endpoint (no valley: same basin).
+
+    The midpoints go through StartEvaluator (review 2.6.44): with a pool
+    each call runs in a worker under ``eval_timeout``, and one that
+    outlasts it scores -inf -- "a valley", so the candidate is KEPT, the
+    conservative direction (it costs one extra polish, and the ledger's own
+    basin match still merges a true duplicate).  The test stays sequential
+    over candidates, as it must (whether candidate c is kept decides which
+    midpoints candidate c+1 needs), but one candidate's midpoints against
+    the kept set are independent, so they go out ``width`` at a time and
+    the first duplicate in kept order decides -- the same verdict as the
+    one-at-a-time loop, which is exactly what ``cores: 1`` still runs
+    (width 1).  A timed-out call is counted in
+    ``status["n_midpoint_eval_timeouts"]`` and logged.
+    """
+    from ..samplers._common import (
+        StartEvaluator,
+        _shutdown_pool,
+        create_pool,
+        set_worker_globals,
+    )
+
+    max_kept = max(0, len(candidates) - 1)
+    pool, n_proc = None, 1
+    if max_kept > 0:
+        set_worker_globals(lp_of_row)
+        pool, n_proc = create_pool(
+            cores, max_kept, "Hot-chain discovery midpoints", logger
+        )
+    evaluator = StartEvaluator(
+        lp_of_row,
+        pool=pool,
+        cores=n_proc,
+        eval_timeout=eval_timeout,
+        label="Hot-chain discovery midpoint test",
+    )
+    n_mid = 0
+    kept = []
+    try:
+        for lp_c, x_c in candidates:
+            dup = False
+            for w in range(0, len(kept), evaluator.width):
+                window = kept[w : w + evaluator.width]
+                lps = evaluator([0.5 * (x_c + x_k) for _lp_k, x_k in window])
+                n_mid += len(window)
+                if any(
+                    lp_mid >= min(lp_c, lp_k) - 1.0
+                    for lp_mid, (lp_k, _x_k) in zip(lps, window)
+                ):
+                    dup = True  # no valley between them: same basin
+                    break
+            if not dup:
+                kept.append((lp_c, x_c))
+    finally:
+        if evaluator.pool is not None:
+            _shutdown_pool(evaluator.pool)
+    if evaluator.n_timed_out:
+        status["n_midpoint_eval_timeouts"] = int(evaluator.n_timed_out)
+        logger.warning(
+            f"Hot-chain discovery: {evaluator.n_timed_out} of {n_mid} "
+            f"midpoint logp call(s) exceeded eval_timeout="
+            f"{float(eval_timeout):g}s and were read as a valley, so those "
+            f"candidates were kept rather than merged."
+        )
+    return kept
+
+
 def discover_hot_modes(
     system,
     model,
@@ -1139,16 +1212,9 @@ def discover_hot_modes(
         except Exception:
             return -np.inf
 
-    kept = []
-    for lp_c, x_c in candidates:
-        dup = False
-        for lp_k, x_k in kept:
-            lp_mid = _lp_of_row(0.5 * (x_c + x_k))
-            if lp_mid >= min(lp_c, lp_k) - 1.0:
-                dup = True  # no valley between them: same basin
-                break
-        if not dup:
-            kept.append((lp_c, x_c))
+    kept = _dedup_by_midpoint(
+        candidates, _lp_of_row, cores, eval_timeout, status
+    )
     status["n_clusters"] = int(len(kept))
     logger.info(
         "Hot-chain discovery (level ladder): "

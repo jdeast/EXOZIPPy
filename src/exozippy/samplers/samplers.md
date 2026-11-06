@@ -569,14 +569,24 @@ once every seed has stopped, each interval logs "every seed has stopped;
 draining N in-flight evaluation(s), the oldest running T", and says whether
 an `eval_timeout` will end the wait.
 
+**And so do the wrap-up's per-draw evaluations (review 2.6.44).** `lp`
+from the model, the V_c/V_e branch weights, the evidence bridge and the
+hot-chain midpoint test all take `cores` and `eval_timeout` from `run.py`;
+the first three through `_common.map_draws` (ranges of draws sized to the
+pool, one draw per task for a model slower than `DRAW_TASK_TARGET_S`, a
+timed-out range re-run one draw per task), the last through
+`StartEvaluator`.  Details and what a lost draw becomes are in `run.md`,
+"The per-draw wrap-up evaluations run below one task per chain".
+
 **The config-vocabulary ruling this needed (2.3.6's partition).** The key
 stays in `run.METHOD_ONLY_SAMPLER_KEYS` as a PTDE-family key, because that is
 still true of the SAMPLER: nuts/demc/nested evaluate logp in-process or
 through their own machinery and cannot time a call out. But the polish and
 the probe now read it under every method, so the warning a non-PTDE user gets
 is narrowed through `run.METHOD_ONLY_KEYS_HONORED_ELSEWHERE`: "IGNORED by the
-sampler ... but the seed polish's DE engine and the startup whitening probe
-still bound every logp call by it, so it is not inert." Saying "IGNORED ...
+sampler ... but the seed polish's DE engine, the startup whitening probe
+and the wrap-up's per-draw evaluations ... still bound every logp call by it,
+so it is not inert." Saying "IGNORED ...
 Remove it" there would be the 2.3.6 lie in reverse.
 
 **Setting it.** `eval_timeout` is per CALL, so on a minutes-per-logp model

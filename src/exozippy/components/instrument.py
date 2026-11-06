@@ -2314,11 +2314,16 @@ class Instrument(TimeSystem, Component):
             inst_map[np.asarray(rows, dtype=int)] = int(inst_idx)
         return inst_map
 
-    def _exposure_partition(self, inst_map):
+    def _exposure_partition(self, inst_map, ninterp=None):
         """The sub-exposure node groups of rows with per-row instrument
         index ``inst_map``: ``exposure.partition`` on each row's own file's
         exposure time (in days) and node count, with this child's
-        ``EXPOSURE_RULE``.  A list of ``(rows, offsets, weights)``."""
+        ``EXPOSURE_RULE``.  A list of ``(rows, offsets, weights)``.
+
+        ``ninterp`` (per FILE, optional) replaces the files' node counts --
+        the hook that lets a file be evaluated at two node counts and the
+        results compared (``smear``/``smear_file``/``exposure_nodes`` all
+        take it), without touching the configured ``self.ninterp``."""
         if not self.supports_exposure:
             raise TypeError(
                 f"{type(self).__name__} does not declare supports_exposure; "
@@ -2329,7 +2334,9 @@ class Instrument(TimeSystem, Component):
             np.asarray(self.exptime_s, dtype=float)
             / exposure_rules.SECONDS_PER_DAY
         )
-        ninterp = np.asarray(self.ninterp, dtype=int)
+        ninterp = np.asarray(
+            self.ninterp if ninterp is None else ninterp, dtype=int
+        )
         return exposure_rules.partition(
             exptime_days[inst_map], ninterp[inst_map], self.EXPOSURE_RULE
         )
@@ -2350,7 +2357,7 @@ class Instrument(TimeSystem, Component):
                 grid = time[rows][:, None] + offsets
             self._exposure_groups.append((rows, grid, weights))
 
-    def smear(self, fn, t, blocks):
+    def smear(self, fn, t, blocks, ninterp=None):
         """The exposure-averaged model on times ``t``, in ROW order.
 
         ``fn(t_sub, rows)`` builds the instantaneous model on one node
@@ -2371,7 +2378,9 @@ class Instrument(TimeSystem, Component):
         ``ninterp == 1`` everywhere there is exactly one group of width 1 and
         the result is ``fn``'s own output at the timestamps.
         """
-        groups = self._exposure_partition(self._blocks_inst_map(blocks))
+        groups = self._exposure_partition(
+            self._blocks_inst_map(blocks), ninterp
+        )
         inverse_order = np.argsort(np.concatenate([g[0] for g in groups]))
         per_member = None
         for rows, offsets, weights in groups:
@@ -2396,13 +2405,59 @@ class Instrument(TimeSystem, Component):
                 )
             w_g = pt.constant(weights)  # (k_g,)
             for m, x in enumerate(out):
-                # Weighted mean over this group's own nodes (weights sum to
-                # 1); with k_g == 1 an identity (single column, weight 1).
-                w_b = w_g[(None, slice(None)) + (None,) * (x.ndim - 2)]
-                per_member[m].append(pt.sum(x * w_b, axis=1))
+                per_member[m].append(self._node_mean(x, w_g))
         return tuple(
             pt.concatenate(parts)[inverse_order] for parts in per_member
         )
+
+    @staticmethod
+    def _node_mean(x, w):
+        """The weighted mean of ``x`` (``(n, k, ...)``) over its node axis
+        1 with weights ``w`` (``(k,)`` tensor, summing to 1); with k == 1 an
+        identity (single column, weight 1).  The one averaging step of
+        ``smear`` and ``smear_file``."""
+        w_b = w[(None, slice(None)) + (None,) * (x.ndim - 2)]
+        return pt.sum(x * w_b, axis=1)
+
+    def exposure_nodes(self, i, ninterp=None):
+        """File ``i``'s sub-exposure node offsets in DAYS and their weights,
+        ``(offsets (k,), weights (k,))`` from this child's ``EXPOSURE_RULE``
+        and the file's ``exptime_s`` / ``ninterp``.  One node at offset 0
+        for an unsmeared file."""
+        if not self.supports_exposure:
+            raise TypeError(
+                f"{type(self).__name__} does not declare supports_exposure; "
+                f"it has no exposure description."
+            )
+        k = int(self.ninterp[i] if ninterp is None else ninterp)
+        if k == 1:
+            return np.zeros(1), np.ones(1)
+        frac, weights = exposure_rules.RULES[self.EXPOSURE_RULE](k)
+        return frac * (
+            self.exptime_s[i] / exposure_rules.SECONDS_PER_DAY
+        ), weights
+
+    def smear_file(self, fn, t, i, ninterp=None):
+        """``smear`` for a time vector that belongs to ONE file, ``i``, of
+        any (even symbolic) length: every row shares the file's nodes, so
+        the sub-exposure times are ``t[:, None] + offsets[None, :]``,
+        ``(N, k)``, with no row partition.  ``fn(t_sub)`` returns a tuple
+        of ``(N, k, ...)`` tensors; each comes back node-averaged,
+        ``(N, ...)``.  The child that keeps one dataset per file
+        (astrometry) uses this; the concatenating children use ``smear``.
+        """
+        offsets, weights = self.exposure_nodes(i, ninterp)
+        t_sub = pt.as_tensor_variable(t)[:, None] + pt.constant(
+            offsets[None, :]
+        )
+        out = fn(t_sub)
+        if not isinstance(out, tuple):
+            raise TypeError(
+                f"{type(self).__name__}.smear_file: the model function must "
+                f"return a tuple of tensors, got {type(out).__name__}."
+            )
+        w = pt.constant(weights)
+        return tuple(self._node_mean(x, w) for x in out)
 
     def add_parameter(self, model, param_name, system, context_nodes=None):
         """Stage 6, plus the detrend coefficients' whitening scale.

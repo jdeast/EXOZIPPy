@@ -302,7 +302,7 @@ def test_evidence_refuses_heavy_tailed_mode():
     at d = 5, and only past d ~ 8 does the mismatch compound into
     re2 > re2_max) -- it is far more forgiving than plain importance sampling
     -- so the 1-D version of this test asserted a refusal that the estimator
-    had no reason to make.  It passed anyway, because _ev_eval_block fed pymc
+    had no reason to make.  It passed anyway, because _ev_eval_range fed pymc
     a 1-D array for a SCALAR free RV, every logp evaluation raised, and the
     mode was refused for a reason the test never checked.  Asserting the
     state is what keeps that from recurring.
@@ -348,7 +348,7 @@ def test_logp_point_shapes_come_from_the_value_variable(rv_shape):
     Then the evaluations succeed in both cases.
 
     The trace shape cannot decide this: it is 0-d either way, while pymc's
-    compiled logp checks ndim exactly and _ev_eval_block's broad except turns
+    compiled logp checks ndim exactly and _ev_eval_range's broad except turns
     a mismatch into a nan.  Reading the shape off the trace nans out every
     one-element parameter of every real fit; reading a 1-d array in
     unconditionally nans out a genuinely scalar RV.  Both then surface as a

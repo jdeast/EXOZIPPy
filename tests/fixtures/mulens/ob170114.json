@@ -1,6 +1,6 @@
 {
  "config": "examples/ob170114/ob170114.yaml",
- "n_terms": 87,
+ "n_terms": 94,
  "params": "examples/ob170114/ob170114.params.yaml",
  "platform": {
   "blas": "scipy-openblas",
@@ -66,7 +66,11 @@
    0.0,
    0.0
   ],
+  "star.feh_raw": [
+   0.0
+  ],
   "star.logmass_raw": [
+   0.0,
    0.0,
    0.0
   ],
@@ -85,11 +89,15 @@
   "star.rv_raw": [
    0.0,
    0.0
+  ],
+  "star.teff_raw": [
+   0.0
   ]
  },
  "terms": {
   "POT:galacticmodel.imf_prior": 0.0,
   "POT:galacticmodel.kinematic_prior": -8.8290376817796,
+  "POT:gaussian_prior.band.du1": -5.452486613273754,
   "POT:gaussian_prior.lens.xalpha": -0.3780107162176545,
   "POT:gaussian_prior.lens.yalpha": -0.12198928378235384,
   "POT:gaussian_prior.orbit.xbigomega": -0.04397833900031094,
@@ -113,11 +121,13 @@
   "POT:logit_uniform_prior.source.t_0": -2.4397022381963143,
   "POT:logit_uniform_prior.source.u_0": -1.386358363167978,
   "POT:logit_uniform_prior.star.distance": -5.976788841910725,
-  "POT:logit_uniform_prior.star.logmass": -3.8753275205287085,
+  "POT:logit_uniform_prior.star.feh": -1.504077396776274,
+  "POT:logit_uniform_prior.star.logmass": -5.646506282056743,
   "POT:logit_uniform_prior.star.pm_dec": -2.772588723415037,
   "POT:logit_uniform_prior.star.pm_ra": -2.7725887232088633,
   "POT:logit_uniform_prior.star.radius": -12.476203247925252,
   "POT:logit_uniform_prior.star.rv": -2.772588722239781,
+  "POT:logit_uniform_prior.star.teff": -1.479997539352064,
   "POT:low_bound.lens.q": -9.85967654375977e-305,
   "POT:low_bound.lens.s": -9.85967654375977e-305,
   "POT:low_bound.mulensevent.mlens_total": -9.85967654375977e-305,
@@ -128,15 +138,16 @@
   "POT:low_bound.mulensevent.mu_rel_geo_mag": -1.66556031992878e-82,
   "POT:low_bound.mulensevent.mu_rel_mag": -1.4200344304590817e-115,
   "POT:low_bound.mulensevent.pi_rel": -9.85967654375977e-305,
-  "POT:low_bound.mulensevent.t_E": -1.6770028423437367e-82,
+  "POT:low_bound.mulensevent.t_E": -1.6770028423435936e-82,
   "POT:low_bound.mulensevent.theta_E": -9.85967654375977e-305,
   "POT:low_bound.planet.mass": -9.85967654375977e-305,
-  "POT:mulensevent.event_rate_prior": 0.44563394892839614,
+  "POT:low_bound.star.logg": -49.433172518671725,
+  "POT:mulensevent.event_rate_prior": 0.4456339489283965,
   "POT:mulensevent.mu_rel_singularity": -9.85967654375977e-305,
   "POT:mulensevent.source_behind_lens": -9.85967654375977e-305,
   "POT:mulensevent.theta_E_singularity": -9.85967654375977e-305,
   "POT:orbit.e_collision_bound": -2.437690467865578e-84,
-  "POT:planet.m_pos_constraint": -5.048057063443954e-110,
+  "POT:planet.m_pos_constraint": -5.0480570634428064e-110,
   "POT:up_bound.lens.q": -9.85967654375977e-305,
   "POT:up_bound.lens.s": -9.85967654375977e-305,
   "POT:up_bound.mulensevent.mlens_total": -9.85967654375977e-305,
@@ -150,13 +161,14 @@
   "POT:up_bound.mulensevent.theta_E": -9.85967654375977e-305,
   "POT:up_bound.planet.mass": -9.85967654375977e-305,
   "POT:up_bound.source.rho": -9.85967654375977e-305,
+  "POT:up_bound.star.logg": -9.85967654375977e-305,
   "RV:band.u1_raw": -0.9189385332046727,
   "RV:lens.log_s_raw": -0.9189385332046727,
   "RV:lens.xalpha_raw": -0.9189385332046727,
   "RV:lens.yalpha_raw": -0.9189385332046727,
   "RV:mulensinstrument.err_scale_raw": -0.9189385332046727,
   "RV:mulensinstrument.log_f_total_raw": -0.9189385332046727,
-  "RV:mulensinstrument.model": 6017.422675315998,
+  "RV:mulensinstrument.model": 6017.422675316004,
   "RV:mulensinstrument.q_source_raw": -0.9189385332046727,
   "RV:orbit.cosi_raw": -0.9189385332046727,
   "RV:orbit.logP_raw": -0.9189385332046727,
@@ -170,11 +182,13 @@
   "RV:source.t_0_raw": -0.9189385332046727,
   "RV:source.u_0_raw": -0.9189385332046727,
   "RV:star.distance_raw": -1.8378770664093453,
-  "RV:star.logmass_raw": -1.8378770664093453,
+  "RV:star.feh_raw": -0.9189385332046727,
+  "RV:star.logmass_raw": -2.756815599614018,
   "RV:star.pm_dec_raw": -1.8378770664093453,
   "RV:star.pm_ra_raw": -1.8378770664093453,
   "RV:star.radius_raw": -1.8378770664093453,
-  "RV:star.rv_raw": -1.8378770664093453
+  "RV:star.rv_raw": -1.8378770664093453,
+  "RV:star.teff_raw": -0.9189385332046727
  },
- "total_logp": 5914.1256394058255
+ "total_logp": 5851.727910976616
 }

@@ -706,6 +706,13 @@ class AstrometryInstrument(Instrument):
     # out_scale is one scale in the data's own unit, and these files carry
     # two observables in different units.  _load_likelihood_config raises.
     supports_robust_likelihood = False
+    # Exposure smearing (instrument.md, "Exposure smearing"): a dataset with
+    # ninterp > 1 is modeled as the exposure-mean POSITION -- (dE, dN)
+    # averaged together on one set of nodes, every observable formed from
+    # the averaged vector afterwards (_exposure_model).  Gauss-Legendre:
+    # the track is smooth over an exposure, and no parity constrains it.
+    supports_exposure = True
+    EXPOSURE_RULE = "gauss"
 
     def __init__(self, config, config_manager):
         super().__init__(config, config_manager)
@@ -776,6 +783,18 @@ class AstrometryInstrument(Instrument):
                         f"'orbit:'."
                     )
             self.rel_orbit.append(idx)
+
+        # A catalog dataset observes a SOLUTION (positions, parallax and
+        # proper motion at one epoch), not a time series of exposures:
+        # there is nothing to average, so the exposure keys are refused.
+        for i, (m, c) in enumerate(zip(self.modes, self.config)):
+            stated = [k for k in self.EXPOSURE_KEYS if k in c]
+            if m == "catalog" and stated:
+                raise ValueError(
+                    f"[{self.prefix}.{self.names[i]}] mode 'catalog' is a "
+                    f"catalog solution, not a time series of exposures; "
+                    f"{', '.join(stated)} does not apply. Remove the key."
+                )
 
         self._parse_catalog_and_split_keys()
         self._parse_data_formats()
@@ -1443,6 +1462,7 @@ class AstrometryInstrument(Instrument):
                 ),
             ),
             *cls._time_config_schema(),
+            *cls._exposure_config_schema(),
             cls._plot_style_config_schema(),
             cls._label_config_schema(),
         ]
@@ -3106,6 +3126,116 @@ class AstrometryInstrument(Instrument):
             denom = denom + r_bg
         return dE + num_E / denom, dN + num_N / denom
 
+    def _smeared(self, i):
+        """Whether dataset ``i`` is modeled as an exposure average."""
+        return self.ninterp[i] > 1
+
+    def _needs_dev(self, i):
+        """Whether dataset ``i``'s model reads the observer's Skowron
+        deviations (a lensed source, or a lensrel pair)."""
+        lens_source = getattr(self, "_lens_source", None)
+        return self.modes[i] == "lensrel" or bool(
+            lens_source and lens_source[i] is not None
+        )
+
+    def _exposure_ephemeris(self, system, i, t):
+        """``(P_E, P_N, dev)`` at the ``(n, k)`` sub-exposure times of
+        dataset ``i``'s epochs ``t`` (numpy): the parallax factors and the
+        Skowron deviations from the observer's ephemeris AT each node, as
+        the unsmeared path computes them at each epoch (load_data,
+        _lens_ephemeris).  ``None`` for what the mode does not read (rel
+        reads neither; ``dev`` only where _needs_dev)."""
+        d = self.datasets[i]
+        offsets, _ = self.exposure_nodes(i)
+        t_sub = np.asarray(t, dtype=float)[:, None] + offsets[None, :]
+        if d["mode"] == "rel":
+            return None, None, None
+        xyz = observer_position_at_reception(
+            t_sub.ravel(),
+            d["ra_ref"],
+            d["dec_ref"],
+            observer_location=self.observers[i],
+        )
+        P_E, P_N = parallax_factors(xyz, d["ra_ref"], d["dec_ref"])
+        dev = None
+        if self._needs_dev(i):
+            dev = system.mulensevent.skowron_deviations(
+                t_sub.ravel(), xyz
+            ).reshape(t_sub.shape + (3,))
+        return P_E.reshape(t_sub.shape), P_N.reshape(t_sub.shape), dev
+
+    def _exposure_model(
+        self, system, i, t, beta=None, P_E=None, P_N=None, dev=None
+    ):
+        """(dE, dN) in mas of dataset ``i`` averaged over each exposure --
+        THE smeared expression, for the likelihood and the plots alike.
+
+        ``t`` is the epochs (numpy or a tensor of any length);
+        ``P_E``/``P_N`` (``(n, k)``) and ``dev`` (``(n, k, 3)``) the
+        ephemeris quantities at the sub-exposure nodes
+        (``_exposure_ephemeris``), as arrays or tensors.  The mode's own
+        builder (``_absolute_model``, ``_rel_model``, ``_lensrel_model``)
+        is evaluated on the flattened nodes and the POSITION is averaged:
+        dE and dN together, with one set of weights
+        (``Instrument.smear_file``).  Every observable is then formed from
+        the averaged vector by the caller -- the along-scan projection, the
+        separation and the position angle -- never averaged itself: the
+        projection is linear, so this is exact for gaia, while sep and pa
+        are not, and <pa> has no meaning across the +/-pi wrap
+        (instrument.md).  The microlensing centroid shift is part of the
+        builder, so it is averaged with the track it moves.
+        """
+        d = self.datasets[i]
+        mode = d["mode"]
+
+        def flat3(x):
+            return pt.as_tensor_variable(x).reshape((-1, 3))
+
+        def fn(t_sub):
+            t_flat = t_sub.reshape((-1,))
+            if mode == "rel":
+                dE, dN = self._rel_model(system, i, t_flat)
+            elif mode == "lensrel":
+                dE, dN = self._lensrel_model(system, i, t_flat, flat3(dev))
+            else:
+                dE, dN = self._absolute_model(
+                    system,
+                    d,
+                    t_flat,
+                    beta,
+                    P_E=pt.as_tensor_variable(P_E).reshape((-1,)),
+                    P_N=pt.as_tensor_variable(P_N).reshape((-1,)),
+                    dev=None if dev is None else flat3(dev),
+                )
+            return dE.reshape(t_sub.shape), dN.reshape(t_sub.shape)
+
+        return self.smear_file(fn, t, i)
+
+    def _exposure_linear_terms(self, system, d, t, point):
+        """The numpy pm + parallax (+ frame) terms averaged over each
+        exposure of dataset ``d`` at epochs ``t``: they are linear in time
+        and in the parallax factors, so their exposure mean is
+        ``_linear_terms`` at ``t`` with the node-averaged parallax factors
+        (the rule is symmetric, so the mean node time is the epoch)."""
+        i = d["index"]
+        P_E, P_N, _ = self._exposure_ephemeris(system, i, t)
+        _, w = self.exposure_nodes(i)
+        return self._linear_terms(
+            dict(d, P_E=P_E @ w, P_N=P_N @ w), t, point, system
+        )
+
+    def _eval_exposure(self, system, i, t, vals):
+        """Dataset ``i``'s exposure-averaged (dE, dN) at epochs ``t``, from
+        the compiled ``_exposure_model`` (``compile_plotters``)."""
+        t = np.asarray(t, dtype=np.float64)
+        k = int(self.ninterp[i])
+        P_E, P_N, dev = self._exposure_ephemeris(system, i, t)
+        if P_E is None:
+            P_E = P_N = np.zeros((len(t), k))
+        if dev is None:
+            dev = np.zeros((len(t), k, 3))
+        return self._compiled_exposure[i](t, P_E, P_N, dev, *vals)
+
     @staticmethod
     def _catalog_solution(d, dE, dN):
         """Catalog dataset ``d``'s modeled solution: its projection
@@ -3162,6 +3292,10 @@ class AstrometryInstrument(Instrument):
                 f"[{self.prefix}] relative astrometry requires an orbit component."
             )
 
+        # The (dE, dN) node each dataset's observables are formed from --
+        # exposure-averaged where the dataset smears -- retained so the
+        # plotted model can be pinned to it (tests/test_astrometry_exposure.py).
+        self._data_position_nodes = [None] * self.n_elements
         for i, d in enumerate(self.datasets):
             name = d["name"]
             mode = d["mode"]
@@ -3177,13 +3311,26 @@ class AstrometryInstrument(Instrument):
                     pm.Deterministic(
                         f"{self.prefix}.{name}.fluxfrac_sed", beta
                     )
-                dev = None
-                lens_source = getattr(self, "_lens_source", None)
-                if lens_source and lens_source[i] is not None:
-                    # The observer's geocentric deviations (C6) at THIS
-                    # dataset's epochs, in the frame t0_par anchors.
-                    dev = system.mulensevent.skowron_deviations(t, d["xyz"])
-                dE, dN = self._absolute_model(system, d, t, beta, dev=dev)
+                if self._smeared(i):
+                    dE, dN = self._exposure_model(
+                        system,
+                        i,
+                        t,
+                        beta,
+                        *self._exposure_ephemeris(system, i, t),
+                    )
+                else:
+                    dev = None
+                    lens_source = getattr(self, "_lens_source", None)
+                    if lens_source and lens_source[i] is not None:
+                        # The observer's geocentric deviations (C6) at
+                        # THIS dataset's epochs, in the frame t0_par
+                        # anchors.
+                        dev = system.mulensevent.skowron_deviations(
+                            t, d["xyz"]
+                        )
+                    dE, dN = self._absolute_model(system, d, t, beta, dev=dev)
+                self._data_position_nodes[i] = (dE, dN)
 
             if mode == "gaia":
                 w_model = dE * d["sin_psi"] + dN * d["cos_psi"]
@@ -3198,8 +3345,13 @@ class AstrometryInstrument(Instrument):
                 )
 
             elif mode == "lensrel":
-                dev = system.mulensevent.skowron_deviations(t, d["xyz"])
-                dE, dN = self._lensrel_model(system, i, t, dev)
+                if self._smeared(i):
+                    _, _, dev_sub = self._exposure_ephemeris(system, i, t)
+                    dE, dN = self._exposure_model(system, i, t, dev=dev_sub)
+                else:
+                    dev = system.mulensevent.skowron_deviations(t, d["xyz"])
+                    dE, dN = self._lensrel_model(system, i, t, dev)
+                self._data_position_nodes[i] = (dE, dN)
                 # The bivariate normal with the per-epoch correlation, as
                 # the East marginal times the North conditional -- exact,
                 # and it keeps two observed nodes like abs mode.  The
@@ -3260,7 +3412,13 @@ class AstrometryInstrument(Instrument):
                 )
 
             else:  # rel
-                dEj, dNj = self._rel_model(system, i, pt.as_tensor_variable(t))
+                if self._smeared(i):
+                    dEj, dNj = self._exposure_model(system, i, t)
+                else:
+                    dEj, dNj = self._rel_model(
+                        system, i, pt.as_tensor_variable(t)
+                    )
+                self._data_position_nodes[i] = (dEj, dNj)
 
                 sep_model = pt.sqrt(pt.sqr(dEj) + pt.sqr(dNj))
                 pa_model = pt.arctan2(dEj, dNj)
@@ -3478,6 +3636,45 @@ class AstrometryInstrument(Instrument):
             self._compiled_lensrel.append(
                 pytensor.function(
                     inputs=[t_input, dev_input] + param_symbols,
+                    outputs=[dE, dN],
+                    on_unused_input="ignore",
+                )
+            )
+
+        # The exposure-averaged model per SMEARED dataset (ninterp > 1),
+        # on a time grid with that grid's own node ephemeris: the
+        # likelihood's _exposure_model run on other times.  Every plotted
+        # model of such a dataset -- at its epochs and on a grid -- comes
+        # from here, never from the instantaneous builders below.
+        self._compiled_exposure = []
+        self._exposure_plot_nodes = []
+        pe_sub = pt.matrix("P_E_sub")
+        pn_sub = pt.matrix("P_N_sub")
+        dev_sub = pt.tensor3("dev_sub")
+        for i in range(self.n_elements):
+            mode = self.modes[i]
+            if not self._smeared(i) or (mode == "rel" and not has_any_orbit):
+                self._compiled_exposure.append(None)
+                self._exposure_plot_nodes.append(None)
+                continue
+            beta = (
+                self._sed_beta_node(system, i)
+                if mode in ABSOLUTE_MODES
+                else None
+            )
+            dE, dN = self._exposure_model(
+                system,
+                i,
+                t_input,
+                beta,
+                P_E=pe_sub,
+                P_N=pn_sub,
+                dev=dev_sub if self._needs_dev(i) else None,
+            )
+            self._exposure_plot_nodes.append((dE, dN))
+            self._compiled_exposure.append(
+                pytensor.function(
+                    inputs=[t_input, pe_sub, pn_sub, dev_sub] + param_symbols,
                     outputs=[dE, dN],
                     on_unused_input="ignore",
                 )
@@ -3725,7 +3922,17 @@ class AstrometryInstrument(Instrument):
                 )
                 if point is not None:
                     vals = self._point_values(system, point)
-                    if lensed_fns and lensed_fns[i] is not None:
+                    if self._smeared(i):
+                        # Exposure-averaged position at the epochs, then
+                        # projected: the likelihood's own order.
+                        dE_m, dN_m = self._eval_exposure(system, i, t, vals)
+                        deps = self._merge_deps(
+                            self._linear_term_deps(system),
+                            self._node_pair_deps(
+                                self._exposure_plot_nodes[i], system
+                            ),
+                        )
+                    elif lensed_fns and lensed_fns[i] is not None:
                         # Lensed source: the full compiled _absolute_model
                         # (linear + orbit + centroid shift) at the epochs.
                         dE_m, dN_m = self._eval_lensed(system, i, t, vals)
@@ -3777,7 +3984,14 @@ class AstrometryInstrument(Instrument):
                 # point supplies it; the raw offsets otherwise (a valid
                 # data-only preview).
                 if point is not None:
-                    dE_lin, dN_lin = self._linear_terms(d, t, point, system)
+                    if self._smeared(i):
+                        dE_lin, dN_lin = self._exposure_linear_terms(
+                            system, d, t, point
+                        )
+                    else:
+                        dE_lin, dN_lin = self._linear_terms(
+                            d, t, point, system
+                        )
                     x_data = d["dE_obs"] - dE_lin
                     y_data = d["dN_obs"] - dN_lin
                     data_name = "data - (pm+plx)"
@@ -3808,7 +4022,34 @@ class AstrometryInstrument(Instrument):
                             photo_nodes[i] if photo_nodes else None, system
                         ),
                     )
-                    if lensed_fns and lensed_fns[i] is not None:
+                    if self._smeared(i):
+                        # Exposure-averaged: the full smeared model minus
+                        # the same smeared linear terms, on the grid.
+                        vals = self._point_values(system, point)
+                        t_pretty = np.linspace(t.min(), t.max(), 2000)
+                        dE_f, dN_f = self._eval_exposure(
+                            system, i, t_pretty, vals
+                        )
+                        dE_l, dN_l = self._exposure_linear_terms(
+                            system, d, t_pretty, point
+                        )
+                        deps = self._merge_deps(
+                            deps,
+                            self._node_pair_deps(
+                                self._exposure_plot_nodes[i], system
+                            ),
+                        )
+                        traces.append(
+                            Trace(
+                                name="exposure-averaged model - (pm+plx)",
+                                role="model",
+                                kind="line",
+                                x=dE_f - dE_l,
+                                y=dN_f - dN_l,
+                                style={"legend": True, "lw": 1},
+                            )
+                        )
+                    elif lensed_fns and lensed_fns[i] is not None:
                         # Lensed source: what remains after the linear
                         # terms is the centroid shift (+ blend drag + any
                         # photocenter orbit), drawn from the full compiled
@@ -3985,13 +4226,24 @@ class AstrometryInstrument(Instrument):
                         d["dec_ref"],
                         observer_location=self.observers[i],
                     )
-                    dev = system.mulensevent.skowron_deviations(t_pretty, xyz)
-                    dE_m, dN_m = lensrel_fns[i](
-                        t_pretty.astype(np.float64), dev, *vals
-                    )
-                    deps = self._node_pair_deps(
-                        lensrel_nodes[i] if lensrel_nodes else None, system
-                    )
+                    if self._smeared(i):
+                        dE_m, dN_m = self._eval_exposure(
+                            system, i, t_pretty, vals
+                        )
+                        deps = self._node_pair_deps(
+                            self._exposure_plot_nodes[i], system
+                        )
+                    else:
+                        dev = system.mulensevent.skowron_deviations(
+                            t_pretty, xyz
+                        )
+                        dE_m, dN_m = lensrel_fns[i](
+                            t_pretty.astype(np.float64), dev, *vals
+                        )
+                        deps = self._node_pair_deps(
+                            lensrel_nodes[i] if lensrel_nodes else None,
+                            system,
+                        )
                     traces.append(
                         Trace(
                             name="model",
@@ -4044,10 +4296,20 @@ class AstrometryInstrument(Instrument):
                 if point is not None and rel_fns and rel_fns[i] is not None:
                     vals = self._point_values(system, point)
                     t_pretty = np.linspace(t.min(), t.max(), 2000)
-                    dE_m, dN_m = rel_fns[i](t_pretty.astype(np.float64), *vals)
-                    deps = self._node_pair_deps(
-                        rel_nodes[i] if rel_nodes else None, system
-                    )
+                    if self._smeared(i):
+                        dE_m, dN_m = self._eval_exposure(
+                            system, i, t_pretty, vals
+                        )
+                        deps = self._node_pair_deps(
+                            self._exposure_plot_nodes[i], system
+                        )
+                    else:
+                        dE_m, dN_m = rel_fns[i](
+                            t_pretty.astype(np.float64), *vals
+                        )
+                        deps = self._node_pair_deps(
+                            rel_nodes[i] if rel_nodes else None, system
+                        )
                     traces.append(
                         Trace(
                             name="model",
@@ -4194,7 +4456,12 @@ class AstrometryInstrument(Instrument):
                 label="+ microlensing centroid shift",
             )
 
-        if lensed:
+        if self._smeared(i):
+            # The exposure-averaged model at the epochs (what the
+            # likelihood compares); the dense lines above are the
+            # instantaneous track it averages.
+            dE_mod_o, dN_mod_o = self._eval_exposure(system, i, t, vals)
+        elif lensed:
             dE_mod_o, dN_mod_o = self._eval_lensed(system, i, t, vals)
         else:
             dE_lin_o, dN_lin_o = self._linear_terms(d, t, point, system)

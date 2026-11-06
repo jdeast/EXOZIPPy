@@ -169,3 +169,37 @@ def test_grid_search_pool_evaluates_every_node_under_forkserver(
 class _NullLog:
     def warning(self, *a, **k):
         pass
+
+
+_WRAPUP_DRAWS = None
+
+
+def _wrapup_range(lo, hi):
+    return [float(-0.5 * _WRAPUP_DRAWS[i] ** 2) for i in range(lo, hi)]
+
+
+@needs_cores
+@needs_forkserver
+def test_wrapup_map_draws_workers_see_the_parent_state_under_forkserver(
+    forkserver_default,
+):
+    """
+    Given forkserver as the process default and draws set in a module
+      global by the parent,
+    When _common.map_draws (the wrap-up's lp / branch / evidence pool,
+      review 2.6.44) evaluates them on 2 workers,
+    Then every value equals the serial one -- the pool forks explicitly.
+    """
+    global _WRAPUP_DRAWS
+    from exozippy.samplers import _common
+
+    _WRAPUP_DRAWS = np.linspace(-2.0, 2.0, 40)
+    try:
+        out, timed_out = _common.map_draws(
+            _wrapup_range, 40, cores=2, eval_timeout=30.0, label="test"
+        )
+    finally:
+        expected = _wrapup_range(0, 40)
+        _WRAPUP_DRAWS = None
+    assert timed_out == []
+    assert out == expected

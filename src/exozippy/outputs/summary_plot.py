@@ -57,6 +57,7 @@ import dataclasses
 import difflib
 import logging
 import math
+import time
 from pathlib import Path
 
 import numpy as np
@@ -481,11 +482,44 @@ def _draw_model_traces(system, panels, draws):
         for panel in panels
         for chart in panel.charts
     }
-    components = [system.active_components[key] for key in sorted(keys)]
+    components = [(key, system.active_components[key]) for key in sorted(keys)]
     models = {}
-    for extra in draws:
-        for comp in components:
-            for chart in comp.plot_data(system, extra):
+    if not draws:
+        return models
+    # Per component, the first draw in-process (its time decides whether
+    # the rest go to the wrap-up's plot pool, plotrender.plot_pool; review
+    # 2.6.44), then the rest.  Chart ids are per component, so each chart's
+    # traces still arrive in draw order.
+    from ..plotrender import plot_data_at_points
+
+    for key, comp in components:
+        t0 = time.perf_counter()
+        first = comp.plot_data(system, draws[0])
+        t_first = time.perf_counter() - t0
+        rest = plot_data_at_points(comp, system, draws[1:], t_first=t_first)
+        per_draw = [first]
+        n_timeout = 0
+        for idx, (state, value) in enumerate(rest, start=1):
+            if state == "ok":
+                per_draw.append(value)
+            elif state == "timeout":
+                n_timeout += 1
+            else:
+                raise RuntimeError(
+                    f"summary figure: plot_data of {key} raised at "
+                    f"posterior draw {idx}: {value}"
+                )
+        if n_timeout:
+            logger.warning(
+                "summary figure: %d of %d draw(s) of %s exceeded "
+                "eval_timeout in plot_data and are left out of the "
+                "spaghetti.",
+                n_timeout,
+                len(draws),
+                key,
+            )
+        for charts in per_draw:
+            for chart in charts:
                 traces = _role(chart, "model")
                 if chart.id in wanted and traces:
                     models.setdefault(chart.id, []).append(traces)

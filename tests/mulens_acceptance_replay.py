@@ -186,6 +186,27 @@ epoch shift and nothing else -- the old model with its seed moved by the
 same 201.9 s reproduces it to 7.9e-6 nats -- and `RV:rvinstrument.model`
 4.9944 -> 4.9903 (-0.0041) is the epoch shift (-0.0067) plus the star's
 own retardation (+0.0026).  Every other term is bit-identical.
+
+Eight fixtures were re-recorded when the Claret limb-darkening tie began
+applying to microlensing bands (components/sed/sed.md, "The tie is a
+property of the BAND"; on by default): OGLE_0383LD, ob07224, ob161003,
+ob170114, ob09020 and the three KMT-2019-BLG-1806 configs -- every fixture
+whose example has a finite source and a band with a Claret table.  Every
+stored start value is bit-identical; the new raw coordinates enter at 0.
+What appeared is the tie and what it reads: `gaussian_prior.band.du1`
+(OGLE_0383LD -0.18, ob07224 -0.13, ob161003 -7.35, ob170114 -5.45,
+ob09020 -41.31, KMT-2019-BLG-1806 x3 -15.75 nats -- the examples' fitted
+u1 against the table at a source Teff nothing else constrains), the
+source's now-sampled teff and feh (their raw N(0,1) terms, -0.92 each, and
+logit-uniform priors on the tables' box, -1.48 and -1.50), and the logg
+barrier, -0.0 except ob170114's -49.43 (its source starts below the
+tables' logg 2.0).  The tie reads the source's MASS through logg, so the
+microlensing-only source's logmass pin is lifted: `logmass_raw` gains one
+element (-0.92) and the logit-uniform logmass prior one term (-1.65 to
+-1.77).  KMT-2019-BLG-1806's SED already sampled teff, so instead of
+appearing its prior renormalizes onto the tables' 3500-10000 K (+2.82).
+Everything else moved by reassociation alone: the data term by <= 1e-9
+nats (3e-14 relative), the rest by <= 4.4e-16 nats.
 """
 
 import glob

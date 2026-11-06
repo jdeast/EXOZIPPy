@@ -120,7 +120,6 @@ NOT implemented here: they are lower priority than the bridge path and are
 """
 
 import logging
-import multiprocessing as mp
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -478,14 +477,18 @@ def _sample_gaussian(mu, S, n, rng):
 # without pickling it (only numpy point arrays cross IPC).
 _EV_LP_FN = None
 _EV_LAYOUT = None  # list of (value_name, start, size, shape)
+_EV_POINTS = None  # (M, D) rows _batch_logp evaluates
 
 
-def _ev_eval_block(args):
-    block, offset = args
-    n = block.shape[0]
-    out = np.full(n, np.nan)
-    for i in range(n):
-        row = block[i]
+def _ev_eval_range(lo, hi):
+    """logp at rows [lo, hi) of the staged points (forked worker or inline).
+
+    Reads the compiled logp, the layout and the (M, D) point matrix from the
+    globals _batch_logp sets before samplers._common.map_draws forks.
+    """
+    out = np.full(hi - lo, np.nan)
+    for j, i in enumerate(range(lo, hi)):
+        row = _EV_POINTS[i]
         point = {}
         for vname, start, size, shape in _EV_LAYOUT:
             # ``shape`` is the VALUE VARIABLE's shape, not the trace's -- see
@@ -494,10 +497,10 @@ def _ev_eval_block(args):
             # wrong refuses every mode of a whole model type silently.
             point[vname] = row[start : start + size].reshape(shape)
         try:
-            out[i] = float(_EV_LP_FN(point))
+            out[j] = float(_EV_LP_FN(point))
         except Exception:
-            out[i] = np.nan
-    return offset, out
+            out[j] = np.nan
+    return out
 
 
 def _build_layout(model, idata):
@@ -521,7 +524,7 @@ def _build_layout(model, idata):
     is reconciled against the VALUE VARIABLE, because the two disagree in a
     case every real fit hits: an EXOZIPPy Parameter with one element is a
     length-1 vector RV, ``shape=(1,)``, and the trace stores it SQUEEZED to
-    0-d.  pymc's compiled logp checks ndim exactly and _ev_eval_block's broad
+    0-d.  pymc's compiled logp checks ndim exactly and _ev_eval_range's broad
     except turns the mismatch into a nan, so taking the shape from the trace
     would silently nan every draw of every one-element parameter -- and
     taking it from the trace unconditionally likewise breaks a genuinely 0-d
@@ -571,16 +574,21 @@ def _posterior_matrix(idata, layout, D):
     return X
 
 
-def _batch_logp(model, layout, points, cores=None):
+def _batch_logp(model, layout, points, cores=None, eval_timeout=None):
     """logp (jacobian=True) at each row of points (M, D) via fork pool.
 
     jacobian=True gives the density over the unconstrained raw space -- the
     space the sampler explores and the space the proposal lives in -- so the
     bridge ratio is over one consistent measure.
+
+    Returns ``(logp, timed_out)``: a row whose call outlasted
+    ``eval_timeout`` is NaN -- a failed evaluation, which the bridge already
+    counts as one -- and its index is in ``timed_out`` for the caller to
+    report (review 2.6.44).
     """
     M = points.shape[0]
     if M == 0:
-        return np.zeros(0)
+        return np.zeros(0), []
     with model:
         logp_fn = model.compile_logp(jacobian=True)
 
@@ -590,35 +598,32 @@ def _batch_logp(model, layout, points, cores=None):
         for _rv, vname, start, size, shape in layout
     ]
 
-    global _EV_LP_FN, _EV_LAYOUT
-    _EV_LP_FN = logp_fn
-    _EV_LAYOUT = eval_layout
-
     # The sampler's core grant, never mp.cpu_count(): on a shared node that
     # is the node's CPUs, not the job's, and every worker forks AFTER the
     # trace is loaded -- the multi-GB-per-worker wrap-up blowup run.py's
     # _compute_lp_from_model documents (review 2.3.9; this pool was missed,
-    # found by the 2.6.43 wrap-up audit).  cores=None is the AUTO grant.
-    from ..samplers._common import default_cores
+    # found by the 2.6.43 wrap-up audit).  cores=None is the AUTO grant,
+    # which create_pool (inside map_draws) applies.  A handful of points
+    # with no eval_timeout to enforce is not worth a fork.
+    from ..samplers._common import map_draws
 
-    grant = default_cores() if cores is None else max(1, int(cores))
-    n_workers = max(1, min(grant, M))
-    if n_workers == 1 or M < 64:
-        _off, vals = _ev_eval_block((points, 0))
-        return vals
-
-    blocks = np.array_split(points, n_workers)
-    args = []
-    off = 0
-    for b in blocks:
-        args.append((b, off))
-        off += b.shape[0]
-    ctx = mp.get_context("fork")
-    out = np.full(M, np.nan)
-    with ctx.Pool(n_workers) as pool:
-        for offset, vals in pool.map(_ev_eval_block, args):
-            out[offset : offset + vals.size] = vals
-    return out
+    global _EV_LP_FN, _EV_LAYOUT, _EV_POINTS
+    _EV_LP_FN = logp_fn
+    _EV_LAYOUT = eval_layout
+    _EV_POINTS = points
+    try:
+        values, timed_out = map_draws(
+            _ev_eval_range,
+            M,
+            cores=1 if (M < 64 and eval_timeout is None) else cores,
+            eval_timeout=eval_timeout,
+            label="evidence: bridge logp",
+            log=logger,
+        )
+    finally:
+        _EV_LP_FN, _EV_LAYOUT, _EV_POINTS = None, None, None
+    out = np.array([np.nan if v is None else v for v in values], dtype=float)
+    return out, timed_out
 
 
 # ----------------------------------------------------------------------
@@ -683,6 +688,7 @@ def estimate_mode_evidences(
     seed=20260712,
     log_norm=None,
     cores=None,
+    eval_timeout=None,
 ):
     """Estimate each mode's local evidence by bridge sampling.
 
@@ -708,6 +714,11 @@ def estimate_mode_evidences(
     seed : RNG seed for reproducible proposal draws.
     cores : the worker grant for the logp pool (None: the AUTO grant,
         samplers._common.default_cores); never the node's CPU count.
+    eval_timeout : per-logp-call wall-clock budget (``sampler:
+        eval_timeout:``; None waits forever).  A call past it is a FAILED
+        evaluation (NaN), counted per mode in ``status["n_eval_timeout"]``
+        and logged, and the bridge's own non-finite accounting takes it from
+        there (review 2.6.44).
     log_norm : float, optional -- the constant (nats) that normalizes the
         model logp's prior terms, ``System.evidence_log_norm()``.  Added to
         every mode's bridge lnZ, so the reported lnZ is the NORMALIZED log
@@ -812,9 +823,13 @@ def estimate_mode_evidences(
 
     if all_points:
         stacked = np.vstack(all_points)
-        logp_all = _batch_logp(model, layout, stacked, cores=cores)
+        logp_all, timed_out = _batch_logp(
+            model, layout, stacked, cores=cores, eval_timeout=eval_timeout
+        )
     else:
-        logp_all = np.zeros(0)
+        logp_all, timed_out = np.zeros(0), []
+    is_timed_out = np.zeros(logp_all.size, dtype=bool)
+    is_timed_out[list(timed_out)] = True
 
     cursor = 0
     for k, kind, X1, Y, mu, S, chain_lengths in stage:
@@ -834,6 +849,7 @@ def estimate_mode_evidences(
             )
             continue
         n1, n2 = X1.shape[0], Y.shape[0]
+        n_to = int(is_timed_out[cursor : cursor + n1 + n2].sum())
         logp1 = logp_all[cursor : cursor + n1]
         cursor += n1
         logp2 = logp_all[cursor : cursor + n2]
@@ -848,6 +864,18 @@ def estimate_mode_evidences(
             "skipped_rvs": list(skipped_rvs),
             "n_skipped_rvs": len(skipped_rvs),
         }
+        if n_to:
+            # Counted only when it happened, so a clean run's status dict
+            # (and everything rendered from it) is what it always was.
+            status["n_eval_timeout"] = n_to
+            logger.warning(
+                "evidence: mode %d: %d of %d bridge logp call(s) exceeded "
+                "eval_timeout=%gs and count as failed evaluations",
+                k + 1,
+                n_to,
+                n1 + n2,
+                float(eval_timeout),
+            )
         lnZ, lnZ_err, re2, converged = bridge_lnZ(
             l1, l2, l1_chains=chain_lengths, status=status
         )

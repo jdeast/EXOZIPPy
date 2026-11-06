@@ -252,6 +252,14 @@ class MulensInstrument(Instrument):
     # Magnitude-space detrend coefficients MULTIPLY the flux model by
     # 10**(-0.4 X.c) (Instrument.DETREND_SPACE).
     DETREND_SPACE = "magnitude"
+    # Exposure smearing (instrument.md, "Exposure smearing";
+    # mulensing.md, "Exposure smearing"): with ninterp > 1 the
+    # magnification is averaged over each exposure, the observer placed at
+    # its ephemeris position at every node.  Gauss-Legendre: the
+    # magnification is smooth except at a caustic crossing, and no parity
+    # with another code constrains the rule.
+    supports_exposure = True
+    EXPOSURE_RULE = "gauss"
 
     # Deps of the derived `zeropoint` that are injected as context nodes by
     # add_parameter below rather than resolved as manifest parameters, so
@@ -480,6 +488,7 @@ class MulensInstrument(Instrument):
                 ),
             ),
             *cls._time_config_schema(),
+            *cls._exposure_config_schema(),
             cls._plot_style_config_schema(),
             cls._label_config_schema(),
             cls._gp_config_schema(),
@@ -781,6 +790,7 @@ class MulensInstrument(Instrument):
         # Median absolute position per instrument (used by MulensEvent to
         # detect satellite parallax when sizing the logmass scale)
         self.inst_ref_pos = []
+        self._node_obs_file = []
 
         # Pass 2: observer positions, flux bootstraps, and sanity checks.
         for i, (t, f, e, df) in enumerate(per_file):
@@ -789,6 +799,14 @@ class MulensInstrument(Instrument):
             self.inst_ref_pos.append(np.median(xyz_abs, axis=0))
 
             xyz_delta = self._abs_to_delta(t, xyz_abs)
+            # The observer at every sub-exposure node of a smeared file,
+            # from the same ephemeris and frame as xyz_delta (None for an
+            # unsmeared file, whose one node is the epoch).
+            self._node_obs_file.append(
+                self._node_observer_positions(i, t)
+                if self.ninterp[i] > 1
+                else None
+            )
 
             # Kept for reread_after_starts, which re-runs the bootstrap at
             # the SOLVED geometry when the start solve moved it.
@@ -2677,8 +2695,137 @@ class MulensInstrument(Instrument):
         groups = [np.flatnonzero(group_of_lc == g) for g in range(len(unique))]
         return group_of_lc, groups
 
+    def _node_observer_positions(self, i, t):
+        """Light curve ``i``'s observer at the ``(n, k)`` sub-exposure nodes
+        of epochs ``t`` (numpy): Skowron+2011 deviations, ``(n, k, 3)``,
+        from the observer's ephemeris AT each node time -- the same lookup
+        and frame as the per-epoch ``observer_pos``, so a satellite's or the
+        Earth's motion during the exposure is followed, not held."""
+        offsets, _ = self.exposure_nodes(i)
+        t_sub = np.asarray(t, dtype=float)[:, None] + offsets[None, :]
+        obs_loc = self.config[i].get("observer_location", "earth")
+        flat = t_sub.ravel()
+        dev = self._abs_to_delta(
+            flat, self.get_observer_position(flat, observer_location=obs_loc)
+        )
+        return np.asarray(dev).reshape(t_sub.shape + (3,))
+
+    def _smeared_magnifications(self, system, t, row_lc, exposure):
+        """Every source's magnification averaged over each exposure,
+        ``[<A_j>]`` -- the flux is linear in A, so ``f_s <A> + f_b`` is the
+        exposure-mean flux, and a variable source composes as ``<S_j A_j>``
+        because ``S_j`` is inside the magnification call.
+
+        ``exposure`` is ``"data"`` (the likelihood: every row of
+        ``self.time``, each file's own nodes and node observer positions,
+        through ``Instrument.smear``) or ``(i, obs_nodes)`` (a plot grid of
+        ONE light curve, ``obs_nodes`` the ``(n, k, 3)`` node positions,
+        through ``Instrument.smear_file``).  Either way the nodes are
+        flattened and handed to the one ``_magnifications`` builder, each
+        node carrying its row's light curve for the limb darkening.
+        """
+        if exposure == "data":
+            node_obs = {}
+            for i in range(self.n_elements):
+                k = int(self.ninterp[i])
+                if k == 1:
+                    continue
+                sl = self.rows(i)
+                node_obs.setdefault(
+                    k, np.full((len(self.time), k, 3), np.nan)
+                )[sl] = self._node_obs_file[i]
+            row_lc = np.asarray(row_lc)
+
+            def fn(t_sub, rows):
+                k = int(self.ninterp[self.inst_map[rows[0]]])
+                obs = (
+                    self.observer_pos[rows]
+                    if k == 1
+                    else node_obs[k][rows].reshape((-1, 3))
+                )
+                A = self._magnifications(
+                    system,
+                    t_sub.reshape((-1,)),
+                    obs,
+                    np.repeat(row_lc[rows], k),
+                )
+                return tuple(a.reshape((len(rows), k)) for a in A)
+
+            blocks = [
+                (i, np.arange(self.rows(i).start, self.rows(i).stop))
+                for i in range(self.n_elements)
+            ]
+            return list(self.smear(fn, t, blocks))
+
+        i, obs_nodes = exposure
+
+        def fn_file(t_sub):
+            A = self._magnifications(
+                system,
+                t_sub.reshape((-1,)),
+                pt.as_tensor_variable(obs_nodes).reshape((-1, 3)),
+                int(row_lc),
+            )
+            return tuple(a.reshape(t_sub.shape) for a in A)
+
+        return list(self.smear_file(fn_file, t, i))
+
+    def _magnifications(
+        self, system, t, obs_pos, row_lc, resolve_method=False
+    ):
+        """Each source's instantaneous magnification on times ``t`` with
+        observer positions ``obs_pos``, ``[A_j]`` -- the per-LD-group
+        assembly ``_model_flux`` documents."""
+        group_of_lc, groups = self._ld_groups(system)
+        row_lc = np.asarray(row_lc)
+        if row_lc.ndim == 0:
+            row_group = None
+            present = [int(group_of_lc[int(row_lc)])]
+        else:
+            row_group = group_of_lc[row_lc]
+            present = [int(g) for g in np.unique(row_group)]
+
+        event = system.mulensevent
+        A_per_source = []
+        for j in range(self._n_sources):
+            if resolve_method:
+                event.resolve_auto_vbbl(index=j)
+
+            def magnification(g, times, obs, j=j):
+                u1, u2, bandpass = self._finite_source_limb_darkening(
+                    system, int(groups[g][0])
+                )
+                return event.get_magnification_op(
+                    times,
+                    obs,
+                    system,
+                    index=j,
+                    u1=u1,
+                    u2=u2,
+                    bandpass=bandpass,
+                )
+
+            if len(present) == 1:
+                A_per_source.append(magnification(present[0], t, obs_pos))
+                continue
+            A = pt.zeros_like(pt.as_tensor_variable(t), dtype="float64")
+            for g in present:
+                rows = np.flatnonzero(row_group == g)
+                A = pt.set_subtensor(
+                    A[rows], magnification(g, t[rows], obs_pos[rows])
+                )
+            A_per_source.append(A)
+        return A_per_source
+
     def _model_flux(
-        self, system, t, obs_pos, inst, row_lc, resolve_method=False
+        self,
+        system,
+        t,
+        obs_pos,
+        inst,
+        row_lc,
+        resolve_method=False,
+        exposure=None,
     ):
         """The ONE detrend-free flux-model expression, in each row's own
         instrument flux system.
@@ -2723,47 +2870,28 @@ class MulensInstrument(Instrument):
         colour).  No clamp: the model flux may legitimately be <= 0
         (f_blend may be negative, difference-imaging data live around zero),
         and the likelihood is Gaussian in flux, so nothing takes a log.
-        """
-        group_of_lc, groups = self._ld_groups(system)
-        row_lc = np.asarray(row_lc)
-        if row_lc.ndim == 0:
-            row_group = None
-            present = [int(group_of_lc[int(row_lc)])]
-        else:
-            row_group = group_of_lc[row_lc]
-            present = [int(g) for g in np.unique(row_group)]
 
+        ``exposure`` (``None``: the magnification at each time) asks for
+        the exposure-averaged magnification instead -- ``"data"`` from the
+        likelihood when a light curve smears, ``(i, obs_nodes)`` from a
+        smeared light curve's plotter; ``_smeared_magnifications``.
+        """
         event = system.mulensevent
         n_src = self._n_sources
-        A_per_source = []
-        for j in range(n_src):
+        if exposure is None:
+            A_per_source = self._magnifications(
+                system, t, obs_pos, row_lc, resolve_method=resolve_method
+            )
+        else:
+            # The backend's method list is fixed once per source, on the
+            # whole time axis (resolve_auto_vbbl), BEFORE any node group's
+            # Op is built -- a per-row decision, never a per-node one.
             if resolve_method:
-                event.resolve_auto_vbbl(index=j)
-
-            def magnification(g, times, obs, j=j):
-                u1, u2, bandpass = self._finite_source_limb_darkening(
-                    system, int(groups[g][0])
-                )
-                return event.get_magnification_op(
-                    times,
-                    obs,
-                    system,
-                    index=j,
-                    u1=u1,
-                    u2=u2,
-                    bandpass=bandpass,
-                )
-
-            if len(present) == 1:
-                A_per_source.append(magnification(present[0], t, obs_pos))
-                continue
-            A = pt.zeros_like(pt.as_tensor_variable(t), dtype="float64")
-            for g in present:
-                rows = np.flatnonzero(row_group == g)
-                A = pt.set_subtensor(
-                    A[rows], magnification(g, t[rows], obs_pos[rows])
-                )
-            A_per_source.append(A)
+                for j in range(n_src):
+                    event.resolve_auto_vbbl(index=j)
+            A_per_source = self._smeared_magnifications(
+                system, t, row_lc, exposure
+            )
 
         fs = self.f_source.value[inst]
         fb = self.f_blend.value[inst]
@@ -2792,7 +2920,13 @@ class MulensInstrument(Instrument):
             self.inst_map_tensor,
             self.inst_map,
             resolve_method=True,
+            exposure="data" if any(k > 1 for k in self.ninterp) else None,
         )
+
+        # Retained (detrend-free, exposure-averaged where a light curve
+        # smears) so the plotted model can be pinned to the likelihood's
+        # (tests/test_mulens_exposure.py).
+        self._model_flux_data_node = model_flux
 
         # Optional detrending against extra data columns, through the shared
         # base mechanism: the coefficients are magnitude-space (airmass,
@@ -3382,8 +3516,37 @@ class MulensInstrument(Instrument):
             nodes[0] if len(nodes) == 1 else pt.stack(nodes)
         )
 
+        # A SMEARED light curve's own curve: the same builder averaged
+        # over each exposure (_smeared_magnifications), on the grid's own
+        # node observer positions, which it computes from t -- the obs_pos
+        # it is handed (the epochs') is not what it needs.
+        obs_nodes_input = pt.tensor3("obs_nodes")
+        smeared_fns = {}
+        for i in range(self.n_elements):
+            if self.ninterp[i] <= 1:
+                continue
+            node = self._model_flux(
+                system,
+                t_input,
+                None,
+                inst_idx,
+                int(i),
+                exposure=(i, obs_nodes_input),
+            )
+            nodes.append(node)
+            smeared_fns[i] = pytensor.function(
+                inputs=[t_input, obs_nodes_input, inst_idx] + param_symbols,
+                outputs=node,
+                on_unused_input="ignore",
+            )
+
         def compiled_model_flux(t, obs_pos, i, *values):
-            return fns[group_of_lc[int(i)]](t, obs_pos, i, *values)
+            i = int(i)
+            if i in smeared_fns:
+                return smeared_fns[i](
+                    t, self._node_observer_positions(i, t), i, *values
+                )
+            return fns[group_of_lc[i]](t, obs_pos, i, *values)
 
         self._compiled_model_flux = compiled_model_flux
 
