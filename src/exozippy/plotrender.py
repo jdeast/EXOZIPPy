@@ -72,7 +72,9 @@ defaults here are the ones the GUI mirrors (review 4.11.6).
 
 from __future__ import annotations
 
+import dataclasses
 import logging
+import time
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -316,6 +318,128 @@ def render_spec_groups(spec_groups, filename_prefix="debug"):
     return written
 
 
+# ---------------------------------------------------------------------------
+# Posterior-draw plot_data on the sampler's pool (review 2.6.44)
+# ---------------------------------------------------------------------------
+
+# The wrap-up's posterior plots call plot_data once per draw (51 per pass,
+# once more per mode, and again for the one-page figure), serially.  On a
+# finite-source binary lens that is the dominant wrap-up cost: measured on
+# examples/MOA-2008-BLG-379 (CPU time, 51 draws), the light-curve plot_data
+# is 17.4 s per draw against a 0.23 s logp -- 74 logp-equivalents a draw,
+# ~15 CPU-minutes a pass -- and it scales with the magnification cost, so at
+# OGLE-2013-BLG-0341's ~225 s logp one serial pass would be days.  Inside
+# ``plot_pool(cores, eval_timeout)`` (run.py opens it around the wrap-up's
+# plot stages) the draws after the reference go out on a fork pool through
+# samplers._common.map_draws, each under eval_timeout; outside it (the
+# pre-flight plots, a GUI preview, a test) everything is serial, as before.
+_PLOT_POOL = {"cores": 1, "eval_timeout": None}
+# Pool only when the serial remainder would take longer than this (the
+# reference draw's own time x the draws left): a fork per component is not
+# free, and an RV or transit plot_data is milliseconds.
+PLOT_POOL_MIN_S = 5.0
+
+_PD_COMPONENT = None
+_PD_SYSTEM = None
+_PD_POINTS = None
+_PD_KWARGS = None
+
+
+class plot_pool:  # noqa: N801 - used as a context manager, like a function
+    """Context in which plot_data_at_points may use ``cores`` workers."""
+
+    def __init__(self, cores, eval_timeout=None):
+        self.grant = {"cores": cores, "eval_timeout": eval_timeout}
+
+    def __enter__(self):
+        self.saved = dict(_PLOT_POOL)
+        _PLOT_POOL.update(self.grant)
+        return self
+
+    def __exit__(self, *exc):
+        _PLOT_POOL.clear()
+        _PLOT_POOL.update(self.saved)
+        return False
+
+
+def _without_nodes(charts):
+    """``charts`` with every trace's ``node`` dropped.
+
+    ``Trace.node`` is the symbolic pytensor graph behind a model curve, kept
+    for the GUI's live re-evaluation; it is not serialized, not compared,
+    and no PDF renderer reads it -- and it does not pickle (a pymc
+    CustomDist class), so a chart carrying one cannot come back from a pool
+    worker.  Dropped on both paths, so serial and pooled charts are equal.
+    """
+    return [
+        dataclasses.replace(
+            chart,
+            traces=[dataclasses.replace(tr, node=None) for tr in chart.traces],
+        )
+        for chart in charts
+    ]
+
+
+def _plot_data_range(lo, hi):
+    """Worker: ("ok", charts) or ("error", text) for points [lo, hi)."""
+    out = []
+    for i in range(lo, hi):
+        try:
+            out.append(
+                (
+                    "ok",
+                    _without_nodes(
+                        _PD_COMPONENT.plot_data(
+                            _PD_SYSTEM, _PD_POINTS[i], **_PD_KWARGS
+                        )
+                    ),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - reported by the parent
+            out.append(("error", f"{type(exc).__name__}: {exc}"))
+    return out
+
+
+def plot_data_at_points(component, system, points, t_first=None, **kwargs):
+    """``component.plot_data`` at each of ``points``, in order.
+
+    Returns ``[("ok", charts) | ("error", text) | ("timeout", None)]``.
+    Serial unless a ``plot_pool`` grant is open AND the serial cost
+    (``t_first`` -- the caller's measured time for one call -- times the
+    number of points) exceeds ``PLOT_POOL_MIN_S``; pooled results are the
+    same charts, computed in forked workers.  A draw whose call outlasts
+    eval_timeout is ("timeout", None), and the caller reports it.
+    """
+    global _PD_COMPONENT, _PD_SYSTEM, _PD_POINTS, _PD_KWARGS
+    from .samplers._common import map_draws
+
+    cores = _PLOT_POOL["cores"]
+    pooled = (
+        cores != 1
+        and len(points) > 1
+        and t_first is not None
+        and t_first * len(points) > PLOT_POOL_MIN_S
+    )
+    _PD_COMPONENT, _PD_SYSTEM, _PD_POINTS, _PD_KWARGS = (
+        component,
+        system,
+        list(points),
+        kwargs,
+    )
+    try:
+        results, _timed_out = map_draws(
+            _plot_data_range,
+            len(points),
+            cores=cores if pooled else 1,
+            eval_timeout=_PLOT_POOL["eval_timeout"],
+            label=f"plot_data ({getattr(component, 'prefix', component)})",
+            log=logger,
+        )
+    finally:
+        _PD_COMPONENT = _PD_SYSTEM = _PD_POINTS = _PD_KWARGS = None
+    return [("timeout", None) if r is None else r for r in results]
+
+
 def plot_via_specs(
     component, system, points, filename_prefix="debug", **plot_data_kwargs
 ):
@@ -336,19 +460,35 @@ def plot_via_specs(
         logger.warning("No points provided for plotting.")
         return []
 
-    spec_groups = []
-    for idx, point in enumerate(points):
-        try:
-            spec_groups.append(
-                component.plot_data(system, point, **plot_data_kwargs)
-            )
-        except Exception as exc:  # noqa: BLE001 - skip a bad posterior draw
-            if idx == 0:
-                raise
+    # The reference point in-process: its failure aborts the plot (it
+    # supplies the data traces), and its time decides whether the rest are
+    # worth a pool (plot_data_at_points).
+    t0 = time.perf_counter()
+    spec_groups = [component.plot_data(system, points[0], **plot_data_kwargs)]
+    t_first = time.perf_counter() - t0
+    rest = plot_data_at_points(
+        component, system, points[1:], t_first=t_first, **plot_data_kwargs
+    )
+    n_timeout = 0
+    for idx, (state, value) in enumerate(rest, start=1):
+        if state == "ok":
+            spec_groups.append(value)
+        elif state == "timeout":
+            n_timeout += 1
+        else:  # a bad posterior draw is skipped
             logger.warning(
                 "plot_data failed for draw %d of %s: %s",
                 idx,
                 getattr(component, "prefix", component),
-                exc,
+                value,
             )
+    if n_timeout:
+        logger.warning(
+            "%d of %d posterior draw(s) of %s exceeded eval_timeout=%gs in "
+            "plot_data and are left out of its plots.",
+            n_timeout,
+            len(points) - 1,
+            getattr(component, "prefix", component),
+            float(_PLOT_POOL["eval_timeout"]),
+        )
     return render_spec_groups(spec_groups, filename_prefix=filename_prefix)

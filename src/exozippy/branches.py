@@ -48,7 +48,6 @@ Component-agnostic: nothing here knows which component declared a branch.
 """
 
 import logging
-import multiprocessing as mp
 
 import numpy as np
 import pytensor
@@ -68,6 +67,7 @@ _LABEL_SEP = " | "
 # run._compute_lp_from_model, whose pattern this is.
 _EVAL_FN = None
 _EVAL_NAMES = None
+_EVAL_DRAWS = None
 
 
 def _apply_combination(nodes, sequence):
@@ -119,12 +119,17 @@ def _compile_evaluator(system, model):
     return fn, names, dets
 
 
-def _eval_chain(args):
-    chain_data, chain_idx, n_draws = args
-    rows = []
-    for d in range(n_draws):
-        rows.append(_EVAL_FN(*[chain_data[n][d] for n in _EVAL_NAMES]))
-    return chain_idx, rows
+def _eval_range(lo, hi):
+    """Evaluator rows at flattened draws [lo, hi) (forked worker or inline).
+
+    Reads the compiled evaluator, the free-RV names and the (chain*draw,
+    ...) internal-unit arrays from the globals resolve_branch_draws sets
+    before samplers._common.map_draws forks.
+    """
+    return [
+        _EVAL_FN(*[_EVAL_DRAWS[n][i] for n in _EVAL_NAMES])
+        for i in range(lo, hi)
+    ]
 
 
 def _raw_inputs(posterior, names, param_lookup):
@@ -195,7 +200,9 @@ def is_branch_resolved(idata):
     return ss is not None and "branch_combination" in ss
 
 
-def resolve_branch_draws(system, model, idata, param_lookup=None, cores=None):
+def resolve_branch_draws(
+    system, model, idata, param_lookup=None, cores=None, eval_timeout=None
+):
     """Draw each posterior draw's branch combination and re-derive, in place.
 
     Returns the set of posterior variable NAMES it regenerated; they come back
@@ -242,36 +249,74 @@ def resolve_branch_draws(system, model, idata, param_lookup=None, cores=None):
         ", ".join(labels),
     )
 
-    global _EVAL_FN, _EVAL_NAMES
+    # Below one task per chain, under eval_timeout (review 2.6.44): this was
+    # one pool.map task per chain with no timeout, so one hung evaluation
+    # held the wrap-up forever.  map_draws cuts the draws into ranges sized
+    # to the pool, on the sampler's grant (None = AUTO), and writes off a
+    # call past eval_timeout.
+    global _EVAL_FN, _EVAL_NAMES, _EVAL_DRAWS
+    n_total = n_chains * n_draws
     _EVAL_FN, _EVAL_NAMES = fn, names
+    _EVAL_DRAWS = {
+        n: np.stack([arr[n] for arr in chain_arrays]).reshape(
+            (n_total,) + chain_arrays[0][n].shape[1:]
+        )
+        for n in names
+    }
     try:
-        from .samplers._common import default_cores
+        from .samplers._common import map_draws
 
-        grant = default_cores() if cores is None else max(1, int(cores))
-        n_workers = min(n_chains, grant)
-        jobs = [(arr, c, n_draws) for c, arr in enumerate(chain_arrays)]
-        if n_workers > 1:
-            with mp.get_context("fork").Pool(n_workers) as pool:
-                results = pool.map(_eval_chain, jobs)
-        else:
-            results = [_eval_chain(j) for j in jobs]
+        rows, timed_out = map_draws(
+            _eval_range,
+            n_total,
+            cores=cores,
+            eval_timeout=eval_timeout,
+            label="[branches] branch weights",
+            log=logger,
+        )
     finally:
-        _EVAL_FN, _EVAL_NAMES = None, None
+        _EVAL_FN, _EVAL_NAMES, _EVAL_DRAWS = None, None, None
 
+    # A draw whose evaluation outlasted eval_timeout has no weights: it is
+    # UNRESOLVED -- branch_combination -1, its Deterministics left on the
+    # as-built (primary) branch, excluded from the branch probabilities --
+    # and counted on the trace and in the log, never silently assigned.
+    unresolved = np.zeros((n_chains, n_draws), dtype=bool)
     log_w = np.full((n_chains, n_draws, n_comb), np.nan)
     det_vals = [[None] * n_draws for _ in range(n_chains)]
-    for c, rows in results:
-        for d, row in enumerate(rows):
-            log_w[c, d] = np.asarray(row[0], dtype=float)
-            det_vals[c][d] = row[1:]
-    if not np.all(np.isfinite(log_w).any(axis=-1)):
-        bad = int((~np.isfinite(log_w).any(axis=-1)).sum())
+    for i, row in enumerate(rows):
+        c, d = divmod(i, n_draws)
+        if row is None:
+            unresolved[c, d] = True
+            continue
+        log_w[c, d] = np.asarray(row[0], dtype=float)
+        det_vals[c][d] = row[1:]
+    n_unresolved = int(unresolved.sum())
+    if n_unresolved:
+        logger.warning(
+            "[branches] %d of %d draw(s) exceeded eval_timeout=%gs: they are "
+            "UNRESOLVED (branch_combination -1), keep the as-built branch's "
+            "Deterministics and are left out of the branch probabilities.",
+            n_unresolved,
+            n_total,
+            float(eval_timeout),
+        )
+    has_finite = np.isfinite(log_w).any(axis=-1)
+    if not np.all(has_finite | unresolved):
+        bad = int((~(has_finite | unresolved)).sum())
         raise FloatingPointError(
             f"[branches] {bad} draw(s) have no finite branch-combination "
             "weight at all; their branch cannot be drawn."
         )
     log_w = np.where(np.isfinite(log_w), log_w, -np.inf)
-    z, prob = _draw_combinations(log_w, seed)
+    # An unresolved draw still consumes its uniform from the seeded stream
+    # (0-weights here, then overwritten), so every RESOLVED draw's branch is
+    # exactly what it would have been had nothing timed out.
+    z, prob = _draw_combinations(
+        np.where(unresolved[..., None], 0.0, log_w), seed
+    )
+    z[unresolved] = -1
+    log_w[unresolved] = np.nan
 
     regenerated = set()
     for j, det in enumerate(dets):
@@ -281,6 +326,9 @@ def resolve_branch_draws(system, model, idata, param_lookup=None, cores=None):
         stacked = np.empty(target.shape, dtype=target.dtype)
         for c in range(n_chains):
             for d in range(n_draws):
+                if unresolved[c, d]:
+                    stacked[c, d] = target.values[c, d]
+                    continue
                 stacked[c, d] = np.reshape(
                     det_vals[c][d][int(z[c, d]) * n_dets + j], target.shape[2:]
                 )
@@ -300,7 +348,7 @@ def resolve_branch_draws(system, model, idata, param_lookup=None, cores=None):
         dims=["chain", "draw", "branch_combination_dim"],
         coords={**coords, "branch_combination_dim": np.arange(n_comb)},
     )
-    probs = branch_probabilities(prob, len(labels))
+    probs = branch_probabilities(prob[~unresolved], len(labels))
     # netCDF attributes: one string and one float array (a list of strings
     # is not portable across netCDF engines).
     ss["branch_combination"].attrs["branch_labels"] = _LABEL_SEP.join(labels)
@@ -308,14 +356,15 @@ def resolve_branch_draws(system, model, idata, param_lookup=None, cores=None):
         probs, dtype=float
     )
     ss["branch_combination"].attrs["seed"] = int(seed)
+    ss["branch_combination"].attrs["n_eval_timeout"] = n_unresolved
     for label, p_alt in zip(labels, probs):
         logger.info(
             "[branches] %s: posterior probability %.4f (Rao-Blackwellized; "
             "%d of %d draws took it)",
             label,
             p_alt,
-            int(((z >> labels.index(label)) & 1).sum()),
-            z.size,
+            int(((z[~unresolved] >> labels.index(label)) & 1).sum()),
+            int((~unresolved).sum()),
         )
     return regenerated
 
@@ -335,4 +384,13 @@ def branch_summary_lines(idata):
     probs = np.atleast_1d(attrs["branch_probability"])
     for label, p in zip(labels, probs):
         lines.append(f"  {label}: {float(p):.4f}")
+    # A trace resolved before review 2.6.44 carries no count, and correctly
+    # so: that code had no eval_timeout, so none of its draws could time out.
+    n_unresolved = int(attrs.get("n_eval_timeout", 0))
+    if n_unresolved:
+        lines.append(
+            f"  ({n_unresolved} draw(s) UNRESOLVED: their evaluation "
+            f"exceeded eval_timeout; branch_combination -1, as-built branch, "
+            f"not in the probabilities above)"
+        )
     return lines

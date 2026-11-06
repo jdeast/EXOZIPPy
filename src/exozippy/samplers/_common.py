@@ -1761,6 +1761,203 @@ class StartEvaluator:
         return [float(v) for v in raw]
 
 
+# ---------------------------------------------------------------------------
+# Wrap-up evaluations over posterior draws (review 2.6.44)
+# ---------------------------------------------------------------------------
+
+# A task (a contiguous range of draws) is sized to take about this long, so
+# a fast model is not paying one IPC round trip per microsecond logp.  A
+# slower model (one call >= this) gets one draw per task, where the per-call
+# eval_timeout is exact.
+DRAW_TASK_TARGET_S = 1.0
+# A multi-draw task's deadline is eval_timeout PLUS this many times its
+# expected legitimate work (m draws x the measured per-draw time), so a hung
+# call is still caught within ~eval_timeout and ordinary jitter never is.
+DRAW_TASK_SLACK = 10.0
+# Wall-clock interval between progress lines (the 2.6.41 probe's cadence).
+DRAW_PROGRESS_S = 60.0
+
+
+def _run_draw_range(task):
+    """Pool worker: ``worker(lo, hi)`` over one range of draws, timed.
+
+    ``worker`` is a module-level function (pickled by reference) that reads
+    its compiled function and its draws from fork-inherited globals the
+    caller set before the pool was created, so a task's IPC payload is two
+    integers.  It is NOT wrapped in an except: a failure here is a model or
+    bookkeeping bug, and it re-raises in the parent from ``get()``.
+    """
+    worker, lo, hi = task
+    t0 = time.perf_counter()
+    out = list(worker(lo, hi))
+    return out, time.perf_counter() - t0
+
+
+def map_draws(worker, n_items, *, cores, eval_timeout, label, log=None):
+    """Evaluate ``worker`` over ``n_items`` draws on the sampler's grant.
+
+    The wrap-up passes that re-evaluate the model at every posterior draw
+    (lp for a sampler that writes none, the branch weights of a V_c/V_e
+    fit, the evidence bridge) used to fork one task per CHAIN (or per
+    worker block) with no eval_timeout: one hung call held its whole chain,
+    and so the stage, forever, and a run with more chains than cores waited
+    a full extra chain for the remainder (review 2.6.44).  Here the draws
+    are cut into ranges and dispatched on the same machinery StartEvaluator
+    uses -- ``create_pool``, ``_map_logp_timeout``, ``recycle_pool`` -- one
+    task per worker in flight, each under its own deadline:
+
+      1. a first batch of single draws, one per worker, measures the
+         per-draw time (it is also real work: those draws are done);
+      2. the rest go out in ranges of ``m = DRAW_TASK_TARGET_S / t_draw``
+         draws (1 for any model slower than that), at most as many as
+         keep every worker busy, each under ``eval_timeout`` for m == 1 or
+         ``eval_timeout + DRAW_TASK_SLACK * m * t_draw`` for a range;
+      3. a range that timed out is re-run ONE DRAW PER TASK under
+         ``eval_timeout``, so only the draws that really hang are lost.
+
+    The pool is recycled after any batch with a timeout (a hung worker never
+    rejoins).  ``worker(lo, hi)`` must be a module-level function returning
+    ``hi - lo`` results and reading its state from globals set BEFORE this
+    is called (create_pool forks).  Serial (``cores`` resolving to 1) is one
+    in-process ``worker(0, n_items)``: there is nothing to time out against,
+    which ``warn_serial_eval_timeout`` says.
+
+    Returns ``(results, timed_out)``: ``results[i]`` is draw i's output, or
+    None for a draw that outlasted ``eval_timeout``; ``timed_out`` is the
+    sorted list of those indices.  The caller reports them -- a timed-out
+    draw is never silently dropped.  Which range a draw lands in changes
+    no value: every draw is the same pure function of its inputs.
+    """
+    log = logger if log is None else log
+    n_items = int(n_items)
+    if n_items == 0:
+        return [], []
+    pool, n_proc = create_pool(cores, n_items, label, log)
+    warn_serial_eval_timeout(eval_timeout, pool, n_proc, label, log)
+    if pool is None:
+        return list(worker(0, n_items)), []
+
+    results = [None] * n_items
+    timed_out = []
+    t_start = time.monotonic()
+    state = {"done": 0, "last": t_start}
+    log.info(
+        f"{label}: {n_items} draw(s) on {n_proc} worker(s), "
+        + (
+            f"each logp call under eval_timeout={float(eval_timeout):g}s"
+            if eval_timeout is not None
+            else "no eval_timeout (a hung call is not written off)"
+        )
+    )
+
+    def _progress(force=False):
+        now = time.monotonic()
+        if not force and now - state["last"] < DRAW_PROGRESS_S:
+            return
+        state["last"] = now
+        done = state["done"]
+        el = now - t_start
+        eta = (
+            f", ETA {el * (n_items - done) / done:.0f} s"
+            if 0 < done < n_items
+            else ""
+        )
+        log.info(
+            f"{label}: {done}/{n_items} draw(s) evaluated, "
+            f"{len(timed_out)} timed out, {el:.0f} s{eta}"
+        )
+
+    def _batches(ranges, timeout):
+        """Run ranges, n_proc in flight; return (timed-out ranges, s/draw)."""
+        nonlocal pool
+        lost, per_draw = [], []
+        for b in range(0, len(ranges), n_proc):
+            batch = ranges[b : b + n_proc]
+            out, to = _map_logp_timeout(
+                pool,
+                [(worker, lo, hi) for lo, hi in batch],
+                timeout,
+                fn=_run_draw_range,
+            )
+            to = set(to)
+            for j, (lo, hi) in enumerate(batch):
+                if j in to:
+                    lost.append((lo, hi))
+                    continue
+                vals, dt = out[j]
+                if len(vals) != hi - lo:
+                    raise RuntimeError(
+                        f"{label}: the worker returned {len(vals)} result(s) "
+                        f"for the {hi - lo} draw(s) [{lo}, {hi})"
+                    )
+                results[lo:hi] = vals
+                per_draw.append(dt / (hi - lo))
+                state["done"] += hi - lo
+            if to:
+                log.warning(
+                    f"{label}: {len(to)} task(s) exceeded their deadline "
+                    f"({timeout:.0f} s); recycling the worker pool."
+                )
+                pool = recycle_pool(pool, n_proc)
+            _progress()
+        return lost, per_draw
+
+    try:
+        n_first = min(n_proc, n_items)
+        lost, per_draw = _batches(
+            [(i, i + 1) for i in range(n_first)], eval_timeout
+        )
+        timed_out.extend(lo for lo, _hi in lost)
+        t_draw = float(np.median(per_draw)) if per_draw else np.inf
+        rest = n_items - n_first
+        if rest > 0:
+            if not np.isfinite(t_draw) or t_draw >= DRAW_TASK_TARGET_S:
+                m = 1
+            else:
+                m = max(
+                    1,
+                    min(
+                        int(DRAW_TASK_TARGET_S / max(t_draw, 1e-9)),
+                        -(-rest // n_proc),
+                    ),
+                )
+            if eval_timeout is None:
+                timeout = None
+            elif m == 1:
+                timeout = float(eval_timeout)
+            else:
+                timeout = float(eval_timeout) + DRAW_TASK_SLACK * m * t_draw
+            ranges = [
+                (lo, min(lo + m, n_items)) for lo in range(n_first, n_items, m)
+            ]
+            lost, _ = _batches(ranges, timeout)
+            singles = []
+            for lo, hi in lost:
+                if hi - lo == 1:
+                    timed_out.append(lo)
+                else:
+                    singles.extend((i, i + 1) for i in range(lo, hi))
+            if singles:
+                log.warning(
+                    f"{label}: re-running the {len(singles)} draw(s) of "
+                    f"{len(lost)} timed-out range(s) one per task, so only "
+                    f"the draws that hang are lost."
+                )
+                lost, _ = _batches(singles, eval_timeout)
+                timed_out.extend(lo for lo, _hi in lost)
+    finally:
+        _shutdown_pool(pool)
+    timed_out.sort()
+    if timed_out:
+        log.error(
+            f"{label}: {len(timed_out)} of {n_items} draw(s) exceeded "
+            f"eval_timeout={float(eval_timeout):g}s and were not evaluated "
+            f"(first: draw {timed_out[0]})."
+        )
+    _progress(force=time.monotonic() - t_start >= DRAW_PROGRESS_S)
+    return results, timed_out
+
+
 def _make_starts(
     n_chains,
     raw_starts,

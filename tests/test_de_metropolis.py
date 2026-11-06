@@ -316,7 +316,8 @@ def test_a_de_fit_completes_and_produces_finite_draws(tiny_model, variant):
     # DE step methods write no 'lp' stat, so run.py fills it in from the
     # model; that is the path a demc/demcz fit takes.
     assert "lp" not in idata.sample_stats.data_vars
-    lp = run._compute_lp_from_model(tiny_model, idata)
+    lp, n_timed_out = run._compute_lp_from_model(tiny_model, idata)
+    assert n_timed_out == 0
     assert lp is not None and np.isfinite(lp).all()
     # The chains started over-dispersed around one seed, so provenance is
     # recorded the same way PTDE records it.

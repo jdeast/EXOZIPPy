@@ -111,6 +111,7 @@ def build_mode_reports(
     hot_status=None,
     mode_status=None,
     cores=None,
+    eval_timeout=None,
 ):
     """Identify posterior modes, distribute the posterior, write tables.
 
@@ -161,7 +162,8 @@ def build_mode_reports(
         the LaTeX/CSV output below picks the new weights up automatically.
         Self-diagnosing: a single refused mode falls back to occupancy.
         Its logp evaluations run on a pool of at most ``cores`` workers
-        (the sampler's grant; None is the AUTO grant).
+        (the sampler's grant; None is the AUTO grant), each call under
+        ``eval_timeout`` (``sampler: eval_timeout:``; review 2.6.44).
     seed_ledger : list of outputs.ledger.SeedRecord, optional
         The multi-seed "considered and rejected" ledger built by run.py
         after the seed polish (outputs.ledger.build_seed_ledger). When
@@ -323,7 +325,12 @@ def build_mode_reports(
                 len(norm_rows),
             )
             evidences = estimate_mode_evidences(
-                model, idata, mode_report, log_norm=log_norm, cores=cores
+                model,
+                idata,
+                mode_report,
+                log_norm=log_norm,
+                cores=cores,
+                eval_timeout=eval_timeout,
             )
             # idata= keeps posterior['mode'].attrs in step with the rewritten
             # weights/provenance instead of leaving the occupancy values
