@@ -514,8 +514,8 @@ def _smear_host(exptime_s, ninterp, rule):
     )
     host._blocks_inst_map = Instrument._blocks_inst_map
     host._node_mean = Instrument._node_mean
-    host._exposure_partition = lambda im: Instrument._exposure_partition(
-        host, im
+    host._exposure_partition = lambda im, ninterp=None: (
+        Instrument._exposure_partition(host, im, ninterp)
     )
     return host, Instrument.smear
 
