@@ -215,25 +215,148 @@ def test_star_constrains_ld_must_be_a_yaml_boolean():
         band.load_data(system=None)
 
 
-def test_a_microlensing_only_band_cannot_be_tied(monkeypatch):
+def _write_pspl_lc(path, t0=2460025.0, te=30.0, u0=0.1, n=60):
+    t = np.linspace(t0 - 2 * te, t0 + 2 * te, n)
+    u = np.sqrt(u0**2 + ((t - t0) / te) ** 2)
+    amp = (u**2 + 2.0) / (u * np.sqrt(u**2 + 4.0))
+    mag = 18.0 - 2.5 * np.log10(amp)
+    np.savetxt(path, np.column_stack([t, mag, np.full(n, 0.01)]))
+    return str(path)
+
+
+def _prepared_fspl(tmp_path, band, galactic=False):
+    """A finite-source PSPL whose only limb-darkening reader is the
+    microlensing light curve, with a lens (star 0) and a source (star 1)
+    whose Teff/[Fe/H]/radius the params file states."""
+    lc = _write_pspl_lc(tmp_path / "lc.dat")
+    config = {
+        "star": [{"name": "Lens"}, {"name": "Source"}],
+        "mulensevent": [
+            {"finite_source": True, "t0_par": 2460025.0, "use_op": False}
+        ],
+        "lens": [{"body": "star.Lens"}],
+        "source": [{"body": "star.Source"}],
+        "band": [band],
+        "mulensinstrument": [
+            {"name": "OGLE", "file": lc, "filter": "I", "band": "I"}
+        ],
+    }
+    if galactic:
+        config["galacticmodel"] = [{"name": "gm", "anchor_idx": 1}]
+    params = {
+        "source.Source.t_0": {"initval": 2460025.0},
+        "source.Source.u_0": {"initval": 0.1},
+        "source.Source.rho": {"initval": 1.0e-3},
+        "mulensevent.t_E": {"initval": 30.0},
+        "star.Source.teff": {"initval": 4800.0, "sigma": 200.0},
+        "star.Source.feh": {"initval": 0.1, "sigma": 0.2},
+        "star.Source.radius": {"initval": 1.2, "sigma": 0.1},
+    }
+    for nm in ("Lens", "Source"):
+        params[f"star.{nm}.ra"] = {"initval": 264.0, "sigma": 0}
+        params[f"star.{nm}.dec"] = {"initval": -27.0, "sigma": 0}
+    system = System(config, user_params=params)
+    system.prepare()
+    return system
+
+
+@pytest.mark.parametrize(
+    "law, offsets", [("linear", ("du1",)), ("quadratic", ("du1", "du2"))]
+)
+def test_a_microlensing_band_is_tied_to_the_source_star(
+    tmp_path, synthetic_claret_tables, law, offsets
+):
     """
-    Given a tied band read only by a finite-source microlensing light curve,
-    When the tie is registered,
-    Then it RAISES (microlensing is out of scope for now) rather than
-    silently leaving the band untied.
+    Given a band read only by a finite-source microlensing light curve,
+    with star_constrains_ld unset,
+    When the system is prepared and built,
+    Then the band is tied exactly as a transit band would be: the tie is a
+    property of the band (its filter, its star), never of what reads it.
+    Its star is the SOURCE (star 1), which is bounded to the tables' box,
+    read by the tie, and whose start seeds the limb darkening.
     """
-    band = Band(
-        [{"name": "I", "filter": "I", "star_constrains_ld": True}],
-        _DummyConfigManager(),
+    system = _prepared_fspl(
+        tmp_path, {"name": "I", "filter": "I", "ld_law": law}
     )
-    band.load_data(system=None)
-    monkeypatch.setattr(
-        band,
-        "ld_consumers",
-        lambda system: [LDConsumer("mulensinstrument[OGLE]", 0, 1, "mulens")],
+    band = system.band
+    assert band.claret_tie_stars(system) == {0: 1}
+    for name in offsets:
+        assert band.manifest[name] == {"expr_key": "default"}
+    assert ("du2" in band.manifest) == (law == "quadratic")
+
+    overrides = system.config_manager.param_overrides
+    for ax in ("teff", "logg", "feh"):
+        assert overrides[f"star.1.{ax}"] == {
+            "lower": ct.BOX[ax][0],
+            "upper": ct.BOX[ax][1],
+        }
+        assert f"star.0.{ax}" not in overrides
+
+    read = {
+        (c.param, c.star)
+        for c in system.star.structure_consumers(system)
+        if c.label == Band.CLARET_CONSUMER_LABEL
+    }
+    assert read == {("teff", 1), ("feh", 1), ("radius", 1)}
+
+    model = system.build_model()
+    assert "band.du1" in model.named_vars
+
+
+@pytest.mark.parametrize("tied", [True, False])
+def test_a_tied_microlensing_source_keeps_its_mass_free(
+    tmp_path, synthetic_claret_tables, tied
+):
+    """
+    Given a finite-source event with a galactic model, whose source star's
+    mass is otherwise pinned (a microlensing-only source: Star's tier-2
+    "overrides" pin, since only the mass prior reads it),
+    When its band is tied to the Claret tables,
+    Then the source's logmass is NOT pinned: the tie reads its logg =
+    f(logmass, radius), and a pinned mass would leave the tables' logg
+    barrier pressing on the radius -- on rho -- against an arbitrary fixed
+    mass (examples/ob161045 started 466 nats into it).  Untied, the pin
+    stands, so the test sees the switch.
+    """
+    system = _prepared_fspl(
+        tmp_path,
+        {
+            "name": "I",
+            "filter": "I",
+            "ld_law": "linear",
+            "star_constrains_ld": tied,
+        },
+        galactic=True,
     )
-    with pytest.raises(ValueError, match="not implemented for microlensing"):
-        band._register_claret_tie(system=None)
+    # Pinned = a sigma of 0 on the source in the overrides channel; with no
+    # element pinned the entry carries no sigma override at all.
+    entry = system.star.manifest["logmass"]
+    overrides = entry.get("overrides", {}) if isinstance(entry, dict) else {}
+    sigma = overrides.get("sigma")
+    pinned = sigma is not None and sigma[1] == 0.0
+    assert pinned == (not tied)
+
+
+def test_an_explicit_false_leaves_a_microlensing_band_untied(
+    tmp_path, synthetic_claret_tables
+):
+    """
+    Given the same microlensing band with star_constrains_ld: false,
+    When the system is prepared,
+    Then nothing is tied and the source star is not bounded.
+    """
+    system = _prepared_fspl(
+        tmp_path,
+        {
+            "name": "I",
+            "filter": "I",
+            "ld_law": "linear",
+            "star_constrains_ld": False,
+        },
+    )
+    assert system.band.claret_tie_stars(system) == {}
+    assert "du1" not in system.band.manifest
+    assert "star.1.teff" not in system.config_manager.param_overrides
 
 
 # --------------------------------------------------------------------------
@@ -418,7 +541,7 @@ def test_a_star_starting_below_the_tables_raises(
 
 def test_a_tied_band_nothing_reads_raises(tmp_path, synthetic_claret_tables):
     """
-    Given a tied V band that no transit, RM or DT dataset references,
+    Given a tied V band nothing reads the limb darkening of,
     When the system is prepared,
     Then it RAISES: there is nothing to tie.
     """

@@ -1183,9 +1183,9 @@ def write_param_file(
     # `sampled_vars`: it is never consumed above, so this loop is its only
     # path into the output file -- and a derived element is exactly where
     # `Parameter.build_pymc` puts a barrier for `bound_scale` to tune.
-    # `examples/gj1214`'s `star.A.loggsed: {bound_scale: 25.0}` -- the one
-    # place bound_scale is load-bearing today -- therefore had no path at
-    # all, and had to be re-added by hand after every restart-file cycle.
+    # `examples/gj1214`'s `star.A.loggsed: {bound_scale: 25.0}` (shipped
+    # until #508) therefore had no path at all, and had to be re-added by
+    # hand after every restart-file cycle.
     #
     # What this deliberately does NOT do is start writing derived parameters
     # a START VALUE.  Nothing here reads the trace: the entry is passed

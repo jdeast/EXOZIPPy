@@ -82,11 +82,22 @@ def get_symbol_map(event_cfg, system_config):
     mu_rel) maps to mulensevent.0.<param> IDENTICALLY in every per-source
     map -- so the shared relations dedup to ONE instance (ConfigManager
     collapses identical relation instances), which is ruling R2's collapse
-    happening in the engine for free.  Companion symbols map to LENS
-    ELEMENT 1 (the first companion; element 0 is the masked primary), and
-    only when a companion exists -- the pre-split map registered the
-    alpha/xalpha/yalpha paths for point lenses too, phantom leaf symbols
-    for parameters no manifest declared.
+    happening in the engine for free.
+
+    Then ONE MAP PER COMPANION (review 8.6.13): companion j (lens element
+    j; element 0 is the masked primary) maps q_lens, companion_mass and
+    primary_lens_mass, plus its geometry (alpha's pair, s <-> log_s) unless
+    it moves on a keplerian orbit.  The q relation and the geometry
+    relations therefore instantiate once per companion, for any number of
+    lens bodies.  Every other symbol stays unmapped in a companion map, so
+    those relations go inert there exactly as companion relations do for a
+    point lens.  The TOTAL lens mass is a sum over all bodies, whose shape
+    depends on the config, so it is not in RELATIONS but in
+    get_extra_relations.  Until 2026-10 only lens element 1 was mapped and
+    the mass sum existed for two bodies only, so a 3+ body lens had no
+    relation from mulensevent.0.mlens_total to the body masses: a seeded
+    t_E landed in mlens_total, which the model never reads (review 1.1.12),
+    and t_E was "not derivable" at stage 1 (review 2.6.34).
     """
     lens_block = (system_config or {}).get("lens") or []
     source_block = (system_config or {}).get("source") or []
@@ -111,19 +122,10 @@ def get_symbol_map(event_cfg, system_config):
     _, l_idx = lens_bodies[0]
     is_binary_lens = len(lens_bodies) > 1
 
-    companion_mass_path = None
-    if len(lens_bodies) == 2:
-        c_comp, c_idx = lens_bodies[1]
-        companion_mass_path = f"{c_comp}.{c_idx}.mass"
-    # 3+ bodies: the binary mass-sum/q relations cannot represent the
-    # extra companions, so companion_mass stays unregistered (both
-    # relations go inert) and MulensEvent.register_parameters seeds
-    # mulensevent.mlens_total from the per-body mass initvals instead.
-
     # theta_E/t_E/rho/pi_E are referenced to the TOTAL lens mass: the
     # primary star's mass for a single lens, the derived
     # mulensevent.0.mlens_total for a binary (tied to the per-body masses
-    # by the mass-sum relation).
+    # by the mass-sum relation, get_extra_relations).
     if is_binary_lens:
         lens_mass_total_path = "mulensevent.0.mlens_total"
     else:
@@ -146,12 +148,12 @@ def get_symbol_map(event_cfg, system_config):
             return None  # resolve_orbit_ref raises on it at construction
         return types[idx] if idx < len(types) else "keplerian"
 
-    keplerian = any(
-        isinstance(e, dict)
-        and e.get("orbit") is not None
-        and _type_of(e["orbit"]) == "keplerian"
-        for e in lens_block[1:]
-    )
+    def _keplerian(entry):
+        return (
+            isinstance(entry, dict)
+            and entry.get("orbit") is not None
+            and _type_of(entry["orbit"]) == "keplerian"
+        )
 
     maps = []
     for j, (s_comp, s_idx) in enumerate(source_bodies):
@@ -193,26 +195,6 @@ def get_symbol_map(event_cfg, system_config):
             "source_dec": f"{s_comp}.{s_idx}.dec",
         }
 
-        if companion_mass_path:
-            result["companion_mass"] = companion_mass_path
-            result["primary_lens_mass"] = f"star.{l_idx}.mass"
-
-        # Companion geometry: LENS ELEMENT 1 (companion slot 0; element 0
-        # is the masked primary -- no primary-element path may ever appear
-        # here, or a seed would target a warn-dropped bookkeeping pin).
-        # For 3+ body lenses only element 1 is covered by the relations;
-        # MulensEvent.register_parameters seeds the remaining companions
-        # from user body-mass/s hints.
-        if is_binary_lens and not keplerian:
-            result["q_lens"] = "lens.1.q"
-            result["alpha"] = "lens.1.alpha"
-            result["xalpha"] = "lens.1.xalpha"
-            result["yalpha"] = "lens.1.yalpha"
-            result["s"] = "lens.1.s"
-            result["log_s"] = "lens.1.log_s"
-        elif is_binary_lens:
-            result["q_lens"] = "lens.1.q"
-
         # log_rho exists only where THIS source severs the stellar tie
         # (star_constrains_rho: false, a per-instance flag now); the
         # relation stays inert otherwise, exactly like s/log_s for PSPL.
@@ -233,7 +215,53 @@ def get_symbol_map(event_cfg, system_config):
 
         maps.append(result)
 
+    # One map per companion: lens element j >= 1 (element 0 is the masked
+    # primary -- no primary-element path may ever appear here, or a seed
+    # would target a warn-dropped bookkeeping pin).
+    for j in range(1, len(lens_bodies)):
+        c_comp, c_idx = lens_bodies[j]
+        comp_map = {
+            "q_lens": f"lens.{j}.q",
+            "companion_mass": f"{c_comp}.{c_idx}.mass",
+            "primary_lens_mass": f"star.{l_idx}.mass",
+        }
+        if not _keplerian(lens_block[j]):
+            comp_map.update(
+                {
+                    "alpha": f"lens.{j}.alpha",
+                    "xalpha": f"lens.{j}.xalpha",
+                    "yalpha": f"lens.{j}.yalpha",
+                    "s": f"lens.{j}.s",
+                    "log_s": f"lens.{j}.log_s",
+                }
+            )
+        maps.append(comp_map)
+
     return maps
+
+
+def get_extra_relations(event_cfg, system_config):
+    """The total lens mass as the sum of EVERY lens body's mass.
+
+    Its number of terms depends on the config, so it cannot sit in the fixed
+    RELATIONS list (ConfigManager instantiates those per symbol map).  For a
+    single lens there is no sum: lens_mass_total maps straight onto the
+    primary's mass in get_symbol_map.
+    """
+    lens_block = (system_config or {}).get("lens") or []
+    bodies = [
+        _resolve_ref(e.get("body"), system_config, f"lens.{i}")
+        for i, e in enumerate(lens_block)
+        if isinstance(e, dict) and e.get("body") is not None
+    ]
+    if len(bodies) < 2:
+        return []
+    return [
+        sp.Eq(
+            sp.Symbol("mulensevent.0.mlens_total"),
+            sp.Add(*[sp.Symbol(f"{ct}.{ci}.mass") for ct, ci in bodies]),
+        )
+    ]
 
 
 RELATIONS = [
@@ -299,15 +327,13 @@ RELATIONS = [
     # theta_E reparameterization, active only for `fitthetae: true` (swap
     # 3); inert otherwise.
     sp.Eq(theta_E, 10**log_theta_E),
-    # Binary lens mass ratio: q = M_companion / M_primary
-    # companion_mass/primary_lens_mass are only in the symbol map for binary
-    # events, so these relations are automatically inert for PSPL (relaxation
-    # engine skips equations with unregistered symbols).  Propagates:
-    # user-supplied q → companion mass initval, or known masses → q.
+    # Lens mass ratio q_j = M_companion_j / M_primary, instantiated once per
+    # companion (get_symbol_map's companion maps); inert for a point lens,
+    # which has no companion map (the relaxation engine skips equations with
+    # unregistered symbols).  Propagates: user-supplied q -> companion mass
+    # initval, or known masses -> q.  The total-mass sum over all bodies is
+    # get_extra_relations.
     sp.Eq(q_lens * primary_lens_mass, companion_mass),
-    # Total lens mass = sum of body masses (binary only; inert for PSPL where
-    # lens_mass_total maps directly onto the primary star's mass).
-    sp.Eq(lens_mass_total, primary_lens_mass + companion_mass),
     # Source trajectory angle: alpha (radians, internal) → xalpha, yalpha.
     # xalpha = r·cos(alpha), yalpha = r·sin(alpha), where r is a free positive
     # scale sampled from the N(0,1) prior — only the direction arctan2(y,x) matters.

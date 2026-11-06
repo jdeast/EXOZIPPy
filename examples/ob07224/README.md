@@ -106,10 +106,11 @@ Downstream this is completely generic: `MulensInstrument.load_data` asks
 barycentric position and `_abs_to_delta` converts it to the Skowron+2011
 geocentric deviation, exactly as it does for Spitzer in `examples/ob140939`.
 A ground site is a spacecraft whose orbit happens to be an Earth radius wide.
-Nothing in `lens.py` knows the difference. On MulensModel's side the model is
-built with `parallax(topocentric=False)` -- MulensModel's own topocentric term
-is *not* used, because EXOZIPPy has already put the observer in the right
-place.
+Nothing in `lens.py` knows the difference. The default VBMicrolensing Op
+projects that deviation itself; on the `backend: mulensmodel` reference the
+model is built with `parallax(topocentric=False)` -- MulensModel's own
+topocentric term is *not* used, because EXOZIPPy has already put the observer
+in the right place.
 
 Heights are nominal to ~100 m. That is `1.6e-5` of an Earth radius, four
 orders of magnitude below the effect being fitted.
@@ -144,18 +145,16 @@ placeholders).
 (`rho = 8.5e-4`, impact parameter `~theta_*/3`), so the peak *is* the source.
 Two consequences:
 
-* The event goes on the MulensModel Op path
-  (`finite_source_LD_Yoo04` inside `+/- 5*rho*t_E` of `t_0`, point source
-  outside). That path has no gradient, so the sampler is the synchronous `ptde` (the recommended default since PR #376) and
+* The event goes on the VBMicrolensing ESPL Op (`ESPLMag2`, the finite
+  source at every epoch; it used the MulensModel Op until the default
+  likelihood path dropped MulensModel -- see
+  `src/exozippy/components/mulensing/mulensing.md`). That path has no gradient, so the sampler is the synchronous `ptde` (the recommended default since PR #376) and
   NUTS is unavailable -- `Lens.sampler_requirements()` will say so if you try.
-* Limb darkening lives *inside* the magnification, and one magnification curve
-  is computed per source over every instrument's concatenated times, so a
-  per-band `u1` would need a per-band magnification. With more than one band
-  present the model warns "Multiple bands for finite-source instruments; using
-  first band's u1" and uses the **lowest-indexed** band any instrument
-  references. That is why `band:` lists `I` first: the peak, the only place
-  8.4 mag of magnification makes limb darkening matter, is covered by OGLE `I`
-  and SMARTS `I`.
+* Limb darkening lives *inside* the magnification, so each band gets its own
+  magnification call on its own epochs, with its own `u1`. The peak, the only
+  place 8.4 mag of magnification makes limb darkening matter, is covered by
+  OGLE `I` and SMARTS `I`. (Before review 8.6.10 every light curve used the
+  first band's `u1`, which is why `band:` used to have to list `I` first.)
 
 `t0_par: 2454233.667` anchors the Skowron+2011 geocentric frame. For
 terrestrial parallax the choice matters far less than for annual parallax --
@@ -267,8 +266,9 @@ positions are being used", not as a parallax detection.
 
 ## Starting values
 
-`ob07224.params.yaml` carries the derivation next to every value. Four
-things worth knowing before reading it:
+`ob07224.params.yaml` carries the values with short notes; the
+derivations are here and in "Details behind the parameter file" below.
+Four things worth knowing before reading it:
 
 1. **`t_0` and `u_0` are not in the Letter**, which prints only derived
    quantities. They are measured here as described above. The OGLE EWS PSPL
@@ -328,3 +328,60 @@ all-points 2.56. The residual is tens of mmag of structure across the peak
 night against quoted errors of 1-5 mmag -- quick-look photometry of an
 `I = 10.5` star, which is precisely the systematic Gould+2009 re-reduced away
 and this example does not.
+
+### Details behind the parameter file
+
+These notes used to sit inline in `ob07224.params.yaml`.
+
+- **`u_0`.** The Letter says only that "the lens transited the source with
+  an impact parameter of ~theta_*/3", i.e. `u_0 ~ rho/3 = 2.8e-4`; the fit
+  of `t_0` and `u_0` above lands at `u_0/rho = 0.41`. At a source transit
+  the light curve constrains `u_0` only through the shape of a plateau it
+  barely resolves, so do not read much into the difference. It is seeded
+  positive: for a point lens with parallax, `(u_0, pi_E_perp) ->
+  -(u_0, pi_E_perp)` is a near-exact degeneracy (`conventions.md`, C23),
+  and what breaks it for terrestrial parallax is the observatories'
+  arrangement about the Earth's rotation axis. The Letter reports one
+  solution; if the Bronberg / Liverpool light curves are ever added, seed
+  both signs and let PTDE report the two modes.
+- **`t_E` and `rho` are the published values.** Refitting them here
+  (`t_0`, `u_0`, `t_E`, `rho` and the I-band `u1` free, `err_scale`
+  profiled out per instrument, `pi_E` pinned) gives `t_E = 7.10 d` and
+  `rho = 8.03e-4`, 3% and 6% from the published pair, out of raw archival
+  photometry: the refit is the check, not the seed. With
+  `star_constrains_rho` at its default, `rho` is derived from
+  `theta_*/theta_E` (`theta_E = 0.77 uas / 8.5e-4 = 0.91 mas`), and the
+  seed back-solves through the engine to the stellar chain.
+- **The relative proper motion.** With `theta_E = 0.9009 mas` and
+  `pi_rel = 1.7798 mas` from the mass/distance block:
+  `mu_rel,geo = theta_E/t_E = 47.62 mas/yr` at PA 218 deg, i.e.
+  `(E, N) = (-29.319, -37.526) mas/yr`; EXOZIPPy's
+  `v_earth,perp(t0_par) = (4.7533, 0.4187) /yr` (22.5 km/s almost due
+  east, the Letter's "23 km/s"); so
+  `mu_rel,hel = mu_rel,geo + pi_rel v_earth,perp = (-20.859, -36.781)
+  mas/yr`, which the lens carries on top of the source's nominal bulge
+  mean `(-6.0, -0.2)` (the Letter gives no absolute source proper motion,
+  and only the difference enters the model). Cross-check: `|mu_rel,hel| =
+  42.3 mas/yr` at 60.4 deg south of west, against the Letter's
+  `mu_hel = 43 mas/yr` and `v_tilde_hel` at "61 deg south of west" --
+  neither used to build the seeds. The lens then moves at 46 mas/yr,
+  `v_t = 115 km/s` at 525 pc, the thick-disk kinematics the Letter's
+  argument rests on (113 +/- 21 km/s counter to Galactic rotation, which
+  is why `theta_E` is ~0.9 mas rather than the sub-mas typical of a bulge
+  lens).
+- **Limb darkening.** Gould+2009's clump calibration gives
+  `E(V-I) = (17.32 - 15.28) - (0.79 + 0.25) = 1.00`, so the source's
+  `(V-I)_s = 20.58 - 18.91 = 1.67` dereddens to `(V-I)_0 = 0.67`: a G
+  dwarf, Teff ~ 5750 K, log g ~ 4.4. The linear-law seeds are for such a
+  star from the standard tabulations. The I band's is fit (the lens
+  transited the source, so the peak shape measures the limb); V and R are
+  pinned, because each light curve uses its own band's `u1` but V is 14
+  SMARTS epochs and none of the R-band sites covers the peak.
+- **The fluxes cross-check the solution.** OGLE's `q_source` comes out at
+  0.4806; the published source magnitude `I_s = 18.91` against the EWS
+  baseline `I_bl = 18.104` predicts `10**(-0.4*(18.91-18.104)) = 0.4761`.
+  Agreement to 1% from the light curve alone is the strongest single
+  confirmation that `t_E`, `rho` and the geometry are the published
+  solution and not a lookalike. OGLE's `err_scale` is seeded at its
+  out-of-event value (see the chi2 table above) rather than its
+  all-points 2.56; the difference is peak systematics.

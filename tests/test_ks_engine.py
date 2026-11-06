@@ -22,6 +22,7 @@ import sympy as sp
 from exozippy.config import (
     PRECEDENCE_DEFAULT,
     PRECEDENCE_DERIVED_DATA,
+    PRECEDENCE_MULENS_LENS_DISTANCE,
     PRECEDENCE_USER,
     ConfigManager,
 )
@@ -354,3 +355,164 @@ def test_a_user_value_on_a_sampled_element_is_rigid():
     assert _val(cm, "x") == 5.0 and _val(cm, "y") == 2.0
     assert _val(cm, "z") == pytest.approx(3.0)
     assert cm._last_provenance["toy.0.x"] == PRECEDENCE_USER
+
+
+# ---------------------------------------------------------------------------
+# Escalation: what a tier cannot absorb inside its bounds goes UP (1.1.11)
+# ---------------------------------------------------------------------------
+def _kinds(cm, kind):
+    return [d for d in cm.diagnostics if d.get("kind") == kind]
+
+
+def test_a_tier_at_its_bound_hands_the_residual_to_the_next_tier_up():
+    """
+    Given x = h + d with x pinned at 5 by the user, h a DATA hint at 1 and
+      d a DEFAULT seed at 1 whose upper bound is 2,
+    When the engine settles it,
+    Then d moves as far as it can (to 2) and h absorbs only the rest (to
+      3): the lower tier's solution is preferred, and the part it cannot
+      absorb is escalated rather than left violated (review 1.1.11).  The
+      relation holds, nothing is reported unsettled, and the escalation is
+      recorded in the keep report.
+    """
+    cm = _toy(
+        {"x": _blk(), "h": _blk(), "d": _blk(1.0, upper=2.0)},
+        lambda S: [sp.Eq(S("x"), S("h") + S("d"))],
+        user={"x": 5.0},
+        hints={"h": (1.0, PRECEDENCE_DERIVED_DATA)},
+    )
+    assert _val(cm, "x") == 5.0
+    assert _val(cm, "d") == pytest.approx(2.0)
+    assert _val(cm, "h") == pytest.approx(3.0, rel=1e-6)
+    assert _kinds(cm, "unsettled") == []
+    ((_label, frm, steps),) = cm._last_keep_report["escalated"]
+    assert frm.startswith("DEFAULT") and steps[0][1] == ["toy.0.h"]
+
+
+def test_escalation_climbs_one_tier_at_a_time():
+    """
+    Given x = h + m + d with x pinned at 10, d a DEFAULT seed (bound 2), m
+      a MULENS_LENS_DISTANCE hint (bound 3) and h a DATA hint, all at 1,
+    When the engine settles it,
+    Then each tier takes what it can before the next one up moves: d to
+      2, m to 3, and h the remaining 5.
+    """
+    cm = _toy(
+        {
+            "x": _blk(),
+            "h": _blk(),
+            "m": _blk(upper=3.0),
+            "d": _blk(1.0, upper=2.0),
+        },
+        lambda S: [sp.Eq(S("x"), S("h") + S("m") + S("d"))],
+        user={"x": 10.0},
+        hints={
+            "h": (1.0, PRECEDENCE_DERIVED_DATA),
+            "m": (1.0, PRECEDENCE_MULENS_LENS_DISTANCE),
+        },
+    )
+    assert _val(cm, "d") == pytest.approx(2.0)
+    assert _val(cm, "m") == pytest.approx(3.0)
+    assert _val(cm, "h") == pytest.approx(5.0, rel=1e-6)
+    assert _kinds(cm, "unsettled") == []
+
+
+def test_an_escalated_hint_on_a_derived_element_is_judged_in_its_plan_scale():
+    """
+    Given x = y + d with x pinned at 5, d a DEFAULT seed at 1 bounded at 2,
+      and y a DERIVED element with no init_scale of its own, carrying a
+      DATA hint at 1 and an upper bound of 3.5 (so the sampled seeds alone
+      cannot reach it and it has no propagated leaf scale either),
+    When the escalation moves y,
+    Then the move is judged in the scale the settle split it in -- the one
+      x = y + d implies from x and d -- instead of raising for want of a
+      declared scale.  This is the data-seeded t_E on the 2L1S DC2018
+      architecture config (tests/test_dc18_arch_config.py), the first
+      case where a settle MOVED a seed on a derived element.
+    """
+    cm = _toy(
+        {
+            "x": _blk(),
+            "y": {"lower": -1e6, "upper": 3.5},
+            "d": _blk(1.0, upper=2.0),
+        },
+        lambda S: [sp.Eq(S("x"), S("y") + S("d"))],
+        user={"x": 5.0},
+        roles={"x": "sampled", "y": "derived", "d": "sampled"},
+        hints={"y": (1.0, PRECEDENCE_DERIVED_DATA)},
+    )
+    assert _val(cm, "d") == pytest.approx(2.0)
+    assert _val(cm, "y") == pytest.approx(3.0, rel=1e-6)
+    assert _kinds(cm, "unsettled") == []
+
+
+def test_a_user_value_is_never_an_escalation_target():
+    """
+    Given x = u + d with x and u pinned by the user (x = 5, u = 1) and d a
+      DEFAULT seed whose upper bound is 2,
+    When the engine settles it,
+    Then no seed above DEFAULT is upstream of the relation, so nothing
+      escalates: both user values are exact and the relation is reported
+      unsettled, as before 1.1.11.
+    """
+    cm = _toy(
+        {"x": _blk(), "u": _blk(), "d": _blk(1.0, upper=2.0)},
+        lambda S: [sp.Eq(S("x"), S("u") + S("d"))],
+        user={"x": 5.0, "u": 1.0},
+    )
+    assert _val(cm, "x") == 5.0 and _val(cm, "u") == 1.0
+    assert len(_kinds(cm, "unsettled")) == 1
+    assert cm._last_keep_report["escalated"] == []
+
+
+def test_an_escalation_that_cannot_settle_is_undone():
+    """
+    Given x = h + d with x pinned at 5, h a DATA hint at 1 bounded at 1.5
+      and d a DEFAULT seed at 1 bounded at 2,
+    When the engine settles it,
+    Then even the DATA tier cannot close the gap, so its move is undone (h
+      keeps its hint) and the relation is reported unsettled -- the start is
+      exactly what it was before escalation existed.
+    """
+    cm = _toy(
+        {"x": _blk(), "h": _blk(upper=1.5), "d": _blk(1.0, upper=2.0)},
+        lambda S: [sp.Eq(S("x"), S("h") + S("d"))],
+        user={"x": 5.0},
+        hints={"h": (1.0, PRECEDENCE_DERIVED_DATA)},
+    )
+    assert _val(cm, "h") == 1.0
+    assert len(_kinds(cm, "unsettled")) == 1
+    assert cm._last_keep_report["escalated"] == []
+
+
+def test_a_settle_never_moves_a_seed_no_check_sees():
+    """
+    Given x = a + b with x pinned at 5 by the user and a, b two DEFAULT
+      seeds (so the DEFAULT tier settles), plus a third DEFAULT seed t that
+      no relation mentions, whose defaults.yaml start (10) is OUTSIDE its
+      bounds [0, 2],
+    When the engine settles the DEFAULT tier,
+    Then t keeps its defaults.yaml start and reports DEFAULT provenance.
+      A settle moves only the coordinates a check reaches.  It used to clip
+      EVERY movable coordinate into its bounds on each Gauss-Newton step, so
+      t landed on its upper bound and reported DERIVED_MIXED ("solved"): an
+      unseeded value that looked informed.  That is how a `type: static`
+      orbit (whose default eccentricity relations settle at DEFAULT) made a
+      DC2018 1L2S source's out-of-window default t_0 look informed and
+      switched the peak finder off for it (review 1.6.21;
+      tests/test_dc18_arch_config.py).
+    """
+    cm = _toy(
+        {
+            "x": _blk(scale=1.0),
+            "a": _blk(1.0, scale=1.0),
+            "b": _blk(1.0, scale=3.0),
+            "t": _blk(10.0, lower=0.0, upper=2.0),
+        },
+        lambda S: [sp.Eq(S("x"), S("a") + S("b"))],
+        user={"x": 5.0},
+    )
+    # Non-vacuity: the DEFAULT tier did settle.
+    assert _val(cm, "a") == pytest.approx(1.3, rel=1e-6)
+    assert _val(cm, "t") == 10.0
+    assert cm._last_provenance["toy.0.t"] == PRECEDENCE_DEFAULT

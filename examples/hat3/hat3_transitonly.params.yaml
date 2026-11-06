@@ -4,11 +4,9 @@ star.feh:
     sigma: 0.08
     citation: high-resolution spectroscopy
 
-# the sigma is only necessary because we're not fiting an evolutionary model
-# it should be removed in a final run
+# A start value: the Torres relations constrain the mass.
 star.mass:
     initval: 0.92
-    sigma: 0.05
 
 # we can measure this from spectroscopy, but typically SED + transit is more direct
 # so we're just going to seed it at the spectroscopic value
@@ -29,9 +27,7 @@ star.parallax:
     sigma: 0.01745
     citation: [GaiaCollaboration:2016, GaiaCollaboration:2023]
 
-# The ephemeris lives on the orbit, not the planet: 'planet.b.tc' and
-# 'planet.b.period' name no parameter and were silently ignored, so these
-# two seeds had no effect at all until they were moved here.
+# The ephemeris lives on the orbit, not the planet.
 orbit.b.tc:
     initval: 2454218.76016
 

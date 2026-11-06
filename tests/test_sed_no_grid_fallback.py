@@ -25,6 +25,7 @@ re-entrant -- it injects its solution into user_params).
 """
 
 import copy
+import re
 
 import pytest
 from test_unseen_star import EXAMPLE_DIR, SED_SIDE, _build, _inputs, _sampled
@@ -43,7 +44,7 @@ def _faint(tmp_path):
 
 def test_a_source_no_grid_hosts_is_severed_not_refused(monkeypatch, tmp_path):
     """
-    Given a microlensing source whose data-derived start teffsed (2563 K)
+    Given a microlensing source whose data-derived start teffsed (~2565 K)
       lies under the BC grid, read by the SED only through the zeropoint tie,
     When the system is prepared and built,
     Then it builds: the Source is severed, its SED knobs are pinned and its
@@ -71,7 +72,12 @@ def test_a_source_no_grid_hosts_is_severed_not_refused(monkeypatch, tmp_path):
     assert not system.mulensinstrument.sed_tie_mask(system).any()
     (rev,) = system.topology_revisions
     assert "SED link SEVERED for star 'Source'" in rev[0]
-    assert "teffsed = 2562" in rev[0] and "(start from data)" in rev[0]
+    # The data-derived start inverts the source flux through the BC grid,
+    # so its last digits move with the grid (2562 K on the logg <= 5.0
+    # tables, 2565 K once the 5.5 plane was added on 2026-10-20).
+    assert (
+        re.search(r"teffsed = 256\d", rev[0]) and "(start from data)" in rev[0]
+    )
     assert "star.Source.teffsed" in rev[1]
     assert any(
         "SEVERED" in d["message"] for d in system.config_manager.diagnostics

@@ -136,6 +136,12 @@ class _FakeOrbit:
     def star_membership(self, star_idx):
         return self._memberships.get(int(star_idx), [])
 
+    @property
+    def is_keplerian(self):
+        # Every fake orbit is Keplerian (a rel target on a Taylor orbit is
+        # left out of the astrometric predicate).
+        return np.ones(64, dtype=bool)
+
     def bodies(self, i):
         return self._bodies.get(int(i), [])
 
@@ -155,6 +161,9 @@ class _FakeAstrometry:
 class _FakeSystem:
     def __init__(self, **comps):
         self.active_components = comps
+        # The raw system config, which orbit.bodies.photocenter_stars reads
+        # (no sed: block here, so a gaia target's photocenter is its own).
+        self.config = {}
 
 
 def _resolve(planet_cfg, **comps):
@@ -214,7 +223,7 @@ def test_rv_only_applies_per_planet_via_orbit_membership():
         },
     )
     chen = _resolve(
-        [{"name": "b"}, {"name": "c", "orbit_ndx": 1, "star_ndx": 1}],
+        [{"name": "b"}, {"name": "c"}],
         rvinstrument=_FakeRV([0]),
         orbit=orbit,
     )
@@ -230,13 +239,15 @@ def test_astrometry_rel_mode_counts_as_a_mass_constraint():
     ) == [True]
 
 
-def test_astrometry_gaia_mode_uses_primary_membership():
+def test_astrometry_gaia_mode_counts_companion_membership():
     """
     Given a gaia-mode target star that is the companion (not primary) of
     the planet's orbit,
     When the default is resolved,
-    Then the orbit does not count as mass-constrained (the photocenter
-    wobble model sums only orbits whose primary group holds the target).
+    Then the orbit counts as mass-constrained: the photocenter wobble sums
+    every Keplerian orbit holding the target, on either side (review
+    8.10.6; it used to sum the primary-group orbits only, and this test
+    pinned that gap).
     """
     orbit = _FakeOrbit(
         memberships={0: [(0, "companion")]},
@@ -247,7 +258,7 @@ def test_astrometry_gaia_mode_uses_primary_membership():
     )
     assert _resolve(
         [{"name": "b"}], astrometryinstrument=ast, orbit=orbit
-    ) == [False]
+    ) == [True]
 
 
 def test_user_override_beats_the_default():

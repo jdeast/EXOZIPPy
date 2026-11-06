@@ -626,6 +626,19 @@ _CHEN_N2 = _CHEN_T1 ** (_CHEN_S1 - _CHEN_S2)
 _CHEN_N3 = _CHEN_N2 * _CHEN_T2 ** (_CHEN_S2 - _CHEN_S3)
 _CHEN_N4 = _CHEN_N3 * _CHEN_T3 ** (_CHEN_S3 - _CHEN_S4)
 
+# The radius above which the relation stops naming one mass (review 2.8.18).
+# Below the Jovian segment's smallest radius, R(T3) = 11.24 Rearth (1.003
+# RJ), R(M) rises monotonically and a radius picks one mass.  At and above it
+# the Jovian segment (slope -0.044, nearly flat), the top of the Neptunian
+# one and the stellar one all reach the same radius, so a radius-only
+# constraint leaves the mass spread over decades with kinks at the breaks,
+# and NUTS does not mix it.  The edge is R(T3) less three of the Jovian
+# segment's fractional scatters, 8.76 Rearth (0.78 RJ): a planet that size
+# reaches the degenerate band within the relation's own 3 sigma.
+CHEN_DEGENERATE_RPEARTH = (
+    _CHEN_N3 * _CHEN_T3**_CHEN_S3 * (1.0 - 3.0 * CHEN_RP_FRAC[2])
+)
+
 
 @register_physics
 def calc_chen_radius(mpearth):

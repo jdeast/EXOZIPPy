@@ -9,6 +9,7 @@ log_q: the magnification model clips q to [1e-9, 100], so q <= 0 is
 meaningless there no matter what else measures the orbit.
 """
 
+import copy
 import logging
 
 import numpy as np
@@ -77,10 +78,26 @@ class _FakeSystem:
 
 
 class _FakeConfigManager:
-    """Just enough for _reconcile_mass_user_params."""
+    """Just enough for _reconcile_mass_user_params and Planet.build_maps."""
 
-    def __init__(self, user_params=None):
+    def __init__(self, user_params=None, system_config=None):
         self.user_params = user_params if user_params is not None else {}
+        # Planet membership and the orbit types are read off the raw
+        # system config (orbit.bodies.planet_membership).
+        self.system_config = system_config or {}
+
+
+def _system_config(planet_cfg):
+    """One host star and one orbit per planet, membership by the orbit
+    groups -- the one spelling (a planet carries no orbit or host key)."""
+    return {
+        "star": [{"name": "A"}],
+        "planet": planet_cfg,
+        "orbit": [
+            {"name": p["name"], "primary": ["A"], "companion": [p["name"]]}
+            for p in planet_cfg
+        ],
+    }
 
 
 _ONE_PLANET_ORBIT = _FakeOrbit(
@@ -91,7 +108,12 @@ _ONE_PLANET_ORBIT = _FakeOrbit(
 
 def _modes(planet_cfg, user_params=None, **comps):
     """The PER-PLANET coordinates."""
-    comp = Planet(planet_cfg, config_manager=_FakeConfigManager(user_params))
+    comp = Planet(
+        planet_cfg,
+        config_manager=_FakeConfigManager(
+            user_params, _system_config(planet_cfg)
+        ),
+    )
     comp.build_maps()
     comp._resolve_mass_parameterization(_FakeSystem(**comps))
     return comp.mass_parameterizations
@@ -196,7 +218,7 @@ def test_a_mixed_topology_gives_each_planet_its_own_coordinate(caplog):
     """
     with caplog.at_level(logging.INFO):
         modes = _modes(
-            [{"name": "b"}, {"name": "c", "orbit_ndx": 1}],
+            [{"name": "b"}, {"name": "c"}],
             rvinstrument=_FakeRV([0]),
             transit=object(),
             orbit=_TWO_PLANET_ORBITS,
@@ -222,7 +244,6 @@ def test_an_explicit_per_planet_mix_is_honored():
             {"name": "b", "fitlogq": False, "fitmsini": False},
             {
                 "name": "c",
-                "orbit_ndx": 1,
                 "fitlogq": True,
             },
         ],
@@ -232,23 +253,64 @@ def test_an_explicit_per_planet_mix_is_honored():
     assert modes == ["linear", "log_q"]
 
 
-def test_fixed_mass_translates_to_log_q():
+@pytest.mark.parametrize("key", ["planet.0.mass", "planet.mass"])
+def test_pin_on_derived_log_q_mass_raises_with_the_remedy(key):
     """
-    Given a user pinning planet.mass with sigma=0 in log_q mode,
+    Given a user pinning planet.mass with sigma=0 (indexed or broadcast)
+    on a planet that samples log_q,
     When the mass coordinate is resolved,
-    Then the pin moves onto the sampled log_q -- sigma=0 on a derived
-    parameter is a silent no-op.
+    Then it RAISES naming the parameter and the sampled coordinate to pin,
+    and user_params is untouched -- a user pin is never moved (review
+    2.1.26(e); it used to be popped and re-written onto log_q).
+    """
+    up = {key: {"initval": 1.0, "sigma": 0.0}}
+    before = copy.deepcopy(up)
+    with pytest.raises(ValueError) as err:
+        _mode([{"name": "b"}], user_params=up, transit=object())
+    msg = str(err.value)
+    assert "'planet.b.mass' has 'sigma: 0'" in msg
+    assert "DERIVES its mass" in msg
+    assert "'planet.b.log_q: {initval:" in msg
+    assert "'fitlogq: false'" in msg
+    assert up == before
+
+
+def test_pin_on_derived_msini_mass_raises_with_the_remedy():
+    """
+    Given an explicit fitmsini: true planet whose mass the user pinned,
+    When the mass coordinate is resolved,
+    Then it raises naming the flag to drop (pinning msini would not fix the
+    mass, so it is not offered).
     """
     up = {"planet.0.mass": {"initval": 1.0, "sigma": 0.0}}
-    assert _mode([{"name": "b"}], user_params=up, transit=object()) == "log_q"
+    with pytest.raises(ValueError, match="Drop 'fitmsini: true'"):
+        _mode(
+            [{"name": "b", "fitmsini": True}],
+            user_params=up,
+            rvinstrument=_FakeRV([0]),
+            orbit=_ONE_PLANET_ORBIT,
+        )
 
-    assert "sigma" not in up["planet.0.mass"]
-    assert up["planet.0.log_q"]["sigma"] == 0.0
+
+def test_pin_on_sampled_linear_mass_is_accepted():
+    """The precedence the other way: where the mass IS the sampled
+    coordinate the pin is an ordinary pin -- no raise, nothing rewritten."""
+    up = {"planet.0.mass": {"initval": 1.0, "sigma": 0.0}}
+    before = copy.deepcopy(up)
+    mode = _mode(
+        [{"name": "b"}],
+        user_params=up,
+        rvinstrument=_FakeRV([0]),
+        transit=object(),
+        orbit=_ONE_PLANET_ORBIT,
+    )
+    assert mode == "linear"
+    assert up == before
 
 
 def test_positive_sigma_on_mass_is_left_alone():
-    """A real Gaussian prior on the mass works on the derived node; only the
-    sigma=0 pin needs moving."""
+    """A real Gaussian prior on the mass works on the derived node; only a
+    sigma=0 pin is refused."""
     up = {"planet.0.mass": {"initval": 1.0, "sigma": 0.1}}
     _mode([{"name": "b"}], user_params=up, transit=object())
 
@@ -353,6 +415,12 @@ def test_two_planets_may_use_different_mass_coordinates():
         {"name": "b"},
         {"name": "c", "fitlogq": False, "fitmsini": False},
     ]
+    # Two planets, so neither host is left implicit: static pairings (no
+    # dynamics) with the lens star.
+    config["orbit"] = [
+        {"name": nm, "type": "static", "primary": ["Lens"], "companion": [nm]}
+        for nm in ("b", "c")
+    ]
     system = System(config, user_params=_binary_params())
     system.prepare()
     model = system.build_model()
@@ -418,6 +486,12 @@ def test_a_mass_seed_reaches_whichever_coordinate_each_planet_samples():
         "planet": [
             {"name": "b", "fitlogq": True},
             {"name": "c", "fitlogq": False, "fitmsini": False},
+        ],
+        # Two planets, so neither host is left implicit: static pairings
+        # (no dynamics) with the one star.
+        "orbit": [
+            {"name": nm, "type": "static", "primary": ["A"], "companion": [nm]}
+            for nm in ("b", "c")
         ],
     }
     system = System(
@@ -540,19 +614,189 @@ def test_log_q_relation_is_inert_in_linear_mode():
     )
 
 
-def test_fixed_mass_really_pins_the_sampled_element():
+def test_pin_on_derived_mass_by_name_raises_at_prepare():
     """
-    Given planet.b.mass sigma=0 written the way a user writes it (by name),
-    When the model is built in log_q mode,
-    Then log_q is not sampled -- i.e. the translation survives the
-    name-to-index standardization and reaches the built Parameter.
+    Given planet.b.mass sigma=0 written the way a user writes it (by name)
+    on a lens planet, which samples log_q,
+    When the system is prepared,
+    Then it raises naming the sampled coordinate -- the check survives the
+    name-to-index standardization.
+    """
+    system = System(
+        _binary_config(),
+        user_params=_binary_params(
+            {"planet.b.mass": {"initval": 1.0, "sigma": 0.0}}
+        ),
+    )
+    with pytest.raises(ValueError, match=r"'planet\.b\.log_q: \{initval:"):
+        system.prepare()
+
+
+def test_the_remedy_pins_the_sampled_element():
+    """
+    Given the remedy the raise names -- planet.b.log_q sigma=0, by name,
+    When the model is built,
+    Then log_q is not sampled, and the pin is the USER's own entry (nothing
+    was written into user_params on their behalf).
     """
     system, model = _build(
-        extra_params={"planet.b.mass": {"initval": 1.0, "sigma": 0.0}}
+        extra_params={"planet.b.log_q": {"initval": -2.5, "sigma": 0.0}}
     )
 
     assert not np.any(np.atleast_1d(system.planet.log_q.is_sampled))
     assert "planet.log_q_raw" not in [v.name for v in model.free_RVs]
+
+
+# A pin on planet.mass with the host's sampled logmass pinned too: log_q is
+# then a fixed number, so the pin is applied to log_q (review 2.1.26(e), JDE
+# 2026-10-31 "when a user's fixed parameter unambiguously propagates to a
+# sampled parameter, we can apply it directly").  lens.b.q is the companion's
+# derived mass ratio, so its seed is dropped: both masses fix it.
+_MASS_PIN = {"initval": 2.0, "sigma": 0}
+_HOST_PIN = {"initval": float(np.log10(0.5)), "sigma": 0}
+
+
+def _pinned_params(extra=None):
+    p = _binary_params(
+        {
+            "planet.b.mass": dict(_MASS_PIN),
+            "star.Lens.logmass": dict(_HOST_PIN),
+        }
+    )
+    p.pop("lens.b.q")
+    p.update(extra or {})
+    return p
+
+
+def _start_logp(system, model):
+    return float(model.compile_logp()(system.get_raw_start(model)))
+
+
+def test_mass_pin_with_pinned_host_is_applied_to_log_q(caplog):
+    """
+    Given planet.b.mass sigma: 0 on a log_q planet whose host logmass is
+    pinned,
+    When the model is built,
+    Then log_q is fixed at log10(m_p/m_host) (unit conversion by the engine,
+    not by hand), the derived mass reproduces the user's 2 M_J, the build
+    says so at INFO and does NOT warn that the pin is a no-op, and the
+    user's planet.mass entry is what export_solution reports -- log_q is
+    "solved", never a user entry.
+    """
+    import astropy.units as u
+
+    params = _pinned_params()
+    with caplog.at_level(logging.INFO):
+        system = System(_binary_config(), user_params=params)
+        system.prepare()
+        model = system.build_model()
+
+    log_q = system.planet.log_q
+    assert not np.any(np.atleast_1d(log_q.is_sampled))
+    mp = (2.0 * u.jupiterMass).to_value(u.solMass)
+    np.testing.assert_allclose(
+        np.atleast_1d(log_q.initval)[0], np.log10(mp / 0.5), rtol=1e-12
+    )
+    mass_fn = pytensor.function(
+        model.value_vars,
+        model.replace_rvs_by_values([system.planet.mass.value]),
+        on_unused_input="ignore",
+    )
+    start = system.get_raw_start(model)
+    (mass,) = mass_fn(*[start[v.name] for v in model.value_vars])
+    np.testing.assert_allclose(np.atleast_1d(mass)[0], mp, rtol=1e-10)
+
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("the pin is applied to 'planet.b.log_q'" in m for m in msgs)
+    assert not any(
+        "planet.mass" in m and "no effect on a derived" in m for m in msgs
+    )
+
+    up = system.config_manager.user_params
+    assert up["planet.0.mass"]["initval"] == 2.0
+    assert up["planet.0.mass"]["sigma"] == 0
+    export = system.config_manager.export_solution(
+        derived_params=system.derived_elements(),
+        manifest_overrides=system.manifest_overrides(),
+    )["parameters"]
+    assert export["planet.b.mass"]["provenance"]["label"] == "user"
+    assert export["planet.b.mass"]["fixed"] is True
+    assert export["planet.b.log_q"]["provenance"]["label"] == "solved"
+    assert export["planet.b.log_q"]["fixed"] is True
+
+
+def test_mass_pin_beside_a_user_log_q_pin_raises():
+    """Two statements of one quantity (a mass pin and log_q's own value) are
+    not reconciled for the user."""
+    params = _pinned_params(
+        {"planet.b.log_q": {"initval": -2.5, "sigma": 0.0}}
+    )
+    system = System(_binary_config(), user_params=params)
+    with pytest.raises(ValueError, match="two statements"):
+        system.prepare()
+
+
+def test_mass_pin_with_a_sampled_host_still_raises():
+    """The ambiguous case: with the host mass sampled, the mass pin fixes
+    neither log_q nor the host alone, so it raises with the remedy."""
+    params = _pinned_params()
+    params.pop("star.Lens.logmass")
+    system = System(_binary_config(), user_params=params)
+    with pytest.raises(ValueError, match="host star's logmass is pinned too"):
+        system.prepare()
+
+
+def test_translated_mass_pin_round_trips_through_mkparam(tmp_path):
+    """
+    Given the translated pin,
+    When mkparam writes a restart file from a trace of that model,
+    Then the file carries the user's own planet.mass and host logmass pins,
+    invents no log_q entry, and a restart from it builds the same model
+    (same start logp, log_q still fixed).
+    """
+    import yaml
+    from test_mkparam_roundtrip import _fabricate_trace
+
+    from exozippy.mkparam import write_param_file
+
+    config = _binary_config()
+    params = _pinned_params()
+    system = System(copy.deepcopy(config), user_params=copy.deepcopy(params))
+    system.prepare()
+    model = system.build_model()
+    logp0 = _start_logp(system, model)
+
+    trace = _fabricate_trace(system, model, tmp_path / "trace.nc")
+    out = write_param_file(
+        copy.deepcopy(config),
+        base_dir=str(tmp_path),
+        trace_path=str(trace),
+        output_path=str(tmp_path / "restart.params.yaml"),
+        user_params=copy.deepcopy(params),
+    )
+    with open(out) as fh:
+        written = yaml.safe_load(fh)
+
+    assert written["planet.b.mass"] == _MASS_PIN
+    assert written["star.Lens.logmass"]["sigma"] == 0
+    assert not any("log_q" in k for k in written)
+
+    # The fabricated trace nudged every sampled start; the restart is
+    # judged on the MODEL it builds, so rebuild from the user's starts with
+    # only the written pins swapped in.
+    restart = copy.deepcopy(params)
+    restart["planet.b.mass"] = written["planet.b.mass"]
+    restart["star.Lens.logmass"] = written["star.Lens.logmass"]
+    system2 = System(copy.deepcopy(config), user_params=restart)
+    system2.prepare()
+    model2 = system2.build_model()
+    assert not np.any(np.atleast_1d(system2.planet.log_q.is_sampled))
+    assert _start_logp(system2, model2) == logp0
+    # And the written file as a whole builds (every entry reloads).
+    system3 = System(copy.deepcopy(config), user_params=written)
+    system3.prepare()
+    system3.build_model()
+    assert not np.any(np.atleast_1d(system3.planet.log_q.is_sampled))
 
 
 def test_export_reports_the_real_derivation_not_the_yaml_block():

@@ -48,9 +48,11 @@ already baked into a.
 
 Barycentric scaling: an EMISSION event (RV reflex: the star; thermal or
 reflected light: the planet) sits at a fixed fraction of the relative-orbit
-separation from the system barycenter -- m_companion/m_total for the star,
-m_primary/m_total for the planet (EXOFASTv2's target2bjd.pro factor =
-q/(1+q), q = M1/M2, is the same relation). An OCCULTATION (transit,
+separation from the system barycenter, WITH A SIGN: z here is the
+companion-minus-primary separation toward the observer, so the planet is at
++(m_primary/m_total) z and the star at -(m_companion/m_total) z -- the
+star's factor is NEGATIVE (EXOFASTv2's target2bjd.pro factor = q/(1+q),
+q = M1/M2, is the planet's magnitude). An OCCULTATION (transit,
 secondary eclipse, RM) is NOT an emission event and takes the mass
 DIFFERENCE instead; `retarded_time`'s `factor` argument documents why.
 Since (a_body/r_body(t)) = (a_rel/r_rel(t)) exactly (the factor cancels in
@@ -112,11 +114,16 @@ def line_of_sight_kinematics(
           opposite), the standard eclipsing-binary result used to measure
           mass ratios (Kaplan 2010, Fabrycky 2010), while m_primary/m_total
           predicts a/c and 1.0 predicts 2a/c.
-        - Light EMITTED by one body (RV reflex, Doppler beaming,
-          ellipsoidal -- all from the star): that body's own barycentric
-          fraction, ``m_companion/m_total`` for the primary.
+        - Light EMITTED by the PRIMARY (RV reflex, Doppler beaming,
+          ellipsoidal -- all from the star): its own SIGNED barycentric
+          position along ``z``, ``-m_companion/m_total`` -- negative,
+          because ``z`` is companion-minus-primary toward the observer and
+          the star sits on the opposite side of the barycenter (it is
+          BEHIND it at transit).  A positive factor here (transit.py's
+          beaming/ellipsoidal until review 1.5.11) retards the star the
+          wrong way.
         - Light emitted by the SECONDARY (thermal emission, reflected-light
-          phase): ``m_primary/m_total``.
+          phase): ``+m_primary/m_total``.
 
         Default 1.0 (the un-scaled relative orbit, the infinite-mass-ratio
         limit).

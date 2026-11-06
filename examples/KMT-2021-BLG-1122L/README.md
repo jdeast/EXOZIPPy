@@ -20,7 +20,10 @@ reference 1584.9 is 20.0 mag at zp 28, a fixed pipeline reference rather
 than this star's baseline, so a magnitude file has a fictitious total flux
 (review 2.2.22).  Each instrument instead states an explicit
 `reference_mag` (I 16.0, V 19.0) above every epoch's flux; the reference
-only shifts the blend, which nothing reads.  Rows with `fwhm <= 0` (pySIS's
+only shifts the blend, which nothing reads.  These are NOT measured
+baselines, so `sed_constrains_blend` (or a background tie) must stay off
+here: the code takes an explicit reference as the user's measurement and
+cannot tell.  Rows with `fwhm <= 0` (pySIS's
 failed-PSF flag) are dropped: they included points 1-9 mag above baseline
 with small errors, one at 11.4 mag with sigma 0.16.
 
@@ -96,13 +99,14 @@ unphysical distances and error scales of 3-7.  `check_start.py` and
 
 All three bit, exactly as 7.6.4 predicted, and each cost one scan iteration:
 
-- **Companion slot 1 ignores `s:` and `alpha:`.**  The engine's
-  `s <-> log_s` and `alpha <-> (xalpha, yalpha)` relations exist for
-  companion slot 0 only, so `lens.LensC.s` / `lens.LensC.alpha` initvals
-  were accepted (no warning) and silently dropped: LensC started at the
-  defaults (s = 1, alpha = 0) and every scan combination gave the same
-  total.  LensC is seeded through its sampled coordinates `log_s`,
-  `xalpha`, `yalpha` instead.
+- **Companion slot 1 used to ignore `s:` and `alpha:`** (fixed by 8.6.13).
+  The engine's `s <-> log_s` and `alpha <-> (xalpha, yalpha)` relations
+  then existed for companion slot 0 only, so `lens.LensC.s` /
+  `lens.LensC.alpha` initvals were accepted (no warning) and silently
+  dropped: LensC started at the defaults (s = 1, alpha = 0) and every scan
+  combination gave the same total.  Every companion now has its own
+  relations (mulensing.md, "Three or more lens bodies"), so LensC is
+  seeded with `s:` (bounds included) and `alpha:` exactly like LensB.
 - **Explicit per-body masses are REQUIRED** (documented): q_2, q_3 are
   derived from `star.{Lens,LensB,LensC}.mass`, set so the derived ratios
   reproduce Table 2.
@@ -153,7 +157,8 @@ T_max 200, tune 5000, up to 20000 draws, hot chains stored), the direct
 VBM N-body Op (no gradient), finite source with a linear Cousins-I limb
 darkening law, NextGen SED on the source with the pure f_source constraint
 (empty `filters:` list, as in KMT-2019-BLG-1806), wide zeropoint priors
-(the pySIS magnitudes are instrumental).
+centered on no offset (the pySIS magnitudes are instrumental; see
+"Zeropoints" below).
 
 **The first launch hung** (job 15506216, 64 cores): the DE seed polish
 stopped at "sweep 400/400 IN PROGRESS (60/64 proposals back)" with the
@@ -183,8 +188,8 @@ population is scored serially in the main process with no timeout (review
 second launch (job 15506222) spent 45 minutes there on one core before it
 was stopped.  The params file therefore bounds both separations to
 s in [0.4, 2.3] (published 1.386 and 1.601, both near the Einstein ring),
-which keeps every failing geometry out of the kernel; for LensC the bound
-goes on `log_s` directly (slot-1 relations are absent, 8.6.13).
+which keeps every failing geometry out of the kernel; the bound is written
+on `s:` for both companions and moved onto the sampled `log_s`.
 
 **The bounded launch hung too** (job 15506232), in the serial start
 scoring: "PTDE init rung 9" at 09:40 and nothing after, 95 minutes of one
@@ -231,3 +236,68 @@ mapping error.
 
 RESULTS: (filled in when the fit lands -- posterior vs Table 2, and the
 lens masses under the IMF and galactic priors).
+
+## Details behind the parameter file
+
+These notes used to sit inline in `KMT-2021-BLG-1122L.params.yaml`.
+
+**t_0 and u_0 are translated, not copied.** Han's origin is the
+"effective position" of the M1-M2 pair (Fig. 4 caption; Di Stefano & Mao
+1996), the primary displaced by `q_2/((1+q_2) s_2)` toward M2, while
+EXOZIPPy's origin is the center of mass of all the lens bodies
+(conventions.md C13). The translation `D = COM - EFF` in the trajectory
+frame moves the closest approach by `t_0' = t_0 - D_tau t_E` and
+`u_0' = u_0 + D_u`; with this geometry that is +4.37 d and +0.012, and the
+optimum sits at `t_0 = 2459374.592`, `u_0 = 0.138`.
+
+**The companions are tied to the primary by orbit groups.** Two
+`type: static` orbits in the config (`LB`: Lens <-> LensB, `LC`: Lens <->
+LensC; one per companion, as each lens companion's orbit is primary <->
+that companion) hard-link each companion's distance, proper motion, rv and
+av to the primary's (orbit.md, "type: static"). Untied, the model samples
+a companion body's distance, pm and rv as free prior-only nuisances, and
+the first acceptance fit parked LensB at 5844 pc beside a primary at
+174 pc. These links used to be written by hand in the params file; the
+orbit groups give a bit-identical start.
+
+**Proper motions.** The direction of `mu_rel` on the sky is unconstrained
+without a parallax measurement (the light curve sees it only relative to
+the lens axis, through alpha), so the lens's pm is placed 12.39 mas/yr
+east of a bulge-typical source pm.
+
+**Zeropoints.** The files are pySIS difference flux at the pipeline's
+fixed zp 28.0 (`prepare_data.py`), an instrumental scale per site and band.
+Han+2023 Sect. 4 calibrate through the red giant clump on pyDIA photometry
+(instrumental `(V-I, I)_RGC = (3.669, 18.025)` against intrinsic
+`(1.060, 14.377)` with `A_I = 3.3`); pySIS differs from pyDIA by an
+unknown constant and we have no field photometry for our own clump. So
+every zeropoint is centered on no offset and left wide (0.5 mag, JDE
+2026-10-11): the light curves pin the site-to-site offsets within a band,
+and theta_* comes from the V-I color plus the A_V prior, to roughly 25% --
+weaker than Han's CMD measurement, and honest about what we can calibrate.
+The dia reader puts the flux in units of the reference and the SED tie
+subtracts the matching offset `zp_ref = 28 - 2.5 log10(ref) =
+reference_mag` itself (`MulensInstrument.flux_system_zp`), so `mu` is the
+calibration alone. Until that fix the tie ignored `zp_ref`, a dia
+zeropoint carried an extra `+reference_mag`, and this example centered the
+priors on 16.0 (I) / 19.0 (V) to compensate. The start logp is unchanged
+by the switch to `mu: 0` on the fixed code: the zeropoint and its prior
+center moved by the same 16 / 19 mag (table in the pull request that
+landed the fix).
+
+**Flux and error-scale starts.** `q_source` (in units of each file's
+reference) and `err_scale` start at the optimum of the convention scan's
+winner (`scan_conventions_opt.py` task 13, light-curve term 9424). The
+flux bootstrap cannot run on a 3-body lens and falls back to
+`q_source = 0.95`, the sampler does not polish its start, and without
+these the start sits ~38,000 nats below the basin's optimum. Both are
+sampled.
+
+**Extinction.** Han+2023 Sect. 4: `A_I = 3.3` toward the field; through
+this fit's own Cousins-I BC grid (`A_I/A_V ~ 0.62` at this reddening) that
+is `A_V ~ 5.3`. It is a prior, not just a start (JDE 2026-10-11): a color
+alone cannot break the reddening degeneracy, and without it the first
+acceptance fit gave the source `A_V` 17-20. Width 0.3 mag: the
+clump-method `A_I` uncertainty plus the extinction-law conversion. The
+dereddened source is `(V-I, I)_0 = (0.892, 17.432)`, a K subgiant with
+`theta_* = 1.26 +/- 0.11 uas`.

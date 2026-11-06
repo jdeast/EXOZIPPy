@@ -1,3 +1,22 @@
+"""
+Galactic prior: genulens's Galactic model (Koshimoto, Baba & Bennett 2021,
+ApJ 917, 78, "K21"; https://github.com/nkoshimoto/genulens), ported
+faithfully in koshimoto21.py, enforcing the density, kinematics and
+present-day mass function of the Galaxy on every modeled star.  Cite K21
+when you use it.
+
+This module is the component: the sight line, the mixture over genulens's
+branches (seven thin-disk age bins, the thick disk, the E+E_X bar, the
+stellar halo and, inside its box, the nuclear stellar disk), linked stars,
+the free-floating-planet mass function, the population age / [Fe/H] priors
+and the evidence normalizer.  The physics, function by function against
+genulens, is koshimoto21.py; galacticmodel.md says what is ported and where
+it deviates.  The earlier 3-population model (``model: simplified``) was
+removed in review 1.7.6.  The event-rate selection factor (theta_E *
+mu_rel) is deliberately NOT here -- it lives in the lens component, so this
+prior stays microlensing-agnostic.
+"""
+
 import logging
 
 import numpy as np
@@ -7,65 +26,14 @@ import pytensor.tensor as pt
 from exozippy.components.component import Component
 
 # One owner for "read a Parameter's hard support" -- star.py's volume prior
-# normalizes over star.distance's bounds exactly the way the IMF branches
-# below normalize over star.logmass's.
+# normalizes over star.distance's bounds exactly the way the FFP mass
+# function below normalizes over star.logmass's.
 from exozippy.components.parameter import sampled_bounds as _sampled_bounds
-from exozippy.constants import (
-    BULGE_BAR_ANGLE,
-    BULGE_CENTRAL_NUMBER_DENSITY,
-    BULGE_DENSITY_X_0,
-    BULGE_DENSITY_Y_0,
-    BULGE_DENSITY_Z_0,
-    BULGE_RC,
-    BULGE_RC_WIDTH,
-    BULGE_ROTATION_ANGULAR_VELOCITY,
-    BULGE_VELOCITY_SIGMA_1,
-    BULGE_VELOCITY_SIGMA_2,
-    BULGE_VELOCITY_SIGMA_3,
-    CHABRIER_BLEND_WIDTH_DEX,
-    CHABRIER_HIGH_MASS_SLOPE,
-    CHABRIER_LOG_MC,
-    CHABRIER_MATCH_LOGMASS,
-    CHABRIER_SIGMA,
-    DISK_LOCAL_NUMBER_DENSITY,
-    DISK_RDBREAK,
-    DISK_ROTATION_VELOCITY,
-    DISK_SCALE_HEIGHT,
-    DISK_SCALE_LENGTH,
-    DISK_VELOCITY_SIGMA_U,
-    DISK_VELOCITY_SIGMA_V,
-    DISK_VELOCITY_SIGMA_W,
-    K_VEL_CONVERSION,
-    SALPETER_IMF_SLOPE,
-    SUN_GC_DISTANCE,
-    THICK_DISK_LOCAL_NUMBER_DENSITY,
-    THICK_DISK_ROTATION_VELOCITY,
-    THICK_DISK_SCALE_HEIGHT,
-    THICK_DISK_SCALE_LENGTH,
-    THICK_DISK_VELOCITY_SIGMA_U,
-    THICK_DISK_VELOCITY_SIGMA_V,
-    THICK_DISK_VELOCITY_SIGMA_W,
-)
 
-"""
-This class implements a mixture model of the thin disk, thick disk, and
-bulge/bar, enforcing the kinematics and density of the galaxy.
-It's a simplified version of the model defined in https://ui.adsabs.harvard.edu/abs/2021ApJ...917...78K/abstract.
-and codified here https://github.com/nkoshimoto/genulens
-This class distills genulens's core functionality into a component for EXOZIPPy
-
-Fidelity notes (vs genulens, reviewed 2026-08): the thin disk collapses
-genulens's 7 age bins into one exponential layer with its B14disk-mode
-(Bennett et al. 2014) kinematics instead of the Shu DF; the bar keeps a
-plain-ellipsoid exp(-r_s/2) profile (not the K21 super-ellipsoid + X-shape)
-but carries genulens's outer cylindrical cutoff and VVV-box-budget
-normalization; NSD, stellar halo, and the bar's spatial sigma gradients /
-streaming motion are omitted.  All three branch weights are genulens's
-NUMBER-density channel on one absolute scale, so the logsumexp mixture
-weight is physical.  The event-rate selection factor (theta_E * mu_rel) is
-deliberately NOT here -- it lives in the lens component, so this prior
-stays microlensing-agnostic.
-"""
+from . import koshimoto21 as k21
+from . import populations
+from .pdmf import GRID_DEX as PDMF_GRID_DEX
+from .pdmf import interp_table
 
 logger = logging.getLogger(__name__)
 
@@ -74,24 +42,13 @@ logger = logging.getLogger(__name__)
 ANCHOR_PLACEHOLDER_RA_DEG = 180.0
 ANCHOR_PLACEHOLDER_DEC_DEG = 0.0
 
-# The frame, the line-of-sight basis and the position transform live in
-# physics.py (the numpy layer) so the start-value hints in
-# mulensing/lens.py use exactly the code this likelihood uses.
-from .physics import (  # noqa: E402
-    GALACTOCENTRIC_FRAME,
-    line_of_sight_basis,
-)
-from .physics import (  # noqa: E402
-    galactic_xyz as _galactic_xyz_np,
-)
-
 
 def _unnormalized_warning():
     logger.warning(
-        "[galacticmodel] Cannot read finite log10-mass bounds; the IMF "
-        "prior is left unnormalized (harmless for sampling, but its logp "
-        "is offset by an unknown constant and is not comparable across "
-        "IMF choices)."
+        "[galacticmodel] Cannot read finite log10-mass bounds; the FFP "
+        "mass prior is left unnormalized (harmless for sampling, but its "
+        "logp is offset by an unknown constant and is not comparable with "
+        "the stellar mass function's)."
     )
     return 0.0
 
@@ -108,7 +65,7 @@ def _power_law_log_norm(k, param):
     logdiffexp(., .) - log(|k| ln10) so the exponentials never overflow
     (10^(k*lo) is 1e12 already at the defaults.yaml floor of -9 dex).
 
-    ``k`` may be a scalar (one slope shared by every star, as Salpeter is) or
+    ``k`` may be a scalar (one slope shared by every star) or
     a per-star array (the FFP slope is per star and user-settable, and each
     star carries its own bounds).  Both branches of the k == 0 split are
     always evaluated and then selected, which is safe because neither can
@@ -129,165 +86,6 @@ def _power_law_log_norm(k, param):
     hi, lo = np.maximum(a, b), np.minimum(a, b)
     power_law = hi + np.log1p(-np.exp(lo - hi)) - np.log(np.abs(k_safe) * ln10)
     return np.where(is_flat, np.log(upper - lower), power_law)
-
-
-# Logistic scale of the Chabrier blend.  A logistic w(t) = sigmoid(-t) with
-# t = (x - x_match)/s falls from 0.9 to 0.1 over 2 ln(9) s, so the declared
-# 10%-90% width fixes s.
-_CHABRIER_BLEND_SCALE = CHABRIER_BLEND_WIDTH_DEX / (2.0 * np.log(9.0))
-
-# Quadrature points for the blended normalizer.  The blend has no closed-form
-# integral (see chabrier_logmass_logp), so the constant is a 1-D numerical
-# integral over the support -- computed ONCE, in numpy, at build time, which
-# is legitimate exactly because star.logmass's bounds are STATIC.  If a
-# dynamic (linked) bound is ever wanted on logmass this breaks and has to be
-# rethought, the same caveat parameter.py's static-bound normalizers carry.
-#
-# 1e5 intervals put dx ~ 1.2e-4 dex on the default 11.5 dex support, ~380x
-# finer than the 0.045 dex blend scale, and trapezoid error falls as dx^2:
-# measured against 4x the points the log-normalizer moves by < 1e-12 nats.
-_CHABRIER_QUAD_POINTS = 100001
-
-
-def _softplus(t, xp):
-    """log(1 + exp(t)), stable at both extremes and smooth at t = 0.
-
-    Deliberately NOT hand-rolled as ``maximum(t, 0) + log1p(exp(-abs(t)))``:
-    that form is stable but its derivative at exactly t = 0 comes out of
-    ``maximum``'s tie-break rather than as the true 0.5, and t = 0 is exactly
-    where the Chabrier segments meet -- i.e. a gradient artifact planted at
-    the one point this whole change exists to smooth.  ``pt.softplus`` gives
-    0.5 there (verified), and ``np.logaddexp(0, t)`` is numpy's own stable
-    formulation of the same function.
-    """
-    if hasattr(xp, "softplus"):
-        return xp.softplus(t)
-    return xp.logaddexp(0.0, t)
-
-
-def chabrier_logmass_logp(logmass, param, xp=pt):
-    """Chabrier (2003) system IMF as a density in x = log10(M/Msun).
-
-    THE functional form, in one place, for both backends: ``xp=pt`` builds the
-    symbolic potential, ``xp=np`` is what the normalizer integrates.  Returns
-    the NORMALIZED log density; pass ``param=None`` for the unnormalized one.
-
-    Functional form
-    ---------------
-    Chabrier's system IMF is PIECEWISE (PASP 115, 763, Table 1): a lognormal
-    below 1 Msun and dN/dlog m ~ m^-1.3 above it.  Until 2026-08 only the
-    lognormal was implemented, applied over the whole support, under a comment
-    saying one "would smoothly match it to a Salpeter tail" -- in the
-    conditional, describing what one could do.  Review 3.7.1 is that nobody
-    had.  The lognormal's slope in log mass is -(x - log Mc)/sigma^2, which is
-    -2.02 nats/dex at 1 Msun and -5.10 at 10, against the tail's constant
-    -1.3*ln10 = -2.99, so massive stars were over-penalized and the error grew
-    with mass.
-
-    Change of variables
-    -------------------
-    None.  Both segments are quoted as dN/dlog m, and x = log10(M) is the
-    sampled coordinate, so they drop straight in.  Contrast the Salpeter
-    branch in ``build_likelihood``, quoted as dN/dM, which picks up
-    |dM/dx| = M ln10 and turns its exponent from -alpha into (1 - alpha).
-
-    The match, and why it is SMOOTHED
-    ---------------------------------
-    The tail's amplitude is fixed by continuity at the match point, so the
-    two segments agree in value there -- but the true IMF is only C0: the
-    slope jumps by 0.97 nats/dex, which is a logp KINK, the same class of
-    thing as the SHO kernel's Q = 1/2 switch.  It is blended out over
-    ``CHABRIER_BLEND_WIDTH_DEX``, whose comment carries the arithmetic: the
-    blend costs ~0.02 nats against ~0.7 nats/dex of published uncertainty in
-    the tail's own exponent, so it cannot be the limiting error.
-
-    The blend is a WEIGHTED SUM of the two DENSITIES,
-    ``w(x)*lognormal + (1-w(x))*powerlaw``, never a ``pt.where`` over the two
-    branch log-densities.  Both branches are finite everywhere here, so a
-    where would not actually produce the documented NaN -- but the weighted
-    sum has no branch selection at all, so it stays clear of that trap by
-    construction rather than by argument.  It is evaluated as
-    ``logaddexp(log w + L, log(1-w) + P)``, which is that sum exactly, in the
-    form that does not underflow: at the -9 dex floor the lognormal is
-    exp(-107) while the unweighted tail is ~1e11.
-
-    Normalization
-    -------------
-    The blended density has NO closed-form integral, so the analytic
-    truncated-lognormal constant becomes a numerical quadrature over the
-    parameter's own hard support.  That is the real implementation cost of
-    the tail, and it is cheap only because the bounds are static -- see
-    ``_CHABRIER_QUAD_POINTS``.  Normalizing over the same support the
-    Salpeter and FFP branches use is what keeps switching between them a
-    meaningful move in logp rather than an arbitrary offset.
-    """
-    x = logmass
-    lognormal = -0.5 * ((x - CHABRIER_LOG_MC) / CHABRIER_SIGMA) ** 2
-    # Continuity fixes the tail's amplitude: it equals the lognormal AT the
-    # match point.  (Chabrier quotes the two normalizations separately; using
-    # them would be equivalent up to the additive constant the normalizer
-    # removes anyway, and stating it as continuity makes the C0 property
-    # manifest instead of a coincidence of two rounded numbers.)
-    at_match = (
-        -0.5
-        * ((CHABRIER_MATCH_LOGMASS - CHABRIER_LOG_MC) / CHABRIER_SIGMA) ** 2
-    )
-    power_law = at_match - CHABRIER_HIGH_MASS_SLOPE * np.log(10.0) * (
-        x - CHABRIER_MATCH_LOGMASS
-    )
-
-    # w = sigmoid(-t) is 1 well below the match and 0 well above it, so
-    # log w = -softplus(t) and log(1 - w) = -softplus(-t).
-    t = (x - CHABRIER_MATCH_LOGMASS) / _CHABRIER_BLEND_SCALE
-    blended = xp.logaddexp(
-        lognormal - _softplus(t, xp), power_law - _softplus(-t, xp)
-    )
-    if param is None:
-        return blended
-    return blended - _chabrier_log_norm(param)
-
-
-def _chabrier_log_norm(param):
-    """log Z of the blended Chabrier density over the Parameter's support.
-
-    Trapezoid on a dense uniform grid, per element (each star carries its own
-    bounds), with the peak factored out so the exponentials stay in range --
-    the integrand spans exp(-107) at the -9 dex floor.  Deliberately the same
-    contract as ``_power_law_log_norm``: an unreadable or degenerate support
-    falls back to unnormalized with a warning rather than failing a fit,
-    because a constant offset never changes the sampling.
-
-    This REPLACED an analytic truncated-lognormal constant
-    (``_lognormal_log_norm``, deleted 2026-08 with the tail), whose hard-won
-    detail is worth keeping in mind here: it built the truncated mass from
-    erf/erfc with a per-side branch and NEVER as a difference of Phi CDFs,
-    because this support straddles the Chabrier mean at -14.6 and +5.5 sigma,
-    where ``1 - eps`` minus ``1 - eps'`` throws away nearly every significant
-    digit.  Quadrature has no such subtraction anywhere -- it sums positive
-    numbers -- so the cancellation cannot recur, but a future author tempted
-    to restore a closed form for speed needs that warning.  The analytic form
-    survives in ``tests/test_galactic_model.py`` as the independent check on
-    a below-the-match support, which is where it is still exact.
-    """
-    bounds = _sampled_bounds(param)
-    if bounds is None:
-        return _unnormalized_warning()
-    lower, upper = bounds
-
-    n = max(np.size(lower), np.size(upper))
-    lower = np.broadcast_to(np.atleast_1d(lower), (n,))
-    upper = np.broadcast_to(np.atleast_1d(upper), (n,))
-
-    frac = np.linspace(0.0, 1.0, _CHABRIER_QUAD_POINTS)
-    grid = lower[:, None] + (upper - lower)[:, None] * frac[None, :]
-    f = chabrier_logmass_logp(grid, param=None, xp=np)
-    peak = np.max(f, axis=1, keepdims=True)
-    integral = np.trapezoid(np.exp(f - peak), grid, axis=1)
-
-    if not np.all(np.isfinite(integral)) or np.any(integral <= 0.0):
-        # Support so far into a tail that its probability mass underflows.
-        return _unnormalized_warning()
-    return np.log(integral) + peak[:, 0]
 
 
 def ffp_logmass_logp(logmass, alpha, param):
@@ -320,9 +118,9 @@ def ffp_logmass_logp(logmass, alpha, param):
 
         log p(x) = -alpha * ln10 * x + const,
 
-    with no Jacobian.  Contrast the Salpeter branch in ``build_likelihood``,
-    which is quoted as dN/dM and therefore picks up |dM/dx| = M ln10, turning
-    its exponent from -alpha into (1 - alpha).  If you substitute a mass
+    with no Jacobian.  Contrast a mass function quoted as dN/dM (Salpeter's
+    power law, say), which picks up |dM/dx| = M ln10, turning its exponent
+    from -alpha into (1 - alpha).  If you substitute a mass
     function quoted as dN/dM, you must put that Jacobian back.
 
     Normalization
@@ -330,7 +128,8 @@ def ffp_logmass_logp(logmass, alpha, param):
     From the sampled support, not from the paper.  ``param`` is the
     ``star.logmass`` Parameter; ``_power_law_log_norm`` integrates 10^(k x)
     over its hard [lower, upper] bounds, which makes this a proper density
-    directly comparable with the IMF branches over the same support.  Both Z
+    directly comparable with the stellar mass function, which koshimoto21
+    normalizes over the same support.  Both Z
     and M_norm are therefore unusable here: each contributes only an additive
     constant that the normalizer cancels exactly.  Z is an abundance (a rate
     per star), and would matter only to a model that weighed the FFP and
@@ -353,43 +152,247 @@ def ffp_logmass_logp(logmass, alpha, param):
     # ---------------------------------------------------------------------
 
 
+# ----------------------------------------------------------------------
+# The kinematic prior's bookkeeping.
+#
+# The linked-star analysis (linked_star_structure) is static -- it reads
+# which star.* elements are HARD-linked -- and decides which stars carry a
+# position term of their own.  The rulings are in components/star/star.md,
+# "Linked stars: one position, one density term".
+# ----------------------------------------------------------------------
+
+#: log of the rv column of the velocity Jacobian: the velocity densities are
+#: in km/s, the sampled rv is in m/s.
+_LOG_KMS_PER_MS = float(np.log(1e-3))
+
+#: The three Galactic POPULATIONS the age / [Fe/H] priors are written for
+#: (populations.py); koshimoto21.POPULATION maps each of genulens's branches
+#: onto one of them.
+BRANCHES = ("thin_disk", "thick_disk", "bulge")
+
+#: The velocity coordinates of a star, in the column order of the
+#: (pm_ra, pm_dec, rv) -> galactocentric map.
+VELOCITY_COORDS = ("pm_ra", "pm_dec", "rv")
+
+
+def _hard_links(param):
+    """{element: link spec} of a Parameter's HARD links (sigma: 0 initval
+    links), or {} -- a mock or an unlinked parameter has none."""
+    links = getattr(param, "element_links", None) or {}
+    return links.get("hard", {}) or {}
+
+
+def linked_star_structure(stars, n_star, prefix="star"):
+    """Which stars carry a position of their own, and which velocity
+    coordinates of each star are hard-linked.
+
+    Returns ``(root_of, vel_linked, refused)``:
+
+    - ``root_of[k]`` is the star whose position star ``k`` shares.  A star
+      whose ``distance`` is HARD-linked to exactly one other star's
+      distance, and to nothing else, joins that star's group (chains are
+      followed to the end); every other star is its own root.
+    - ``vel_linked[k]`` is the sorted tuple of column indices (into
+      ``VELOCITY_COORDS``) of star ``k``'s hard-linked velocity
+      coordinates, for every star that has any.
+    - ``refused`` lists ``(k, dep_paths)`` for a hard-linked distance that
+      reads anything other than ONE other star's distance: that star keeps
+      its own position term (and the caller warns), because there is no
+      single partner whose position it is.
+    """
+    parent = list(range(n_star))
+    refused = []
+    for k, spec in sorted(_hard_links(stars.distance).items()):
+        k = int(k)
+        intra = set(spec.get("intra_deps", ()) or ())
+        paths = tuple(spec.get("dep_paths", ()) or ())
+        foreign = [
+            p
+            for p in paths
+            if not (
+                len(p.split(".")) == 3
+                and p.split(".")[0] == prefix
+                and p.split(".")[2] == "distance"
+            )
+        ]
+        if len(intra) == 1 and not foreign and k not in intra:
+            parent[k] = int(next(iter(intra)))
+        else:
+            refused.append((k, paths))
+
+    root_of = np.arange(n_star)
+    for k in range(n_star):
+        j, seen = k, set()
+        while parent[j] != j:
+            if j in seen:  # a cycle the link engine should have refused
+                raise ValueError(
+                    f"galacticmodel: the hard links on {prefix}.distance "
+                    f"form a cycle through element {k}; a cycle of hard "
+                    f"links has no value."
+                )
+            seen.add(j)
+            j = parent[j]
+        root_of[k] = j
+
+    vel_linked = {}
+    for c, name in enumerate(VELOCITY_COORDS):
+        param = getattr(stars, name, None)
+        if param is None:
+            continue
+        for k in _hard_links(param):
+            vel_linked.setdefault(int(k), set()).add(c)
+    vel_linked = {k: tuple(sorted(v)) for k, v in vel_linked.items()}
+    return root_of, vel_linked, refused
+
+
 class GalacticModel(Component):
-    # The only mass function implemented below.  ``IMF:`` is validated
-    # against this in __init__ rather than silently ignored: the key selected
-    # KROUPA_IMF_SLOPE / SALPETER_IMF_SLOPE for a power-law prior that had
-    # not been applied since the Chabrier lognormal replaced it, so every
-    # `IMF: Salpeter` in a config was a no-op.  Kroupa is still unsupported:
-    # it is a BROKEN power law (alpha = 1.3 below 0.5 Msun, 2.3 above) and
-    # needs a piecewise, continuity-matched density, not a single slope --
-    # KROUPA_IMF_SLOPE is only its low-mass segment.
-    SUPPORTED_IMFS = ("chabrier", "salpeter")
+    """The Galactic prior on a line of sight: the genulens port (Koshimoto,
+    Baba & Bennett 2021, ApJ 917, 78; koshimoto21.py).  Cite K21 when you
+    use it; galacticmodel.md says where the port departs from genulens."""
+
+    #: the galactic model (a MODEL choice, so an enum; one spelling).
+    #: koshimoto21 = the genulens port (koshimoto21.py), the only model since
+    #: review 1.7.6 removed the 3-population ``simplified`` one.  The key
+    #: stays so a config that spells the default out keeps working.
+    SUPPORTED_MODELS = ("koshimoto21",)
+
+    #: Keys of the removed ``model: simplified``, each with what replaces it.
+    #: They RAISE: a removed key silently ignored is a prior the user asked
+    #: for and did not get (CLAUDE.md, no fallbacks).
+    REMOVED_KEYS = {
+        "IMF": (
+            "model: koshimoto21 carries K21's broken-power-law IMF, which "
+            "its branch normalizations are derived from"
+        ),
+        "present_day": (
+            "model: koshimoto21 always applies genulens's present-day mass "
+            "function; 'remnants: false' drops the dark remnants (genulens's "
+            "REMNANT 0)"
+        ),
+    }
 
     def __init__(self, config, config_manager):
         super().__init__(config, config_manager)
         self.label = "Galactic Prior"
         if self.n_elements != 1:
-            # Only config[0] is ever read (imf, anchor_idx), and the extra
-            # blocks used to leak into the likelihood as a broadcast: with
-            # 2 blocks and 1 star the whole kinematic prior was counted
-            # TWICE, and with 2 blocks and 3 stars it raised a bare shape
-            # error.  One galactic prior describes one line of sight.
+            # Only config[0] is ever read (anchor_idx and the options), and
+            # the extra blocks used to leak into the likelihood as a
+            # broadcast: with 2 blocks and 1 star the whole kinematic prior
+            # was counted TWICE, and with 2 blocks and 3 stars it raised a
+            # bare shape error.  One galactic prior describes one line of
+            # sight.
             raise ValueError(
                 f"galacticmodel takes exactly one config block, got "
                 f"{self.n_elements}.  It is a single prior on the line of "
                 f"sight shared by every star; use 'anchor_idx' to choose "
                 f"which star's (ra, dec) defines it."
             )
-        imf = str(self.config[0].get("IMF", "chabrier")).lower()
-        if imf not in self.SUPPORTED_IMFS:
+        cfg = self.config[0]
+        model = cfg.get("model", "koshimoto21")
+        if model == "simplified":
             raise ValueError(
-                f"galacticmodel IMF '{self.config[0].get('IMF')}' is not "
-                f"implemented.  Supported: {', '.join(self.SUPPORTED_IMFS)} "
-                f"('chabrier' = Chabrier 2003 system IMF, a lognormal in "
-                f"log10 mass; 'salpeter' = Salpeter 1955 power law).  "
-                f"'Kroupa' was accepted but silently ignored before 2026-08."
+                "galacticmodel model: simplified was removed (review 1.7.6). "
+                "The earlier 3-population Galactic model (thin disk, thick "
+                "disk, bar) is gone; model: koshimoto21, the port of genulens "
+                "(Koshimoto, Baba & Bennett 2021), is the Galactic model. "
+                "Delete the 'model' key, or write 'model: koshimoto21'."
             )
-        self.imf = imf
+        if model not in self.SUPPORTED_MODELS:
+            raise ValueError(
+                f"galacticmodel model {model!r} is not one of "
+                f"{', '.join(self.SUPPORTED_MODELS)} (case-sensitive): "
+                f"'koshimoto21' is the port of genulens (Koshimoto, Baba & "
+                f"Bennett 2021)."
+            )
+        self.model = model
+        removed = [k for k in self.REMOVED_KEYS if k in cfg]
+        if removed:
+            raise ValueError(
+                "galacticmodel "
+                + "; ".join(
+                    f"key '{k}' belonged to the removed model: simplified "
+                    f"(review 1.7.6) -- {self.REMOVED_KEYS[k]}"
+                    for k in removed
+                )
+                + ".  Delete "
+                + ("it" if len(removed) == 1 else "them")
+                + "; model: koshimoto21 is the Galactic model."
+            )
+        # genulens's REMNANT switch (default on, JDE 2026-10-30).
+        remnants = cfg.get("remnants", True)
+        if not isinstance(remnants, bool):
+            raise ValueError(
+                f"galacticmodel remnants must be true or false, got "
+                f"{remnants!r}."
+            )
+        self.remnants = remnants
+        binaries = cfg.get("binaries", False)
+        if not isinstance(binaries, bool):
+            raise ValueError(
+                f"galacticmodel binaries must be true or false, got "
+                f"{binaries!r}."
+            )
+        self.binaries = binaries
+        self._parse_source_selection()
         self.anchor_idx = self.config[0].get("anchor_idx", 0)
+        # Population-conditional age and [Fe/H] priors (review 1.7.5): two
+        # independent booleans (JDE's n-way ruling), default on.  They act
+        # only on a star whose age / initfeh is SAMPLED (a star on an
+        # evolutionary track); every other star is untouched.
+        for key in ("population_age", "population_feh"):
+            val = self.config[0].get(key, True)
+            if not isinstance(val, bool):
+                raise ValueError(
+                    f"galacticmodel {key} must be true or false, got {val!r}."
+                )
+            setattr(self, key, val)
+
+    SOURCE_SELECTIONS = ("sqrt_distance", "luminosity_function")
+
+    def _parse_source_selection(self):
+        """koshimoto21's source weighting (genulens's rhoD_S), an n-way MODEL
+        choice: sqrt_distance (genulens's default, gammaDs = 0.5: n_MS
+        sqrt(D / 8 kpc), no D^2) or luminosity_function (genulens's AIrc
+        mode: n_MS D^2 fLF(D), sources with apparent I in source_i_range
+        given A_I = source_ai_rc at the red clump)."""
+        cfg = self.config[0]
+        keys = (
+            "source_selection",
+            "source_i_range",
+            "source_ai_rc",
+            "source_dm_rc",
+        )
+        sel = cfg.get("source_selection", "sqrt_distance")
+        if sel not in self.SOURCE_SELECTIONS:
+            raise ValueError(
+                f"galacticmodel source_selection {sel!r} is not one of "
+                f"{', '.join(self.SOURCE_SELECTIONS)} (case-sensitive)."
+            )
+        self.source_selection = sel
+        if sel == "luminosity_function":
+            if "source_ai_rc" not in cfg:
+                raise ValueError(
+                    "galacticmodel source_selection: luminosity_function "
+                    "needs source_ai_rc (the I-band extinction to the red "
+                    "clump, genulens's AIrc)."
+                )
+            i_range = cfg.get("source_i_range", [14.0, 21.0])
+            if len(i_range) != 2 or not i_range[0] < i_range[1]:
+                raise ValueError(
+                    f"galacticmodel source_i_range must be [I_min, I_max] "
+                    f"with I_min < I_max, got {i_range!r}."
+                )
+            self.source_i_range = (float(i_range[0]), float(i_range[1]))
+            self.source_ai_rc = float(cfg["source_ai_rc"])
+            dm = cfg.get("source_dm_rc")
+            self.source_dm_rc = None if dm is None else float(dm)
+        else:
+            extra = [k for k in keys[1:] if k in cfg]
+            if extra:
+                raise ValueError(
+                    f"galacticmodel {', '.join(extra)} apply to "
+                    f"source_selection: luminosity_function only."
+                )
 
     @property
     def prefix(self):
@@ -399,23 +402,125 @@ class GalacticModel(Component):
     def config_schema(cls):
         return [
             {
-                "key": "IMF",
+                "key": "population_age",
                 "kind": "option",
-                "accepts": list(cls.SUPPORTED_IMFS),
+                "accepts": [True, False],
                 "required": False,
                 "doc": (
-                    "Initial mass function for the stellar mass prior "
-                    "(default 'chabrier'): 'chabrier' is the Chabrier 2003 "
-                    "system IMF, a lognormal in log10 mass; 'salpeter' is "
-                    "the Salpeter 1955 power law dN/dM ~ M^-2.35.  Both are "
-                    "normalized over the sampled logmass bounds, so their "
-                    "logp values are directly comparable.  Anything else "
-                    "raises.  This is the STELLAR mass prior: a star may opt "
-                    "out of it individually with the star block's "
-                    "'mass_function: ffp' (the free-floating-planet mass "
-                    "function), which is how an FFP lens and a stellar source "
-                    "get different mass priors in the same fit."
+                    "Population-conditional AGE prior (default true): a "
+                    "star whose age is sampled (a star on an evolutionary "
+                    "track) takes its age from the thin-disk (star "
+                    "formation over 0-10 Gyr), thick-disk (12 +/- 1 Gyr) "
+                    "or bulge (9 +/- 1 Gyr) age distribution, mixed by the "
+                    "same density x kinematics weights as its position "
+                    "(Koshimoto+2021), instead of uniform on its bounds.  "
+                    "false = the uniform prior."
                 ),
+            },
+            {
+                "key": "population_feh",
+                "kind": "option",
+                "accepts": [True, False],
+                "required": False,
+                "doc": (
+                    "Population-conditional INITIAL-METALLICITY prior "
+                    "(default true) on a star whose initfeh is sampled: "
+                    "thin disk 0.0 +/- 0.2 dex at R0 with a -0.06 dex/kpc "
+                    "radial gradient (Genovali+2014), thick disk -0.78 +/- "
+                    "0.30 (Robin+2003), bulge 45% at -0.30 +/- 0.25 plus "
+                    "55% at +0.32 +/- 0.11 (Hill+2011), mixed like "
+                    "population_age.  false = the uniform prior."
+                ),
+            },
+            {
+                "key": "model",
+                "kind": "option",
+                "accepts": list(cls.SUPPORTED_MODELS),
+                "required": False,
+                "doc": (
+                    "The Galactic model (default and only value "
+                    "'koshimoto21'): a faithful port "
+                    "of genulens (Koshimoto, Baba & Bennett 2021, ApJ 917, "
+                    "78; github.com/nkoshimoto/genulens) -- seven thin-disk "
+                    "age bins, thick disk, the E+E_X bar and the stellar "
+                    "halo, with genulens's Shu-distribution disk "
+                    "kinematics, bar streaming and dispersion gradients, "
+                    "and its present-day mass function.  The earlier "
+                    "3-population 'simplified' model was removed (review "
+                    "1.7.6) and raises, as do its IMF and present_day keys.  "
+                    "koshimoto21's age / [Fe/H] priors are still the "
+                    "3-population ones (galacticmodel.md)."
+                ),
+            },
+            {
+                "key": "remnants",
+                "kind": "option",
+                "accepts": [True, False],
+                "required": False,
+                "doc": (
+                    "genulens's REMNANT (default "
+                    "true): stars above their branch's PARSEC turnoff become "
+                    "white dwarfs (Kalirai+2008), neutron stars or black "
+                    "holes (Raithel+2018), neutron stars and black holes "
+                    "with genulens's natal kicks (350 / 100 km/s).  false = "
+                    "genulens's REMNANT 0: dead stars are discarded."
+                ),
+            },
+            {
+                "key": "binaries",
+                "kind": "option",
+                "accepts": [True, False],
+                "required": False,
+                "doc": (
+                    "genulens's BINARY (default "
+                    "false, genulens's default): the lens of a single-lens "
+                    "event may be an unresolved binary -- genulens's "
+                    "multiplicity, mass ratios and separations; a companion "
+                    "resolved wide leaves one body as the lens, one closer "
+                    "than the event can resolve makes the lens their total "
+                    "mass, and a detectable binary is excluded."
+                ),
+            },
+            {
+                "key": "source_selection",
+                "kind": "option",
+                "accepts": ["sqrt_distance", "luminosity_function"],
+                "required": False,
+                "doc": (
+                    "How a survey-selected SOURCE "
+                    "star (Component.selected_sources: a microlensing "
+                    "event's source) is weighted, as genulens does it.  "
+                    "'sqrt_distance' (default, genulens's default): its "
+                    "main-sequence count times sqrt(D / 8 kpc), with no "
+                    "D^2 volume element.  'luminosity_function' (genulens's "
+                    "AIrc mode): main-sequence count times D^2 times the "
+                    "fraction of each population's luminosity function with "
+                    "apparent I in source_i_range (default [14, 21]), given "
+                    "source_ai_rc (required: A_I at the red clump) and "
+                    "optionally source_dm_rc (default Nataf+16 as genulens "
+                    "codes it)."
+                ),
+            },
+            {
+                "key": "source_i_range",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": "[I_min, I_max] for source_selection: luminosity_function.",
+            },
+            {
+                "key": "source_ai_rc",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": "A_I to the red clump (genulens AIrc), for luminosity_function.",
+            },
+            {
+                "key": "source_dm_rc",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": "Red-clump distance modulus (genulens DMrc), optional.",
             },
             {
                 "key": "anchor_idx",
@@ -446,33 +551,220 @@ class GalacticModel(Component):
     # parameter.PriorContribution.
     # ------------------------------------------------------------------
 
-    def _declare_mass_prior(self, stars, ffp_mask):
-        """Describe the imf_prior potential, per star.
+    def _mass_function_mask(self, stars, ffp_mask):
+        """Which stars take genulens's present-day mass function (inside the
+        branch mixture): every star except those whose ``mass_function:``
+        opted onto the FFP mass function."""
+        n_star = int(np.atleast_1d(stars.logmass.initval).size)
+        if ffp_mask.size:
+            return ~ffp_mask
+        return np.ones(n_star, dtype=bool)
 
-        Two descriptions, because the potential really is two densities: the
-        stellar IMF selected by ``IMF:``, and the FFP mass function on the
-        stars whose ``mass_function:`` opted out of it.  Both are normalized
-        over star.logmass's own support, so both supersede the uniform.
+    # ------------------------------------------------------------------
+    # Population-conditional age and [Fe/H] priors (review 1.7.5;
+    # populations.py holds the distributions).
+    # ------------------------------------------------------------------
+
+    def _population_mask(self, stars, name, enabled):
+        """Per star: does star.<name> take the population prior?  Only a
+        SAMPLED element (a free coordinate: not pinned, not derived, not
+        hard-linked -- an orbit member's age is its anchor's, counted once
+        there) and only with the toggle on.  A star with no track has no
+        age/initfeh element at all; one an evolutionarymodel does not name
+        has them pinned at a bookkeeping value (``_pin_unmodeled_stars``),
+        which must not steer its population."""
+        n_star = int(np.atleast_1d(stars.distance.initval).size)
+        param = getattr(stars, name, None)
+        if not enabled or param is None:
+            return np.zeros(n_star, dtype=bool)
+        return np.array(
+            [param.element_is_sampled(k) for k in range(n_star)], dtype=bool
+        )
+
+    def _support(self, param, mask):
+        """Static (lower, upper) per star of a Parameter that must have
+        them; masked-off stars get a wide dummy support (never read, but
+        kept finite so 0 * term stays 0)."""
+        bounds = _sampled_bounds(param)
+        if bounds is None:
+            raise ValueError(
+                f"[{self.prefix}] the population prior on {param.label} "
+                f"needs finite static lower/upper bounds; none could be read."
+            )
+        n = mask.size
+        lo = np.broadcast_to(np.atleast_1d(bounds[0]), (n,)).astype(float)
+        hi = np.broadcast_to(np.atleast_1d(bounds[1]), (n,)).astype(float)
+        if getattr(param, "element_links", None) and (
+            param.element_links.get("lower")
+            or param.element_links.get("upper")
+        ):
+            logger.warning(
+                f"[{self.prefix}] {param.label} carries a linked bound; the "
+                f"population prior is normalized over its STATIC bounds."
+            )
+        return lo, hi
+
+    def _population_branch_terms(self, stars, r, age_mask, feh_mask):
+        """Per branch, per star: log g_b(age) + log p_b(initfeh | R), each
+        normalized over the star's own support, times the 0/1 masks.
+
+        Normalized per branch, so adding them inside the mixture leaves the
+        branch weights the physical number densities: the joint over
+        (position, velocity, mass, age, [Fe/H]) stays a normalized density
+        and ``evidence_log_norm`` is unchanged.  The thin disk's [Fe/H]
+        normalizer moves with R (its center does), so it is in the graph;
+        the rest are build-time constants.  Every term is finite on every
+        element (a masked-off star gets a wide dummy support), so the 0/1
+        weight is plain arithmetic, never a selection.
+        """
+        n_b = len(BRANCHES)
+        terms = [0.0] * n_b
+        if age_mask.any():
+            w = age_mask.astype(float)
+            lo, hi = self._support(stars.age, age_mask)
+            lo = np.where(age_mask, lo, 0.0)
+            hi = np.where(age_mask, hi, populations.AGE_MAX_GYR)
+            t = stars.age.value
+            for b, pop in enumerate(BRANCHES):
+                log_g = populations.log_age_density(pop, t, xp=pt)
+                terms[b] = terms[b] + w * (
+                    log_g - populations.log_age_norm(pop, lo, hi)
+                )
+        if feh_mask.any():
+            w = feh_mask.astype(float)
+            lo, hi = self._support(stars.initfeh, feh_mask)
+            populations.check_thin_disk_feh_support(
+                lo[feh_mask], hi[feh_mask], f"[{self.prefix}] star.initfeh"
+            )
+            lo = np.where(feh_mask, lo, -10.0)
+            hi = np.where(feh_mask, hi, 10.0)
+            f = stars.initfeh.value
+            for b, pop in enumerate(BRANCHES):
+                log_p = populations.log_feh_density(pop, f, r_kpc=r, xp=pt)
+                if pop == "thin_disk":
+                    log_z = populations.thin_disk_log_feh_norm(
+                        r, lo, hi, xp=pt
+                    )
+                else:
+                    log_z = populations.log_feh_norm(pop, lo, hi)
+                terms[b] = terms[b] + w * (log_p - log_z)
+        return terms
+
+    def _declare_population_priors(self, system, stars, age_mask, feh_mask):
+        """Prior-column declarations and the draft sentence for the
+        population age / [Fe/H] priors (declare-at-site rule)."""
+        from ...outputs.prose import get_collector
+
+        if age_mask.any():
+            stars.age.add_prior_contribution(
+                latex=(
+                    r"Galactic-population mixture: thin disk SFH "
+                    r"$\propto e^{-(10-T)/7}$ on 0--10\,Gyr, thick disk "
+                    r"$12 \pm 1$\,Gyr, bulge $9 \pm 1$\,Gyr"
+                ),
+                text=(
+                    "Galactic-population mixture: thin disk SFH "
+                    "exp(-(10-T)/7) on 0-10 Gyr, thick disk 12+/-1 Gyr, "
+                    "bulge 9+/-1 Gyr"
+                ),
+                elements=np.nonzero(age_mask)[0],
+                supersedes_bounds=True,
+            )
+        if feh_mask.any():
+            stars.initfeh.add_prior_contribution(
+                latex=(
+                    r"Galactic-population mixture: thin disk "
+                    r"$\mathcal{N}(-0.06\,(R-R_0), 0.2)$, thick disk "
+                    r"$\mathcal{N}(-0.78, 0.3)$, bulge "
+                    r"$0.45\,\mathcal{N}(-0.30, 0.25) + "
+                    r"0.55\,\mathcal{N}(0.32, 0.11)$"
+                ),
+                text=(
+                    "Galactic-population mixture: thin disk "
+                    "N(-0.06 (R-R0), 0.2), thick disk N(-0.78, 0.3), bulge "
+                    "0.45 N(-0.30, 0.25) + 0.55 N(0.32, 0.11)"
+                ),
+                elements=np.nonzero(feh_mask)[0],
+                supersedes_bounds=True,
+            )
+        if not (age_mask.any() or feh_mask.any()):
+            return
+        what = " and ".join(
+            w
+            for w, m in (("age", age_mask), ("initial metallicity", feh_mask))
+            if m.any()
+        )
+        get_collector(system).add(
+            rf"The {what} prior of each star on an evolutionary track "
+            r"follows its Galactic population, mixed with the same "
+            r"density and kinematic weights as its position: ages from "
+            r"a thin-disk star-formation history "
+            r"$\propto e^{-(10\,{\rm Gyr}-T)/7\,{\rm Gyr}}$ over "
+            r"0--10\,Gyr, a $12 \pm 1$\,Gyr thick disk and a "
+            r"$9 \pm 1$\,Gyr bulge \citep{Koshimoto:2021}; metallicities "
+            r"from a thin disk centered on solar at the Sun with the "
+            r"Cepheid gradient of $-0.06$\,dex\,kpc$^{-1}$ "
+            r"\citep{Genovali:2014} and a 0.2\,dex width, a thick disk at "
+            r"$-0.78 \pm 0.30$ \citep{Robin:2003}, and the two-component "
+            r"bulge distribution of \citet{Hill:2011}.",
+            section="priors",
+            key=f"{self.prefix}.population_age_feh",
+            rank=21,
+        )
+
+    def _birth_logmass(self, system, stars):
+        """The ``stars.logmass`` vector with each star's BIRTH mass in place.
+
+        A star whose present-day mass differs from its initial one has a
+        component that says so: ``Component.initial_logmass`` returns
+        ``{star index: log10 initial mass}`` (the evolutionary model, which
+        also adds the Jacobian of that change of coordinate).  Two
+        components claiming one star would be two different birth masses,
+        and raise.  Assembled with ``set_subtensor``, never ``pt.where``.
+        """
+        claims = {}
+        for comp in system.active_components.values():
+            for si, value in comp.initial_logmass(system).items():
+                if si in claims:
+                    raise ValueError(
+                        f"[{self.prefix}] star {si} has an initial mass from "
+                        f"both '{claims[si][0]}' and '{comp.prefix}'; a star "
+                        f"has one birth mass."
+                    )
+                claims[si] = (comp.prefix, value)
+        logmass = stars.logmass.value
+        if not claims:
+            return logmass
+        idx = sorted(claims)
+        return pt.set_subtensor(
+            logmass[np.asarray(idx, dtype=int)],
+            pt.stack([claims[i][1] for i in idx]),
+        )
+
+    def _declare_mass_prior(self, stars, ffp_mask):
+        """Describe the mass prior, per star.
+
+        Two descriptions, because the prior really is two densities: genulens's
+        present-day mass function (inside the kinematic mixture) on the stars
+        on the stellar mass function, and the FFP mass function (the
+        ``imf_prior`` potential) on the stars whose ``mass_function:`` opted
+        out of it.  Both are normalized over star.logmass's own support, so
+        both supersede the uniform.
         """
         logmass = getattr(stars, "logmass", None)
         if logmass is None:
             return
 
-        if self.imf == "salpeter":
-            imf_latex = r"Salpeter (1955) IMF in $\log_{10} M$"
-            imf_text = "Salpeter (1955) IMF in log10 M"
-        else:
-            # "lognormal + $m^{-1.3}$" rather than a bare "Chabrier (2003)
-            # IMF": the label used to name the paper while the code applied
-            # only its low-mass segment (review 3.7.1), so the table said
-            # nothing that would have caught it.  Naming both segments is
-            # what makes the claim checkable at a glance.
-            imf_latex = (
-                r"Chabrier (2003) IMF in $\log_{10} M$ "
-                r"(lognormal $+\ m^{-1.3}$ tail)"
-            )
-            imf_text = "Chabrier (2003) IMF in log10 M (lognormal + m^-1.3)"
-
+        imf_latex = (
+            r"Koshimoto et al. (2021) present-day mass function "
+            r"(genulens: K21 IMF, PARSEC turnoff"
+            + (r", WD/NS/BH remnants)" if self.remnants else ")")
+        )
+        imf_text = (
+            "Koshimoto+2021 present-day mass function (genulens: K21 "
+            "IMF, PARSEC turnoff"
+            + (", WD/NS/BH remnants)" if self.remnants else ")")
+        )
         imf_elements = np.nonzero(~ffp_mask)[0] if ffp_mask.size else None
         if imf_elements is None or len(imf_elements):
             logmass.add_prior_contribution(
@@ -498,14 +790,14 @@ class GalacticModel(Component):
             )
 
     def _add_mass_prior_prose(self, system, stars, ffp_mask):
-        """Modeling-draft sentences for the imf_prior potential.
+        """Modeling-draft sentences for the mass prior.
 
-        Mirrors ``_declare_mass_prior``'s per-star split: the stellar IMF
-        sentence names its stars only when some star opted onto the FFP
-        mass function, and each FFP star gets the Sumi slope actually
-        applied.  Declared next to the potential (declare-at-site rule).
+        Mirrors ``_declare_mass_prior``'s per-star split: one sentence for
+        the stars on genulens's present-day mass function, and each FFP star
+        gets the Sumi slope actually applied.  Declared next to the
+        potential (declare-at-site rule).
         """
-        from ...outputs.prose import get_collector, join_names
+        from ...outputs.prose import get_collector
         from ...outputs.texutils import latex_escape
 
         prose = get_collector(system)
@@ -523,51 +815,25 @@ class GalacticModel(Component):
         if len(star_names) < n:
             star_names += [str(i) for i in range(len(star_names), n)]
         mask = ffp_mask if ffp_mask.size else np.zeros(n, dtype=bool)
-        # Says "system" and names both segments: the sentence used to read
-        # "\citet{Chabrier:2003} lognormal", which was an accurate
-        # description of what the code did and an inaccurate description of
-        # the cited IMF (review 3.7.1).  A modeling draft has to be able to
-        # stand as written.
-        imf_cite = (
-            r"\citet{Salpeter:1955} power-law"
-            if self.imf == "salpeter"
-            else r"\citet{Chabrier:2003} system"
-        )
-        imf_names = [nm for nm, f in zip(star_names, mask) if not f]
-        if imf_names:
-            target = (
-                "each modeled star"
-                if len(imf_names) == n
-                else (
-                    ("star " if len(imf_names) == 1 else "stars ")
-                    + join_names(latex_escape(nm) for nm in imf_names)
-                )
-            )
+        if not mask.all():
             prose.add(
-                f"We applied the {imf_cite} initial mass function as a "
-                f"prior on the mass of {target}, normalized over the "
-                f"sampled log-mass support.",
+                r"The mass of each star on the stellar mass function "
+                r"followed the present-day mass function of "
+                r"\citet{Koshimoto:2021} as implemented in genulens: their "
+                r"broken-power-law initial mass function, truncated at each "
+                r"population's main-sequence turnoff from the PARSEC "
+                r"isochrones \citep{Bressan:2012}"
+                + (
+                    r", with the dead stars turned into white dwarfs "
+                    r"\citep{Kalirai:2008} and neutron stars and black holes "
+                    r"\citep{Raithel:2018} that received natal kicks of 350 "
+                    r"and 100\,km\,s$^{-1}$"
+                    if self.remnants
+                    else ""
+                )
+                + r", inside the Galactic-population mixture.",
                 section="priors",
                 key=f"{self.prefix}.imf",
-                rank=10,
-            )
-        if imf_names and self.imf != "salpeter":
-            # A config fact, not a fitted value: the smoothing width is a
-            # constant of the implementation, so it is interpolatable and
-            # belongs in the draft rather than left for a reader to discover
-            # that the published piecewise form was not applied verbatim.
-            prose.add(
-                r"The \citet{Chabrier:2003} system IMF is piecewise -- a "
-                r"lognormal below $1\,M_\odot$ matched to "
-                r"$dN/d\log m \propto m^{-1.3}$ above it -- and is only "
-                r"$C^0$ at the join.  We blended the two segments over a "
-                rf"{CHABRIER_BLEND_WIDTH_DEX:g} dex ramp so the prior is "
-                r"differentiable there; the blend departs from the exact "
-                r"piecewise form by less than $0.02$ nats, far below the "
-                r"published uncertainty on the high-mass exponent "
-                r"($x = 1.3 \pm 0.3$).",
-                section="priors",
-                key=f"{self.prefix}.imf.blend",
                 rank=10,
             )
         alphas = np.atleast_1d(getattr(stars, "ffp_alpha", []))
@@ -610,7 +876,7 @@ class GalacticModel(Component):
                     supersedes_bounds=True,
                 )
 
-    def _require_anchor_position(self, stars):
+    def _require_anchor_position(self, stars, anchor):
         """Refuse to build the prior on an anchor star nobody positioned.
 
         The whole prior -- density, d^2 volume, velocity frame, the three
@@ -643,12 +909,12 @@ class GalacticModel(Component):
         unset = []
         for name, param in (("ra", stars.ra), ("dec", stars.dec)):
             src = getattr(param, "element_initval_source", lambda i: None)(
-                self.anchor_idx
+                anchor
             )
             if src in ("user", "data", "solved"):
                 continue
             if np.isclose(
-                float(param.element_start(self.anchor_idx)),
+                float(param.element_start(anchor)),
                 placeholder[name],
                 rtol=0.0,
                 atol=1e-12,
@@ -657,22 +923,18 @@ class GalacticModel(Component):
         if not unset:
             return
         names = getattr(stars, "names", None)
-        label = (
-            names[self.anchor_idx]
-            if names and self.anchor_idx < len(names)
-            else str(self.anchor_idx)
-        )
+        label = names[anchor] if names and anchor < len(names) else str(anchor)
         missing = " and ".join(f"star.{label}.{n}" for n in unset)
         raise ValueError(
             f"[{self.prefix}] the galactic model's anchor star '{label}' "
-            f"(star index {self.anchor_idx}) has no sky position: {missing} "
+            f"(star index {anchor}) has no sky position: {missing} "
             f"still at the defaults.yaml value. The whole density and "
             f"kinematic prior is evaluated along this star's line of sight, "
             f"so set star.{label}.ra and star.{label}.dec in the params file "
             f"(or point 'anchor_idx' at a star that has them)."
         )
 
-    def _warn_if_anchor_coords_sampled(self, stars, ra_rad, dec_rad):
+    def _warn_if_anchor_coords_sampled(self, stars, ra_rad, dec_rad, anchor):
         """Warn once if the anchor star's ra/dec are SAMPLED, since the
         line-of-sight basis below is built from their start values and frozen.
 
@@ -692,13 +954,13 @@ class GalacticModel(Component):
         moving = [
             name
             for name, param in (("ra", stars.ra), ("dec", stars.dec))
-            if param.element_is_sampled(self.anchor_idx)
+            if param.element_is_sampled(anchor)
         ]
         if not moving:
             return
         logger.warning(
             f"[{self.prefix}] star.{'/'.join(moving)} of the anchor star "
-            f"{self.anchor_idx} is sampled, but the galactic model's line of "
+            f"{anchor} is sampled, but the galactic model's line of "
             f"sight is FROZEN at the start value (ra="
             f"{np.degrees(ra_rad):.6f} deg, dec={np.degrees(dec_rad):.6f} "
             f"deg) for the whole fit. This is safe -- 1 arcsec of coordinate "
@@ -710,119 +972,55 @@ class GalacticModel(Component):
     def build_likelihood(self, model, system):
         stars = system.star
 
-        # 1. Pre-compute the transformation matrix using Astropy, ONCE, from
-        # the anchor star's initial RA/Dec.  This is a property of the line
-        # of sight, not of a component element: the loop this replaced ran
-        # over self.n_elements (the number of galacticmodel BLOCKS) while
-        # indexing self.anchor_idx every time, so it stacked n_elements
-        # identical copies and then relied on those copies broadcasting
-        # against the (n_star,) sampled vectors -- which silently doubled
-        # the whole prior for 2 blocks and 1 star, and raised a bare shape
-        # error whenever n_blocks and n_stars disagreed and neither was 1.
-        # Keeping the matrix 2-D (and the direction cosines scalar) lets it
-        # broadcast over any number of stars by construction.
-        self._require_anchor_position(stars)
-        ra_rad = stars.ra.element_start(self.anchor_idx)
-        dec_rad = stars.dec.element_start(self.anchor_idx)
-        self._warn_if_anchor_coords_sampled(stars, ra_rad, dec_rad)
-
-        # Shared with the start-value hints (physics.line_of_sight_basis):
-        # the affine (pm_ra_cosdec, pm_dec, rv) -> galactocentric velocity map,
-        # as one offset plus three unit-response columns.
-        (
-            m_rot_np,
-            v0_arr,
-            cosl_cosb_np,
-            sinl_cosb_np,
-            sinb_np,
-        ) = line_of_sight_basis(ra_rad, dec_rad)
-
-        # Convert to tensors for graph injection
-        M_rot = pt.as_tensor_variable(m_rot_np)  # (3, 3)
-        v0 = pt.as_tensor_variable(v0_arr)  # (3,)
-        cosl_cosb = pt.as_tensor_variable(cosl_cosb_np)
-        sinl_cosb = pt.as_tensor_variable(sinl_cosb_np)
-        sinb = pt.as_tensor_variable(sinb_np)
-
-        # 2. PyTensor Math Helpers
-        def get_galactocentric_velocity(dist_kpc, pm_ra, pm_dec, rv_ms):
-            v_alpha_kms = K_VEL_CONVERSION * pm_ra * dist_kpc
-            v_delta_kms = K_VEL_CONVERSION * pm_dec * dist_kpc
-            v_rad_kms = rv_ms / 1e3
-            v_icrs = pt.stack(
-                [v_alpha_kms, v_delta_kms, v_rad_kms], axis=1
-            )  # (N, 3)
-            v_gal_offset = (M_rot @ v_icrs[:, :, None]).squeeze(-1)
-            return v0 + v_gal_offset
-
-        def get_galactic_xyz(dist):
-            # physics.galactic_xyz is pure arithmetic, so the same function
-            # serves numpy scalars (the hints) and tensors (here).
-            return _galactic_xyz_np(dist, cosl_cosb, sinl_cosb, sinb)
-
-        def get_polar_velocity(x, y, r, v_x, v_y):
-            cos_phi = x / r  # unitless
-            sin_phi = y / r  # unitless
-            v_r = v_y * sin_phi + v_x * cos_phi
-            v_phi = v_y * cos_phi - v_x * sin_phi
-            return v_r, v_phi
-
-        # match the IMF.  The key is validated in __init__, so every branch
-        # here is a supported option.  BOTH are densities in the SAMPLED
-        # coordinate x = log10(M), not in M, and both are summed over every
-        # modeled star (lens and source alike).
-        if self.imf == "salpeter":
-            # Salpeter (1955): dN/dM ~ M^-alpha, alpha = 2.35.  Change of
-            # variables to x = log10(M)  (M = 10^x, dM/dx = M ln10):
-            #   dN/dx = (dN/dM)(dM/dx) = M^-alpha * M ln10
-            #         = ln10 * M^(1-alpha) = ln10 * 10^((1-alpha)x)
-            #   log p(x) = (1 - alpha) * ln10 * x + const
-            # SALPETER_IMF_SLOPE is the SIGNED MASS-SPACE exponent (-alpha),
-            # NOT an already-converted log-space slope, so the slope in the
-            # sampled coordinate is SALPETER_IMF_SLOPE + 1 = -1.35, i.e.
-            # -1.35*ln10 = -3.108 nats per dex of mass.  A linear tilt is
-            # fine for NUTS now that the bounded-coordinate transform is
-            # sound, and the support IS bounded (star.logmass carries hard
-            # lower/upper), so the density is proper and normalizable.
-            k = SALPETER_IMF_SLOPE + 1.0
-            imf_logp = k * np.log(10.0) * stars.logmass.value - (
-                _power_law_log_norm(k, stars.logmass)
+        # The sight line, ONCE, from the anchor star's initial RA/Dec.  This
+        # is a property of the line of sight, not of a component element:
+        # the loop this replaced ran over self.n_elements (the number of
+        # galacticmodel BLOCKS) while indexing self.anchor_idx every time,
+        # so it stacked n_elements identical copies and then relied on those
+        # copies broadcasting against the (n_star,) sampled vectors -- which
+        # silently doubled the whole prior for 2 blocks and 1 star, and
+        # raised a bare shape error whenever n_blocks and n_stars disagreed
+        # and neither was 1.  The velocity map stays 2-D so it broadcasts
+        # over any number of stars by construction.
+        # A lens whose position is DERIVED from its source's (review 8.10.4)
+        # has no start of its own -- its resolved initval is a placeholder --
+        # so the sight line is read off the star it derives from, which it
+        # matches to the lens-source separation (mas; the freeze below is
+        # safe out to ~1 arcmin).
+        anchor = stars.position_root(self.anchor_idx)
+        if anchor != self.anchor_idx:
+            logger.info(
+                f"[{self.prefix}] anchor star {self.anchor_idx}'s position is "
+                f"derived from star {anchor}'s (the lens track); the line of "
+                f"sight is read from star {anchor}."
             )
-        else:
-            # Chabrier (2003) system IMF -- the PIECEWISE one: a lognormal
-            # below 1 Msun (beautiful constant curvature -1/sigma^2 for NUTS,
-            # and the low-mass end is where unconstrained particles fall into
-            # the abyss) matched to a dN/dlog m ~ m^-1.3 tail above it,
-            # smoothed across the slope discontinuity.  The form, the match,
-            # the smoothing and the numerical normalizer all live in
-            # chabrier_logmass_logp; only the lognormal segment shipped until
-            # 2026-08 (review 3.7.1).
-            #
-            # Normalized over the SAME star.logmass support the power law
-            # uses, so both IMFs are proper densities and switching between
-            # them moves logp by a meaningful amount rather than by an
-            # arbitrary offset.  Two archived-baseline moves have come out
-            # of that constant: -0.3568 nats/star when the lognormal was
-            # first normalized, and +0.0029 nats/star when the tail landed
-            # (the tail adds a little mass above 1 Msun, so log Z drops from
-            # 0.3568196 to 0.3539152).  The second is small at the default
-            # start ONLY because these stars are near the Chabrier peak; the
-            # density itself moves by +0.57 nats at 10 Msun and more above.
-            # Both re-pinned in tests/test_runaway_logp_regression.py.
-            imf_logp = chabrier_logmass_logp(
-                stars.logmass.value, stars.logmass
-            )
+        self._require_anchor_position(stars, anchor)
+        ra_rad = stars.ra.element_start(anchor)
+        dec_rad = stars.dec.element_start(anchor)
+        self._warn_if_anchor_coords_sampled(stars, ra_rad, dec_rad, anchor)
+        self._k21_sight_line(system, stars, ra_rad, dec_rad)
 
-        # Per-star opt-out of the stellar IMF.  A microlensing lens that is a
-        # free-floating planet MUST be declared as a star (Lens._validate_
-        # bodies rejects a non-star primary), and everything else that makes
-        # it a star is right -- the galactic density and kinematic priors
-        # below are mass-independent.  Only the mass prior is wrong: under
-        # Chabrier a 3 Mjup body sits ~3.3 sigma below the peak, ~5.4 nats of
-        # penalty for being what the user said it is.  The choice has to be
-        # PER STAR (a stellar source with an FFP lens is the realistic
-        # system), which is why it lives on the star block and not here; see
-        # Star._parse_mass_functions.
+        # A mass function is a density in the BIRTH mass, in the SAMPLED
+        # coordinate x = log10(M).  For most stars that is star.logmass
+        # itself; a star whose mass loss is modeled (a MIST track) samples
+        # its PRESENT-DAY mass, and the component that models it supplies
+        # the initial mass along with the Jacobian that makes this a density
+        # in it (Component.initial_logmass).
+        birth_logmass = self._birth_logmass(system, stars)
+
+        # Per-star opt-out of the stellar mass function.  A microlensing lens
+        # that is a free-floating planet MUST be declared as a star
+        # (Lens._validate_bodies rejects a non-star primary), and everything
+        # else that makes it a star is right -- the galactic density and
+        # kinematic priors below are mass-independent.  Only the mass prior
+        # is wrong: K21's mass function ends at 0.001 Msun, so a 3 Mjup body
+        # would be charged for being what the user said it is.  The choice
+        # has to be PER STAR (a stellar source with an FFP lens is the
+        # realistic system), which is why it lives on the star block and not
+        # here; see Star._parse_mass_functions.  The FFP stars' mass prior is
+        # the imf_prior potential; every other star takes genulens's
+        # present-day mass function inside the branch mixture below and
+        # contributes 0 here.
         ffp_mask = getattr(stars, "ffp_mask", None)
         ffp_mask = (
             np.zeros(0, dtype=bool)
@@ -830,172 +1028,122 @@ class GalacticModel(Component):
             else np.asarray(ffp_mask, dtype=bool)
         )
         if ffp_mask.any():
-            # Both branches are finite everywhere on the support (one linear
-            # in x, one quadratic), so a plain weighted sum is safe and, being
-            # arithmetic rather than pt.switch, keeps a clean gradient on
+            # A 0/1 weight on a term finite everywhere on the support: plain
+            # arithmetic rather than a selection, so a clean gradient on
             # every backend.
-            w = ffp_mask.astype(float)
-            imf_logp = (
-                w
+            imf_logp = pt.sum(
+                ffp_mask.astype(float)
                 * ffp_logmass_logp(
-                    stars.logmass.value, stars.ffp_alpha, stars.logmass
+                    birth_logmass, stars.ffp_alpha, stars.logmass
                 )
-                + (1.0 - w) * imf_logp
             )
+        else:
+            imf_logp = pt.constant(0.0, dtype="float64")
+        pm.Potential(f"{self.prefix}.imf_prior", imf_logp)
 
-        pm.Potential(f"{self.prefix}.imf_prior", pt.sum(imf_logp))
-
+        pdmf_mask = self._mass_function_mask(stars, ffp_mask)
+        self._k21_mf = (
+            self._build_k21_mass_function(stars) if pdmf_mask.any() else None
+        )
         self._declare_mass_prior(stars, ffp_mask)
         self._add_mass_prior_prose(system, stars, ffp_mask)
-        ######
 
         # even though non-physical values will be rejected
         # we still need to be able to calculate a likelihood,
         distance = pt.maximum(stars.distance.value, 1e-3) / 1e3  # kpc
-        x, y, z = get_galactic_xyz(distance)
-        z_smooth = pt.sqrt(z**2 + 1e-6)
-        r = pt.sqrt(x**2 + y**2 + 1e-6)
 
-        vel = get_galactocentric_velocity(
-            distance, stars.pm_ra.value, stars.pm_dec.value, stars.rv.value
-        )  # km/s
-        v_x, v_y, v_z = vel[:, 0], vel[:, 1], vel[:, 2]
-        v_r, v_phi = get_polar_velocity(x, y, r, v_x, v_y)
+        # The genulens port (koshimoto21.py): its branches with their own
+        # NORMALIZED velocity densities, in genulens's position and velocity
+        # frames.  Each branch carries its own normalization -- constants
+        # cancel within a single Potential but NOT across the logsumexp --
+        # and the number densities (genulens's lens density n0, every
+        # object) set the physical branch ratios.  The per-population inputs
+        # not yet ported per branch (age/[Fe/H]) are mapped from each
+        # branch's population (k21.POPULATION).
+        log_dens, log_vel, r = self._k21_branch_terms(stars)
+        parent = tuple(k21.POPULATION[b] for b in self._k21_branches)
 
-        # match the density distribution of the galaxy
-        cos_bar = np.cos(BULGE_BAR_ANGLE)
-        sin_bar = np.sin(BULGE_BAR_ANGLE)
-        x_bar = x * cos_bar + y * sin_bar
-        y_bar = -x * sin_bar + y * cos_bar
-
-        def hinge(t):
-            # Smooth max(t, 0) (C-infinity), transition width ~50 pc in
-            # kpc units -- keeps the plateau/cutoff kinks differentiable.
-            return 0.5 * (t + pt.sqrt(t * t + 0.0025))
-
-        # Each mixture branch must carry its own normalization: constants
-        # cancel within a single Potential but NOT across the logsumexp.
-        # Velocity Gaussians contribute -log(sigma1*sigma2*sigma3) (the
-        # shared (2*pi)^(3/2) is identical in all branches and dropped);
-        # the density anchors (stars/pc^3, genulens's number-density
-        # channel, see constants.py) set the physical population ratios.
-
-        # 1. Thin disk (Spatial + Kinematic)
-        # Radial profile: exponential with Rd = 2.6 kpc, held FLAT inside
-        # R = DISK_RDBREAK (genulens's DISK=2 inner plateau) -- a plain
-        # exponential over-weights near-GC disk lenses by ~3x at R = 1
-        # kpc.  Anchored to the local (R0, midplane) number density.
-        # Galactic rotation is AZIMUTHAL: the circular-speed offset belongs
-        # on v_phi (paired with the azimuthal dispersion sigma_V) and the
-        # radial component v_r is zero-centered (sigma_U). These centers
-        # were swapped until 2026-08: the prior penalized an EXACTLY
-        # circular co-rotating orbit by ~49 nats and was maximized by a
-        # star plunging radially at the rotation speed (pinned by
-        # tests/test_galactic_model.py). On examples/ob140939 the swap
-        # gave the anti-rotation parallax solution +5 nats and flipped the
-        # mode weights to 0.98/0.02 AGAINST the Yee et al. 2015 proper-
-        # motion-preferred solution. Sign convention: v_phi as computed by
-        # get_polar_velocity is positive for co-rotation at every position
-        # (verified against astropy Galactocentric), so the center is
-        # +DISK_ROTATION_VELOCITY.
-        r_beyond_sun = SUN_GC_DISTANCE - DISK_RDBREAK
-        log_dens_thin = (
-            np.log(DISK_LOCAL_NUMBER_DENSITY)
-            - (hinge(r - DISK_RDBREAK) - r_beyond_sun) / DISK_SCALE_LENGTH
-            - z_smooth / DISK_SCALE_HEIGHT
-        )
-        log_vel_thin = (
-            (-0.5 / DISK_VELOCITY_SIGMA_U**2) * v_r**2
-            + (-0.5 / DISK_VELOCITY_SIGMA_V**2)
-            * (v_phi - DISK_ROTATION_VELOCITY) ** 2
-            + (-0.5 / DISK_VELOCITY_SIGMA_W**2) * v_z**2
-        )
-        L_thin = (
-            log_dens_thin
-            + log_vel_thin
-            - np.log(
-                DISK_VELOCITY_SIGMA_U
-                * DISK_VELOCITY_SIGMA_V
-                * DISK_VELOCITY_SIGMA_W
+        # Population-conditional age / [Fe/H] priors (review 1.7.5): per
+        # population, per star, inside the same mixture (populations.py).
+        age_mask = self._population_mask(stars, "age", self.population_age)
+        feh_mask = self._population_mask(stars, "initfeh", self.population_feh)
+        pop_terms = None
+        if age_mask.any() or feh_mask.any():
+            pop_terms = self._population_branch_terms(
+                stars, r, age_mask, feh_mask
             )
-        )
-
-        # 2. Thick disk (Spatial + Kinematic) -- same plateau, its own
-        # scale length/height; kinematics include the asymmetric drift
-        # (mean rotation 170 km/s) and hotter dispersions.
-        log_dens_thick = (
-            np.log(THICK_DISK_LOCAL_NUMBER_DENSITY)
-            - (hinge(r - DISK_RDBREAK) - r_beyond_sun)
-            / THICK_DISK_SCALE_LENGTH
-            - z_smooth / THICK_DISK_SCALE_HEIGHT
-        )
-        log_vel_thick = (
-            (-0.5 / THICK_DISK_VELOCITY_SIGMA_U**2) * v_r**2
-            + (-0.5 / THICK_DISK_VELOCITY_SIGMA_V**2)
-            * (v_phi - THICK_DISK_ROTATION_VELOCITY) ** 2
-            + (-0.5 / THICK_DISK_VELOCITY_SIGMA_W**2) * v_z**2
-        )
-        L_thick = (
-            log_dens_thick
-            + log_vel_thick
-            - np.log(
-                THICK_DISK_VELOCITY_SIGMA_U
-                * THICK_DISK_VELOCITY_SIGMA_V
-                * THICK_DISK_VELOCITY_SIGMA_W
+            pop_terms = [pop_terms[j] for j in parent]
+        if self._k21_mf is not None:
+            # genulens's present-day mass function per branch, with the
+            # neutron stars' and black holes' kicked velocity densities: the
+            # mass and the velocity are not separable.
+            log_vel = self._k21_mass_velocity_terms(
+                birth_logmass, pdmf_mask, age_mask, log_vel
             )
-        )
-
-        # 3. Bulge/bar (Spatial + Kinematic), anchored at its center.
-        # The Gaussian cylindrical cutoff beyond BULGE_RC (genulens Rc/
-        # srob) is what confines the bar: without it the shallow
-        # exp(-r_s/2) profile is still 9% of central at a 4-kpc lens
-        # distance (vs ~4e-6 in genulens), flooding the disk range with
-        # spurious bulge stars.
-        r_bulge_coord = pt.sqrt(
-            (x_bar / BULGE_DENSITY_X_0) ** 2
-            + (y_bar / BULGE_DENSITY_Y_0) ** 2
-            + (z / BULGE_DENSITY_Z_0) ** 2
-        )
-        log_dens_bulge = (
-            np.log(BULGE_CENTRAL_NUMBER_DENSITY)
-            - 0.5 * r_bulge_coord
-            - 0.5 * (hinge(r - BULGE_RC) / BULGE_RC_WIDTH) ** 2
-        )
-        # Bulge cylindrical rotation is azimuthal too (same fix as above).
-        bulge_rot = BULGE_ROTATION_ANGULAR_VELOCITY * r
-        log_vel_bulge = (
-            (-0.5 / BULGE_VELOCITY_SIGMA_1**2) * v_r**2
-            + (-0.5 / BULGE_VELOCITY_SIGMA_2**2) * (v_phi - bulge_rot) ** 2
-            + (-0.5 / BULGE_VELOCITY_SIGMA_3**2) * v_z**2
-        )
-        L_bulge = (
-            log_dens_bulge
-            + log_vel_bulge
-            - np.log(
-                BULGE_VELOCITY_SIGMA_1
-                * BULGE_VELOCITY_SIGMA_2
-                * BULGE_VELOCITY_SIGMA_3
+            self._add_k21_remnant_probability(
+                birth_logmass, log_dens, log_vel, pdmf_mask, age_mask
             )
-        )
+        # the per-branch population terms, kept apart for the linked path (a
+        # member's velocity term is replaced, these are not)
+        self._k21_pop = [
+            pt.zeros_like(lv) + (0.0 if pop_terms is None else pop_terms[j])
+            for j, lv in enumerate(log_vel)
+        ]
+        branch_logp = [dens + lv for dens, lv in zip(log_dens, log_vel)]
+        if pop_terms is not None:
+            # Per-star terms (a linked member's entries are 0: its
+            # age/initfeh are not sampled).
+            branch_logp = [bl + pt_ for bl, pt_ in zip(branch_logp, pop_terms)]
+        self._declare_population_priors(system, stars, age_mask, feh_mask)
 
         volume_element = 2.0 * pt.log(distance * 1000.0)
 
-        # The velocity Gaussians are evaluated in km/s while the sampled
+        # The velocity densities are evaluated in km/s while the sampled
         # coordinates are (pm_ra, pm_dec, rv); the change of variables
-        # v = M_rot @ (K*pm_ra*d, K*pm_dec*d, rv/1e3) + v0 needs
-        # |det dv/d(pm_ra, pm_dec, rv)| = (K*d)^2 * 1e-3 (M_rot is a pure
-        # rotation, det = 1; the constant 1e-3 from m/s -> km/s is
-        # dropped).  Without the +2*log(d) the intended prior
-        # rho * d^2 * f(v) * (K*d)^2 was applied as rho * d^2 * f(v),
+        # v = v0 + M @ (K*pm_ra*d, K*pm_dec*d, rv/1e3) needs
+        # |det dv/d(pm_ra, pm_dec, rv)| = (K*d)^2 * 1e-3 (M is orthogonal,
+        # |det| = 1; the constant 1e-3 from m/s -> km/s is dropped here and
+        # reported by evidence_log_norm).  Without the +2*log(d) the intended
+        # prior rho * d^2 * f(v) * (K*d)^2 was applied as rho * d^2 * f(v),
         # under-weighting large distances by d^2.
-        velocity_jacobian = 2.0 * pt.log(K_VEL_CONVERSION * distance)
+        velocity_jacobian = 2.0 * pt.log(k21.K_KMS * distance)
 
-        # 4. Combine them using LogSumExp
-        # log(exp(L_thin) + exp(L_thick) + exp(L_bulge))
-        kinematic_penalty = pt.sum(
-            pm.math.logsumexp(pt.stack([L_thin, L_thick, L_bulge]), axis=0)
-            + volume_element
-            + velocity_jacobian
+        # Linked stars (star.md, "Linked stars: one position, one density
+        # term").  A star whose distance is HARD-linked to another star's
+        # has no position of its own: the system it belongs to has one
+        # position along the line of sight, so it gets one density and one
+        # d^2 volume element, inside one branch (one population for the
+        # whole system).
+        n_star = int(
+            getattr(stars, "n_elements", 0)
+            or np.atleast_1d(stars.distance.initval).size
+        )
+        root_of, vel_linked, refused = linked_star_structure(
+            stars, n_star, prefix=getattr(stars, "prefix", "star")
+        )
+        self._linked_star_report(stars, root_of, vel_linked, refused)
+        roots = sorted(set(int(j) for j in root_of))
+        members = [k for k in range(n_star) if root_of[k] != k]
+
+        if members or vel_linked:
+            kinematic_penalty = self._k21_grouped_logp(
+                log_dens,
+                branch_logp,
+                volume_element,
+                velocity_jacobian,
+                root_of,
+                vel_linked,
+            )
+        else:
+            # Every star independent: one mixture per star.
+            kinematic_penalty = pt.sum(
+                pm.math.logsumexp(pt.stack(branch_logp), axis=0)
+                + volume_element
+                + velocity_jacobian
+            )
+
+        self._evidence_log_norm = self._kinematic_evidence_log_norm(
+            stars, roots, vel_linked
         )
         pm.Potential(f"{self.prefix}.kinematic_prior", kinematic_penalty)
 
@@ -1005,12 +1153,418 @@ class GalacticModel(Component):
         get_collector(system).add(
             r"We imposed Galactic density and kinematic priors on the "
             r"distance, proper motion, and radial velocity of each modeled "
-            r"star, following a simplified version of the parametric "
-            r"Galactic model of \citet{Koshimoto:2021}.",
+            r"star, following the Galactic model of "
+            r"\citet{Koshimoto:2021} as implemented in genulens.",
             section="priors",
             key=f"{self.prefix}.kinematic",
             rank=20,
         )
+
+    def _k21_sight_line(self, system, stars, ra_rad, dec_rad):
+        """The genulens port's sight line: (l, b), the velocity map, the
+        components genulens simulates there (the NSD inside |l| < 5,
+        |b| < 2), and which stars are survey-selected sources
+        (Component.selected_sources) with their weighting."""
+        l_deg, b_deg, m_np, v0_np = k21.line_of_sight_basis(ra_rad, dec_rad)
+        self._k21_lb = (l_deg, b_deg)
+        self._k21_basis = (m_np, v0_np)
+        self._k21_branches = k21.branches_for(l_deg, b_deg)
+        n_star = int(np.atleast_1d(stars.distance.initval).size)
+        src = np.zeros(n_star, dtype=bool)
+        for comp in system.active_components.values():
+            for k in comp.selected_sources(system):
+                if not 0 <= int(k) < n_star:
+                    raise ValueError(
+                        f"[{self.prefix}] '{comp.prefix}' selected source "
+                        f"star {k}, but there are {n_star} stars."
+                    )
+                src[int(k)] = True
+        self._k21_src = src
+        self._k21_binary = {}
+        if self.binaries:
+            for comp in system.active_components.values():
+                self._k21_binary.update(comp.unresolved_binary_lenses(system))
+        if self.source_selection == "sqrt_distance":
+            self._k21_selection = ("sqrt_distance",)
+        else:
+            ai0, h = k21.extinction_scale(
+                l_deg, b_deg, self.source_ai_rc, self.source_dm_rc
+            )
+            self._k21_selection = (
+                "luminosity_function",
+                *self.source_i_range,
+                float(ai0),
+                float(h),
+            )
+        sel = self._k21_selection
+        self._k21_root_selection = lambda k: (
+            l_deg,
+            b_deg,
+            sel if src[k] else None,
+        )
+
+    def _k21_branch_terms(self, stars):
+        """koshimoto21's per-branch log number densities and NORMALIZED log
+        velocity densities, one per-star vector each, in the sight line's
+        branch order, plus the cylindrical radius (kpc) the population
+        priors read.  Positions are genulens's Dlb2xyz and velocities
+        genulens's (l, b) projection (koshimoto21.line_of_sight_basis).  A
+        survey-selected source takes genulens's SOURCE density instead
+        (main-sequence count times the source weight w_S, which replaces
+        the D^2 volume element: k21.log_source_weights)."""
+        l_deg, b_deg = self._k21_lb
+        m_np, v0_np = self._k21_basis
+        br = self._k21_branches
+        d_pc = pt.maximum(stars.distance.value, 1e-3)
+        d_kpc = d_pc / 1e3
+        x, y, z = k21.dlb_to_xyz(d_pc, l_deg, b_deg, xp=pt)
+        m = pt.as_tensor_variable(m_np)
+        cols = pt.stack(
+            [
+                k21.K_KMS * stars.pm_ra.value * d_kpc,
+                k21.K_KMS * stars.pm_dec.value * d_kpc,
+                stars.rv.value / 1e3,
+            ],
+            axis=1,
+        )
+        vel = pt.as_tensor_variable(v0_np) + (m @ cols[:, :, None]).squeeze(-1)
+        dens = k21.log_number_densities(x, y, z, xp=pt)
+        velo = k21.log_velocity_densities(
+            x, y, z, vel[:, 0], vel[:, 1], vel[:, 2], xp=pt
+        )
+        self._k21_state = (x, y, z, vel)
+        self._k21_distance = d_pc
+        r_kpc = pt.sqrt(x * x + y * y + 1.0) / 1e3
+        log_dens = [dens[i] for i in br]
+        if self._k21_src.any():
+            s = self._k21_src.astype(float)
+            dens_ms = k21.log_number_densities(
+                x, y, z, xp=pt, luminous_only=True
+            )
+            w_s = k21.log_source_weights(br, d_pc, self._k21_selection, xp=pt)
+            log_dens = [
+                (1.0 - s) * d + s * (dens_ms[i] + w)
+                for d, i, w in zip(log_dens, br, w_s)
+            ]
+        return log_dens, [velo[i] for i in br], r_kpc
+
+    def _build_k21_mass_function(self, stars):
+        bounds = _sampled_bounds(stars.logmass)
+        if bounds is None:
+            raise ValueError(
+                f"[{self.prefix}] model: koshimoto21 needs finite "
+                f"star.logmass lower/upper bounds to normalize its mass "
+                f"function; none could be read."
+            )
+        n_star = int(np.atleast_1d(stars.logmass.initval).size)
+        lower = np.broadcast_to(np.atleast_1d(bounds[0]), (n_star,))
+        upper = np.broadcast_to(np.atleast_1d(bounds[1]), (n_star,))
+        return k21.MassFunction(
+            lower, upper, remnants=self.remnants, branches=self._k21_branches
+        )
+
+    def _k21_mass_velocity_terms(self, x_mass, pdmf_mask, age_mask, log_vel):
+        """Per branch, per star: log [PDMF x velocity density] of the
+        genulens port, normalized over the star's logmass support:
+
+            log[ phi_still(x) p_b(v) + phi_NS(x) p_NS,b(v)
+                 + phi_BH(x) p_BH,b(v) ] - log Z_b
+
+        (``still`` = luminous stars and white dwarfs, which keep the
+        branch's velocity distribution; neutron stars and black holes carry
+        genulens's natal kicks, koshimoto21.log_kicked_velocity).  A
+        survey-selected SOURCE is a luminous star (genulens draws sources
+        from n0MS): the luminous PDMF alone, normalized over the luminous
+        objects.  A star whose AGE is sampled is luminous by its track:
+        K21's IMF alone (its alive condition is the track's).  A star off
+        the stellar IMF (an FFP) keeps the bare velocity density.  Also
+        stores, per branch, the MASS-ONLY term (``_k21_mass_only``) a
+        member star whose whole velocity is its root's takes.  Arithmetic
+        0/1 weights on finite terms -- no selection."""
+        mf = self._k21_mf
+        x, y, z, vel = self._k21_state
+        w = pdmf_mask.astype(float)
+        a = (age_mask & pdmf_mask).astype(float)
+        src = self._k21_src.astype(float)
+        bases = k21.kick_bases(x, y, z, xp=pt, branches=self._k21_branches)
+        log_imf = k21.log_imf(x_mass, xp=pt) - mf.log_imf_peak
+        out, mass_only = [], []
+        for j in range(len(self._k21_branches)):
+            tab = {
+                g: interp_table(
+                    mf.log_table[g][j], mf.x0, PDMF_GRID_DEX, x_mass
+                )
+                for g in mf.GROUPS
+            }
+            log_lum = interp_table(mf.log_lum[j], mf.x0, PDMF_GRID_DEX, x_mass)
+            if self._k21_binary:
+                tab["still"] = self._k21_binary_still(j, tab["still"], x_mass)
+            mean, sig = bases[j]
+            kicked = [
+                tab[g]
+                + k21.log_kicked_velocity(
+                    vel[:, 0], vel[:, 1], vel[:, 2], mean, sig, speed, xp=pt
+                )
+                for g, speed in (("NS", k21.KICK_NS), ("BH", k21.KICK_BH))
+            ]
+            mix = pm.math.logsumexp(
+                pt.stack([tab["still"] + log_vel[j], *kicked]), axis=0
+            )
+            total = pm.math.logsumexp(
+                pt.stack([tab[g] for g in mf.GROUPS]), axis=0
+            )
+            field = (
+                (1.0 - a) * (mix - log_vel[j]) + a * log_imf - mf.log_norm[j]
+            )
+            field_m = (1.0 - a) * total + a * log_imf - mf.log_norm[j]
+            source = (1.0 - a) * log_lum + a * log_imf - mf.log_norm_lum[j]
+            out.append(log_vel[j] + w * ((1.0 - src) * field + src * source))
+            mass_only.append(w * ((1.0 - src) * field_m + src * source))
+        self._k21_mass_only = mass_only
+        return out
+
+    def _k21_binary_still(self, j, still, x_mass):
+        """For an unresolved-binary lens (binaries: true), branch j's
+        luminous-plus-white-dwarf term with the luminous part replaced by
+        genulens's effective binary-lens density at the event's scale r0 =
+        sqrt(kappa pi_rel) D_L (koshimoto21.log_binary_lens_density; white
+        dwarfs get no companion in genulens).  Other stars keep ``still``;
+        assembled with set_subtensor."""
+        mf = self._k21_mf
+        stars_d = self._k21_distance
+        b = self._k21_branches[j]
+        log_wd = interp_table(mf.log_wd[j], mf.x0, PDMF_GRID_DEX, x_mass)
+        out = still
+        for lens, src in sorted(self._k21_binary.items()):
+            lr0 = k21.log_r0(stars_d[lens], stars_d[src], xp=pt)
+            log_bin = (
+                k21.log_binary_lens_density(b, x_mass[lens], lr0, xp=pt)
+                - mf.log_imf_peak
+            )
+            out = pt.set_subtensor(
+                out[lens], pt.logaddexp(log_bin, log_wd[lens])
+            )
+        return out
+
+    def _k21_grouped_logp(
+        self,
+        log_dens,
+        branch_logp,
+        volume_element,
+        velocity_jacobian,
+        root_of,
+        vel_linked,
+    ):
+        """The genulens port with linked stars: per group (a root and the
+        members sharing its position), ONE density at the root's position,
+        ONE volume element and ONE branch for the whole system:
+
+            log p_g = logsumexp_b [ log n_b(d_r) + sum_k T_b,k ] + 2 log d_r
+
+        A member whose velocity is entirely its root's (all three
+        coordinates hard-linked: a binary companion) contributes its MASS
+        term only; one with its own velocity contributes its full
+        (normalized) mass x velocity term and its own velocity Jacobian,
+        with the rv column's m/s -> km/s owed in-model so a member
+        integrates to exactly 1.  A partly linked velocity raises: the
+        disk's v_phi density is not Gaussian, so the conditional density of
+        the free coordinates given the linked ones has no closed form."""
+        n_star = len(root_of)
+        roots = sorted(set(int(j) for j in root_of))
+        members = [k for k in range(n_star) if root_of[k] != k]
+        partial = {k: c for k, c in vel_linked.items() if len(c) != 3}
+        if partial or any(int(root_of[k]) == k for k in vel_linked):
+            raise NotImplementedError(
+                f"[{self.prefix}] model: koshimoto21 supports a linked star "
+                f"whose velocity is entirely its root's, or entirely its own; "
+                f"star(s) {sorted(partial) or sorted(vel_linked)} have a "
+                f"partly linked (or root-linked) velocity, whose conditional "
+                f"density has no closed form under genulens's non-Gaussian "
+                f"disk kinematics."
+            )
+        dens = [d for d in log_dens]
+        T = [bl - d for bl, d in zip(branch_logp, dens)]
+        J = velocity_jacobian
+        mass_only = getattr(self, "_k21_mass_only", None)
+        for k in members:
+            if k in vel_linked:
+                for b in range(len(T)):
+                    mo = 0.0 if mass_only is None else mass_only[b][k]
+                    # population terms (age/[Fe/H]) ride in T - the
+                    # velocity part; keep them, drop the velocity
+                    T[b] = pt.set_subtensor(T[b][k], mo + self._k21_pop[b][k])
+                J = pt.set_subtensor(J[k], 0.0)
+            else:
+                J = pt.set_subtensor(J[k], J[k] + _LOG_KMS_PER_MS)
+        W = np.zeros((len(roots), n_star))
+        for k in range(n_star):
+            W[roots.index(int(root_of[k])), k] = 1.0
+        W = pt.as_tensor_variable(W)
+        roots_idx = np.asarray(roots, dtype=np.int64)
+        group_branch = [d[roots_idx] + pt.dot(W, t) for d, t in zip(dens, T)]
+        return (
+            pt.sum(pm.math.logsumexp(pt.stack(group_branch), axis=0))
+            + pt.sum(volume_element[roots_idx])
+            + pt.sum(J)
+        )
+
+    def _add_k21_remnant_probability(
+        self, x_mass, log_dens, log_terms, pdmf_mask, age_mask
+    ):
+        """``galacticmodel.p_remnant`` for the genulens port: the branch
+        responsibilities (density x mass x velocity) times each branch's
+        dark fraction at the star's mass.  Reporting only."""
+        idx = np.nonzero(pdmf_mask)[0]
+        mf = self._k21_mf
+        stacked = pt.stack([d + t for d, t in zip(log_dens, log_terms)])[
+            :, idx
+        ]
+        resp = pt.exp(stacked - pm.math.logsumexp(stacked, axis=0))
+        lum_only = age_mask[idx].astype(float)
+        dark = (1.0 - lum_only) * pt.stack(
+            [
+                interp_table(
+                    mf.dark_frac[j], mf.x0, PDMF_GRID_DEX, x_mass[idx]
+                )
+                for j in range(len(self._k21_branches))
+            ]
+        )
+        pm.Deterministic(
+            f"{self.prefix}.p_remnant", pt.sum(resp * dark, axis=0)
+        )
+
+    # ------------------------------------------------------------------
+    # Linked stars and the normalization (star.md, "Linked stars: one
+    # position, one density term").
+    # ------------------------------------------------------------------
+
+    def _linked_star_report(self, stars, root_of, vel_linked, refused):
+        """Say, once per build, which stars share a position and what each
+        linked star still contributes -- and warn for a hard-linked
+        distance the rule cannot place."""
+        names = list(getattr(stars, "names", None) or [])
+
+        def label(k):
+            return names[k] if k < len(names) else str(k)
+
+        for k, j in enumerate(root_of):
+            if j == k:
+                continue
+            linked = vel_linked.get(k, ())
+            free = [
+                VELOCITY_COORDS[c] for c in range(3) if c not in set(linked)
+            ]
+            what = (
+                "nothing further (its velocity is hard-linked too)"
+                if not free
+                else "the density of its free velocity coordinate(s) "
+                + ", ".join(free)
+                + (
+                    " conditional on the linked "
+                    + ", ".join(VELOCITY_COORDS[c] for c in linked)
+                    if linked
+                    else ""
+                )
+                + ", in the same Galactic population"
+            )
+            logger.info(
+                f"[{self.prefix}] star '{label(k)}' shares the position of "
+                f"star '{label(int(j))}' (hard-linked distance): one "
+                f"position, one density and d^2 volume term; '{label(k)}' "
+                f"contributes {what}."
+            )
+        for k, paths in refused:
+            logger.warning(
+                f"[{self.prefix}] star '{label(k)}' has a hard-linked "
+                f"distance that does not name exactly one other star's "
+                f"distance (it reads {list(paths) or 'nothing'}), so there "
+                f"is no single partner whose position it shares. It keeps "
+                f"its own Galactic density term, which is then a factor on "
+                f"the link's sources rather than a density of a coordinate "
+                f"of its own. Link it as 'initval: star.<other>.distance' "
+                f"with 'sigma: 0' to share that star's position instead."
+            )
+
+    def _kinematic_evidence_log_norm(self, stars, roots, vel_linked):
+        """The constant to ADD to a log evidence for the kinematic prior to
+        be a normalized density (outputs/evidence's sign convention: the
+        bridge integrates exp(model logp), and lnZ_norm = lnZ + this).
+
+        Per ROOT (a star with a position of its own), the term in the model
+        is the normalized density over (distance, pm_ra, pm_dec, rv) plus
+
+            log Z_pos - log(1e-3)
+
+        where Z_pos = int sum_b n_b(d) w_b(d) dd over the root's static
+        distance bounds (koshimoto21.log_position_norm, with the root's own
+        weighting: the lens density times d^2, or a survey-selected
+        source's genulens source weight) -- the stars per steradian in the
+        cone -- and the last is the rv column's m/s -> km/s Jacobian (the
+        velocity densities are normalized in the model, their (2 pi)^(3/2)
+        included).  A root whose own velocity is hard-linked owes no
+        Jacobian constant.  A root whose distance is PINNED owes log of its
+        weighted density at the pin instead of Z_pos (the remaining velocity
+        mixture is then normalized).  A member owes nothing: its term is
+        exact in the model.  Velocity bounds are treated as infinite (pm
+        +/- 1e5 mas/yr is > 400 km/s beyond 1 pc).
+        """
+        bounds = _sampled_bounds(stars.distance)
+        is_derived = getattr(stars.distance, "element_is_derived", None)
+        links = getattr(stars.distance, "element_links", None) or {}
+        if links.get("lower") or links.get("upper"):
+            logger.warning(
+                f"[{self.prefix}] star.distance carries a linked lower/upper "
+                f"bound; the kinematic prior's position normalizer uses the "
+                f"STATIC bounds, so evidence_log_norm is approximate there."
+            )
+        total = 0.0
+        cache = {}
+        for k in roots:
+            los = self._k21_root_selection(k)
+            sampled = stars.distance.element_is_sampled(k) or bool(
+                is_derived(k) if callable(is_derived) else False
+            )
+            if sampled:
+                if bounds is None:
+                    logger.warning(
+                        f"[{self.prefix}] cannot read finite star.distance "
+                        f"bounds; the kinematic prior's position normalizer "
+                        f"is omitted from evidence_log_norm."
+                    )
+                    c = 0.0
+                else:
+                    lo = float(
+                        np.atleast_1d(bounds[0])[
+                            min(k, np.size(bounds[0]) - 1)
+                        ]
+                    )
+                    hi = float(
+                        np.atleast_1d(bounds[1])[
+                            min(k, np.size(bounds[1]) - 1)
+                        ]
+                    )
+                    key = (lo, hi, los)
+                    if key not in cache:
+                        cache[key] = k21.log_position_norm(lo, hi, *los)
+                    c = cache[key]
+            else:
+                d0 = float(stars.distance.element_start(k))
+                log_n = k21.log_total_number_density(d0, *los)
+                c = float(log_n) + 2.0 * np.log(max(d0, 1e-3))
+            if k not in vel_linked:
+                c -= _LOG_KMS_PER_MS
+            total -= c
+        return float(total)
+
+    def evidence_log_norm(self):
+        """Constant that makes this component's potentials normalized priors
+        in a log evidence (ADD it to lnZ; see _kinematic_evidence_log_norm).
+
+        Covers the kinematic prior only -- the FFP potential (imf_prior) is already
+        normalized over star.logmass's support.  Available after
+        build_likelihood; 0.0 before.
+        """
+        return float(getattr(self, "_evidence_log_norm", 0.0))
 
     def compile_plotters(self, model, system):
         pass

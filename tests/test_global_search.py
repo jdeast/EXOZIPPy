@@ -507,7 +507,7 @@ def test_a_multi_orbit_system_is_left_alone(tmp_path, caplog):
     then it declines: a periodogram peak names no orbit."""
     # Arrange
     config = transit_config(tmp_path)
-    config["planet"].append({"name": "c", "orbit_ndx": 1})
+    config["planet"].append({"name": "c"})
     config["orbit"].append({"name": "c", "primary": ["A"], "companion": ["c"]})
 
     # Act

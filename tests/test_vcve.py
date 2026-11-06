@@ -739,10 +739,20 @@ def _two_orbit_config(rv, fitvcve):
     """Two planets on two orbits of one star, `fitvcve` per orbit."""
     return {
         "star": [{"name": "A", "mist": False}],
-        "planet": [{"name": "b"}, {"name": "c", "orbit_ndx": 1}],
+        "planet": [{"name": "b"}, {"name": "c"}],
         "orbit": [
-            {"name": "b", "fitvcve": fitvcve[0]},
-            {"name": "c", "fitvcve": fitvcve[1]},
+            {
+                "name": "b",
+                "primary": ["A"],
+                "companion": ["b"],
+                "fitvcve": fitvcve[0],
+            },
+            {
+                "name": "c",
+                "primary": ["A"],
+                "companion": ["c"],
+                "fitvcve": fitvcve[1],
+            },
         ],
         "rvinstrument": [{"name": "inst0", "file": rv}],
     }

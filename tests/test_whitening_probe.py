@@ -62,7 +62,8 @@ def test_probe_element_is_gradient_immune_far_from_the_mode():
 
     The one-sided drop this rung replaces returns ~0.5/|g| = sigma/400
     here: the 1000x-too-tight scales that re-widened ob140939's raw
-    posterior into the _RAW_CANCELLATION_CLIP wall (86% divergences).
+    posterior into the raw-cancellation clip's wall (86% divergences; the
+    wall itself is gone since review 1.2.9).
     """
     # ARRANGE: mode at 200, sigma 1, start at 0
     delta_sigmas = 200.0

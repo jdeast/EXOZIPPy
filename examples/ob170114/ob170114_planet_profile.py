@@ -114,9 +114,11 @@ def main(maxfev=30000):
         parts, total, ok, _ = mmf.decompose(system, model, as_dict(x))
         # Collapse each sampled coordinate's raw prior with its logit-Jacobian
         # potential (RV:<x>_raw + POT:logit_uniform_prior.<x> -> CoV:<x>): the
-        # pair cancels to a few nats and is huge term by term, so a split
-        # that leaves them apart calls the Jacobian "prior" (first run:
+        # pair cancelled to a few nats and was huge term by term, so a split
+        # that left them apart called the Jacobian "prior" (first run:
         # +47,000 nats of "prior" that were 47,000 of cancelling Jacobian).
+        # Since review 1.2.9 a logit element's raw half is flat, so the pair
+        # is no longer huge, but the collapse is still the right grouping.
         col = {}
         for k, v in parts.items():
             v = float(v)

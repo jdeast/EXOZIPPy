@@ -8,7 +8,12 @@ grid:
         6600.,  6700.,  6800.,  6900.,  7000.,  7200.,  7400.,  7600.,
         7800.,  8000.,  8200.,  8400.,  8600.,  8800.,  9000.,  9200.,
         9400.,  9600.,  9800., 10000.]
-  logg: [0. , 0.5, 1. , 1.5, 2. , 2.5, 3. , 3.5, 4. , 4.5, 5. ]
+  # 5.5 added 2026-10-20: BT-NextGen has the plane only to 5000 K; the
+  # hotter nodes are PADDED from logg 5.0 (generate_NextGen_BC_Tables.
+  # pad_missing_nodes, recorded in each table's meta['padding']) so the
+  # box stays rectangular.  No star lives there; the padding only keeps
+  # the loader's complete box from trimming the plane away.
+  logg: [0. , 0.5, 1. , 1.5, 2. , 2.5, 3. , 3.5, 4. , 4.5, 5. , 5.5]
   feh: [-4. , -3.5, -3. , -2.5, -2. , -1.5, -1. , -0.5,  0. ,  0.3,  0.5]
   # BULGE_AV_PTS: the original 13 points VERBATIM, plus 8-20 at the same
   # 2-mag cadence the axis already used above Av = 2.  Extended, not

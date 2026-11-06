@@ -58,6 +58,7 @@ class MISTPlot:
     KIEL_COLUMNS = (
         "logmass",
         "initfeh",
+        "logmass_initial",
         "teff_mist",
         "logg_mist",
         "teff_fit",
@@ -235,9 +236,15 @@ class MISTPlot:
         ]
         return {"window": window, "marks": marks}
 
-    def _track_rows(self, i, logmass, initfeh, eep_window):
+    def _track_rows(self, i, logmass_initial, initfeh, eep_window):
         """Instance ``i``'s track over ``eep_window``: ``{"teff", "logg",
         "eep", "age"}`` arrays, row-aligned, age in Gyr.
+
+        The real evolutionary track: the tabulated grid at the star's
+        INITIAL mass (``mist_grid.interpolate_track(..., mass="initial")``),
+        with each row's logg from that row's PRESENT-DAY mass, so the curve
+        is the one star's path including its mass loss. (At a fixed
+        present-day mass the re-axed grid is not one star's track.)
 
         Rows the grid flags as unreliable (``here_be_dragons``) are cut, so
         the drawn track stops where the models stop being trustworthy rather
@@ -258,25 +265,27 @@ class MISTPlot:
         """
         from exozippy.constants import LOGG_CONST
 
-        from .mist_grid import OUTPUT_INDEX, interpolate_track
+        from .mist_grid import TRACK_INDEX, interpolate_track
 
         grid = self.evolutionarymodel._grids[i]
-        track = interpolate_track(grid, logmass, initfeh)
+        track = interpolate_track(
+            grid, logmass_initial, initfeh, mass="initial"
+        )
         # EEP is the grid AXIS the track's rows are indexed by, not one of
-        # the interpolated OUTPUT_COLUMNS, and interpolate_track leaves that
+        # the interpolated TRACK_COLUMNS, and interpolate_track leaves that
         # axis alone -- so grid["eep_pts"] is row-aligned with `track` by
         # construction.
         eep = np.asarray(grid["eep_pts"], dtype=float)
-        teff = track[:, OUTPUT_INDEX["teff_mist"]]
-        radius = track[:, OUTPUT_INDEX["radius_mist"]]
+        teff = track[:, TRACK_INDEX["teff_mist"]]
+        radius = track[:, TRACK_INDEX["radius_mist"]]
         logg = (
             LOGG_CONST
-            + logmass
+            + track[:, TRACK_INDEX["logmass_present"]]
             - 2.0 * np.log10(np.where(radius > 0, radius, np.nan))
         )
 
         keep = (
-            (track[:, OUTPUT_INDEX["here_be_dragons"]] <= 0)
+            (track[:, TRACK_INDEX["here_be_dragons"]] <= 0)
             & np.isfinite(teff)
             & (radius > 0)
             & (eep >= eep_window[0])
@@ -287,13 +296,13 @@ class MISTPlot:
             "teff": teff[keep],
             "logg": logg[keep],
             "eep": eep[keep],
-            "age": track[:, OUTPUT_INDEX["age_mist_gyr"]][keep],
+            "age": track[:, TRACK_INDEX["age_mist_gyr"]][keep],
         }
 
-    def _track_curve(self, i, logmass, initfeh, eep_window):
+    def _track_curve(self, i, logmass_initial, initfeh, eep_window):
         """(teff, logg) along instance ``i``'s track, over ``eep_window``
         (``_track_rows`` without the EEP and age)."""
-        rows = self._track_rows(i, logmass, initfeh, eep_window)
+        rows = self._track_rows(i, logmass_initial, initfeh, eep_window)
         return rows["teff"], rows["logg"]
 
     def _plot_kiel_trace(self, star_idx, point=None):
@@ -376,7 +385,9 @@ class MISTPlot:
         star_index = self.evolutionarymodel.star_indices[star_idx]
         star_name = self.system.star.names[star_index]
         # grab the logmass and initfeh for the draw
-        logmass = float(kiel[star_idx, self.KIEL_INDEX["logmass"]])
+        logmass_initial = float(
+            kiel[star_idx, self.KIEL_INDEX["logmass_initial"]]
+        )
         initfeh = float(kiel[star_idx, self.KIEL_INDEX["initfeh"]])
 
         eep = marks[star_idx, self.KIEL_INDEX["eep"]]
@@ -385,7 +396,9 @@ class MISTPlot:
             [eep],
             eep_margin,
         )
-        track_rows = self._track_rows(star_idx, logmass, initfeh, eep_window)
+        track_rows = self._track_rows(
+            star_idx, logmass_initial, initfeh, eep_window
+        )
         teff_track, logg_track = track_rows["teff"], track_rows["logg"]
         # Only the part of the arc inside the logg window: the rest is
         # drawn but clipped away, and letting it set the axis is what

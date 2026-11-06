@@ -403,8 +403,15 @@ def pipeline_flags(prefix):
     return flags
 
 
-def report(prefix, event, data_dir, tier="default"):
-    """`prefix` is the run prefix, e.g. sweep/128/DC2018_128."""
+def report(prefix, event, data_dir, tier="default", physical=True):
+    """`prefix` is the run prefix, e.g. sweep/128/DC2018_128.
+
+    physical=True adds the 7.16.5 block: bias and coverage (the truth's
+    percentile in the posterior DRAWS) of the lens mass, both distances,
+    |mu_rel| and its direction, the planet mass and a_perp, via
+    dc18_common.physical_rows.  It needs the trace; the stated-1-sigma rows
+    above are the CSV's.
+    """
     truth, cls = truth_for(event, data_dir)
     csv_path = prefix + "_results.csv"
     trace_path = prefix + "_trace.nc"
@@ -637,6 +644,35 @@ def report(prefix, event, data_dir, tier="default"):
         )
     )
     print("  CLEAR WINNER: %s" % winner)
+
+    phys_rows, phys_info = [], None
+    if physical and os.path.exists(trace_path):
+        phys_rows, phys_info = C.physical_rows(
+            event,
+            data_dir,
+            trace_path,
+            config_path=prefix + ".yaml",
+            summary_path=prefix + "_summary.txt",
+        )
+        print(
+            "\n  PHYSICAL QUANTITIES vs the key (7.16.5) -- %s; %d/%d chains, "
+            "burn-in %d, %d draws pooled over all modes"
+            % (
+                phys_info["provenance"],
+                phys_info["n_chains"],
+                phys_info["n_chains_total"],
+                phys_info["burnin"],
+                phys_info["n_draws_kept"],
+            )
+        )
+        for line in C.format_physical(phys_rows).splitlines():
+            print("    " + line)
+        for w in phys_info["warnings"]:
+            print("  !! physical: %s" % w)
+    elif physical:
+        print(
+            "\n  PHYSICAL QUANTITIES: NO TRACE -- no posterior draws to score"
+        )
     return {
         "event": event,
         "class": cls,
@@ -652,7 +688,116 @@ def report(prefix, event, data_dir, tier="default"):
         "hit": best["hit"],
         "n": best["n"],
         "clear_winner": winner,
+        "physical": phys_rows,
+        "physical_info": (
+            None
+            if phys_info is None
+            else {k: v for k, v in phys_info.items() if k != "warnings"}
+            | {"warnings": list(phys_info["warnings"])}
+        ),
     }
+
+
+def write_physical_csv(path, results):
+    """Every event's physical rows, one CSV row per (event, quantity)."""
+    keys = [
+        "event",
+        "class",
+        "prefix",
+        "param",
+        "unit",
+        "truth",
+        "median",
+        "lo68",
+        "hi68",
+        "lo95",
+        "hi95",
+        "pit",
+        "z",
+        "log10_ratio",
+        "bias",
+        "in68",
+        "in95",
+        "n",
+        "note",
+    ]
+    with io.open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=keys, extrasaction="ignore")
+        w.writeheader()
+        for r in results:
+            for row in r.get("physical") or []:
+                w.writerow(dict(row, prefix=r["prefix"]))
+
+
+def plot_pit(path, rows, subset=None, subset_label=None, title=None):
+    """PIT histograms, one panel per physical quantity (10 bins on [0, 1]).
+
+    All scored events as the light bars; `subset` (a set of event numbers),
+    if given, overplotted as the dark bars.  The dashed line is the count a
+    calibrated posterior expects per bin.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    keys = C.PHYSICAL_KEYS
+    fig, axes = plt.subplots(2, 4, figsize=(13, 5.6), sharex=True)
+    bins = np.linspace(0.0, 1.0, 11)
+    light, dark, ink = "#9ec5e8", "#1f5f99", "#444444"
+    for ax, k in zip(axes.ravel(), keys):
+        pit = [
+            r["pit"] for r in rows if r["param"] == k and r["pit"] is not None
+        ]
+        ax.hist(
+            pit,
+            bins=bins,
+            color=light,
+            edgecolor="white",
+            lw=2,
+            label="all scored (%d)" % len(pit),
+        )
+        if subset:
+            ps = [
+                r["pit"]
+                for r in rows
+                if r["param"] == k
+                and r["pit"] is not None
+                and int(r["event"]) in subset
+            ]
+            ax.hist(
+                ps,
+                bins=bins,
+                color=dark,
+                edgecolor="white",
+                lw=2,
+                label="%s (%d)" % (subset_label or "subset", len(ps)),
+            )
+        ax.axhline(len(pit) / 10.0, color=ink, ls="--", lw=1)
+        ax.set_title("%s [%s]" % (k, C.PHYSICAL_UNIT[k]), fontsize=10)
+        ax.set_xlim(0, 1)
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
+    last = axes.ravel()[len(keys)]
+    handles, labels = axes.ravel()[0].get_legend_handles_labels()
+    last.axis("off")
+    last.legend(
+        handles,
+        labels,
+        loc="center",
+        frameon=False,
+        title=(
+            "PIT = truth's percentile\nin the posterior;\n"
+            "0 -> posterior above truth\n--- uniform expectation"
+        ),
+    )
+    for ax in axes[-1]:
+        ax.set_xlabel("PIT")
+    if title:
+        fig.suptitle(title, fontsize=11)
+    fig.tight_layout()
+    fig.savefig(path, dpi=120)
+    plt.close(fig)
 
 
 # Grey band-extinction residual per event, in magnitudes: what our INTEGRATED
@@ -813,6 +958,30 @@ def main():
     ap.add_argument("--tier", default="default", choices=sorted(TIERS))
     ap.add_argument("--json-out", default=None)
     ap.add_argument(
+        "--no-physical",
+        action="store_true",
+        help="skip the physical-quantity block (7.16.5)",
+    )
+    ap.add_argument(
+        "--physical-csv",
+        default=None,
+        help="write every event's physical rows (truth, posterior, PIT) here",
+    )
+    ap.add_argument(
+        "--pit-png",
+        default=None,
+        help="write the ensemble PIT histograms here",
+    )
+    ap.add_argument(
+        "--subset",
+        action="append",
+        default=[],
+        metavar="NAME=EV,EV,...",
+        help="also report the ensemble over these events (repeatable); the "
+        "first one is overplotted on --pit-png",
+    )
+    ap.add_argument("--title", default=None, help="title for --pit-png")
+    ap.add_argument(
         "--event",
         type=int,
         default=None,
@@ -862,7 +1031,9 @@ def main():
                 print("skip %s: cannot infer the event number" % p)
                 continue
             try:
-                out.append(report(p, ev, d, tier=a.tier))
+                out.append(
+                    report(p, ev, d, tier=a.tier, physical=not a.no_physical)
+                )
             except Exception as e:  # noqa: BLE001
                 print("\n%s FAILED: %s: %s" % (p, type(e).__name__, e))
     if out:
@@ -892,6 +1063,40 @@ def main():
                     ", ".join(sorted(set(r.get("flags") or []))) or "-",
                 )
             )
+    phys = [row for r in out for row in (r.get("physical") or [])]
+    subsets = []
+    for spec in a.subset:
+        name, _, evs = spec.partition("=")
+        subsets.append((name, {int(e) for e in evs.split(",") if e.strip()}))
+    if phys:
+        print("\n" + "=" * 104)
+        print(
+            C.format_ensemble(
+                C.ensemble_physical(phys),
+                "PHYSICAL ENSEMBLE: all scored events",
+            )
+        )
+        for name, evs in subsets:
+            sub = [r for r in phys if int(r["event"]) in evs]
+            print()
+            print(
+                C.format_ensemble(
+                    C.ensemble_physical(sub), "PHYSICAL ENSEMBLE: %s" % name
+                )
+            )
+        if a.physical_csv:
+            write_physical_csv(a.physical_csv, out)
+            print("\nwrote %s" % a.physical_csv)
+        if a.pit_png:
+            first = subsets[0] if subsets else (None, None)
+            plot_pit(
+                a.pit_png,
+                phys,
+                subset=first[1],
+                subset_label=first[0],
+                title=a.title,
+            )
+            print("wrote %s" % a.pit_png)
     if out:
         print_convention_caveat(out)
     if a.json_out:

@@ -90,9 +90,6 @@ def build_params(alpha_deg, u0_sign=+1.0):
     return {
         "star.Lens.ra": pin(T["ra"]),
         "star.Lens.dec": pin(T["dec"]),
-        "star.Lens.teff": {"sigma": 0.0},
-        "star.Lens.feh": {"sigma": 0.0},
-        "star.Lens.radius": {"sigma": 0.0},
         "planet.Companion.radius": {"sigma": 0},
         # --- the answer key's inputs ---
         "star.Lens.distance": pin(T["Dl"] * 1000.0),

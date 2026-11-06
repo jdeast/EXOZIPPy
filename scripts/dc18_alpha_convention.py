@@ -288,7 +288,10 @@ def main(argv=None):
         f"scanning alpha for {len(events)} events on {ncpu} workers\n",
         flush=True,
     )
-    with mp.Pool(ncpu) as pool:
+    # FORK, never the platform default: `--data-dir` rebinds the global
+    # DATA in this process, and only a fork child inherits that (a spawn /
+    # forkserver worker re-imports the module and reads the default tree).
+    with mp.get_context("fork").Pool(ncpu) as pool:
         rows = pool.map(one_event, events)
 
     ok = [r for r in rows if r.get("status") == "ok"]

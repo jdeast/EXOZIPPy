@@ -12,7 +12,7 @@ This component also owns everything event-scoped that is not a parameter:
 the magnification dispatcher (`get_magnification`/`get_magnification_op`,
 one call per source trajectory over the shared lens bodies), the event-level
 config keys (finite_source, t0_par, backend, mag_method, use_op, the fit*
-coordinate flags, peak_find, source_orbit), the event potentials
+coordinate flags, peak_find), the event potentials
 (event rate, singularity guards, source-behind-lens, the fitpirel
 Jacobian), the seeding hints, and the sampler-compatibility declaration.
 """
@@ -24,8 +24,16 @@ import pymc as pm
 import pytensor.tensor as pt
 
 from exozippy.components.component import Component
-from exozippy.components.orbit.bodies import orbit_types
+from exozippy.components.orbit.bodies import (
+    LENS_TAYLOR_TYPES,
+    STATIC_TYPE,
+    UNIFORM_ROTATION_TYPE,
+    orbit_types,
+    parse_orbit_bodies,
+)
+from exozippy.components.star.position import probe_star_radec
 from exozippy.config import (
+    PRECEDENCE_DEFAULT,
     PRECEDENCE_DERIVED_DATA,
     PRECEDENCE_DERIVED_MIXED,
     PRECEDENCE_MULENS_LENS_DISTANCE,
@@ -39,11 +47,17 @@ from exozippy.corner_utils import (
 )
 from exozippy.outputs.prose import get_collector
 from exozippy.potentials import soft_lower_bound
-from exozippy.skyframe import observer_sky_offset, sky_basis
+from exozippy.skyframe import observer_sky_offset, parallax_factors, sky_basis
 
 from ..galacticmodel.physics import expected_proper_motion
 from .bodies import body_entries, resolve_orbit_ref, validate_event_config
-from .op import BinaryLensMagOp, MulensMagOp, VBMDirectMagOp
+from .op import (
+    VBM_RELTOL_DEFAULT,
+    VBM_TOL_DEFAULT,
+    BinaryLensMagOp,
+    MulensMagOp,
+    VBMDirectMagOp,
+)
 from .physics import (
     MU_REL_FLOOR,
     T_E_FLOOR,
@@ -51,6 +65,7 @@ from .physics import (
     THETA_E_LENSING_MIN,
     apply_u_0_floor,
     clip_q,
+    host_offset_from_com,
     lens_geometry_from_orbit,
     source_offset_from_orbit,
     xallarap_trajectory_shift,
@@ -58,9 +73,65 @@ from .physics import (
 
 logger = logging.getLogger(__name__)
 
+# Central-difference step (days) for the Earth's velocity at t0_par, which
+# spans the Skowron frame (conventions.md C5).  A CONVENTION, not a numerical
+# detail: the velocity cancels exactly in u(t) but sets the reported t_E and
+# the direction of pi_E, so a (t_0, u_0) is comparable across codes only in
+# a frame built with the same step.  (omega h)^2/6 = 1.2e-7 relative here;
+# it was 0.5 d (1.2e-5) before review 1.10.13.  Module-level so a test can
+# reproduce the pre-1.10.13 frame.
+FRAME_VELOCITY_STEP_DAYS = 0.05
+
 # alpha is stored in radians (lens.alpha's internal_unit) and consumed in
 # degrees by both magnification backends.
 _RAD_TO_DEG = 180.0 / np.pi
+# Floor on a uniform_rotation companion's s^2 (Einstein radii^2) before the
+# square root: STRICTLY positive, so a separation passing exactly through
+# zero never meets sqrt'(0) = inf (CLAUDE.md, the where-trap rule).
+_S_SQ_FLOOR = 1e-300
+
+
+_VBM_ACCURACY_DEFAULTS = {
+    "vbm_tol": VBM_TOL_DEFAULT,
+    "vbm_reltol": VBM_RELTOL_DEFAULT,
+}
+
+
+def parse_vbm_accuracy(ev, key):
+    """``mulensevent.<key>`` (``vbm_tol`` or ``vbm_reltol``) as a float, or
+    its default when the key is absent; anything else raises naming the key.
+
+    A plain number only (the scalar-or-list rule): a bool, a string or a
+    list is refused rather than coerced.  ``vbm_tol`` must be in (0, 1):
+    VBM's absolute goal, where zero never converges and a value > 1 is read
+    by VBM as a fixed NUMBER of contour points instead (a different
+    algorithm this key does not offer).  ``vbm_reltol`` must be in [0, 1):
+    0 switches the relative goal off, and 1 would accept any answer.
+    """
+    if key not in ev:
+        return _VBM_ACCURACY_DEFAULTS[key]
+    val = ev[key]
+    if isinstance(val, bool) or not isinstance(val, (int, float)):
+        hint = (
+            "  (PyYAML reads an exponent without a decimal point, e.g. "
+            "1e-4, as a string: write 1.0e-4.)"
+            if isinstance(val, str)
+            else ""
+        )
+        raise ValueError(
+            f"mulensevent.{key} must be a number, got {val!r} "
+            f"({type(val).__name__}).{hint}"
+        )
+    val = float(val)
+    if key == "vbm_tol":
+        ok = bool(np.isfinite(val)) and 0.0 < val < 1.0
+        need = "in (0, 1)"
+    else:
+        ok = bool(np.isfinite(val)) and 0.0 <= val < 1.0
+        need = "in [0, 1)"
+    if not ok:
+        raise ValueError(f"mulensevent.{key} must be {need}, got {val!r}.")
+    return val
 
 
 class MulensEvent(Component):
@@ -91,7 +162,18 @@ class MulensEvent(Component):
 
     # Earth's velocity at t0_par, projected E/N -- constants injected in
     # add_parameter for the mu_rel helio -> geo conversion (Gould 2004).
-    context_dep_names = frozenset({"earth_vperp_e", "earth_vperp_n"})
+    # The lens_offset_e/n quartet (review 8.10.4) likewise: the astrometric
+    # reference epoch, t0_par, and the Earth's parallax factors at t0_par.
+    context_dep_names = frozenset(
+        {
+            "earth_vperp_e",
+            "earth_vperp_n",
+            "track_epoch",
+            "track_t0_par",
+            "track_earth_pe",
+            "track_earth_pn",
+        }
+    )
 
     def __init__(self, config, config_manager):
         # Refuse unknown/misplaced keys BEFORE anything reads the block: a
@@ -140,6 +222,11 @@ class MulensEvent(Component):
         # it back into t0_par[0] -- a length-1 list precisely so that write
         # is visible to every later reader of the same object.
         self.t0_par = [self._resolve_t0_par(ev, config_manager)]
+        # The source's line of sight (ra, dec in radians), set by
+        # MulensInstrument.load_data before the geocentric frame is first
+        # anchored: the frame's Earth is placed at the instant it received
+        # the light tagged t0_par, which depends on the direction.
+        self._line_of_sight_rad = None
 
         # One magnification method per source; all sources start from the
         # event-level config value, and resolve_auto_vbbl refines each slot.
@@ -156,6 +243,11 @@ class MulensEvent(Component):
         self.use_op = bool(ev.get("use_op", False))
 
         self.backend = ev.get("backend", "vbm_direct")
+        # VBM's accuracy goals for every VBMDirectMagOp this event builds
+        # (the photometric Op under the default backend, and the
+        # astrometric Op under either).  mulensing.md, "VBM accuracy".
+        self.vbm_tol = parse_vbm_accuracy(ev, "vbm_tol")
+        self.vbm_reltol = parse_vbm_accuracy(ev, "vbm_reltol")
         self._warned_linear_ld_backend = False
         if self.backend not in ("vbm_direct", "mulensmodel"):
             raise ValueError(
@@ -163,63 +255,118 @@ class MulensEvent(Component):
                 f"'mulensmodel', got '{self.backend}'."
             )
 
-        # Source orbital motion -- xallarap (C25): `source_orbit:` on this
-        # block names the orbit the luminous source moves on; the trajectory
-        # shift is applied by the magnification dispatcher below.  The
-        # orbit's `type:` is what says HOW it moves, so the separate
-        # `source_orbital_motion:` key that used to repeat it is gone.
-        # (A leftover `source_orbital_motion:` key is refused by the shared
-        # key check, bodies.REMOVED_KEYS, with the migration message.)
-        self.source_orbit_ref = [ev.get("source_orbit")]
-        self.xal_orbit_idx = None
-        som = None
-        if self.source_orbit_ref[0] is not None:
-            self.xal_orbit_idx = resolve_orbit_ref(
-                config_manager, self.source_orbit_ref[0], self.prefix
-            )
-            types = orbit_types(sys_cfg)
-            som = (
-                types[self.xal_orbit_idx]
-                if self.xal_orbit_idx < len(types)
-                else "keplerian"
-            )
-            if som != "keplerian":
-                raise NotImplementedError(
-                    f"mulensevent.source_orbit names a type: {som} orbit.  "
-                    "Linear (or quadratic) xallarap is deliberately not "
-                    "offered: a low-order source drift is exactly "
-                    "degenerate with (t_E, t_0, u_0, alpha) in the light "
-                    "curve alone (conventions.md C25).  Use a keplerian "
-                    "source orbit, or wait for the per-star proper-motion "
-                    "predicate that would make a linear mode meaningful."
+        # Source orbital motion -- xallarap (C25), PER SOURCE (review 8.6.9,
+        # the source twin of 8.6.33): each source entry's `orbit:` names the
+        # orbit it moves on, exactly as a lens companion's does; a source
+        # without one is static beside moving ones.  The orbit's `type:` says
+        # HOW it moves, and only keplerian is offered: a linear source drift
+        # is degenerate with (t_E, t_0, u_0, alpha) in the light curve alone
+        # (C25) -- physics, not plumbing.  A source sits ALONE on one side of
+        # its orbit; on the primary side its offset is the orbit's primary
+        # track, a1 = a m_companion / m_total, on the companion side the
+        # opposite track, a2 = -a m_primary / m_total (source_offset_from_
+        # orbit is linear in its amplitude).  Two sources on ONE orbit, one
+        # per side, are the linked binary source.  A source inside a group
+        # of bodies is a hierarchical system (8.6.33 phase 2) and raises.
+        self.source_orbit_idx = []  # per source slot: orbit index or None
+        self.source_orbit_side = []  # +1 primary side, -1 companion side
+        src_block = sys_cfg.get("source") or []
+        refs = [
+            e.get("orbit") if isinstance(e, dict) else None for e in src_block
+        ]
+        types = orbit_types(sys_cfg)
+        prim = comp = None
+        if any(r is not None for r in refs):
+            prim, comp = parse_orbit_bodies(sys_cfg.get("orbit"), sys_cfg)
+        for j, ref in enumerate(refs):
+            if ref is None:
+                self.source_orbit_idx.append(None)
+                self.source_orbit_side.append(None)
+                continue
+            o = resolve_orbit_ref(config_manager, ref, f"source.{j}")
+            t = types[o] if o < len(types) else "keplerian"
+            if t == STATIC_TYPE:
+                raise ValueError(
+                    f"source.{j}: orbit {ref!r} is type: static, a pairing "
+                    "with no dynamics, so it cannot move this source.  A "
+                    "source that does not move carries no 'orbit:' key."
                 )
-            if self.n_sources > 1:
+            if t != "keplerian":
                 raise NotImplementedError(
-                    "xallarap currently supports a single luminous source; "
-                    "the linked binary-source case (both sources on one "
-                    "orbit, opposite offsets scaled by the mass ratio) is "
-                    "the next step of review 8.6.9."
+                    f"source.{j}: orbit {ref!r} is type: {t}.  Linear (or "
+                    "quadratic) xallarap is deliberately not offered: a "
+                    "low-order source drift is exactly degenerate with "
+                    "(t_E, t_0, u_0, alpha) in the light curve alone "
+                    "(conventions.md C25).  Use a keplerian source orbit."
                 )
-            # The lens binary and the source binary are different systems,
-            # so a lens companion's `orbit:` and this block's
-            # `source_orbit:` must not name the same orbit.  Resolved from
-            # the raw lens block: component construction order is the
-            # user's config key order, so the Lens instance may not exist
-            # yet.
+            body = tuple(self.source_bodies[j])
+            p_grp = [tuple(b) for b in prim[o]]
+            c_grp = [tuple(b) for b in comp[o]]
+            if p_grp == [body]:
+                side = 1
+            elif c_grp == [body]:
+                side = -1
+            else:
+                raise NotImplementedError(
+                    f"source.{j}: orbit {ref!r} has primary group {p_grp} "
+                    f"and companion group {c_grp}; a source must be ALONE "
+                    f"on one side of its orbit (a source inside a group of "
+                    f"bodies is a hierarchical system, review 8.6.33 phase "
+                    f"2)."
+                )
+            self.source_orbit_idx.append(o)
+            self.source_orbit_side.append(side)
+
+        by_orbit = {}
+        for j, o in enumerate(self.source_orbit_idx):
+            if o is not None:
+                by_orbit.setdefault(o, []).append(j)
+        for o, js in by_orbit.items():
+            if len(js) == 2 and (
+                self.source_orbit_side[js[0]] == self.source_orbit_side[js[1]]
+            ):
+                raise ValueError(
+                    f"[{self.prefix}] sources {js} name the same orbit from "
+                    f"the same side."
+                )
+            # The other side of a source's orbit may be a dark body or the
+            # OTHER source of a binary -- but then that source must name
+            # this orbit too, or it would be modeled static while the orbit
+            # says it moves.
+            for j in js:
+                other = comp[o] if self.source_orbit_side[j] == 1 else prim[o]
+                for k, sb in enumerate(self.source_bodies):
+                    if [tuple(sb)] == [
+                        tuple(b) for b in other
+                    ] and k not in js:
+                        raise ValueError(
+                            f"[{self.prefix}] source.{j}'s orbit "
+                            f"{refs[j]!r} has source.{k} on its other side, "
+                            f"but source.{k} does not name that orbit: put "
+                            f"'orbit: {refs[j]}' on source.{k} too (a "
+                            f"binary source moves both sources)."
+                        )
+        self.xal_orbit_idxs = sorted(by_orbit)
+
+        # The lens binary and a source binary are different systems, so a
+        # lens companion's `orbit:` and a source's must not name the same
+        # orbit.  Resolved from the raw lens block: component construction
+        # order is the user's config key order, so the Lens instance may not
+        # exist yet.
+        if self.xal_orbit_idxs:
             lens_refs = {
                 resolve_orbit_ref(config_manager, e["orbit"], f"lens.{i}")
                 for i, e in enumerate(sys_cfg.get("lens") or [])
                 if isinstance(e, dict) and e.get("orbit") is not None
             }
-            if self.xal_orbit_idx in lens_refs:
+            shared = lens_refs & set(self.xal_orbit_idxs)
+            if shared:
                 raise ValueError(
-                    f"[{self.prefix}] the lens companion's (`orbit:`) and "
-                    f"the event's (`source_orbit:`) references name the "
-                    "SAME orbit; the lens binary and the source binary are "
-                    "different systems."
+                    f"[{self.prefix}] a lens companion's and a source's "
+                    f"`orbit:` name the SAME orbit {sorted(shared)}; the "
+                    "lens binary and the source binary are different "
+                    "systems."
                 )
-        # Compat view: "keplerian" when the source moves, else None.
-        self.source_orbital_motion = [som]
 
     def _resolve_t0_par(self, event_config, config_manager):
         """t0_par from the mulensevent block, the source.0.t_0 seed, or the
@@ -343,31 +490,41 @@ class MulensEvent(Component):
                 "accepts": ["vbm_direct", "mulensmodel"],
                 "required": False,
                 "doc": (
-                    "Magnification engine for the multi-lens Op path, and "
-                    "for a finite-source single lens whose band declares "
-                    "'ld_law: quadratic' (only VBMicrolensing can apply a "
-                    "quadratic limb-darkening profile). Default "
-                    "'vbm_direct'; 'mulensmodel' is the A/B reference and "
-                    "is linear-LD only."
+                    "Magnification engine for the Op path: binary and "
+                    "N-lens events and every finite-source single lens. "
+                    "Default 'vbm_direct' (VBMicrolensing, linear or "
+                    "quadratic limb darkening); 'mulensmodel' is the A/B "
+                    "reference, at most 2 lens bodies, and is linear-LD "
+                    "only. Its finite-source single lens uses MulensModel's "
+                    "Yoo04 where u/rho <= 99 (the end of Yoo04's table) and "
+                    "a point source beyond, which is within 0.014 mmag "
+                    "there."
                 ),
             },
             {
-                "key": "source_orbit",
+                "key": "vbm_tol",
                 "kind": "option",
                 "accepts": None,
                 "required": False,
                 "doc": (
-                    "Source orbital motion -- xallarap (conventions.md "
-                    "C25; review 8.6.9): the orbit instance (name or index) "
-                    "of the luminous source about its (dark or faint) "
-                    "companion.  Its barycentric sky offset enters the "
-                    "trajectory at exactly the parallax slot, anchored at "
-                    "t0_par, with NO new sampled parameters.  The orbit "
-                    "must be type: keplerian -- a linear source drift is "
-                    "exactly degenerate with (t_E, t_0, u_0, alpha) in the "
-                    "light curve alone.  Must differ from the lens "
-                    "companion's 'orbit:' (the lens binary).  Single "
-                    "luminous source for now."
+                    "VBMicrolensing's absolute accuracy goal on the "
+                    "magnification (vbm.Tol), a float in (0, 1). Default 1e-3 "
+                    "(VBM's own). Reaches every VBMicrolensing Op: the "
+                    "light curve under backend 'vbm_direct' and the "
+                    "astrometric centroid under either backend."
+                ),
+            },
+            {
+                "key": "vbm_reltol",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "VBMicrolensing's relative accuracy goal (vbm.RelTol), "
+                    "a float in [0, 1). Default 0 (off: Tol alone decides). "
+                    "A nonzero value lets VBM stop on whichever goal is "
+                    "met first, and makes its first-annulus limb-darkening "
+                    "false convergence more likely (mulensing.md)."
                 ),
             },
             {
@@ -394,39 +551,129 @@ class MulensEvent(Component):
         """(comp_type, star_ndx) of the primary source body."""
         return self.source_bodies[0]
 
-    def _mass_initval(self, comp_type, ndx):
-        """Best-effort mass initval (solMass) for a body at stage 3, from
-        user_params mass or logmass entries; None when neither is given."""
-        up = self.config_manager.user_params
-        entry = user_entry(up, f"{comp_type}.{ndx}.mass")
-        val = None if entry is None else entry.get("initval")
-        if val is not None:
-            # A user_params `mass` is in that BODY's own user unit, and this
-            # function's contract is solMass.  `star.mass` is solMass so the
-            # two coincide, but `planet.mass` is jupiterMass
-            # (planet/defaults.yaml), so returning it raw seeded
-            # mulensevent.mlens_total -- and through it theta_E, t_E and
-            # every per-element q -- too large by 1047 on any lens with 2+
-            # companions one of which is a planet.  Measured: a two-planet
-            # lens seeded q = 1.995e-3 where the built graph computes
-            # 1.9047e-6.  Single-companion lenses never reached here, which
-            # is why it survived.
-            #
-            # config_manager's factor is the USER -> INTERNAL one; it is the
-            # RECIPROCAL of Parameter's (CLAUDE.md), so it multiplies here.
-            # Reaching for it in a component is the existing idiom
-            # (orbit.py:750) -- what is forbidden is hand-writing the number.
-            factor = self.config_manager.get_conversion_factor(
-                comp_type, "mass", full_path=f"{comp_type}.{ndx}.mass"
+    def lens_track_star(self, system):
+        """The primary lens STAR whose sky position is derived from the
+        source's (review 8.10.4), or None.
+
+        The light curve fixes the lens-minus-source separation at every
+        instant (C9), so a lens star's ``ra``/``dec`` at the astrometric
+        reference epoch are not free: they are the primary source's plus
+        ``mulensevent.lens_offset_e/n``.  The flip happens exactly where
+        that position is MEASURED -- the lens star is the target of a
+        gaia/abs astrometry dataset -- and nowhere else: a lens position
+        nothing reads is a pinned bookkeeping value, and deriving it would
+        only add a potential to every microlensing fit.
+
+        Stage-safe from stage 1 on: reads the raw astrometry config and
+        ``lens_bodies``/``source_bodies`` (``__init__``), never a stage-2
+        attribute, because AstrometryInstrument.load_data asks it too.
+        """
+        l_type, l_idx = self._primary_lens()
+        s_type, _ = self._primary_source()
+        if l_type != "star" or s_type != "star":
+            return None
+        astrom = getattr(system, "astrometryinstrument", None)
+        if astrom is None:
+            return None
+        for i, c in enumerate(astrom.config):
+            mode = c.get("mode", "gaia")
+            # astrometryinstrument.ABSOLUTE_MODES, spelled out (import
+            # cycle).  A lens named in a dataset's psf_stars (review 8.10.3)
+            # is measured too: its track moves that blended photocenter.
+            # psf_stars is resolved to indices at AstrometryInstrument
+            # construction, so this stays stage-safe.
+            if mode in ("gaia", "abs", "catalog") and (
+                int(c.get("star_ndx", 0)) == int(l_idx)
+                or int(l_idx) in astrom.psf_stars[i]
+            ):
+                return int(l_idx)
+        return None
+
+    def _validate_lens_track(self, system):
+        """Refuse the configurations the derived lens position cannot
+        represent, and say what it approximates.  Called at stage 3 when
+        ``lens_track_star`` is not None."""
+        if self.xal_orbit_idxs:
+            raise NotImplementedError(
+                f"[{self.prefix}] the lens star carries absolute astrometry, "
+                f"so its position is derived from the source's and the "
+                f"event geometry (review 8.10.4) -- but this event has a "
+                f"source on an orbit (xallarap), and the source's orbital offset "
+                f"at the reference epoch is not part of that derivation "
+                f"yet.  Drop the lens's astrometry or the source orbit."
             )
-            return float(val) * float(factor if factor else 1.0)
-        entry = user_entry(up, f"{comp_type}.{ndx}.logmass")
-        val = None if entry is None else entry.get("initval")
-        # Only `star` declares logmass, in dex(solMass), so 10** already
-        # lands in the internal unit.  A component that ever declares a
-        # logmass in another dex base needs the same factor treatment as
-        # `mass` above.
-        return float(10.0 ** float(val)) if val is not None else None
+        if self.n_companions >= 2:
+            raise NotImplementedError(
+                f"[{self.prefix}] the lens star carries absolute astrometry, "
+                f"so its position is derived from the event geometry "
+                f"(review 8.10.4), which places the luminous primary relative "
+                f"to the lens center of mass for ONE companion only; this "
+                f"lens has {self.n_companions}."
+            )
+        if self.n_companions == 1 and self.lens_bodies[1][0] == "star":
+            logger.warning(
+                f"[{self.prefix}] the lens star's position is derived from "
+                f"the event geometry (review 8.10.4) and the lens companion "
+                f"is a STAR: the derivation places the primary at its offset "
+                f"from the center of mass at t0_par, while a luminous "
+                f"companion moves the light's photocenter and the binary "
+                f"orbit moves both over the years to the imaging epoch (up "
+                f"to s theta_E).  Treat the lens astrometry as approximate."
+            )
+
+    def check_lens_offset_supported(self, where):
+        """Gate for the resolved lens-minus-source astrometry ('lensrel'):
+        the luminous primary is placed relative to the lens center of mass
+        for at most one companion (``host_offset``)."""
+        if self.n_companions >= 2:
+            raise NotImplementedError(
+                f"[{where}] resolved lens-source astrometry places the "
+                f"luminous primary relative to the lens center of mass for "
+                f"ONE companion only; this lens has {self.n_companions}."
+            )
+        if self.n_companions == 1 and self.lens_bodies[1][0] == "star":
+            logger.warning(
+                f"[{where}] the lens companion is a STAR: the model places "
+                f"the primary at its offset from the center of mass at "
+                f"t0_par, while a luminous companion moves the light's "
+                f"photocenter and the binary orbit moves both over the years "
+                f"to the imaging epoch (up to s theta_E)."
+            )
+
+    def host_offset(self, system):
+        """The luminous primary's offset from the lens center of mass, on
+        C9's ``(tau_hat, beta_hat)`` axes in Einstein radii (C12/C15), from
+        the companion geometry at t0_par: ``(0, 0)`` for a single lens.
+        The tensor twin of the ``binary`` expression of
+        ``lens_offset_e/n``; both call ``physics.host_offset_from_com``."""
+        if self.n_companions == 0:
+            return 0.0, 0.0
+        if self.n_companions > 1:
+            raise NotImplementedError(
+                f"[{self.prefix}] host_offset supports one companion; this "
+                f"lens has {self.n_companions} (check_lens_offset_supported "
+                f"should have refused it)."
+            )
+        lens = system.lens
+        return host_offset_from_com(
+            lens.s.value[1], lens.alpha.value[1], lens.q.value[1]
+        )
+
+    def _lens_track_constants(self, system):
+        """The context constants of lens_offset_e/n: the astrometric
+        reference epoch, t0_par, and the Earth's parallax factors at
+        t0_par -- from the same frame anchor (``geocentric_frame``) the
+        light curve's deviations use, so the derived offset and the
+        trajectory share one frame by construction."""
+        _t0, earth_pos, _vel = self.geocentric_frame()
+        ra, dec = self._line_of_sight_rad
+        p_e, p_n = parallax_factors(np.asarray(earth_pos)[None, :], ra, dec)
+        return {
+            "track_epoch": float(system.astrometryinstrument.epoch),
+            "track_t0_par": float(self.t0_par[0]),
+            "track_earth_pe": float(p_e[0]),
+            "track_earth_pn": float(p_n[0]),
+        }
 
     def _validate_bodies(self, system):
         """Fail at registration time if a body reference points to a
@@ -525,6 +772,21 @@ class MulensEvent(Component):
     # Lifecycle stages
     # ------------------------------------------------------------------
 
+    def selected_sources(self, system):
+        """The event's source is the star the survey selected (a flux-
+        limited detection): Component.selected_sources.  The primary
+        source's star; a second source in the same system is linked to it
+        and shares its position (star.md, 'Linked stars')."""
+        return [int(self.source_map[0])]
+
+    def unresolved_binary_lenses(self, system):
+        """A single-lens event's lens may be an unresolved binary
+        (Component.unresolved_binary_lenses); a lens with companions is
+        modeled body by body and is not."""
+        if len(self.lens_bodies) != 1:
+            return {}
+        return {int(self.lens_map[0]): int(self.source_map[0])}
+
     def build_maps(self):
         """Stage 2: index maps for the event-level parameter chain.
 
@@ -559,6 +821,13 @@ class MulensEvent(Component):
             setattr(
                 self, f"companion{j}_mass_map", np.array([c_ndx], dtype=int)
             )
+        # The derived lens position's deps (lens_offset_e/n): the primary
+        # source's element of the `source` component, and the first
+        # companion's element of the `lens` component (element 0 is the
+        # primary, masked inactive there).
+        self.primary_source_element_map = np.array([0], dtype=int)
+        if self.n_companions >= 1:
+            self.first_companion_map = np.array([1], dtype=int)
 
     def register_parameters(self, system):
         """Stage 3: Declare the event-level manifest and push hints."""
@@ -582,17 +851,26 @@ class MulensEvent(Component):
         def murel_entry():
             if not fitmurel:
                 return {"expr_key": "default"}
-            # Sampled mode: start at 0 relative pm through the overrides
-            # channel (defaults.yaml deliberately carries no initval --
-            # the engine's default-armor would seed mu_rel = 0 into every
-            # config and break the t_E derivation chain), with a
-            # preliminary 1 mas/yr whitening scale.  The engine's mu_rel
-            # relation upgrades the start from any pm/t_E seeds.
-            return {"overrides": {"initval": [0.0]}}
+            # Sampled mode: no options; the start is the hint pushed below.
+            return None
 
         if fitmurel:
-            self.config_manager.add_scale_hint("mulensevent.0.mu_ra_rel", 1.0)
-            self.config_manager.add_scale_hint("mulensevent.0.mu_dec_rel", 1.0)
+            # Start at 0 relative pm as a ranked add_hint at
+            # PRECEDENCE_DEFAULT (review 2.1.26(d)): a modelling default,
+            # so a user initval beats it, any engine-solved value (from
+            # pm/t_E seeds) beats it, and the ledger reports it as a
+            # default -- not as the user's value or the data's.  It was an
+            # "overrides" initval, which reached resolve() but never the
+            # provenance ledger.  Pushed ONLY in this mode: defaults.yaml
+            # deliberately carries no initval, since the engine's
+            # default-armor would seed mu_rel = 0 into every config and
+            # break the t_E derivation chain.  Preliminary 1 mas/yr
+            # whitening scale.
+            for p in ("mu_ra_rel", "mu_dec_rel"):
+                self.config_manager.add_hint(
+                    f"mulensevent.0.{p}", 0.0, rank=PRECEDENCE_DEFAULT
+                )
+                self.config_manager.add_scale_hint(f"mulensevent.0.{p}", 1.0)
 
         # fitpirel (swap 2): sample log_pi_rel, derive pi_rel from it, and
         # the star component derives the lens distance (see star.py).
@@ -663,6 +941,14 @@ class MulensEvent(Component):
             "pi_E_E": {"expr_key": "default"},
         }
 
+        # The lens star's position, derived from the source's where it is
+        # measured (review 8.10.4; Star flips the lens's ra/dec onto these).
+        if self.lens_track_star(system) is not None:
+            self._validate_lens_track(system)
+            key = "binary" if self.n_companions == 1 else "default"
+            self.manifest["lens_offset_e"] = {"expr_key": key}
+            self.manifest["lens_offset_n"] = {"expr_key": key}
+
         # The geocentric-frame caveat lives in ONE shared table note (the
         # note_marks dedup collapses identical texts to one letter).
         geo_note = (
@@ -696,144 +982,13 @@ class MulensEvent(Component):
                     "deps": ["mlens_total", "pi_rel"],
                 }
 
-        if self.n_companions >= 2:
-            # The symbolic relaxation engine only knows the binary mass-sum
-            # and q relations (see symbolic_physics.get_symbol_map), so for
-            # 3+ lens bodies the mlens_total and per-element q initvals are
-            # seeded from the per-body mass initvals instead.  The q and
-            # log_s hints target LENS ELEMENTS: companion slot j is lens
-            # element j+1 (the off-by-one this refactor is named for).
-            body_masses = [
-                self._mass_initval(c_type, c_ndx)
-                for c_type, c_ndx in self.lens_bodies
-            ]
-            # Seeded at PRECEDENCE_DERIVED_MIXED: overrides defaults, yields
-            # to explicit user values.  Loud, once, at config time, because
-            # the alternative -- a start that quietly comes from nowhere --
-            # is what review 1.6.5 traced (and what 2.6.6 asks be said out
-            # loud until the relations are generalized).  A WARNING and not
-            # an INFO: for a 2-body lens the engine derives all of this from
-            # ANY of the masses, q or the trajectory, so a user who has
-            # never had to supply body masses gets no other signal that a
-            # third body changes the rules.
-            user_q = [
-                f"lens.{j + 1}.q"
-                for j in range(1, self.n_companions)
-                if self.config_manager.user_params.get(f"lens.{j + 1}.q")
-                is not None
-            ]
-            if user_q:
-                logger.warning(
-                    f"{self.prefix}: {', '.join(user_q)} sets the START of "
-                    "a derived mass ratio but CANNOT set the companion "
-                    "mass it is computed from -- the relaxation engine's q "
-                    "relation covers the first companion (lens element 1) "
-                    "only (see mulensing/symbolic_physics.py).  The fit "
-                    "will run at the masses, not at the q you typed.  "
-                    "Supply <component>.<body>.mass (or logmass) for every "
-                    "lens body instead."
-                )
-            if any(m is None for m in body_masses):
-                missing = [
-                    f"{ct}.{cn}"
-                    for (ct, cn), m in zip(self.lens_bodies, body_masses)
-                    if m is None
-                ]
-                logger.warning(
-                    f"{self.prefix}: no mass initval for lens body/bodies "
-                    f"{missing}, so mulensevent.mlens_total and the "
-                    "per-companion q starts fall back to defaults.  A lens "
-                    "with 3+ bodies REQUIRES explicit body masses: the "
-                    "engine's mass-sum and q relations are binary-only, so "
-                    "nothing else can supply them (review 2.6.6).  Add "
-                    f"mass (or logmass) initvals for {missing} to the "
-                    "params file."
-                )
-            else:
-                self.config_manager.add_hint(
-                    "mulensevent.0.mlens_total",
-                    float(sum(body_masses)),
-                    rank=PRECEDENCE_DERIVED_MIXED,
-                )
-                for j, m_c in enumerate(body_masses[1:]):
-                    q_j = m_c / body_masses[0]
-                    self.config_manager.add_hint(
-                        f"lens.{j + 1}.q", q_j, rank=PRECEDENCE_DERIVED_MIXED
-                    )
-                    self.config_manager.add_scale_hint(
-                        f"lens.{j + 1}.q", 0.1 * q_j
-                    )
-
-            # The s <-> log_s relation is mapped only for the first
-            # companion (lens element 1), so for 3+ body lenses seed the
-            # remaining companions' log_s from any user s initval.
-            up = self.config_manager.user_params
-            for j in range(1, self.n_companions):
-                entry = user_entry(up, f"lens.{j + 1}.s")
-                s_val = None if entry is None else entry.get("initval")
-                if s_val is None or float(s_val) <= 0.0:
-                    continue
-                self.config_manager.add_hint(
-                    f"lens.{j + 1}.log_s",
-                    float(np.log10(float(s_val))),
-                    rank=PRECEDENCE_DERIVED_MIXED,
-                )
-
-        # Expected proper motions from the galactic model, for the seeds
-        # below.  None when the line of sight is not known yet, in which
-        # case the pm hints are simply skipped.
-        pm_expected = self._galactic_pm_expectations(system)
-
-        # Inject event-level physical hints for the body stars.
+        # The event's kinematic start hints (distances, masses, the
+        # galactic-model proper motions).  MulensInstrument already pushed
+        # them at stage 1, before its flux bootstrap probed the geometry;
+        # re-pushed here (same numbers) so a fit with no microlensing data
+        # has them too.  See register_kinematic_hints.
+        self.register_kinematic_hints(system)
         l_type, l_idx = self._primary_lens()
-
-        # PRECEDENCE_MULENS_LENS_DISTANCE overrides the 10 pc defaults.yaml
-        # default (PRECEDENCE_DEFAULT) but yields to any value the
-        # relaxation engine derives from pi_rel + d_S
-        # (PRECEDENCE_MULENS_SOURCE_DISTANCE).  That ordering is what breaks
-        # the d_L <-> parallax cycle; see the constants' comment in
-        # config.py.
-        self.config_manager.add_hint(
-            f"star.{l_idx}.distance",
-            4000.0,
-            rank=PRECEDENCE_MULENS_LENS_DISTANCE,
-        )
-        self.config_manager.add_scale_hint(f"star.{l_idx}.distance", 5.0)
-        self.config_manager.add_hint(f"star.{l_idx}.logmass", -0.5)
-        self.config_manager.add_scale_hint(f"star.{l_idx}.logmass", 0.001)
-        self.config_manager.add_scale_hint(f"star.{l_idx}.pm_ra", 3.0)
-        self.config_manager.add_scale_hint(f"star.{l_idx}.pm_dec", 3.0)
-        self.config_manager.add_scale_hint(f"star.{l_idx}.rv", 1e5)
-        self._seed_expected_pm(pm_expected, l_idx, "thin_disk", 4000.0)
-
-        # Every source body gets the same bulge-source seeding: each source
-        # star's distance and pm still get their own start (the secondary's
-        # distance feeds ITS rho even though it no longer feeds mu_rel).
-        for s_type, s_idx in self.source_bodies:
-            self.config_manager.add_hint(
-                f"star.{s_idx}.distance",
-                8000.0,
-                rank=PRECEDENCE_MULENS_SOURCE_DISTANCE,
-            )
-            self.config_manager.add_scale_hint(f"star.{s_idx}.distance", 5.0)
-            self.config_manager.add_hint(f"star.{s_idx}.logmass", -0.5)
-            self.config_manager.add_scale_hint(f"star.{s_idx}.logmass", 0.3)
-            self.config_manager.add_scale_hint(f"star.{s_idx}.pm_ra", 3.0)
-            self.config_manager.add_scale_hint(f"star.{s_idx}.pm_dec", 3.0)
-            self.config_manager.add_scale_hint(f"star.{s_idx}.rv", 1e5)
-            self._seed_expected_pm(pm_expected, s_idx, "bulge", 8000.0)
-
-        # Companion lens bodies (everything beyond the primary)
-        for l2_type, l2_idx in self.lens_bodies[1:]:
-            if l2_type == "star":
-                self.config_manager.add_hint(
-                    f"star.{l2_idx}.distance",
-                    4000.0,
-                    rank=PRECEDENCE_MULENS_LENS_DISTANCE,
-                )
-                self.config_manager.add_scale_hint(
-                    f"star.{l2_idx}.distance", 5.0
-                )
 
         # Tighten lens logmass scale when satellite parallax is available
         if hasattr(system, "mulensinstrument") and hasattr(
@@ -859,6 +1014,140 @@ class MulensEvent(Component):
                     f"star.{l_idx}.logmass", scale
                 )
 
+    def register_kinematic_hints(self, system):
+        """Push the event's kinematic START hints: the body stars'
+        distances and masses and the galactic-model proper motions.
+
+        These, with the frame constants (register_frame_constants), are
+        what the relaxation engine solves pi_E, theta_E, pi_rel and mu_rel
+        from when no entry states them.  The flux bootstrap reads that
+        geometry at stage 1 (MulensInstrument._probe_bootstrap_geometry),
+        so MulensInstrument.load_data calls this BEFORE its probe; until
+        2026-10 the hints arrived only at stage 3, the probe solved the
+        event on the defaults.yaml 10 pc distances and unit masses instead
+        (DC2018-069: theta_E 35 mas, pi_rel 154 mas, a lens at 4.3 pc), and
+        the geocentric pi_E relation (review 8.6.23, #455) turned that into
+        pi_E = (-1.46, -4.10) against a model start of ~(0.03, 0.02) --
+        150x the parallax in the bootstrap's point-lens columns.  Every
+        number here is a constant or comes from the line of sight and the
+        user's own entries, so stage 1 already knows it; register_parameters
+        calls this again (identical values) for a fit without microlensing
+        data.  Scale hints that need the observer positions (the satellite
+        logmass scale) stay at stage 3.
+        """
+        # Expected proper motions from the galactic model, for the seeds
+        # below.  None when the line of sight is not known yet, in which
+        # case the pm hints are simply skipped.
+        pm_expected = self._galactic_pm_expectations(system)
+
+        # Inject event-level physical hints for the body stars.
+        l_type, l_idx = self._primary_lens()
+
+        # PRECEDENCE_MULENS_LENS_DISTANCE overrides the 10 pc defaults.yaml
+        # default (PRECEDENCE_DEFAULT) but yields to any value the
+        # relaxation engine derives from pi_rel + d_S
+        # (PRECEDENCE_MULENS_SOURCE_DISTANCE).  That ordering is what breaks
+        # the d_L <-> parallax cycle; see the constants' comment in
+        # config.py.
+        self.config_manager.add_hint(
+            f"star.{l_idx}.distance",
+            4000.0,
+            rank=PRECEDENCE_MULENS_LENS_DISTANCE,
+        )
+        self.config_manager.add_scale_hint(f"star.{l_idx}.distance", 5.0)
+        self.config_manager.add_hint(f"star.{l_idx}.logmass", -0.5)
+        self.config_manager.add_scale_hint(f"star.{l_idx}.logmass", 0.001)
+        self.config_manager.add_scale_hint(f"star.{l_idx}.pm_ra", 3.0)
+        self.config_manager.add_scale_hint(f"star.{l_idx}.pm_dec", 3.0)
+        self.config_manager.add_scale_hint(f"star.{l_idx}.rv", 1e5)
+        self._seed_expected_pm(pm_expected, l_idx, "thin_disk", 4000.0, system)
+
+        # Every source body gets the same bulge-source seeding: each source
+        # star's distance and pm still get their own start (the secondary's
+        # distance feeds ITS rho even though it no longer feeds mu_rel).
+        for s_type, s_idx in self.source_bodies:
+            self.config_manager.add_hint(
+                f"star.{s_idx}.distance",
+                8000.0,
+                rank=PRECEDENCE_MULENS_SOURCE_DISTANCE,
+            )
+            self.config_manager.add_scale_hint(f"star.{s_idx}.distance", 5.0)
+            self.config_manager.add_hint(f"star.{s_idx}.logmass", -0.5)
+            self.config_manager.add_scale_hint(f"star.{s_idx}.logmass", 0.3)
+            self.config_manager.add_scale_hint(f"star.{s_idx}.pm_ra", 3.0)
+            self.config_manager.add_scale_hint(f"star.{s_idx}.pm_dec", 3.0)
+            self.config_manager.add_scale_hint(f"star.{s_idx}.rv", 1e5)
+            self._seed_expected_pm(pm_expected, s_idx, "bulge", 8000.0, system)
+
+        self._declare_companion_mass_backed(system)
+
+        # Companion lens bodies (everything beyond the primary)
+        for l2_type, l2_idx in self.lens_bodies[1:]:
+            if l2_type == "star":
+                self.config_manager.add_hint(
+                    f"star.{l2_idx}.distance",
+                    4000.0,
+                    rank=PRECEDENCE_MULENS_LENS_DISTANCE,
+                )
+                self.config_manager.add_scale_hint(
+                    f"star.{l2_idx}.distance", 5.0
+                )
+
+    def _declare_companion_mass_backed(self, system):
+        """The light curve backs each COMPANION's mass ratio (review 8.6.42).
+
+        A companion's q is a shape parameter of the light curve (the caustic
+        size and position), measured independently of the event's physical
+        scale, which is what t_E, theta_E, pi_rel and the total lens mass
+        describe.  So its sampled mass coordinate -- a planet's log_q (or
+        its linear mass / msini where the entry asks for that), a stellar
+        companion's logmass -- is declared LIKELIHOOD_BACKED: an unseeded
+        (defaults.yaml) start decides above the distance guesses and every
+        other default, and an event-level discrepancy is absorbed by the
+        event chain (the lens distance, under the KS order) instead.
+
+        Without it, a 2L1S config with t_E (and rho) seeded and q unseeded
+        left log_q the ONLY DEFAULT-tier seed upstream of theta_E^2 = kappa
+        M_tot pi_rel; that tier's settle drove it to a bound (log_q = 1,
+        q = 10, after the geocentric relations of #455; -9 before) and the
+        escalation of review 1.1.11 then HELD it there while the higher
+        tiers absorbed the rest -- ~1e6 nats of start logp on DC2018 sweep
+        configs, and event 131 refused to build (log_q start 1.197).  A user
+        value or a data hint (the peak finder's or the grid's log_q, at
+        DERIVED_DATA) is untouched: only seeds below the backed level move.
+        """
+        from ..planet.planet import (
+            lens_companion_samples_log_q,
+            parse_mass_flags,
+        )
+
+        cm = self.config_manager
+        planet = getattr(system, "planet", None)
+        for c_type, c_idx in self.lens_bodies[1:]:
+            if c_type == "star":
+                cm.declare_likelihood_backed(f"star.{c_idx}.logmass")
+                continue
+            if c_type != "planet":
+                raise ValueError(
+                    f"mulensevent: lens companion '{c_type}.{c_idx}' is "
+                    "neither a star nor a planet, so its mass coordinate is "
+                    "unknown."
+                )
+            if planet is None:
+                raise RuntimeError(
+                    f"mulensevent: lens companion planet.{c_idx} names a "
+                    "planet, but the system has no planet component."
+                )
+            entry = planet.config[c_idx]
+            where = f"planet.{planet.names[c_idx]}"
+            if lens_companion_samples_log_q(entry, where):
+                coord = "log_q"
+            elif parse_mass_flags(entry, where)["fitmsini"]:
+                coord = "msini"
+            else:
+                coord = "mass"
+            cm.declare_likelihood_backed(f"planet.{c_idx}.{coord}")
+
     def _galactic_pm_expectations(self, system):
         """Line of sight for the galactic-model proper-motion seeds.
 
@@ -873,22 +1162,64 @@ class MulensEvent(Component):
         free.  That gap is what the engine used to fill by inventing a
         direction (issue #93).
 
-        But where a config DOES imply the proper motion, a prior mean
-        dropped on top fights it.  Measured at the seed (raw = 0), chi2/N
-        ungated vs gated:
+        THE GATE, AND WHY IT IS ONLY pi_E NOW (#93, JDE 2026-10-20).  Until
+        #93 any user pi_E_N/pi_E_E OR any user pm_ra/pm_dec (any star)
+        skipped ALL seeding, because a prior mean dropped on top of a value
+        the config implied fought it.  Measured then, under the OLD engine,
+        chi2/N at the seed, ungated vs gated:
 
             ob140939 (pi_E_N/pi_E_E measured, Yee+2015)  3.04 -> 179.1 | 3.04
             ob161003 (two sources, t_E + rho each)       1.72 ->   3.9 | 1.72
             DC2018_128 (t_0/u_0/t_E/s/q/alpha/rho)       1.42 ->   1.21 (kept)
             ob08092 (t_0/u_0/t_E only, PSPL)             1.50 ->   1.42 (kept)
 
-        So the gate below is what keeps this from making published
-        solutions worse.  Filling only the *direction* and leaving the
-        magnitude to the data would serve every case at once, but the
-        direction is not a symbol, so provenance cannot express it
-        per-symbol; that needs a basis change (mu_rel_mag, mu_rel_pa) which
-        is a sampling-geometry question and does not belong here.
-        tests/test_seed_quality.py pins all four numbers.
+        Under the precedence ladder (#455) a USER pm (PRECEDENCE_USER)
+        outranks this seed (PRECEDENCE_DERIVED_DATA) and is never traded
+        against it, so a seed can no longer bend a user's value.  Hence:
+        a star whose pm the user gave a VALUE (an initval or a mu; bounds
+        alone do not count) is simply not seeded (``_seed_expected_pm``),
+        and every OTHER star still is.  The gate
+        stays for pi_E alone: two seeded proper motions would fight a user
+        pi_E over the DIRECTION of mu_rel, and no distance can absorb a
+        direction -- only the magnitude goes into theta_E.
+
+        Re-measured 2026-10-20 under the new engine.  The metric is
+        check_user_starts (requested vs produced), with start logp as
+        context.  With the narrowed gate EVERY shipped microlensing config
+        starts BYTE-IDENTICAL to the old gate (ob08092, ob140939, ob161003,
+        ob09020, ob09020_linear, KMT-2019-BLG-1806, ob07224, ob170114,
+        OGLE_0383LD, DC2018_128, ob161045, kb180087_obj3,
+        KMT-2021-BLG-1122L): each one either sets pi_E, sets the pm of every
+        seedable star, or sets none (seeded before and after).  The one
+        that changes path is ob161003, which now seeds SourceB; the engine
+        derives SourceB's pm from the user Lens pm and the event's one
+        mu_rel (DERIVED_USER, which outranks the seed), so its start does
+        not move either.  The case the ruling is about, ob08092 with only a user
+        star.Lens pm of (-2, -5) mas/yr:
+
+                         seeded   mu_rel_geo PA  |mu_rel_geo|  logp     misses
+            old gate     none     172.8 deg     11.55         6240.48  0
+            pi_E only    Source    75.5 deg      1.05         6249.94  0
+
+        the source sits at the bulge mean, the lens keeps the user's pm, and
+        t_E is absorbed through the lens distance.  Removing the pi_E gate
+        too (seeding over a user pi_E) still delivers pi_E and leaves chi2/N
+        unchanged -- the old 179.1 blow-up does not return -- but the engine
+        then has to throw the proper motions far out to hold the direction:
+        ob08092 + pi_E (0.3, -0.1) moves the pms to ~40 mas/yr and logp
+        6240.25 -> 5880.32; KMT-2019-BLG-1806 to ~55 mas/yr and logp
+        45542.37 -> 44784.14.  That is the gate's measured reason.  A user
+        Sgr-A*-relative pm (``pm_ra_sgra``) counts as setting the pm: seeding
+        ob140939's source over its user pm_ra_sgra put both pms at ~240
+        mas/yr and logp at -320466 against -1233.58.
+
+        WITH NO galacticmodel BLOCK there is no direction information at
+        all, so nothing is seeded and the engine picks one (ob08092: PA -86
+        deg, almost all in RA); left as is.  If a direction is ever wanted
+        there, the honest fix is a mu_rel position-angle parameter (the
+        (mu_rel_mag, mu_rel_pa) basis), a sampling-geometry question that
+        does not belong here.  tests/test_seed_quality.py pins the gate and
+        the per-star skip.
 
         THE MULTI-SOURCE GATE IS RETIRED (stage 4).  It refused to seed any
         event with more than one source, because pre-split each source
@@ -903,8 +1234,8 @@ class MulensEvent(Component):
         examples come out BYTE-IDENTICAL with the gate gone, which on its
         own proves nothing -- ob161003's params file pins
         star.Source*/star.Lens pm_ra/pm_dec (added with the du-sign work),
-        so the earlier blocker returns first and this gate is unreachable
-        for the only multi-source example shipped.  Stripping those four
+        so the then-blanket pm/pi_E gate returned first and this one was
+        unreachable for the only multi-source example shipped.  Stripping those four
         pins to reach it, chi2/N at the seed:
 
             gate present (no pm seeded)   10.91
@@ -917,60 +1248,84 @@ class MulensEvent(Component):
         """
         if "galacticmodel" not in getattr(system, "config", {}):
             return None
-        # Skip when something already implies the direction or the
-        # magnitude.
+        # The one remaining gate: a user pi_E fixes the DIRECTION of
+        # mu_rel, and two seeded proper motions would fight it over that
+        # direction, which no distance can absorb.  A user proper motion
+        # is NOT a reason to skip here: it outranks the seed, so it is
+        # handled per star in _seed_expected_pm (#93, JDE 2026-10-20).
         up = self.config_manager.user_params
-        blockers = [
-            k
-            for k in up
-            if k.endswith((".pi_E_N", ".pi_E_E"))
-            or ".pm_ra" in k
-            or ".pm_dec" in k
-        ]
+        blockers = [k for k in up if k.endswith((".pi_E_N", ".pi_E_E"))]
         if blockers:
             logger.info(
-                f"[{self.prefix}] proper motion or parallax already given "
+                f"[{self.prefix}] microlens parallax already given "
                 f"({', '.join(sorted(blockers))}); not seeding from the "
-                f"galactic model, which would contradict it."
+                f"galactic model, whose proper motions would contradict "
+                f"its direction."
             )
             return None
-        try:
-            n_stars = system.star.n_elements
-            source_ndx = int(self.source_map[0])
-            ra_all = self.config_manager.resolve(
-                "star", "ra", shape=(n_stars,)
-            )["initval"]
-            dec_all = self.config_manager.resolve(
-                "star", "dec", shape=(n_stars,)
-            )["initval"]
-        except Exception as exc:  # pragma: no cover - seeds are optional
-            logger.debug(
-                f"[{self.prefix}] could not resolve the line of sight for "
-                f"the galactic-model proper-motion seeds: {exc!r}"
-            )
-            return None
-
-        keys = [f"star.{source_ndx}.ra", "star.ra"]
-        names = getattr(system.star, "names", None)
-        if names:
-            keys.append(f"star.{names[source_ndx]}.ra")
-        if not any(k in self.config_manager.user_params for k in keys):
+        # probe_star_radec, not resolve(): a source position LINKED to the
+        # lens's read as the defaults.yaml placeholder under resolve(), and
+        # an `in user_params` test cannot tell a link from a number (review
+        # 1.1.10).  An uninformed position means no line of sight, so no
+        # seed -- these seeds are optional.
+        source_ndx = int(self.source_map[0])
+        pos = probe_star_radec(self.config_manager, [source_ndx])[source_ndx]
+        if pos is None:
             logger.debug(
                 f"[{self.prefix}] no user-set RA/Dec; skipping the "
                 f"galactic-model proper-motion seeds."
             )
             return None
+        return pos
 
-        # resolve() hands back the value in the parameter's USER unit,
-        # which for ra/dec is degrees; the galactic-model helpers take
-        # radians.
-        return (
-            float(np.radians(np.atleast_1d(ra_all)[source_ndx])),
-            float(np.radians(np.atleast_1d(dec_all)[source_ndx])),
+    def _user_pm_keys(self, system, star_idx):
+        """The params-file keys that set star ``star_idx``'s proper motion.
+
+        All three spellings (broadcast ``star.pm_ra``, index ``star.2.pm_ra``,
+        name ``star.Source.pm_ra``), and the Sgr-A*-relative pair as well as
+        the absolute one: ``pm_ra_sgra`` is derived from ``pm_ra`` one to
+        one, so a user value on it pins the proper motion just as directly
+        (ob140939's source).  Sorted, for a stable log line.
+
+        ONLY AN ENTRY THAT GIVES A VALUE COUNTS (JDE 2026-10-20): an
+        ``initval`` or a prior mean ``mu``, written as a number or as a link
+        (a linked field lives in ``ConfigManager.links``, not in the entry).
+        A bounds-only entry (``lower``/``upper``/``sigma`` with no value)
+        states no proper motion, so it must not turn the seed off; the seed
+        then meets those bounds under the usual rules for any start.
+        """
+        cm = self.config_manager
+        name = system.star.names[star_idx]
+
+        def gives_value(key):
+            entry = user_entry(cm.user_params, key)
+            if entry is not None and any(
+                entry.get(f) is not None for f in ("initval", "mu")
+            ):
+                return True
+            linked = cm.links.get(key, {})
+            return "initval" in linked or "mu" in linked
+
+        return sorted(
+            key
+            for axis in ("pm_ra", "pm_dec", "pm_ra_sgra", "pm_dec_sgra")
+            for key in (
+                f"star.{axis}",
+                f"star.{star_idx}.{axis}",
+                f"star.{name}.{axis}",
+            )
+            if gives_value(key)
         )
 
-    def _seed_expected_pm(self, line_of_sight, star_idx, population, dist_pc):
+    def _seed_expected_pm(
+        self, line_of_sight, star_idx, population, dist_pc, system
+    ):
         """Seed one star's pm_ra/pm_dec at the galactic model's prior mean.
+
+        Skipped for a star whose proper motion the user set
+        (``_user_pm_keys``): a user value (PRECEDENCE_USER) outranks this
+        seed, so the seed could never move it and is only noise in the log
+        and the ledger.  The OTHER stars are still seeded (#93).
 
         PRECEDENCE_DERIVED_DATA: this is derived from the galactic model
         the same way an RV offset is derived from the data, so it belongs
@@ -997,6 +1352,14 @@ class MulensEvent(Component):
         proper motion for a place the star is not.
         """
         if line_of_sight is None:
+            return
+        user_keys = self._user_pm_keys(system, star_idx)
+        if user_keys:
+            logger.info(
+                f"[{self.prefix}] star.{star_idx} proper motion given "
+                f"({', '.join(user_keys)}); not seeding it from the "
+                f"galactic model."
+            )
             return
         ra_rad, dec_rad = line_of_sight
         try:
@@ -1031,13 +1394,18 @@ class MulensEvent(Component):
 
     def add_parameter(self, model, param_name, system, context_nodes=None):
         """Inject the Earth-velocity context constants for the mu_rel_geo
-        chain (see context_dep_names); everything else is generic."""
+        chain and the frame constants of the derived lens offset (see
+        context_dep_names); everything else is generic."""
         if param_name in ("mu_ra_rel_geo", "mu_dec_rel_geo"):
             context_nodes = dict(context_nodes or {})
             if "earth_vperp_e" not in context_nodes:
                 vperp_e, vperp_n = self._earth_vperp_en(system)
                 context_nodes["earth_vperp_e"] = pt.as_tensor_variable(vperp_e)
                 context_nodes["earth_vperp_n"] = pt.as_tensor_variable(vperp_n)
+        if param_name in ("lens_offset_e", "lens_offset_n"):
+            context_nodes = dict(context_nodes or {})
+            for key, val in self._lens_track_constants(system).items():
+                context_nodes.setdefault(key, pt.as_tensor_variable(val))
         return super().add_parameter(model, param_name, system, context_nodes)
 
     def register_frame_constants(self, system):
@@ -1052,6 +1420,20 @@ class MulensEvent(Component):
         (before its stage-1 probe of the event geometry) and again at stage
         3, which also covers a fit with no microlensing data (0, 0).
         """
+        if self._line_of_sight_rad is None:
+            # No microlensing data set it at stage 1 (an astrometry-only
+            # or data-free event): the frame is still well defined by the
+            # source star's own coordinates, so read them here rather than
+            # leave geocentric_frame to raise at stage 7.  probe_star_radec,
+            # not resolve(): a linked position read as the placeholder
+            # (review 1.1.10).  An UNSTATED position leaves the line of
+            # sight unset -- a data-free model may never need the frame,
+            # and geocentric_frame raises, naming the coordinates, if
+            # anything does -- rather than set it from the placeholder.
+            source_ndx = int(self.source_bodies[0][1])
+            pos = probe_star_radec(self.config_manager, [source_ndx])
+            if pos[source_ndx] is not None:
+                self.set_line_of_sight(*pos[source_ndx])
         vperp_e, vperp_n = self._earth_vperp_en(system)
         self.config_manager.add_constant(
             "mulensevent.0.earth_vperp_e", vperp_e
@@ -1140,6 +1522,11 @@ class MulensEvent(Component):
         # -- the shape finally matches the physics.
         mu_rel_geo = self.mu_rel_geo_mag.value
         theta_E = self.theta_E.value
+        # Deliberately UNNORMALIZED (mulensing.md, "The event-rate prior"):
+        # its normalizer E_prior[mu_rel theta_E] is common to 1L1S, 1L1S_fs
+        # and a linked 1L2S, and differs for 2L1S by exactly
+        # E_q[sqrt(1 + q)] -- the physical rate ratio of a heavier lens,
+        # which the evidence is meant to keep.
 
         pm.Potential(
             f"{self.prefix}.event_rate_prior",
@@ -1177,7 +1564,7 @@ class MulensEvent(Component):
             pt.sum(soft_lower_bound(theta_E, 1e-6, scale=1e-5)),
         )
 
-        if self.xal_orbit_idx is not None:
+        if self.xal_orbit_idxs:
             get_collector(system).add(
                 r"We modeled the orbital motion of the source (the "
                 r"xallarap effect; \citealt{Griest:1992}) by projecting "
@@ -1208,24 +1595,40 @@ class MulensEvent(Component):
         return system.lens.alpha.value[j + 1] * _RAD_TO_DEG
 
     def _companion_geometry_series(self, times, system):
-        """Per-epoch companion geometry ``(s_t, alpha_t_deg)`` for companion
-        0 (VECTOR ELEMENT 1 of the lens component; element 0 is the masked
-        primary), or ``None`` when the lens geometry is static.
+        """Per-epoch geometry of EVERY companion, ``(S, ALPHA_DEG)``, each
+        of shape ``(n_companions, n_epochs)`` -- row j is companion slot j
+        (lens VECTOR ELEMENT j + 1; element 0 is the masked primary) -- or
+        ``None`` when no companion moves (review 8.6.33: any number of
+        companions may move, each on its own orbit, beside static ones).
 
-        The linear mode is DEFINITIONAL in these coordinates (C24):
+        Each row follows its own companion's mode.  The uniform_rotation
+        mode is DEFINITIONAL in these coordinates (C24):
 
-            s(t)     = s_0     + ds_dt     * (t - t0_par)/DAYS_PER_YEAR
-            alpha(t) = alpha_0 + dalpha_dt * (t - t0_par)/DAYS_PER_YEAR
+            s_j(t)     = s_j0     + ds_dt[o_j]     * (t - t0_par)/DAYS_PER_YEAR
+            alpha_j(t) = alpha_j0 + dalpha_dt[o_j] * (t - t0_par)/DAYS_PER_YEAR
 
-        anchored at t0_par -- the same fiducial epoch the parallax uses
-        (5d: one anchor is what makes the two effects composable; Skowron
-        Eq. A17).  ``alpha_t`` is returned in DEGREES, the unit both
-        magnification backends take; ``dalpha_dt``'s internal unit is
-        rad/yr, so the rate converts here alongside alpha itself
+        with o_j companion j's own uniform_rotation orbit, anchored at
+        t0_par, read THROUGH ``Orbit.state_vectors`` like every other
+        consumer of an orbit (JDE 2026-11-03): the state is the pair's
+        separation ``X, Y = s(t) (cos, sin) alpha(t)`` in the trajectory
+        frame and Einstein radii, from the LENS's (s_j0, alpha_j0), in C15's
+        placement ``s (cos alpha, -sin alpha)``, and the row is its polar form -- s = |(X, Y)| and alpha = alpha_j0 plus the
+        angle rotated from the anchor direction (continuous within half a
+        turn of alpha_j0; the backends read alpha only through its sine and
+        cosine).  Where s_j0 + ds_dt dt passes through zero the state passes
+        to the other side, |s| with alpha + 180 deg, which is the same
+        configuration.  Anchored at t0_par -- the
+        same fiducial epoch the parallax uses (5d: one anchor is what makes
+        the two effects composable; Skowron Eq. A17).  A keplerian row comes
+        from companion j's own orbit through ``lens_geometry_from_orbit``,
+        the same physics function the reported s/alpha use; a static row is
+        its constant (s_j, alpha_j).  ``alpha`` is returned in DEGREES, the
+        unit both magnification backends take; ``dalpha_dt``'s internal
+        unit is rad/yr, so the rate converts here alongside alpha itself
         (_alpha_deg).  Skowron's gamma vocabulary maps as
         gamma_par = ds_dt/s_0 and gamma_perp = -dalpha_dt -- the minus is
-        C24's rule, and the light curve built from these definitions is
-        pinned against MulensModel's linear branch (the reference
+        C24's rule, and the binary light curve built from these definitions
+        is pinned against MulensModel's linear branch (the reference
         implementation) in tests/test_lens_orbital_motion.py.
 
         ``times`` may be a tensor or a numpy array (the likelihood's
@@ -1234,51 +1637,80 @@ class MulensEvent(Component):
         curve is the curve the likelihood fits.
         """
         lens = system.lens
-        om = lens.orbital_motion[0]
-        if om is None:
+        if not lens.any_motion:
             return None
-        dt_yr = (times - self.t0_par[0]) / DAYS_PER_YEAR
-        if om == "linear":
-            # The rates are the companion's type: linear ORBIT's (anchored
-            # at t0_par, which is that orbit's epoch -- Orbit._taylor_epochs).
-            o = lens.motion_orbit_idx
-            s_t = lens.s.value[1] + system.orbit.ds_dt.value[o] * dt_yr
-            alpha_t_deg = (
-                self._alpha_deg(system, 0)
-                + system.orbit.dalpha_dt.value[o] * _RAD_TO_DEG * dt_yr
-            )
-            return s_t, alpha_t_deg
-        # keplerian: the same physics function the reported s/alpha use
-        # (evaluated there at t0_par), here over the epoch vector.  No
-        # anchor enters -- alpha(t) = phi_pi - PA_axis(t) is absolute
-        # (C15/C20/C24), and s(t) is the projected separation in Einstein
-        # units.  Adds NO free parameters (8.6.8 5b).
-        j = lens.kep_orbit_idx
+        dt_yr = (pt.as_tensor_variable(times) - self.t0_par[0]) / DAYS_PER_YEAR
         orbit = system.orbit
-        s_t, alpha_t_rad = lens_geometry_from_orbit(
-            pt.as_tensor_variable(times),
-            orbit.tp_target.value[j],
-            orbit.n.value[j],
-            orbit.ecc.value[j],
-            orbit.sinw.value[j],
-            orbit.cosw.value[j],
-            orbit.cosi.value[j],
-            orbit.bigomega.value[j],
-            orbit.a.value[j],
-            self.theta_E.value[0],
-            system.star.distance.value[int(self.lens_bodies[0][1])],
-            self.pi_E_N.value[0],
-            self.pi_E_E.value[0],
-        )
-        return s_t, alpha_t_rad * _RAD_TO_DEG
+        s_rows, alpha_rows = [], []
+        for j, (mode, o) in enumerate(
+            zip(lens.companion_motion, lens.companion_orbit_idx)
+        ):
+            elem = j + 1
+            if mode in LENS_TAYLOR_TYPES:
+                # The companion's own uniform_rotation (polar) or
+                # constant_velocity (straight-line) ORBIT's state
+                # (anchored at t0_par, that orbit's epoch --
+                # Orbit._taylor_epochs), from the lens's (s0, alpha0).
+                alpha0 = lens.alpha.value[elem]
+                X, Y, *_ = orbit.state_vectors(
+                    pt.as_tensor_variable(times),
+                    np.array([o]),
+                    relative=True,
+                    lens_anchor=(
+                        pt.stack([lens.s.value[elem]]),
+                        pt.stack([alpha0]),
+                    ),
+                )
+                X, Y = X[:, 0], Y[:, 0]
+                # Strictly positive radicand floor (CLAUDE.md where-trap).
+                s_rows.append(pt.sqrt(pt.maximum(X**2 + Y**2, _S_SQ_FLOOR)))
+                # C15's placement is s (cos alpha, -sin alpha): the angle
+                # rotated from the anchor direction, with Y's sign undone.
+                ca, sa = pt.cos(alpha0), pt.sin(alpha0)
+                rotated = pt.arctan2(-ca * Y - sa * X, ca * X - sa * Y)
+                alpha_rows.append(
+                    self._alpha_deg(system, j) + rotated * _RAD_TO_DEG
+                )
+            elif mode == "keplerian":
+                # No anchor enters -- alpha(t) = phi_pi - PA_axis(t) is
+                # absolute (C15/C20/C24), and s(t) is the projected
+                # separation in Einstein units.  Adds NO free parameters
+                # (8.6.8 5b).
+                s_t, alpha_t_rad = lens_geometry_from_orbit(
+                    pt.as_tensor_variable(times),
+                    orbit.tp_target.value[o],
+                    orbit.n.value[o],
+                    orbit.ecc.value[o],
+                    orbit.sinw.value[o],
+                    orbit.cosw.value[o],
+                    orbit.cosi.value[o],
+                    orbit.bigomega.value[o],
+                    orbit.a.value[o],
+                    self.theta_E.value[0],
+                    system.star.distance.value[int(self.lens_bodies[0][1])],
+                    self.pi_E_N.value[0],
+                    self.pi_E_E.value[0],
+                )
+                s_rows.append(s_t)
+                alpha_rows.append(alpha_t_rad * _RAD_TO_DEG)
+            else:
+                # Static beside a moving companion: its constant geometry,
+                # broadcast over the epochs.
+                zero = pt.zeros_like(dt_yr)
+                s_rows.append(lens.s.value[elem] + zero)
+                alpha_rows.append(self._alpha_deg(system, j) + zero)
+        return pt.stack(s_rows), pt.stack(alpha_rows)
 
-    def _source_offset_series(self, times, system):
-        """Per-epoch xallarap trajectory shift ``(dtau_t, du_t)``, or None
-        for a static source (conventions.md C25; review 8.6.9).
+    def _source_offset_series(self, times, system, index=0):
+        """Per-epoch xallarap trajectory shift ``(dtau_t, du_t)`` of SOURCE
+        slot ``index``, or None for a static source (conventions.md C25;
+        review 8.6.9).
 
-        The luminous source's own barycentric sky offset -- its orbit's
-        primary track, a1 = a * m_companion / m_total, in Einstein units
-        a1/(D_S theta_E) -- anchored at t0_par (the shift VANISHES there,
+        That source's own barycentric sky offset -- on the primary side of
+        its orbit the primary track, a1 = a * m_companion / m_total, on the
+        companion side the opposite track, a2 = -a * m_primary / m_total
+        (a linked binary source puts one source on each side), in Einstein
+        units a/(D_S theta_E) -- anchored at t0_par (the shift VANISHES there,
         5d: same anchor as the parallax, so t_0/u_0 keep their meaning),
         and projected on C9's (tau_hat, beta_hat) exactly where the
         parallax terms enter: parallax is the OBSERVER's offset, xallarap
@@ -1287,16 +1719,23 @@ class MulensEvent(Component):
         Built from the TIMES ARGUMENT, so the plotters' model grids carry
         the same moving source the likelihood fits.
         """
-        if self.xal_orbit_idx is None:
+        j = self.source_orbit_idx[index]
+        if j is None:
             return None
-        j = self.xal_orbit_idx
         orbit = system.orbit
-        a1 = (
-            orbit.a.value[j]
-            * orbit.m_companion.value[j]
-            / orbit.m_total.value[j]
-        )
-        d_s = system.star.distance.value[int(self.source_bodies[0][1])]
+        if self.source_orbit_side[index] == 1:
+            a1 = (
+                orbit.a.value[j]
+                * orbit.m_companion.value[j]
+                / orbit.m_total.value[j]
+            )
+        else:
+            a1 = -(
+                orbit.a.value[j]
+                * (orbit.m_total.value[j] - orbit.m_companion.value[j])
+                / orbit.m_total.value[j]
+            )
+        d_s = system.star.distance.value[int(self.source_bodies[index][1])]
         args = (
             orbit.tp_target.value[j],
             orbit.n.value[j],
@@ -1366,8 +1805,9 @@ class MulensEvent(Component):
           never once entered the branch.
         * Where it could fire it could only do harm.  These five are NaN
           only when an input is already NaN, i.e. the raw vector itself
-          carries a NaN -- and that raw variable's own N(0, 1) prior term
-          already makes the total logp NaN, so the proposal is rejected
+          carries a NaN -- and that raw variable's own density term
+          (NaN-propagating on every element, flat or not: parameter.py's
+          _raw_logp) already makes the total logp NaN, so the proposal is rejected
           whatever this function returns (verified on all three events, for
           every sampled coordinate).  Substituting a "safe" value could
           never rescue a sample; it invented an entire event geometry --
@@ -1427,9 +1867,16 @@ class MulensEvent(Component):
         n_lenses = len(self.lens_bodies)
         if n_lenses > 2:
             return f"a {n_lenses}-body lens (MulensModel carries at most 2)"
-        if n_lenses == 2 and system.lens.orbital_motion[0] == "keplerian":
+        if n_lenses == 2 and system.lens.companion_motion[0] == "keplerian":
             return "a lens companion on a keplerian orbit"
-        if self.xal_orbit_idx is not None:
+        if (
+            n_lenses == 2
+            and system.lens.companion_motion[0] == "constant_velocity"
+        ):
+            # MulensModel's lens motion is polar-linear (ds_dt, dalpha_dt)
+            # or Keplerian; it has no straight-line mode.
+            return "a lens companion on a constant_velocity orbit"
+        if self.xal_orbit_idxs:
             return "xallarap (a source orbit)"
         return None
 
@@ -1437,8 +1884,8 @@ class MulensEvent(Component):
         """The MulensModel parameter vector of source slot ``index``, in
         op.py's positional layout: ``[t_0, u_0, t_E, pi_E_N, pi_E_E]`` +
         ``[rho]`` (finite source) + ``[s, q, alpha_deg]`` (binary lens) +
-        ``[ds_dt, dalpha_dt_deg]`` (a companion on a ``type: linear``
-        orbit).  ONE builder for the ``mulensmodel`` backend's Ops and the
+        ``[ds_dt, dalpha_dt_deg]`` (a companion on a ``type:
+        uniform_rotation`` orbit, read off its state at t0_par).  ONE builder for the ``mulensmodel`` backend's Ops and the
         MulensModel plots, so the caustics and trajectory drawn are those of
         the parameters the fit reads.  Limb darkening is not part of it:
         the Op caller appends ``u1``.
@@ -1470,15 +1917,28 @@ class MulensEvent(Component):
                     self._alpha_deg(system, 0),
                 ]
             )
-            if lens.orbital_motion[0] == "linear":
+            if lens.companion_motion[0] == UNIFORM_ROTATION_TYPE:
                 # MulensModel's LINEAR branch is definitional in the same
-                # (ds_dt, dalpha_dt) and takes deg/yr; the rates are the
-                # companion's type: linear orbit's.
-                o = lens.motion_orbit_idx
+                # (ds_dt, dalpha_dt) and takes deg/yr; they are read off the
+                # companion's uniform_rotation state at t0_par (its epoch),
+                # in C15's placement s (cos alpha, -sin alpha):
+                # ds/dt = (X VX + Y VY)/s, dalpha/dt = -(X VY - Y VX)/s^2.
+                o = lens.companion_orbit_idx[0]
+                X, Y, _, VX, VY, _ = system.orbit.state_vectors(
+                    np.array([float(system.orbit.taylor_epoch[o])]),
+                    np.array([o]),
+                    relative=True,
+                    lens_anchor=(
+                        pt.stack([lens.s.value[1]]),
+                        pt.stack([lens.alpha.value[1]]),
+                    ),
+                )
+                X, Y, VX, VY = X[0, 0], Y[0, 0], VX[0, 0], VY[0, 0]
+                s_sq = X**2 + Y**2
                 params.extend(
                     [
-                        system.orbit.ds_dt.value[o],
-                        system.orbit.dalpha_dt.value[o] * _RAD_TO_DEG,
+                        (X * VX + Y * VY) / pt.sqrt(s_sq),
+                        -(X * VY - Y * VX) / s_sq * _RAD_TO_DEG,
                     ]
                 )
         return params
@@ -1538,11 +1998,9 @@ class MulensEvent(Component):
         u_p = p["u_0"] + delta_n * p["pi_E_E"] - delta_e * p["pi_E_N"]
 
         # Xallarap enters at EXACTLY this slot: parallax is the OBSERVER's
-        # offset, this is the SOURCE's own (C25).  getattr, not a bare
-        # attribute: test harnesses borrow this method onto minimal fakes
-        # (tests/test_trajectory_sanitization.py).
-        if getattr(self, "xal_orbit_idx", None) is not None:
-            xal = self._source_offset_series(times, system)
+        # offset, this is the SOURCE's own (C25) -- this source's.
+        xal = self._source_offset_series(times, system, index)
+        if xal is not None:
             tau_p = tau_p + xal[0]
             u_p = u_p + xal[1]
         return tau_p, u_p
@@ -1623,6 +2081,13 @@ class MulensEvent(Component):
     # ------------------------------------------------------------------
     # The Skowron+2011 geocentric frame (conventions.md C5, C6)
     # ------------------------------------------------------------------
+    def set_line_of_sight(self, ra_rad, dec_rad):
+        """Record the source direction the geocentric frame is built for.
+        Called by ``MulensInstrument.load_data`` (both the provisional and
+        the final anchoring); a change of direction invalidates the cached
+        frame."""
+        self._line_of_sight_rad = (float(ra_rad), float(dec_rad))
+
     def geocentric_frame(self):
         """``(t0_par, earth_pos_ref, earth_vel_ref)`` -- the anchors of the
         geocentric inertial frame: Earth's barycentric position (AU) and
@@ -1635,29 +2100,50 @@ class MulensEvent(Component):
         against a stale value: ``MulensInstrument.load_data`` re-resolves
         ``t0_par`` at stage 1 (the peak finder's seeds arrive after this
         component's ``__init__`` snapshot) and writes it back into that
-        length-1 list precisely so later readers see the final value.  The
-        velocity is a central difference over +/-0.5 d, the recipe
-        ``MulensInstrument`` used before this moved here (bit-identical).
-        """
-        from exozippy.ephemeris import get_observer_position
+        length-1 list precisely so later readers see the final value.
 
+        ``t0_par`` is a BJD_TDB tag like every other epoch (C4), so the
+        Earth is placed where it was when it RECEIVED that light: at the
+        reception instant ``t0_par - Roemer`` toward the source
+        (``ephemeris.reception_instant``; review 1.10.13).  The velocity is
+        the physical one, d(position)/d(coordinate time), by a central
+        difference of +/-0.05 d about that instant ((omega h)^2/6 = 1.2e-7
+        relative; it was +/-0.5 d, 1.2e-5, before 1.10.13).  The velocity
+        cancels exactly in u(t) -- the rectilinear term and the deviations
+        use the same one -- but it sets the REPORTED t_E and the direction
+        of pi_E, and a (t_0, u_0) quoted by another code is only
+        comparable in a frame spanned by the same velocity (C5).
+        """
+        from exozippy.ephemeris import get_observer_position, reception_instant
+
+        if self._line_of_sight_rad is None:
+            raise RuntimeError(
+                f"[{self.prefix}] geocentric_frame needs the source's line "
+                f"of sight (set_line_of_sight), which MulensInstrument."
+                f"load_data provides at stage 1 and register_frame_constants "
+                f"at stage 3 -- from the source star's ra/dec, so give "
+                f"star.<source>.ra and .dec (deg) in the params file if "
+                f"they are unset; otherwise it was called before either."
+            )
         t0 = float(self.t0_par[0])
+        ra, dec = self._line_of_sight_rad
         cache = getattr(self, "_geocentric_frame_cache", None)
-        if cache is not None and cache[0] == t0:
-            return cache
-        pos = get_observer_position(np.array([t0]), observer_location="earth")[
-            0
-        ]  # (3,) AU
-        _dt = 0.5  # days for finite-difference velocity
+        if cache is not None and cache[0] == (t0, ra, dec):
+            return cache[1]
+        jd0 = float(reception_instant(np.array([t0]), ra, dec)[0])
+        pos = get_observer_position(
+            np.array([jd0]), observer_location="earth"
+        )[0]  # (3,) AU
+        _dt = FRAME_VELOCITY_STEP_DAYS
         _ep = get_observer_position(
-            np.array([t0 + _dt]), observer_location="earth"
+            np.array([jd0 + _dt]), observer_location="earth"
         )[0]
         _em = get_observer_position(
-            np.array([t0 - _dt]), observer_location="earth"
+            np.array([jd0 - _dt]), observer_location="earth"
         )[0]
         vel = (_ep - _em) / (2.0 * _dt)  # AU/day
-        self._geocentric_frame_cache = (t0, pos, vel)
-        return self._geocentric_frame_cache
+        self._geocentric_frame_cache = ((t0, ra, dec), (t0, pos, vel))
+        return self._geocentric_frame_cache[1]
 
     def skowron_deviations(self, t, xyz_abs):
         """Absolute barycentric observer positions -> Skowron+2011 geocentric
@@ -1676,8 +2162,46 @@ class MulensEvent(Component):
         t_delta = (np.asarray(t, dtype=float) - t0)[:, np.newaxis]  # (N, 1)
         return xyz_abs - (pos + vel * t_delta)
 
+    # The event window's half-width is 1 t_E, but never thinner than this
+    # (days): a 0.35-day t_E makes "within 1 t_E" a sliver that holds almost
+    # no data, and the enrichment ratio is then noise (the DC2026 team's
+    # anomsweep.py floor, kept so the numbers agree).
+    EVENT_WINDOW_MIN_HALF_WIDTH = 0.5
+
+    def event_windows(self, system, point):
+        """The time ranges where this event's signal lives, at ``point``.
+
+        The hook the post-fit robust-likelihood audit
+        (``outputs/outliers.py``) duck-types for: a list of ``(lo, hi)``
+        epochs (BJD_TDB days, the instruments' time system) -- here
+        ``|t - t_0| < max(t_E, EVENT_WINDOW_MIN_HALF_WIDTH)`` around every
+        source's ``t_0``.  The audit compares where the hogg mixture's
+        outlier-component points fall against this window; it never learns
+        what a microlensing event is.  ``point`` is a plotting point
+        (internal units, the form ``plot_data`` takes); a parameter it does
+        not carry falls back to its initval.
+        """
+        source = system.source
+
+        def value(param):
+            return np.atleast_1d(
+                np.asarray(point.get(param.label, param.initval), dtype=float)
+            )
+
+        t_E = float(value(self.t_E)[0])
+        half = max(t_E, self.EVENT_WINDOW_MIN_HALF_WIDTH)
+        if not np.isfinite(half):
+            return []
+        return [
+            (float(t0) - half, float(t0) + half)
+            for t0 in value(source.t_0)
+            if np.isfinite(t0)
+        ]
+
     def uses_op(self, index=0):
-        """True if get_magnification_op will dispatch to the MulensModel Op.
+        """True if get_magnification_op will dispatch to a magnification Op
+        (VBMDirectMagOp, or a MulensModel Op under ``backend:
+        mulensmodel``) rather than the symbolic point-lens formula.
 
         Event-level property (the lens bodies and finite_source flag are
         shared by all sources), so ``index`` is ignored beyond backward
@@ -1695,7 +2219,8 @@ class MulensEvent(Component):
     def sampler_requirements(self):
         """Declare sampler constraints for this event configuration.
 
-        Binary/finite-source lenses use the MulensModel Op, which is not
+        Binary/finite-source lenses use a magnification Op (VBMicrolensing,
+        or MulensModel under ``backend: mulensmodel``), which is not
         differentiable.  Gradient-based samplers (NUTS, numpyro, blackjax)
         will produce invalid results; PTDE is required.  The SYNCHRONOUS
         loop (ptde) is recommended -- since 2026-10-04 (review 2.4.9, TASK
@@ -1718,9 +2243,10 @@ class MulensEvent(Component):
                 "incompatible": {"nuts", "numpyro", "blackjax"},
                 "recommended": "ptde",
                 "reason": (
-                    "binary/finite-source microlensing uses the MulensModel "
-                    "Op, which is not differentiable -- gradient-based "
-                    "samplers produce invalid results"
+                    "binary/finite-source microlensing uses a "
+                    "VBMicrolensing (or MulensModel) magnification Op, which "
+                    "is not differentiable -- gradient-based samplers "
+                    "produce invalid results"
                 ),
             }
         return {}
@@ -1788,7 +2314,7 @@ class MulensEvent(Component):
         return f"{ra_deg}d {dec_deg}d"
 
     def _resolve_quadratic_ld(self, u2, effective_bandpass):
-        """Can the selected backend honour the band's second LD coefficient?
+        """Can the selected backend honor the band's second LD coefficient?
 
         Returns True to put u2 in the param vector, False to drop it -- and
         when it drops it, says so ONCE, because a silently ignored u2 is
@@ -1798,30 +2324,38 @@ class MulensEvent(Component):
         one combination of the sampled Kipping pair (q1, q2) becomes
         likelihood-free -- sampled, reported, and constrained by nothing.
 
-        WHO CAN DO WHAT:
+        THE RULE IS THE BACKEND, NOTHING ELSE.  Under ``backend: vbm_direct``
+        (the default) every Op-path event -- binary, N-lens, and every
+        finite-source single lens -- goes through ``VBMDirectMagOp``, whose
+        solvers all carry LDquadratic (BinaryMag2/MultiMag2 and, for the
+        point lens, ESPLMag2), so u2 is always honored.  Under ``backend:
+        mulensmodel`` (the A/B reference) it never is: ``set_limb_coeff_u``
+        takes one coefficient and the Yoo04 B0/B1 factorization MulensModel
+        uses for a finite point source is a linear-law formalism, so the
+        reference stays linear and says so.
 
-        * VBMicrolensing carries LDquadratic for the binary/N-lens solvers
-          (BinaryMag2/MultiMag2) and for the point lens (ESPLMag2).  So
-          `backend: vbm_direct` -- the default -- can honour u2 everywhere.
-        * MulensModel cannot, anywhere: `set_limb_coeff_u` takes one
-          coefficient and the Yoo04 B0/B1 factorization it uses for a
-          finite point source is a linear-law formalism.  `backend:
-          mulensmodel` is the A/B reference, so it keeps being linear and
-          says so.
-
-        WHY THE SINGLE-LENS DEFAULT IS NOT FLIPPED WHOLESALE.  A
-        finite-source point lens goes to MulensModel today, and VBM's
-        ESPLMag2 disagrees with Yoo04 by up to ~5 mmag (1.7 mmag rms) in
-        the deep finite-source regime u_0 << rho -- Yoo04's table
-        interpolation, measured at rho = 0.001-0.05.  Routing every FSPL
-        fit to VBM would therefore move existing answers by more than most
-        of these light curves' error bars, silently, as a side effect of an
-        unrelated fix.  So the switch is keyed on u2 actually being in
-        play: a `ld_law: linear` band keeps MulensModel and is
-        bit-identical to before, and only the configuration that was
-        already WRONG changes backend.  A user who wants VBM's ESPL for its
-        own sake still has no way to ask for it; that is a deliberately
-        separate decision (see notes).
+        WHY THE LD LAW NO LONGER PICKS THE SINGLE-LENS BACKEND.  Until
+        #488, a finite-source single lens on a LINEAR band kept the
+        MulensModel Op even under vbm_direct, so
+        that existing answers would not move: the two backends differed by
+        up to ~5 mmag, which was attributed to Yoo04's table interpolation.
+        Measured against a direct integration of a linear-LD disk (u1 =
+        0.55, rho = 0.001-0.05; mulensing.md, "The limb-darkening LAW
+        reaches the magnification"), that attribution was wrong: Yoo04's
+        tables agree with the integral to <0.01 mmag at rho <= 0.01.  The
+        ~5 mmag was the MulensModel backend's own method window, which
+        dropped to a POINT source outside t_0 +/- 5 rho t_E, where the finite
+        source still raises A by ~rho^2/(8 u^2) ~ 0.5%.  (That window now
+        ends at z = u/rho = 99, the end of Yoo04's dense table, where the
+        point source is within 0.014 mmag; op.YOO04_Z_MAX.)  VBM's ESPL is
+        within 0.1-0.2 mmag of the integral there and almost everywhere
+        else; its two narrow weak spots (+/-1.2 mmag within 1% of rho of
+        the limb crossing, and an error growing as u/rho -> 0, NaN at u ==
+        0) are VBM's own and are tabulated in mulensing.md.  So the
+        MulensModel route was the less accurate of the two as configured,
+        and no faster; MulensModel is off the default likelihood path
+        entirely.  The linear-band fits that moved are stated in
+        mulensing.md.
         """
         if u2 is None or effective_bandpass is None:
             return False
@@ -1837,7 +2371,7 @@ class MulensEvent(Component):
                 "source profile is linear in u1. Note that this leaves one "
                 "combination of the band's sampled (q1, q2) constrained by "
                 "nothing but its prior. Fixes: use the default 'backend: "
-                "vbm_direct' to honour u2, or declare 'ld_law: linear' on "
+                "vbm_direct' to honor u2, or declare 'ld_law: linear' on "
                 "the band to make the linear law deliberate and drop the "
                 "unconstrained coordinate."
             )
@@ -1870,7 +2404,7 @@ class MulensEvent(Component):
         uniform-source finite-source magnification.  u2 is the SECOND
         (quadratic) coefficient and is present only for a band declaring
         ``ld_law: quadratic`` -- see _resolve_quadratic_ld above for which
-        backends can honour it and what happens when the selected one
+        backends can honor it and what happens when the selected one
         cannot.
 
         Set ``use_op: true`` on the mulensevent block to force the Op (e.g.
@@ -1907,48 +2441,16 @@ class MulensEvent(Component):
 
         # Per-epoch xallarap trajectory shift (source orbital motion, C25)
         # -- None for a static source.
-        source_series = self._source_offset_series(times, system)
+        source_series = self._source_offset_series(times, system, index)
         if source_series is not None and self.backend == "mulensmodel":
             raise NotImplementedError(
-                "xallarap (source_orbit) requires backend: vbm_direct (the "
+                "xallarap (a source on an orbit) requires backend: vbm_direct (the "
                 "point-source single-lens case takes the symbolic path "
                 "and needs neither).  MulensModel's native xi_* xallarap "
                 "is not wired as a backend -- unnecessary: C25's machinery "
                 "covers it, and the xi_* mapping is verified "
                 "(conventions.md C25; a published xi_* solution seeds a "
                 "config directly, see examples/ob170114)."
-            )
-
-        single_lens_vbm = (
-            n_lenses == 1
-            and use_rho
-            and (use_u2 or source_series is not None)
-            and self.backend == "vbm_direct"
-        )
-
-        if single_lens_vbm:
-            # ESPL through VBM: the only backend here that carries a
-            # quadratic limb-darkening law for a point lens, and the one a
-            # finite-source single lens with XALLARAP routes through (the
-            # MulensModel single-lens Op has no slot for a per-epoch
-            # trajectory shift).  Without xallarap it is reached ONLY when
-            # u2 is genuinely in play (_resolve_quadratic_ld), so a
-            # linear-band fit keeps MulensModel and stays bit-identical --
-            # see that method.
-            return self._vbm_op_call(
-                times,
-                obs_pos,
-                system,
-                index,
-                coords=coords,
-                use_rho=True,
-                effective_bandpass=effective_bandpass,
-                use_u2=use_u2,
-                u1=u1,
-                u2=u2,
-                source_series=source_series,
-                geometry_series=None,
-                n_companions=0,
             )
 
         # Per-epoch companion geometry (lens orbital motion, C24) -- None
@@ -1959,7 +2461,14 @@ class MulensEvent(Component):
             else None
         )
 
-        if n_lenses >= 2 and self.backend == "vbm_direct":
+        if self.backend == "vbm_direct" and (n_lenses >= 2 or use_rho):
+            # EVERY binary/N-lens event and EVERY finite-source single lens
+            # (ESPL, n_companions == 0) under the default backend: whatever
+            # the band's LD law, with or without xallarap.  The finite-source
+            # single lens used to keep MulensModel unless u2 was in play; see
+            # _resolve_quadratic_ld for why it no longer does.  The one
+            # single-lens case left for the MulensModel Op below is a forced
+            # `use_op: true` on a POINT source, which asks for it by name.
             return self._vbm_op_call(
                 times,
                 obs_pos,
@@ -1976,7 +2485,7 @@ class MulensEvent(Component):
                 n_companions=self.n_companions,
             )
         elif n_lenses == 2:
-            if lens.orbital_motion[0] == "keplerian":
+            if lens.companion_motion[0] == "keplerian":
                 raise NotImplementedError(
                     "a lens companion on a keplerian orbit requires backend: "
                     "vbm_direct."
@@ -1998,7 +2507,7 @@ class MulensEvent(Component):
         else:
             if source_series is not None:
                 raise NotImplementedError(
-                    "xallarap (source_orbit) with a FORCED MulensModel "
+                    "xallarap (a source on an orbit) with a FORCED MulensModel "
                     "single-lens Op (use_op: true) is not wired; drop "
                     "use_op (the symbolic path carries xallarap) or use "
                     "finite_source with backend: vbm_direct."
@@ -2080,6 +2589,8 @@ class MulensEvent(Component):
             orbital_motion=geometry_series is not None,
             source_motion=source_series is not None,
             astrometry=astrometry,
+            accuracy=self.vbm_tol,
+            relative_accuracy=self.vbm_reltol,
         )
         op_inputs = [
             pt.stack(param_list),
@@ -2123,11 +2634,11 @@ class MulensEvent(Component):
         the same centroid a MulensModel-backed light curve would imply
         (C18: the trajectory conventions are identical; op.py's class
         docstring: the origin is the centre of mass in both).  The A this
-        returns is therefore VBM's, which for a linear-LD finite-source
-        single lens differs from the MulensModel A the light curve fits by
-        up to ~5 mmag in the deep finite-source regime (mulensing.md, the
-        LD-law section) -- second order on a dilution WEIGHT, and stated
-        here so nobody hunts it as a bug.  The finite-source centroid is
+        returns is therefore VBM's -- the same A the light curve fits under
+        the default backend, and up to ~5 mmag from a ``backend:
+        mulensmodel`` light curve's on a finite-source single lens (that
+        backend's point-source window; mulensing.md, the LD-law section),
+        second order on a dilution WEIGHT.  The finite-source centroid is
         VBM's disk-integrated, limb-darkened one, so the stage-1 "valid
         only for rho << u" caveat does not apply on this path.  The Op has
         no gradient (``sampler_requirements`` already says so for any
@@ -2145,7 +2656,7 @@ class MulensEvent(Component):
         use_rho = self.finite_source
         effective_bandpass = bandpass if (use_rho and u1 is not None) else None
         use_u2 = self._resolve_quadratic_ld(u2, effective_bandpass)
-        source_series = self._source_offset_series(times, system)
+        source_series = self._source_offset_series(times, system, index)
         geometry_series = (
             self._companion_geometry_series(times, system)
             if n_lenses >= 2

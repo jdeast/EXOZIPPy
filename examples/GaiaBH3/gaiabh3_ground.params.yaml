@@ -1,0 +1,59 @@
+# Starting values / priors for Gaia BH3.
+# Stellar priors from Gaia Collaboration, Panuzzo et al. (2024), A&A 686,
+# L2, "Stellar parameters derived in this work"; orbit and barycenter
+# starts from its combined (astrometry + RVS) solution.  The paper's times
+# are TCB; the TCB - TDB difference (~20 s) is far below their errors.
+
+star.G.mass:
+  initval: 0.76
+  sigma: 0.05
+  citation: Panuzzo:2024
+star.G.radius:
+  initval: 4.936
+  sigma: 0.016
+  citation: Panuzzo:2024
+star.G.teff:
+  initval: 5212
+  sigma: 80
+  citation: Panuzzo:2024
+star.G.feh:
+  initval: -2.56
+  sigma: 0.11
+  citation: Panuzzo:2024
+
+# Barycenter at J2017.5 (the DR4 reference epoch)
+star.G.ra:
+  initval: 294.8278502301
+star.G.dec:
+  initval: 14.9309190869
+star.G.pm_ra:
+  initval: -28.317
+star.G.pm_dec:
+  initval: -155.221
+star.G.parallax:
+  initval: 1.6933
+
+# The dark companion ("planet" component): ~32.7 Msun in jupiterMass
+planet.BH.mass:
+  initval: 34256.0
+planet.BH.radius:
+  initval: 1.0
+  sigma: 0          # irrelevant for a dark, non-transiting companion
+
+orbit.BH.period:
+  initval: 4253.1
+orbit.BH.tp:
+  initval: 2458177.39
+orbit.BH.secosw:
+  initval: 0.18714        # e = 0.7291, omega_* = 77.34 deg
+orbit.BH.sesinw:
+  initval: 0.83311
+orbit.BH.bigomega:
+  initval: 136.236
+orbit.BH.cosi:
+  initval: -0.35151       # i = 110.58 deg
+
+rvinstrument.GaiaRVS.gamma:
+  initval: -357310.0      # m/s
+rvinstrument.Ground.gamma:
+  initval: -357310.0      # m/s

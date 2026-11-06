@@ -141,7 +141,7 @@ def _transit_config(lc_file, sed_file):
     return {
         "star": [{"name": "A", "mist": False}, {"name": "B", "mist": False}],
         "planet": [{"name": "b", "fitbeam": True}],
-        "orbit": [{"name": "b"}],
+        "orbit": [{"name": "b", "primary": ["A"], "companion": ["b"]}],
         "band": [
             {
                 "name": "V",
@@ -158,7 +158,7 @@ def _transit_config(lc_file, sed_file):
                 "name": "inst0",
                 "file": lc_file,
                 "band": "V",
-                "exptime": 30.0,
+                "exptime_s": 1800.0,
                 "ninterp": 4,
                 "seddeblend": True,
             }
@@ -351,8 +351,11 @@ def test_two_planet_ellipsoidal_terms_telescope_exactly(tmp_path_factory):
     )
     config = {
         "star": [{"name": "A", "mist": False}],
-        "planet": [{"name": "b"}, {"name": "c", "orbit_ndx": 1}],
-        "orbit": [{"name": "b"}, {"name": "c"}],
+        "planet": [{"name": "b"}, {"name": "c"}],
+        "orbit": [
+            {"name": "b", "primary": ["A"], "companion": ["b"]},
+            {"name": "c", "primary": ["A"], "companion": ["c"]},
+        ],
         "band": [
             {
                 "name": "V",
@@ -449,7 +452,7 @@ def _kelt17_split(tmp_path, n_rm=40, dense=False, tc_epoch=None):
         {"name": "TRES_RM", "file": "rm_inst.rv", "rm": "b", "rm_band": "V"},
         {"name": "TRES_ORB", "file": "orb_inst.rv"},
     ]
-    cfg["planet"].append({"name": "c", "orbit_ndx": 1})
+    cfg["planet"].append({"name": "c"})
     cfg["orbit"].append({"name": "c", "primary": ["A"], "companion": ["c"]})
     params["orbit.c.period"] = {"initval": 11.3}
     params["orbit.c.tc"] = {"initval": tc + 4.1}
@@ -502,14 +505,21 @@ def rm_split(tmp_path_factory):
 
 
 def _keplerian_matrix(system, param_values, t):
-    """The bare Keplerian per-orbit RV matrix (no RM) at ``t``, in
-    internal units, straight from the orbit component."""
+    """The bare Keplerian per-orbit RV matrix (no RM) at arrival times
+    ``t``, in internal units, straight from the orbit component -- at the
+    star's EMISSION times (its own light travel, on by default for both
+    files; ``RVInstrument._orbit_emission_times``, as the RM-free file's
+    rows)."""
     import pytensor.tensor as pt
 
     rv = system.rvinstrument
     K_vec, omap = rv._orbit_rv_terms(system, rv.star_ndx[0])
+    t = np.asarray(t, dtype=float)
+    t_emit = rv._orbit_emission_times(
+        system, pt.as_tensor_variable(t), np.full(t.size, 1)
+    )
     node = system.orbit.get_radial_velocity(
-        pt.as_tensor_variable(np.asarray(t, dtype=float)), K_vec, omap
+        pt.stack([t_emit[int(o)] for o in omap], axis=1), K_vec, omap
     )
     return _eval_at(node, system, param_values)
 

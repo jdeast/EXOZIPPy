@@ -93,6 +93,51 @@ uniform in Rp/R* (components/star/star.md, "Planet radius prior"):
 stored start (R* = 1 solRad).  Every recorded value is kept bit-identical;
 only that term and `n_terms` were added.
 
+The ob07224 fixture was re-recorded when finite-source limb darkening
+became per band (review 8.6.10, mulensing/mulensing.md "Limb darkening is
+per band, not per instrument").  Every light curve used to take the FIRST
+band's u1 (I, 0.47); SMARTS_V, the example's only V light curve (14
+epochs), now takes band V's pinned 0.64.  One move, explained:
+`RV:mulensinstrument.model` 23298.4498 -> 23300.7569 (+2.3071), all of it
+on SMARTS_V's rows (213.4015 -> 215.7086); every other light curve, every
+other term and the stored start are bit-identical.  The other multi-band
+finite-source fixtures did not move beyond rounding: ob09020 by 4e-11
+nats (its 5 V epochs), ob161003 not at all.
+
+The ob07224 fixture was re-recorded again when the default backend
+(`vbm_direct`) began routing EVERY finite-source single lens through
+VBMicrolensing's ESPL (`VBMDirectMagOp(n_companions=0)`), linear band
+included; it used to keep the MulensModel Op (mulensing/mulensing.md,
+"The limb-darkening LAW reaches the magnification").  One move, explained:
+`RV:mulensinstrument.model` 23300.7569 -> 23322.4157 (+21.6588).  By epoch,
++14.86 of it is at 5-10 rho t_E from t_0 and +6.07 at 10-30 rho t_E --
+exactly where the MulensModel Op's `auto_vbbl` window had dropped to a
+POINT source while the finite source still raises A by ~rho^2/(8 u^2) --
+with +0.48 inside 1 rho t_E, -0.08 at 1-5 and +0.33 beyond 30.  Every
+other term and the stored start are bit-identical, and no other fixture
+moved (every other fixture is a binary or N-lens event, already on VBM).
+
+Eight fixtures were re-recorded when every limb-darkened VBMDirectMagOp
+began forcing a second annulus (`vbm.minannuli = 2`; mulensing/mulensing.md,
+"VBM's limb-darkened finite source never stops after one annulus").  Every
+stored start is bit-identical, and the only term the change moves is
+`RV:mulensinstrument.model` (measured by replaying each start at
+minannuli 1 and 2 on one machine): ob09020 +0.2534 nats, OGLE_0383LD
+-0.0526, ob07224 -0.0155, ob161003 -0.0061, ob170114 +0.0051, the three
+KMT-2019-BLG-1806 configs +0.0003 each.  Per epoch these are ordinary
+Tol-level moves, no false convergence: at most 1.8e-4 relative in A
+(OGLE_0383LD, at A ~ 1.1-1.2), 2.7e-5 (ob09020), 8.6e-6 (ob07224), and in
+each case toward a Tol = 1e-5 reference (largest error vs that reference,
+minannuli 1 -> 2: 2.6e-4 -> 2.0e-4, 3.8e-5 -> 2.9e-5, 1.2e-5 -> 5.2e-6).
+ob09020 and OGLE_0383LD exceeded the physics tolerance, hence the
+re-record; the other six were re-recorded so the strict tier stays
+bit-exact.  The re-record also absorbed drift master already carried
+(identical at minannuli 1): OGLE_0383LD's model term by 3.6e-7 and five
+prior terms by <= 1.2e-10 nats, and KMT-2019-BLG-1806's
+`up_bound.star.loggsed` from -8.0e-269 to -9.9e-305.  The other six
+fixtures (DC2018_128 x3, point source; ob08092 and ob140939 x2, symbolic
+PSPL) do not move at all: none has a limb-darkened finite-source VBM call.
+
 ob161003 (2S2L) is the ONE example whose model changes BY CONSTRUCTION
 (review R1): its per-source event-level vectors collapse to scalars.  Its
 replay fixture is re-recorded post-split; the stage-0 recording is kept at
@@ -102,6 +147,66 @@ term, by the tests at the bottom of test_mulens_acceptance_b.py.
 Most of the gate is marked slow: each case builds a full System and compiles
 PyTensor graphs.  Two fast, deterministic PSPL examples run unmarked so the
 instrument itself is exercised on every suite run.
+
+All fourteen fixtures had their f_source/f_blend potentials removed when
+those bounds were (review 1.6.18; mulensing/mulensing.md, "f_source and
+f_blend carry NO bounds").  The edit was surgical -- the four terms
+`low_bound`/`up_bound.mulensinstrument.f_source`/`f_blend` deleted,
+`n_terms` and `total_logp` adjusted, every stored start and every other
+recorded value untouched -- and the replay holds the result to the strict
+tier, which is the proof that nothing else moved.  The removed values were
+~1e-304 except `low_bound...f_source`, which was log(1/2) per
+magnitude-format light curve: ob09020 -6.2383, ob07224 and ob161003
+-4.8520, OGLE_0383LD -4.1589, the three KMT-2019-BLG-1806 configs -2.0794,
+ob08092 and ob170114 -0.6931, the three DC2018_128 configs -0.1009, and
+ob140939/ob140939_today ~1e-304 (flux files).  The start logp rises by
+exactly that term on each.
+
+All fourteen had their two galacticmodel terms updated when the present-day
+mass function became the default (review 1.7.2; star/star.md, "The
+present-day mass function").  Surgical again: `imf_prior` set to its new
+value 0.0 (every star's mass prior moved inside the population mixture),
+`kinematic_prior` to its new value at the stored start, `total_logp`
+adjusted by their sum; every other term replayed bit-identical before the
+edit.  Total moves: DC2018_128 x3 +0.2124, KMT-2019-BLG-1806 x3 +0.5202,
+OGLE_0383LD +0.2139, ob07224 +0.2426, ob08092 +0.2267, ob09020 +0.4107,
+ob140939 +0.2652, ob140939_today +0.3578, ob161003 +0.4590, ob170114
+-0.6682.  The presplit ob161003 recording was made under the 3-population
+Galactic model, removed in review 1.7.6, so its two galacticmodel terms are
+accepted as moved there (test_mulens_acceptance_b.py, _GALACTIC_TERMS).
+
+The ob09020 fixture was re-recorded when corrected RVs began carrying the
+star's own light-travel time (rvinstrument.md, "Corrected velocities";
+default on).  The lens orbit L is now retarded by the RVs, so its Kepler
+epoch is the target frame's (`tc_target = tc + 201.9 s` at the start) and
+the sampled conjunction is read as the OBSERVED one
+(Orbit._ltt_reporting_mask).  Two moves, both explained:
+`RV:mulensinstrument.model` 33686.1274 -> 33772.7157 (+86.5883) is that
+epoch shift and nothing else -- the old model with its seed moved by the
+same 201.9 s reproduces it to 7.9e-6 nats -- and `RV:rvinstrument.model`
+4.9944 -> 4.9903 (-0.0041) is the epoch shift (-0.0067) plus the star's
+own retardation (+0.0026).  Every other term is bit-identical.
+
+Eight fixtures were re-recorded when the Claret limb-darkening tie began
+applying to microlensing bands (components/sed/sed.md, "The tie is a
+property of the BAND"; on by default): OGLE_0383LD, ob07224, ob161003,
+ob170114, ob09020 and the three KMT-2019-BLG-1806 configs -- every fixture
+whose example has a finite source and a band with a Claret table.  Every
+stored start value is bit-identical; the new raw coordinates enter at 0.
+What appeared is the tie and what it reads: `gaussian_prior.band.du1`
+(OGLE_0383LD -0.18, ob07224 -0.13, ob161003 -7.35, ob170114 -5.45,
+ob09020 -41.31, KMT-2019-BLG-1806 x3 -15.75 nats -- the examples' fitted
+u1 against the table at a source Teff nothing else constrains), the
+source's now-sampled teff and feh (their raw N(0,1) terms, -0.92 each, and
+logit-uniform priors on the tables' box, -1.48 and -1.50), and the logg
+barrier, -0.0 except ob170114's -49.43 (its source starts below the
+tables' logg 2.0).  The tie reads the source's MASS through logg, so the
+microlensing-only source's logmass pin is lifted: `logmass_raw` gains one
+element (-0.92) and the logit-uniform logmass prior one term (-1.65 to
+-1.77).  KMT-2019-BLG-1806's SED already sampled teff, so instead of
+appearing its prior renormalizes onto the tables' 3500-10000 K (+2.82).
+Everything else moved by reassociation alone: the data term by <= 1e-9
+nats (3e-14 relative), the rest by <= 4.4e-16 nats.
 """
 
 import glob
@@ -257,7 +362,9 @@ def load_fixture(name):
     return load(os.path.join(FIXTURES, name + ".json"))
 
 
-def build(fixture, extra_params=None):
+def build(fixture, extra_params=None, edit_config=None):
+    """Build a fixture's example; ``edit_config(cfg)`` may adjust the parsed
+    config in place first (e.g. a historical recording's model switch)."""
     cfg_path = os.path.join(ROOT, fixture["config"])
     par_path = os.path.join(ROOT, fixture["params"])
     cwd = os.getcwd()
@@ -269,6 +376,8 @@ def build(fixture, extra_params=None):
             par = yaml.safe_load(fh) or {}
         if extra_params:
             par.update(extra_params)
+        if edit_config is not None:
+            edit_config(cfg)
         system = System(cfg, par)
         system.prepare()
         return system, system.build_model()

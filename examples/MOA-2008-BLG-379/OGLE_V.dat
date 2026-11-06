@@ -1,0 +1,35 @@
+# MOA-2008-BLG-379 light curve from the NASA Exoplanet Archive,
+# UID_0302515_PLC_002.tbl (converted by prepare_data.py; values verbatim).
+# Columns: HJD (UTC)  magnitude  magnitude uncertainty
+#
+# STAR_ID                              = "MOA 2008-BLG-379L"
+# DATA_CATEGORY                        = "Photometric light curve"
+# RA                                   = "17h58m49.44s"
+# RA_UNITS                             = "sexagesimal"
+# DEC                                  = "-30d11m48.95s"
+# DEC_UNITS                            = "sexagesimal"
+# EQUINOX                              = "J2000.0"
+# NUMBER_OF_POINTS                     = "7"
+# TIME_REFERENCE_FRAME                 = "Heliocentric JD"
+# MINIMUM_DATE                         = "2452858.582050"
+# MAXIMUM_DATE                         = "2454685.624850"
+# DATE_UNITS                           = "days"
+# MINIMUM_VALUE                        = "19.755"
+# MAXIMUM_VALUE                        = "20.763"
+# VALUE_UNITS                          = "mag"
+# REFERENCES                           = "Suzuki et al. 2014"
+# BIBCODES                             = "2014ApJ...780..123S"
+# TELESCOPE                            = "Warsaw Telescope (1.3 m)"
+# INSTRUMENT                           = "mosaic camera"
+# TIME_SERIES_DATA_FILTER              = "V"
+# OBSERVATORY_SITE                     = "Las Campanas Observatory, Chile"
+# COLUMN_JD                            = "Heliocentric Julian Day"
+# COLUMN_RELATIVE_MAGNITUDE            = "Relative or Instrument Magnitude"
+# COLUMN_MAGNITUDE_UNCERTAINTY         = "Magnitude Uncertainty"
+2452858.582050 20.695 0.1191
+2453475.879560 20.556 0.0684
+2454588.888600 20.763 0.1015
+2454596.898760 20.616 0.1050
+2454599.897620 20.529 0.0814
+2454646.702310 20.542 0.0731
+2454685.624850 19.755 0.0448

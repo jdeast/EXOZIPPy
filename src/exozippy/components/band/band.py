@@ -6,6 +6,7 @@ import numpy as np
 import pymc as pm
 import pytensor.tensor as pt
 
+from exozippy.components.band import ldgrid
 from exozippy.components.band.claret import (
     claret_band_lookup,
     interpolate,
@@ -37,10 +38,12 @@ logger = logging.getLogger(__name__)
 # One (band, star) registration by one limb-darkening consumer.  `star` is
 # the star index whose atmosphere that consumer's limb darkening describes,
 # or None when the consumer cannot determine it on its own (see
-# Band.ld_consumers).  `label` names the consumer in error messages; `kind`
-# is what reads it -- one of Band.LD_CONSUMER_KINDS -- for the questions that
-# depend on WHICH consumer it is (only some may carry the Claret tie).
-LDConsumer = namedtuple("LDConsumer", "label band star kind")
+# Band.ld_consumers).  `label` names the consumer in error messages.  There
+# is deliberately no record of WHAT KIND of consumer it is: nothing about a
+# band's limb darkening -- the Claret tie included -- may depend on whether a
+# transit, an RM block, a Doppler tomography dataset or a microlensing light
+# curve reads it.
+LDConsumer = namedtuple("LDConsumer", "label band star")
 
 # The Claret tie's start-value seed keeps the sampled Kipping coordinates
 # (or a linear u1) this far inside [0, 1]: a start ON the edge has no raw
@@ -95,15 +98,10 @@ class Band(Component):
     # which knob a band's limb darkening turns.
     LD_SAMPLED_PARAMS = {"quadratic": ("q1", "q2"), "linear": ("u1",)}
 
-    # What can read a band's limb darkening (LDConsumer.kind).
-    LD_CONSUMER_KINDS = ("transit", "mulens", "rm", "dopptom")
-
-    # The consumers whose band may carry the Claret tie (star_constrains_ld).
-    # Finite-source microlensing is deliberately absent -- out of scope for
-    # now (components/sed/sed.md, "The Claret limb-darkening tie"): a source
-    # star's Teff/logg are usually weakly constrained, and an explicit tie on
-    # a microlensing-only band raises rather than being ignored.
-    CLARET_TIE_KINDS = ("transit", "rm", "dopptom")
+    # Where a tied band's table prediction comes from (``ld_source:``):
+    # the Claret tables (ATLAS, three axes) or the PHOENIX tables generated
+    # from specific intensities (band/ldgrid.py; four axes, A_V the fourth).
+    LD_SOURCES = ("claret", "phoenix")
 
     # The label Star.structure_consumers files the tie's readership under.
     # Declared here, read there through the component, so the two cannot
@@ -166,6 +164,24 @@ class Band(Component):
                 ),
             },
             {
+                "key": "ld_source",
+                "kind": "option",
+                "accepts": list(cls.LD_SOURCES),
+                "required": False,
+                "doc": (
+                    "Which limb-darkening tables star_constrains_ld reads. "
+                    "'claret' (default): Claret & Bloemen 2011 / Claret "
+                    "2017 (ATLAS, least squares; Teff 3500-10000 K, logg "
+                    "2-5). 'phoenix': EXOZIPPy's own tables from the "
+                    "PHOENIX-ACES specific intensities (Husser et al. 2013; "
+                    "quasi-spherical, flux-conserving fits through the same "
+                    "filter profiles, weighting and extinction law as the "
+                    "bolometric corrections), on (Teff, logg, [Fe/H], A_V): "
+                    "reach 2300 K and logg 6, and follow the star's A_V "
+                    "when it has one (no SED: evaluated at A_V = 0)."
+                ),
+            },
+            {
                 "key": "star_constrains_ld",
                 "kind": "option",
                 "accepts": None,
@@ -183,8 +199,10 @@ class Band(Component):
                     "explicit true raises instead. With it on, the star is "
                     "held inside the tables' range (Teff 3500-10000 K, logg "
                     "2.0-5.0, [Fe/H] -2.0 to +1.0), and a star that STARTS "
-                    "outside it raises: set false on its bands. Transit, RM "
-                    "and Doppler-tomography bands only."
+                    "outside it raises: set false on its bands. The star "
+                    "is whichever star the band's limb darkening describes "
+                    "(a transit host, the RM star, a microlensing source), "
+                    "whatever reads it."
                 ),
             },
             {
@@ -250,6 +268,7 @@ class Band(Component):
             0 if d is None else int(d) for d in self.star_ndx_declared
         ]
         self.ld_laws = self._parse_ld_laws()
+        self.ld_sources = self._parse_ld_sources()
         self.fitthermal = [
             bool(c.get("fitthermal", False)) for c in self.config
         ]
@@ -340,6 +359,30 @@ class Band(Component):
             laws.append(norm)
         return laws
 
+    def _parse_ld_sources(self):
+        """Per-band ``ld_source:``, validated: which tables the tie reads.
+
+        Default ``claret``, the shipped behaviour.  ``phoenix`` reads the
+        tables generated from the PHOENIX-ACES specific intensities
+        (models/PHOENIX/, band/ldgrid.py), which add A_V as a fourth axis
+        and reach 2300 K and logg 6.  Like ``ld_law``, a typo is an error,
+        never a silent default.
+        """
+        sources = []
+        for i, c in enumerate(self.config):
+            src = c.get("ld_source", "claret")
+            norm = str(src).strip().lower()
+            if norm not in self.LD_SOURCES:
+                raise ValueError(
+                    f"{self.prefix}.{self.names[i]}: unknown ld_source "
+                    f"{src!r}. Accepted: {', '.join(self.LD_SOURCES)} "
+                    f"('claret' = the Claret & Bloemen 2011 / Claret 2017 "
+                    f"tables, the default; 'phoenix' = EXOZIPPy's tables "
+                    f"from the PHOENIX specific intensities)."
+                )
+            sources.append(norm)
+        return sources
+
     def _parse_star_constrains_ld(self):
         """Per-band ``star_constrains_ld``: True, False, or None when unset.
 
@@ -392,25 +435,19 @@ class Band(Component):
         for i in candidates:
             explicit = self.star_constrains_ld[i] is True
             where = f"{self.prefix}.{self.names[i]}.star_constrains_ld"
-            kinds = {c.kind for c in consumers if c.band == i}
             reason, level = None, logging.WARNING
-            if not kinds & set(self.CLARET_TIE_KINDS):
-                # Nothing that reads limb darkening the tie applies to: for
-                # an unset band that is simply not a case for it (INFO).
+            # The tie is a property of the BAND -- its filter and its star --
+            # never of what reads it: a transit, an RM block, a Doppler
+            # tomography dataset and a finite-source microlensing light curve
+            # all read the same (u1, u2).  The one consumer question is
+            # whether ANYTHING reads them.
+            if not any(c.band == i for c in consumers):
+                # For an unset band that is simply not a case for it (INFO).
                 level = logging.INFO
-                if "mulens" in kinds:
-                    reason = (
-                        "the Claret limb-darkening tie is not implemented "
-                        "for microlensing light curves yet; this band is read "
-                        "only by a finite-source microlensing light curve"
-                    )
-                else:
-                    reason = (
-                        "nothing in this topology reads this band's limb "
-                        "darkening through a transit, a Rossiter-McLaughlin "
-                        "(rvinstrument rm:) block or a Doppler tomography "
-                        "dataset, so there is nothing to tie"
-                    )
+                reason = (
+                    "nothing in this topology reads this band's limb "
+                    "darkening, so there is nothing to tie"
+                )
             elif i in unnamed_bands and self.star_ndx_declared[i] is None:
                 reason = (
                     "this band's light curve covers planets around more than "
@@ -421,14 +458,20 @@ class Band(Component):
                 )
             else:
                 law = self.ld_laws[i]
-                name, reason = claret_band_lookup(self.filter_names[i])
-                if name is not None and name not in TABLE_BANDS[law]:
-                    reason = (
-                        f"there is no {law} Claret table for {name} (this "
-                        f"band's ld_law is {law}); {law} tables exist for "
-                        f"{', '.join(TABLE_BANDS[law])} (use ld_law: "
-                        f"quadratic to tie it)"
+                if self.ld_sources[i] == "phoenix":
+                    name, reason = ldgrid.ld_table_lookup(
+                        self.filter_names[i], law
                     )
+                else:
+                    name, reason = claret_band_lookup(self.filter_names[i])
+                    if name is not None and name not in TABLE_BANDS[law]:
+                        reason = (
+                            f"there is no {law} Claret table for {name} "
+                            f"(this band's ld_law is {law}); {law} tables "
+                            f"exist for {', '.join(TABLE_BANDS[law])} (use "
+                            f"ld_law: quadratic to tie it, or ld_source: "
+                            f"phoenix)"
+                        )
                 if reason is None:
                     tied.append((i, name))
                     continue
@@ -491,9 +534,9 @@ class Band(Component):
         name_to_idx = {name: i for i, name in enumerate(self.names)}
         out = []
 
-        def _mark(label, idx, star, kind):
+        def _mark(label, idx, star):
             if idx is not None and 0 <= idx < self.n_elements:
-                out.append(LDConsumer(label, int(idx), star, kind))
+                out.append(LDConsumer(label, int(idx), star))
 
         def _cfg(comp_name):
             comp = getattr(system, comp_name, None)
@@ -501,7 +544,12 @@ class Band(Component):
 
         # Transit: the occultation model cannot be computed without limb
         # darkening, so any transit referencing a band reads it.
-        hosts = {int(pcfg.get("star_ndx", 0) or 0) for pcfg in _cfg("planet")}
+        # The planets' hosts: Planet's star_map, derived at stage 2 from the
+        # orbit blocks' groups (a planet carries no host key of its own).
+        planet = getattr(system, "planet", None)
+        hosts = (
+            {int(h) for h in planet.star_map} if planet is not None else set()
+        )
         transit_host = hosts.pop() if len(hosts) == 1 else None
         for i, c in enumerate(_cfg("transit")):
             name = c.get("name", i)
@@ -509,7 +557,6 @@ class Band(Component):
                 f"transit[{name}]",
                 name_to_idx.get(c.get("band")),
                 transit_host,
-                "transit",
             )
 
         # Microlensing: the magnification only takes u1 when the source is
@@ -542,7 +589,6 @@ class Band(Component):
                     f"mulensinstrument[{name}]",
                     name_to_idx.get(c.get("band")),
                     src,
-                    "mulens",
                 )
 
         # Rossiter-McLaughlin: rvinstrument `rm:` reads the `rm_band` band, or
@@ -557,7 +603,6 @@ class Band(Component):
                 f"rvinstrument[{name}].rm",
                 idx,
                 self._rm_host_star(system, c.get("rm")),
-                "rm",
             )
 
         # Doppler tomography: the shadow amplitude is the blocked
@@ -575,7 +620,6 @@ class Band(Component):
                 f"dopptom[{name}]",
                 idx,
                 self._rm_host_star(system, c.get("orbit")),
-                "dopptom",
             )
 
         return out
@@ -782,10 +826,20 @@ class Band(Component):
         if not tied:
             return
         for i, name in plan:
-            self._claret_tables[i] = load_table(name, self.ld_laws[i])
+            if self.ld_sources[i] == "phoenix":
+                self._claret_tables[i] = ldgrid.load_ld_table(
+                    self.filter_names[i], self.ld_laws[i]
+                )
+            else:
+                self._claret_tables[i] = load_table(name, self.ld_laws[i])
+        # A PHOENIX table's fourth axis is the star's A_V, which exists only
+        # with an sed: block in the topology; without one the tables are
+        # read at A_V = 0 (nothing in the fit knows the reddening) and no
+        # A_V bound is placed.  Decided once here, read at build time.
+        self._ld_av_available = "av" in getattr(system.star, "manifest", {})
 
         self._declare_claret_offsets(tied)
-        self._bound_tied_stars(sorted({self.star_indices[i] for i in tied}))
+        self._bound_tied_stars(tied)
         self._check_and_seed_claret_starts(system, tied)
         self._warn_unconstrained_tie_stars(system, tied)
 
@@ -811,35 +865,69 @@ class Band(Component):
         if (tied_mask & quadratic).any():
             self.manifest["du2"] = entry(tied_mask & quadratic)
 
-    def _bound_tied_stars(self, stars):
-        """Hold each tied band's star inside the tables' box.
+    @staticmethod
+    def _table_axes(table):
+        """The axes a table is interpolated on: Claret's three, or the
+        PHOENIX tables' four (``axis_order``)."""
+        return tuple(getattr(table, "axis_order", AXIS_ORDER))
+
+    @staticmethod
+    def _table_box(table):
+        """``{axis: (lo, hi)}`` of a table: Claret's fixed BOX, or the
+        complete box the PHOENIX table was loaded on."""
+        return dict(getattr(table, "box", BOX))
+
+    @staticmethod
+    def _table_source(table):
+        return getattr(table, "source", "Claret")
+
+    def _star_axes(self, i):
+        """The star axes band ``i``'s table reads, minus an A_V the star
+        does not have."""
+        axes = self._table_axes(self._claret_tables[i])
+        if not self._ld_av_available:
+            axes = tuple(ax for ax in axes if ax != "av")
+        return axes
+
+    def _bound_tied_stars(self, tied):
+        """Hold each tied band's star inside its tables' box.
 
         A validity limit, so through ``ConfigManager.add_override`` (it
         combines with the user's and other components' bounds as
         max(lower)/min(upper), and warns when it clips a user's) -- the
         SED's and the MIST grid's channel.  Index paths, so an override by
         another component on the broadcast ``star.feh`` (the SED's) is a
-        different entry and both apply.  teff and feh are sampled, so the
-        box is their exact support (EXOFASTv2's out-of-table rejection, with
-        a gradient); logg is derived, so its bound is a soft barrier.
+        different entry and both apply.  teff, feh and av are sampled, so
+        the box is their exact support (EXOFASTv2's out-of-table rejection,
+        with a gradient); logg is derived, so its bound is a soft barrier.
+        A star read by two tables with different boxes gets their
+        intersection.
         """
-        for s in stars:
-            for ax in AXIS_ORDER:
-                lo, hi = BOX[ax]
-                self.config_manager.add_override(
-                    f"star.{s}.{ax}", lower=lo, upper=hi
-                )
-        # Per tied star (index keys): a wall on an UNtied star is not the
-        # tables running out (diagnostics.grid_bounded_paths).
-        self._grid_bound_paths = {
-            f"star.{s}.{ax}": {
-                "lower": BOX[ax][0],
-                "upper": BOX[ax][1],
-                "source": "Claret limb-darkening table",
+        boxes = {}
+        for i in tied:
+            s_idx = self.star_indices[i]
+            table = self._claret_tables[i]
+            box = self._table_box(table)
+            for ax in self._star_axes(i):
+                lo, hi = box[ax]
+                cur = boxes.setdefault((s_idx, ax), [lo, hi, set()])
+                cur[0] = max(cur[0], lo)
+                cur[1] = min(cur[1], hi)
+                cur[2].add(self._table_source(table))
+        self._grid_bound_paths = {}
+        for (s_idx, ax), (lo, hi, sources) in sorted(boxes.items()):
+            self.config_manager.add_override(
+                f"star.{s_idx}.{ax}", lower=lo, upper=hi
+            )
+            # Per tied star (index keys): a wall on an UNtied star is not
+            # the tables running out (diagnostics.grid_bounded_paths).
+            self._grid_bound_paths[f"star.{s_idx}.{ax}"] = {
+                "lower": lo,
+                "upper": hi,
+                "source": " / ".join(
+                    f"{src} limb-darkening table" for src in sorted(sources)
+                ),
             }
-            for s in stars
-            for ax in AXIS_ORDER
-        }
 
     def grid_bound_paths(self):
         """{parameter label: {lower, upper, source}} for the tie's bounds.
@@ -864,14 +952,30 @@ class Band(Component):
         all three inputs trace back to the user or a component (``informed``):
         a table value at a defaults.yaml star describes no star.
         """
-        stars = sorted({self.star_indices[i] for i in tied})
-        paths = [f"star.{s}.{ax}" for s in stars for ax in AXIS_ORDER]
+        star_axes = {}
+        for i in tied:
+            star_axes.setdefault(self.star_indices[i], set()).update(
+                self._star_axes(i)
+            )
+        stars = sorted(star_axes)
+        paths = [
+            f"star.{s}.{ax}" for s in stars for ax in sorted(star_axes[s])
+        ]
         probed = self.config_manager.probe_start(paths)
         star_names = list(system.star.names)
 
         for s in stars:
             label = self._star_label(star_names, s)
-            for ax in AXIS_ORDER:
+            box = {}
+            for i in tied:
+                if self.star_indices[i] != s:
+                    continue
+                for ax, (lo, hi) in self._table_box(
+                    self._claret_tables[i]
+                ).items():
+                    cur = box.setdefault(ax, [lo, hi])
+                    cur[0], cur[1] = max(cur[0], lo), min(cur[1], hi)
+            for ax in sorted(star_axes[s]):
                 p = probed[f"star.{s}.{ax}"]
                 if p.value is None:
                     if ax != "logg":
@@ -895,13 +999,13 @@ class Band(Component):
                         f"the soft barrier still holds it in the model."
                     )
                     continue
-                lo, hi = BOX[ax]
+                lo, hi = box[ax]
                 if lo <= p.value <= hi:
                     continue
                 msg = (
                     f"[{self.prefix}] star {label} starts at {ax} = "
-                    f"{p.value:.4g}, outside the Claret limb-darkening "
-                    f"tables' range [{lo:g}, {hi:g}], and a band tied to them "
+                    f"{p.value:.4g}, outside the limb-darkening tables' "
+                    f"range [{lo:g}, {hi:g}], and a band tied to them "
                     f"(star_constrains_ld) reads this star."
                 )
                 if ax == "logg":
@@ -920,23 +1024,47 @@ class Band(Component):
 
         for i in tied:
             s = self.star_indices[i]
-            starts = {ax: probed[f"star.{s}.{ax}"] for ax in AXIS_ORDER}
+            axes = self._star_axes(i)
+            starts = {ax: probed[f"star.{s}.{ax}"] for ax in axes}
             if not all(p.informed for p in starts.values()):
                 logger.info(
                     f"[{self.prefix}] {self.names[i]}: not seeding the limb "
-                    f"darkening from the Claret table -- star "
-                    f"{self._star_label(star_names, s)}'s start teff/logg/feh "
-                    f"is not informed by the params file or the data."
+                    f"darkening from the "
+                    f"{self._table_source(self._claret_tables[i])} table -- "
+                    f"star {self._star_label(star_names, s)}'s start "
+                    f"{'/'.join(axes)} is not informed by the params file "
+                    f"or the data."
                 )
                 continue
-            coeffs = interpolate(
-                self._claret_tables[i],
-                *(starts[ax].value for ax in AXIS_ORDER),
+            coeffs = self._interpolate_numpy(
+                i, {ax: starts[ax].value for ax in axes}
             )
             for param, value in self._claret_seed(i, coeffs).items():
                 self.config_manager.add_hint(
                     f"{self.prefix}.{i}.{param}", value
                 )
+
+    def _interpolate_numpy(self, i, values):
+        """Band ``i``'s table coefficients at a dict of star values (numpy;
+        start seeding).  A PHOENIX table missing its A_V value (no sed:
+        block) is read at A_V = 0."""
+        table = self._claret_tables[i]
+        axes = self._table_axes(table)
+        if "av" in axes:
+            point = [values.get(ax, 0.0) for ax in axes]
+            return ldgrid.interpolate(table, *point)
+        return interpolate(table, *(values[ax] for ax in axes))
+
+    def _interpolate_node(self, i, nodes):
+        """Band ``i``'s table coefficients as a PyTensor vector at a dict of
+        scalar star tensors (the model)."""
+        table = self._claret_tables[i]
+        axes = self._table_axes(table)
+        if "av" in axes:
+            zero = pt.as_tensor_variable(np.float64(0.0))
+            point = [nodes.get(ax, zero) for ax in axes]
+            return ldgrid.interpolate_node(table, *point)
+        return interpolate_node(table, *(nodes[ax] for ax in axes))
 
     def _claret_seed(self, i, coeffs):
         """The sampled limb-darkening coordinates of band ``i`` at the table
@@ -1014,8 +1142,11 @@ class Band(Component):
             return cached[1]
 
         where = f"{self.prefix}.star_constrains_ld"
+        axes = set()
+        for i, table in self._claret_tables.items():
+            axes.update(self._star_axes(i))
         star_nodes = {}
-        for ax in AXIS_ORDER:
+        for ax in sorted(axes):
             _d, node, _aligned = self._resolve_dep_node(
                 model, system, {}, f"star.{ax}[star_map]", where
             )
@@ -1029,8 +1160,8 @@ class Band(Component):
                 u1c.append(zero)
                 u2c.append(zero)
                 continue
-            coeffs = interpolate_node(
-                table, *(star_nodes[ax][i] for ax in AXIS_ORDER)
+            coeffs = self._interpolate_node(
+                i, {ax: node[i] for ax, node in star_nodes.items()}
             )
             u1c.append(coeffs[0])
             u2c.append(coeffs[1] if self.ld_laws[i] == "quadratic" else zero)
@@ -1052,9 +1183,13 @@ class Band(Component):
         from ...outputs.texutils import latex_escape
 
         stars = sorted({self.star_indices[i] for i in tied})
+        sources = sorted(
+            {self._table_source(self._claret_tables[i]) for i in tied}
+        )
+        which = " / ".join(sources)
         system.star.logg.add_prior_contribution(
-            latex=r"soft bound to the Claret limb-darkening tables",
-            text="soft bound to the Claret limb-darkening tables",
+            latex=rf"soft bound to the {which} limb-darkening tables",
+            text=f"soft bound to the {which} limb-darkening tables",
             elements=stars,
             supersedes_bounds=True,
             # A barrier at the interval's edges, not a density over it.
@@ -1074,26 +1209,61 @@ class Band(Component):
             if len(widths) == 1
             else "with the per-band widths listed in the table"
         )
-        tess = any(self._claret_tables[i].band == "TESS" for i in tied)
-        cite = r"\citet{Claret:2011}" + (
-            r" and, for TESS, \citet{Claret:2017}" if tess else ""
-        )
-        names = join_names([latex_escape(self.names[i]) for i in tied])
-        get_collector(system).add(
-            rf"The limb-darkening coefficients in the {names} "
-            rf"band{'s' if len(tied) > 1 else ''} were each given a Gaussian "
-            rf"prior {width} on their offset from the tables of {cite} "
-            rf"(ATLAS models, least-squares fits, a microturbulent velocity "
-            rf"of 2\,km\,s$^{{-1}}$), interpolated at the host star's "
-            rf"effective temperature, surface gravity and metallicity, once "
-            rf"per band.  Each such star was held inside the tables' range: "
-            rf"hard bounds on its effective temperature and metallicity, and "
-            rf"a soft barrier on its surface gravity, which is derived from "
-            rf"its mass and radius.",
-            section="priors",
-            key=f"{self.prefix}.claret_tie",
-            rank=30,
-        )
+        claret = [
+            i
+            for i in tied
+            if self._table_source(self._claret_tables[i]) == "Claret"
+        ]
+        phoenix = [i for i in tied if i not in claret]
+        if claret:
+            tess = any(self._claret_tables[i].band == "TESS" for i in claret)
+            cite = r"\citet{Claret:2011}" + (
+                r" and, for TESS, \citet{Claret:2017}" if tess else ""
+            )
+            names = join_names([latex_escape(self.names[i]) for i in claret])
+            get_collector(system).add(
+                rf"The limb-darkening coefficients in the {names} "
+                rf"band{'s' if len(claret) > 1 else ''} were each given a "
+                rf"Gaussian prior {width} on their offset from the tables of "
+                rf"{cite} (ATLAS models, least-squares fits, a microturbulent "
+                rf"velocity of 2\,km\,s$^{{-1}}$), interpolated at the host "
+                rf"star's effective temperature, surface gravity and "
+                rf"metallicity, once per band.  Each such star was held "
+                rf"inside the tables' range: hard bounds on its effective "
+                rf"temperature and metallicity, and a soft barrier on its "
+                rf"surface gravity, which is derived from its mass and radius.",
+                section="priors",
+                key=f"{self.prefix}.claret_tie",
+                rank=30,
+            )
+        if phoenix:
+            names = join_names([latex_escape(self.names[i]) for i in phoenix])
+            av_clause = (
+                " and $A_V$"
+                if self._ld_av_available
+                else " (at $A_V = 0$, the fit having no extinction)"
+            )
+            get_collector(system).add(
+                rf"The limb-darkening coefficients in the {names} "
+                rf"band{'s' if len(phoenix) > 1 else ''} were each given a "
+                rf"Gaussian prior {width} on their offset from tables we "
+                rf"computed \\citep{{Eastman:2026ld}} from the PHOENIX-ACES specific intensities of "
+                rf"\citet{{Husser:2013}}: each band-integrated profile "
+                rf"$I(\mu)$, formed through the same filter profiles, "
+                rf"detector weighting and extinction law as the bolometric "
+                rf"corrections, has its limb placed at the point of steepest "
+                rf"descent and is fitted conserving its flux exactly "
+                rf"\citep[the quasi-spherical method of][]{{Claret:2012}}, "
+                rf"interpolated at the host star's effective temperature, "
+                rf"surface gravity, metallicity{av_clause}, once per band.  "
+                rf"Each such star was held inside the tables' range: hard "
+                rf"bounds on its sampled coordinates and a soft barrier on "
+                rf"its surface gravity, which is derived from its mass and "
+                rf"radius.",
+                section="priors",
+                key=f"{self.prefix}.phoenix_ld_tie",
+                rank=30,
+            )
 
     def _tied_sigmas(self, name, tied):
         """The resolved sigma of each tied element of du1/du2 that has the

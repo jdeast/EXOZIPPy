@@ -154,6 +154,67 @@ def test_a_circular_orbit_puts_the_eclipse_at_half_a_period():
     assert float(got) == pytest.approx(TC + PERIOD / 2.0, abs=1e-9)
 
 
+def _conjunctions_by_brute_force(ecc, omega, period):
+    """(t_transit, t_eclipse) of the textbook Euler-angle orbit, tp = 0.
+
+    Independent of orbit/physics.py: the star's orbit is built by
+    test_skyframe._euler_orbit (Kepler solved by Newton iteration, then
+    Rz(bigomega) Rx(i) Rz(omega_*)), edge-on with bigomega = 0, and each
+    conjunction is a root of the star's North offset found by brentq.  The
+    root with Z_star > 0 (the star is the farther body, skyframe.md) is the
+    primary transit; the one with Z_star < 0 is the eclipse.  Nothing here
+    uses the f = +/-pi/2 - omega shortcut ts_from_ecc_omega is built on.
+    """
+    from scipy.optimize import brentq
+    from test_skyframe import _euler_orbit
+
+    kw = dict(P=period, e=ecc, inc=np.pi / 2, om=omega, bigom=0.0)
+
+    def north(t):
+        return _euler_orbit(np.array([t]), **kw)[0][0, 0]
+
+    grid = np.linspace(0.0, period, 4001)
+    n = _euler_orbit(grid, **kw)[0][0]
+    out = {}
+    for i in np.flatnonzero(np.sign(n[:-1]) != np.sign(n[1:])):
+        t = brentq(north, grid[i], grid[i + 1], xtol=1e-13, rtol=1e-15)
+        z = _euler_orbit(np.array([t]), **kw)[0][2, 0]
+        out["transit" if z > 0 else "eclipse"] = t
+    return out["transit"], out["eclipse"]
+
+
+@pytest.mark.parametrize(
+    "ecc,omega",
+    [(0.1, 0.4), (0.3, 2.0), (0.6, -1.1), (0.45, 4.0), (0.8, 0.9)],
+)
+def test_eclipse_time_matches_an_independent_conjunction_solve(ecc, omega):
+    """
+    Given an eccentric orbit and its primary transit time,
+    When ts_from_ecc_omega computes the secondary-eclipse time,
+    Then it equals the conjunction found by brute force on the textbook
+      Euler-angle orbit (the star-behind root, after tc) to 1e-8 days.
+
+    Every other ts check in this file is a round trip through
+    ts_from_ecc_omega itself, where a mirrored e cos(omega), omega_* read as
+    omega_planet, or a primary/secondary swap cancels (review 7.16.1).
+    """
+    # Arrange
+    t_transit, t_eclipse = _conjunctions_by_brute_force(ecc, omega, PERIOD)
+    expected = t_eclipse if t_eclipse > t_transit else t_eclipse + PERIOD
+
+    # Act
+    got_np = ophys.ts_from_ecc_omega(ecc, omega, t_transit, PERIOD, xp=np)
+    e_v, w_v, tc_v = pt.dscalars("e", "w", "tc")
+    got_pt = pytensor.function(
+        [e_v, w_v, tc_v],
+        ophys.ts_from_ecc_omega(e_v, w_v, tc_v, PERIOD, xp=pt),
+    )(ecc, omega, t_transit)
+
+    # Assert
+    assert float(got_np) == pytest.approx(expected, abs=1e-8)
+    assert float(got_pt) == pytest.approx(expected, abs=1e-8)
+
+
 def test_a_circular_orbit_has_equal_transit_and_eclipse_durations():
     """
     Given a circular orbit,

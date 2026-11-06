@@ -1,0 +1,16 @@
+{
+  "event_id": "sim_pspl_0001",
+  "ra": 268.0,
+  "dec": -29.0,
+  "architecture": "1S1L",
+  "light_curves": [
+    {
+      "path": "sim_pspl_F146.dat",
+      "band": "F146",
+      "data_format": "magnitude",
+      "observer_location": "roman_simulated_2018dc",
+      "time_frame": "bjd",
+      "time_scale": "tdb"
+    }
+  ]
+}

@@ -1,8 +1,10 @@
 """Tests for the free-floating-planet mass function.
 
 The FFP mass function is selected per star (`mass_function: ffp` on a star
-block) and replaces, for that star only, the stellar IMF the galacticmodel
-block otherwise applies to every star.  See
+block) and replaces, for that star only, the stellar mass function the
+galacticmodel block otherwise applies to every star (genulens's present-day
+mass function, inside the kinematic mixture).  The FFP term alone is the
+``galacticmodel.imf_prior`` potential; it is 0 for every other star.  See
 `galacticmodel.ffp_logmass_logp` -- the single function the functional form
 lives in -- and `Star._parse_mass_functions`.
 """
@@ -16,6 +18,7 @@ import pytensor.tensor as pt
 import pytest
 
 from conftest import _DummyConfigManager, _DummySystem, _MockParam
+from exozippy.components.galacticmodel import koshimoto21 as k21
 from exozippy.components.galacticmodel.galacticmodel import (
     GalacticModel,
     ffp_logmass_logp,
@@ -35,18 +38,6 @@ _LOGMASS_LOWER = -9.0
 _LOGMASS_UPPER = 2.5
 
 _LN10 = np.log(10.0)
-
-# Chabrier 2003 SYSTEM IMF, as build_likelihood applies it: PIECEWISE, a
-# lognormal below 1 Msun and dN/dlog m ~ m^-1.3 above it, blended across a
-# 0.2 dex ramp (review 3.7.1).  Written out from the paper rather than
-# imported, so a silent edit to the component's constants fails here.
-_CHABRIER_LOG_MC = np.log10(0.22)
-_CHABRIER_SIGMA = 0.57
-_CHABRIER_HIGH_MASS_X = 1.3
-_CHABRIER_MATCH = 0.0  # 1 Msun
-_CHABRIER_BLEND_10_90_DEX = 0.2
-
-_HBL_DEX = np.log10(0.075)  # hydrogen-burning limit, dex(solMass)
 
 
 class _MockStar:
@@ -69,19 +60,32 @@ class _MockStar:
             self.ffp_mask = np.asarray(ffp_mask, dtype=bool)
             self.ffp_alpha = np.full(n, alpha, dtype=float)
 
+    def position_root(self, i):
+        # No derived lens positions here (Star.position_root).
+        return i
+
 
 class _MockSystem:
     def __init__(self, star):
         self.star = star
+        # No component models a star's mass loss (Component.initial_logmass).
+        self.active_components = {}
 
 
-def _imf_potential(star, imf=None):
-    """Numeric value of the galacticmodel.imf_prior potential for a star."""
-    cfg = [{}] if imf is None else [{"IMF": imf}]
-    gm = GalacticModel(cfg, _DummyConfigManager())
+def _potentials(star):
+    """(imf_prior, kinematic_prior) numeric values for a mock star set."""
+    gm = GalacticModel([{}], _DummyConfigManager())
     with pm.Model() as model:
         gm.build_likelihood(model, _MockSystem(star))
-    return float(model.named_vars["galacticmodel.imf_prior"].eval())
+    return (
+        float(model.named_vars["galacticmodel.imf_prior"].eval()),
+        float(model.named_vars["galacticmodel.kinematic_prior"].eval()),
+    )
+
+
+def _imf_potential(star):
+    """Numeric value of the galacticmodel.imf_prior potential for a star."""
+    return _potentials(star)[0]
 
 
 def _ffp_closed_form(x, alpha, lower=_LOGMASS_LOWER, upper=_LOGMASS_UPPER):
@@ -93,44 +97,6 @@ def _ffp_closed_form(x, alpha, lower=_LOGMASS_LOWER, upper=_LOGMASS_UPPER):
     k = -alpha
     z = (10.0 ** (k * upper) - 10.0 ** (k * lower)) / (k * _LN10)
     return k * _LN10 * x - np.log(z)
-
-
-def _chabrier_unnormalized(x):
-    """The blended Chabrier density, unnormalized, written independently.
-
-    Composed as a plain WEIGHTED SUM of the two densities -- which is the
-    algebra the component's logaddexp/softplus formulation claims to be a
-    numerically stable rewrite of.  Safe here because the masses tested are
-    near the peak, where neither branch underflows.
-    """
-    x = np.asarray(x, dtype=float)
-    lognormal = np.exp(-0.5 * ((x - _CHABRIER_LOG_MC) / _CHABRIER_SIGMA) ** 2)
-    at_match = np.exp(
-        -0.5 * ((_CHABRIER_MATCH - _CHABRIER_LOG_MC) / _CHABRIER_SIGMA) ** 2
-    )
-    tail = at_match * 10.0 ** (-_CHABRIER_HIGH_MASS_X * (x - _CHABRIER_MATCH))
-    s = _CHABRIER_BLEND_10_90_DEX / (2.0 * np.log(9.0))
-    w = 1.0 / (1.0 + np.exp((x - _CHABRIER_MATCH) / s))
-    return np.log(w * lognormal + (1.0 - w) * tail)
-
-
-def _chabrier_closed_form(x, lower=_LOGMASS_LOWER, upper=_LOGMASS_UPPER):
-    """The normalized Chabrier log density.
-
-    "Closed form" is now a misnomer kept for continuity of the call sites:
-    the blend has no closed-form integral, so the normalizer is scipy's
-    ADAPTIVE quadrature here against the component's uniform trapezoid.  That
-    the two agree is a statement about the integral rather than about two
-    copies of one algorithm.
-    """
-    from scipy.integrate import quad
-
-    def f(t):
-        return np.exp(_chabrier_unnormalized(t))
-
-    lo, _ = quad(f, lower, _CHABRIER_MATCH, limit=400)
-    hi, _ = quad(f, _CHABRIER_MATCH, upper, limit=400)
-    return _chabrier_unnormalized(x) - np.log(lo + hi)
 
 
 # ---------------------------------------------------------------------------
@@ -188,7 +154,7 @@ def test_ffp_density_integrates_to_one_over_the_support():
     Given the FFP mass function normalized over star.logmass's hard bounds,
     When exp(logp) is integrated numerically over that support,
     Then the result is 1 -- it is a proper density, so its logp is comparable
-      with the IMF branches over the same support.
+      with the stellar mass function normalized over the same support.
     """
     # Arrange
     param = _MockParam(0.0, lower=_LOGMASS_LOWER, upper=_LOGMASS_UPPER)
@@ -223,9 +189,9 @@ def test_ffp_stops_penalizing_a_jupiter_mass_lens_relative_to_a_star():
     """
     Given a 3 Mjup lens and a 0.5 Msun star,
     When each mass prior's preference between the two is measured,
-    Then Chabrier charges ~5 nats for being 3 Mjup while the FFP function
-      *prefers* it by ~5 nats -- a swing of ~10 nats, which is the penalty
-      this feature removes.
+    Then K21's IMF (the stellar mass function's birth density) charges ~2.5
+      nats for being 3 Mjup while the FFP function *prefers* it by ~5 nats
+      -- a swing of ~7.5 nats, which is the penalty this feature removes.
 
     Stated as a DIFFERENCE within one prior on purpose.  Each prior's
     normalizer cancels, so this is the comparison that means something; the
@@ -245,12 +211,12 @@ def test_ffp_stops_penalizing_a_jupiter_mass_lens_relative_to_a_star():
 
     # Act
     ffp = ffp_logmass_logp(np.array([ffp_x, star_x]), 0.96, param)
-    chabrier = _chabrier_closed_form(np.array([ffp_x, star_x]))
+    k21_imf = k21.log_imf(np.array([ffp_x, star_x]))
 
     # Assert
     assert ffp[0] - ffp[1] == pytest.approx(4.95, abs=0.05)
-    assert chabrier[0] - chabrier[1] == pytest.approx(-5.25, abs=0.05)
-    assert (ffp[0] - ffp[1]) - (chabrier[0] - chabrier[1]) > 9.0
+    assert k21_imf[0] - k21_imf[1] == pytest.approx(-2.50, abs=0.05)
+    assert (ffp[0] - ffp[1]) - (k21_imf[0] - k21_imf[1]) > 7.0
 
 
 # ---------------------------------------------------------------------------
@@ -262,9 +228,10 @@ def test_default_path_is_untouched_by_the_ffp_branch():
     """
     Given stars that did not select a mass function (and a star object from
       before this feature existed, with no ffp_mask attribute at all),
-    When the IMF potential is built,
-    Then both give the identical Chabrier value -- the default model is
-      byte-for-byte what it was.
+    When the galactic potentials are built,
+    Then both give identical values, and the imf_prior potential is exactly
+      0: every star's mass prior is genulens's present-day mass function,
+      inside the kinematic mixture.
     """
     # Arrange
     logmass = [np.log10(0.5), np.log10(0.3)]
@@ -272,31 +239,27 @@ def test_default_path_is_untouched_by_the_ffp_branch():
     modern = _MockStar(logmass, ffp_mask=[False, False])
 
     # Act
-    legacy_val = _imf_potential(legacy)
-    modern_val = _imf_potential(modern)
+    legacy_val = _potentials(legacy)
+    modern_val = _potentials(modern)
 
     # Assert
-    expected = float(np.sum(_chabrier_closed_form(np.array(logmass))))
     assert legacy_val == modern_val
-    # rel=1e-10, not 1e-12: the Chabrier normalizer is a numerical integral on
-    # both sides now (trapezoid in the component, adaptive Gauss-Kronrod
-    # here), and they agree to 1.4e-12 rather than to the last bit.  The
-    # legacy == modern equality above is still EXACT, which is what this test
-    # is really about.
-    assert legacy_val == pytest.approx(expected, rel=1e-10)
+    assert legacy_val[0] == 0.0
+    assert np.isfinite(legacy_val[1])
 
 
 def test_mixed_system_puts_the_right_prior_on_each_star():
     """
     Given a realistic microlensing system -- a STELLAR source and an
       FFP LENS -- with mass_function: ffp on the lens only,
-    When the IMF potential is built,
-    Then it is exactly ffp(lens) + chabrier(source): each star draws its own
+    When the galactic potentials are built,
+    Then imf_prior is exactly ffp(lens), the lens's mass does not reach the
+      kinematic mixture, and the source's mass does: each star draws its own
       mass prior, and neither leaks into the other.
 
     This is why the selection has to be per star rather than a
-    galacticmodel-level switch: the potential is one sum over the whole
-    star.logmass vector.
+    galacticmodel-level switch: one prior covers the whole star.logmass
+    vector.
     """
     # Arrange
     lens_x = np.log10(3.0 / 1047.57)  # 3 Mjup FFP lens
@@ -304,44 +267,29 @@ def test_mixed_system_puts_the_right_prior_on_each_star():
     star = _MockStar([lens_x, source_x], ffp_mask=[True, False])
 
     # Act
-    got = _imf_potential(star)
+    imf, kin = _potentials(star)
+    _, kin_lens_moved = _potentials(
+        _MockStar([lens_x - 1.0, source_x], ffp_mask=[True, False])
+    )
+    _, kin_source_moved = _potentials(
+        _MockStar([lens_x, source_x - 0.3], ffp_mask=[True, False])
+    )
 
     # Assert
     expected = float(
         np.atleast_1d(
             ffp_logmass_logp(lens_x, FFP_MASS_FUNCTION_SLOPE, star.logmass)
         )[0]
-    ) + float(np.atleast_1d(_chabrier_closed_form(source_x))[0])
-    # rel=1e-10: see test_default_path_is_untouched_by_the_ffp_branch -- the
-    # Chabrier half of this sum is normalized by quadrature on both sides.
-    assert got == pytest.approx(expected, rel=1e-10)
-
-    # ... and it is genuinely different from charging both the stellar IMF
-    both_stellar = _imf_potential(_MockStar([lens_x, source_x]))
-    assert abs(got - both_stellar) > 4.0
-
-
-def test_mixed_system_works_under_salpeter_too():
-    """
-    Given IMF: Salpeter and one star opting into the FFP mass function,
-    When the IMF potential is built,
-    Then the FFP star draws the FFP prior and the other draws Salpeter --
-      the per-star choice overrides whichever stellar IMF is configured.
-    """
-    # Arrange
-    lens_x = -3.0
-    source_x = np.log10(1.1)
-    star = _MockStar([lens_x, source_x], ffp_mask=[True, False])
-
-    # Act
-    got = _imf_potential(star, imf="salpeter")
-
-    # Assert: Salpeter is dN/dM ~ M^-2.35, so in log mass its exponent is
-    # (1 - 2.35) = -1.35 -- i.e. the same closed form with "alpha" = 1.35.
-    expected = _ffp_closed_form(lens_x, FFP_MASS_FUNCTION_SLOPE) + (
-        _ffp_closed_form(source_x, 1.35)
     )
-    assert got == pytest.approx(expected, rel=1e-12)
+    assert imf == pytest.approx(expected, rel=1e-12)
+    assert kin_lens_moved == kin
+    assert abs(kin_source_moved - kin) > 1e-3
+
+    # ... and it is genuinely different from charging both the stellar
+    # mass function
+    both_imf, both_kin = _potentials(_MockStar([lens_x, source_x]))
+    assert both_imf == 0.0
+    assert abs((imf + kin) - (both_imf + both_kin)) > 1.0
 
 
 def test_user_alpha_takes_effect_in_the_potential():
@@ -405,7 +353,8 @@ def test_absent_mass_function_defaults_to_the_stellar_imf():
     Given star blocks with no mass_function key (every config written before
       this feature),
     When the component is constructed,
-    Then every star draws the stellar IMF and the FFP mask is all False.
+    Then every star draws the stellar mass function and the FFP mask is all
+      False.
     """
     # Act
     star = _star([{"name": "A"}, {"name": "B"}])
@@ -501,15 +450,13 @@ def test_ffp_without_a_galacticmodel_block_warns(caplog):
 # ---------------------------------------------------------------------------
 
 
-def _logmass_lower(blocks, imf=None, user_params=None):
+def _logmass_lower(blocks, with_gm=False, user_params=None):
     """Resolved star.logmass lower bound(s) for the given star blocks."""
     star = _star(blocks, user_params)
     system = _DummySystem()
     system.config_manager = star.config_manager
-    if imf is not None:
-        system.galacticmodel = GalacticModel(
-            [{"IMF": imf}], star.config_manager
-        )
+    if with_gm:
+        system.galacticmodel = GalacticModel([{}], star.config_manager)
     star.register_parameters(system)
     with pm.Model() as model:
         star.add_parameter(model=model, param_name="logmass", system=system)
@@ -523,13 +470,11 @@ def test_ffp_leaves_the_default_logmass_support_alone():
     Then the lower bound is still defaults.yaml's -9 dex.
 
     NOT an oversight.  Sub-stellar masses are this relation's domain, so a
-    floor here would gate the very models it exists to express.  Contrast the
-    Salpeter floor, which fixes a stellar IMF being used outside its domain
-    of validity.
+    floor here would gate the very models it exists to express.
     """
     # Act
     lower = _logmass_lower(
-        [{"name": "Lens", "mass_function": "ffp"}], imf="chabrier"
+        [{"name": "Lens", "mass_function": "ffp"}], with_gm=True
     )
 
     # Assert
@@ -600,40 +545,12 @@ def test_user_lower_bound_is_honored_under_ffp():
     # Act
     lower = _logmass_lower(
         [{"name": "Lens", "mass_function": "ffp"}],
-        imf="chabrier",
+        with_gm=True,
         user_params={"star.Lens.logmass": {"lower": -7.0}},
     )
 
     # Assert
     assert lower[0] == pytest.approx(-7.0)
-
-
-def test_ffp_star_is_exempt_from_the_salpeter_floor(caplog):
-    """
-    Given IMF: Salpeter and one star opting into the FFP mass function,
-    When the logmass bounds are resolved,
-    Then only the stars drawing the stellar IMF are floored at the
-      hydrogen-burning limit; the FFP star keeps the full support.
-
-    The Salpeter floor exists because a STELLAR IMF has no claim below the
-    hydrogen-burning limit.  A star that opted out of the stellar IMF must
-    not inherit its floor -- that is the whole point of opting out.
-    """
-    # Act
-    with caplog.at_level(logging.WARNING):
-        lower = _logmass_lower(
-            [
-                {"name": "Lens", "mass_function": "ffp"},
-                {"name": "Source"},
-            ],
-            imf="salpeter",
-        )
-
-    # Assert
-    assert lower[0] == pytest.approx(_LOGMASS_LOWER)
-    assert lower[1] == pytest.approx(_HBL_DEX)
-    assert "star.Source.logmass" in caplog.text
-    assert "raising the lower bound on star.Lens.logmass" not in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -645,9 +562,11 @@ def test_ffp_star_is_exempt_from_the_salpeter_floor(caplog):
 def test_end_to_end_mixed_system_builds_with_the_right_prior_on_each_star():
     """
     Given a full System with a stellar source and an FFP lens,
-    When the model is built and the IMF potential evaluated at the start,
-    Then the potential equals ffp(lens) + chabrier(source), and both the logp
-      and its gradient are finite.
+    When the model is built and the imf_prior potential evaluated at the
+      start,
+    Then the potential equals ffp(lens) alone (the source's mass prior is
+      inside the kinematic mixture), and both the logp and its gradient are
+      finite.
 
     The headline: this is the whole feature end to end, through the real
     config plumbing rather than a mock.
@@ -690,10 +609,8 @@ def test_end_to_end_mixed_system_builds_with_the_right_prior_on_each_star():
 
     # Assert
     assert system.star.ffp_mask.tolist() == [True, False]
-    lens_x, source_x = float(values[0]), float(values[1])
-    expected = _ffp_closed_form(lens_x, FFP_MASS_FUNCTION_SLOPE) + float(
-        np.atleast_1d(_chabrier_closed_form(source_x))[0]
-    )
+    lens_x = float(values[0])
+    expected = _ffp_closed_form(lens_x, FFP_MASS_FUNCTION_SLOPE)
     assert potential == pytest.approx(expected, rel=1e-10)
 
     assert np.isfinite(float(np.asarray(model.compile_logp()(ip))))

@@ -13,13 +13,14 @@ from exozippy.components.parameterization import (
     mode_manifest,
     pin_unselected,
 )
+from exozippy.components.relations import StellarRelation
 from exozippy.config import PRECEDENCE_DERIVED_USER, user_entry
 from exozippy.constants import (
     FFP_MASS_FUNCTION_MIN_MEARTH,
     FFP_MASS_FUNCTION_SLOPE,
-    HYDROGEN_BURNING_LIMIT,
     MSUN_TO_MEARTH,
 )
+from exozippy.manifest import interpret_manifest_entry, normalize_selector
 from exozippy.outputs.prose import get_collector
 
 from . import physics
@@ -39,7 +40,7 @@ def _microlensing_only_star_indices(system):
     """Star indices that are exclusively a microlensing source body.
 
     The mulensing physics reads a source star's DISTANCE, proper motion and
-    sky position, and its MASS only through the IMF prior -- never its
+    sky position, and its MASS only through the mass prior -- never its
     teff or feh, and its radius only under ``finite_source`` (rho's deps
     include ``star.radius[source_map]``; see mulensing/defaults.yaml).  A
     source-only star's mass therefore has no likelihood term of its own,
@@ -70,6 +71,45 @@ def _microlensing_only_star_indices(system):
     return source_idx - lens_idx
 
 
+def _mass_reader_star_indices(system):
+    """Stars whose mass a stellar-structure component reads in the likelihood.
+
+    The components that read a star's mass are the empirical relations
+    (mann and torres predict it, mamajek predicts teff/radius FROM it) AND
+    the evolutionary models, which are not empirical relations: a MIST
+    track is indexed by the star's mass (``star.logmass`` is the track's
+    mass coordinate).  All of them share the ``StellarRelation`` wiring
+    mixin (``components/relations.py``) and name their target stars in
+    ``star_indices`` (set in ``load_data``, i.e. before this stage-3
+    caller), so they are asked through it rather than by name.  A
+    microlensing-only source among those stars has a mass term of its own
+    and must stay free.
+
+    The name list this replaced, ``("mann", "torres", "mamajek")``, held
+    only the empirical relations, so it pinned the mass of a source star
+    that an evolutionary model constrains through its distance
+    (microlensing) and its radius/teff (SED): the track then had to fit the
+    star at its seed-0 mass.
+
+    The Claret limb-darkening tie reads it too: its tables are interpolated
+    at the star's logg = calc_logg_from_logmass(logmass, radius), and the
+    tables' logg range is a soft barrier on it.  Pinning the mass of a
+    microlensing source whose band is tied (the tie applies to any band,
+    components/sed/sed.md) would leave that barrier pressing on the radius
+    alone -- i.e. on rho -- against an arbitrary fixed mass: examples/
+    ob161045's giant source started at logg 1.68 (13.4 Rsun at a pinned
+    0.316 Msun), 466 nats into the barrier.
+    """
+    out = set()
+    for comp in system.get_all_components():
+        if isinstance(comp, StellarRelation):
+            out |= {int(s) for s in comp.star_indices}
+    band = in_topology(system, "band")
+    if isinstance(band, Component):
+        out |= {int(s) for s in band.claret_tie_stars(system).values()}
+    return out
+
+
 # One reader of one star's structural parameter.  ``param`` is the star
 # parameter read, ``star`` the index of the star it belongs to, and ``label``
 # names the reader for the log line and the degeneracy warning.
@@ -79,12 +119,12 @@ StarConsumer = namedtuple("StarConsumer", "label param star")
 class Star(Component):
     # Which mass prior each star draws from.  "imf" (the default, and what
     # every config written before this key existed gets) means the stellar
-    # initial mass function chosen by the galacticmodel block's `IMF:` key;
-    # "ffp" means the free-floating-planet mass function, i.e.
-    # galacticmodel.ffp_logmass_logp.
+    # mass function of the galacticmodel block (genulens's present-day mass
+    # function, built on K21's IMF); "ffp" means the free-floating-planet
+    # mass function, i.e. galacticmodel.ffp_logmass_logp.
     #
-    # Why PER STAR and not a galacticmodel-level key: the IMF potential is a
-    # plain sum over the whole star.logmass vector, lens and source alike, and
+    # Why PER STAR and not a galacticmodel-level key: the mass prior covers
+    # the whole star.logmass vector, lens and source alike, and
     # the system this exists for -- an FFP lens crossing a bulge SOURCE star
     # -- needs a different mass prior on each.  Putting the choice on the star
     # block keeps it next to the mass it describes, next to the other
@@ -105,6 +145,9 @@ class Star(Component):
     def __init__(self, config, config_manager):
         super().__init__(config, config_manager)
         self.label = "Stellar Parameters"
+        # Lens stars whose position derives from their source's (review
+        # 8.10.4); filled at stage 3 by _radec_manifest_entry.
+        self.position_roots = {}
         self.mist = [c.get("mist", True) for c in self.config]
         self.parsec = [c.get("parsec", False) for c in self.config]
 
@@ -124,14 +167,15 @@ class Star(Component):
                 "required": False,
                 "doc": (
                     "Which mass prior this star draws from (default 'imf'). "
-                    "'imf' is the stellar initial mass function selected by "
-                    "the galacticmodel block's IMF: key.  'ffp' is the "
+                    "'imf' is the galacticmodel block's stellar mass "
+                    "function (genulens's present-day mass function on "
+                    "K21's IMF).  'ffp' is the "
                     "free-floating-planet mass function of Sumi et al. 2023 "
                     "(a power law in log mass, dN/dlogM ~ M^-0.96), for a "
                     "microlensing lens that is a free-floating planet -- "
                     "such a lens must be declared as a 'star' block with a "
                     "low logmass, and this is what keeps it from also being "
-                    "charged the stellar IMF.  The choice is per star, so a "
+                    "charged the stellar mass function.  The choice is per star, so a "
                     "stellar source and an FFP lens can each get the right "
                     "prior.  The slope is tunable with the dict form, "
                     "'mass_function: {kind: ffp, alpha: 0.96}' (alpha is the "
@@ -225,8 +269,8 @@ class Star(Component):
                 raise ValueError(
                     f"{name}: mass_function '{kind}' is not implemented.  "
                     f"Supported: {', '.join(self.MASS_FUNCTIONS)} ('imf' = "
-                    f"the stellar IMF chosen by the galacticmodel block's "
-                    f"IMF: key, the default; 'ffp' = the free-floating-"
+                    f"the galacticmodel block's stellar mass function, the "
+                    f"default; 'ffp' = the free-floating-"
                     f"planet mass function of Sumi et al. 2023, a power law "
                     f"in log mass).  To add another, implement it alongside "
                     f"galacticmodel.ffp_logmass_logp."
@@ -272,11 +316,8 @@ class Star(Component):
     def _warn_ffp_logmass_bound(self):
         """Tell the user that the FFP support's lower edge is their call.
 
-        NOT a floor.  The Salpeter branch raises star.logmass's bound because
-        a *stellar* IMF below the hydrogen-burning limit is outside its domain
-        of validity -- that is a correctness fix.  Here the sub-stellar range
-        IS the domain, so clamping it would gate the very models this mass
-        function exists to express.  The support stays at defaults.yaml's
+        NOT a floor.  The sub-stellar range IS this mass function's domain,
+        so clamping it would gate the very models it exists to express.  The support stays at defaults.yaml's
         [-9, 2.5] dex and the user gets the information to choose.
 
         Fired only where the bound is still the default: a user who has set
@@ -758,104 +799,36 @@ class Star(Component):
             f"{{mu: ..., sigma: ...}}'."
         )
 
-    def _galactic_imf(self, system):
-        """(galacticmodel present?, its IMF name) as (bool, str or None).
+    def _has_galacticmodel(self, system):
+        """Is there a galacticmodel in this topology?
 
         ``in_topology`` prefers the instantiated component and falls back to
         the raw config, so the answer does not depend on whether
-        galacticmodel happens to have been built before the stars -- a missed
-        lookup here would silently drop a mass-prior floor, which is the one
-        failure mode the floors exist to prevent.  What is left here is the
-        only part that is this caller's own: reading ``IMF:`` off whichever
-        of the two shapes came back.
+        galacticmodel happens to have been built before the stars.  An
+        EMPTY raw list is treated as no galacticmodel, which is the
+        historical answer here and the conservative one -- there is no
+        instance to draw a prior from.  (Contrast the plain topology
+        question, where an empty block is a real answer; a premature
+        `evolutionarymodel: {}` is tested.)
         """
         found = in_topology(system, "galacticmodel")
         if found is None:
-            return False, None
-
-        imf = getattr(found, "imf", None)
-        if imf is None:
-            # A raw config block: a list of instances, or (defensively) one
-            # bare dict.  GalacticModel itself rejects more than one, so
-            # config[0] is the whole story.  An EMPTY list is treated as no
-            # galacticmodel, which is the historical answer here and the
-            # conservative one -- there is no instance to draw an IMF from.
-            # (Contrast the plain topology question, where an empty block is
-            # a real answer; a premature `evolutionarymodel: {}` is tested.)
-            if isinstance(found, (list, tuple)):
-                if not found:
-                    return False, None
-                found = found[0]
-            imf = (found or {}).get("IMF", "chabrier")
-        return True, str(imf).lower()
-
-    def _salpeter_logmass_floor(self, imf):
-        """Lower bound to impose on logmass under a power-law IMF, or None.
-
-        defaults.yaml keeps logmass's floor at an unphysical -9 dex on
-        purpose: a planetary-mass LENS has to be declared as a star (see
-        Lens._validate_bodies, whose two guards advertise exactly that
-        workaround).  Under the default Chabrier lognormal that floor is
-        inert -- the prior density at -9 dex is ~exp(-107), so the bound is a
-        safety rail nothing ever touches.
-
-        Under IMF: Salpeter it stops being a rail and becomes the answer.
-        The power law rises toward low mass without limit, at
-        (1 - 2.35) * ln10 = 3.11 nats per dex, so it accumulates ~26 nats of
-        preference between the Chabrier peak and -9 dex; whatever the data
-        allow, the posterior piles against the floor.  A stellar IMF also
-        simply does not apply below the hydrogen-burning limit -- that is a
-        brown dwarf, with its own (poorly constrained) mass function.
-
-        So under Salpeter the floor is raised to the hydrogen-burning limit.
-        NOTE this is not a claim that a single Salpeter power law is accurate
-        down to there: Salpeter (1955) fit ~0.4-10 Msun, and the real IMF
-        flattens below ~0.5 Msun, which is precisely why Kroupa and Chabrier
-        exist.  Everything below ~0.5 Msun is extrapolation.  The
-        hydrogen-burning limit is the honest floor for a *stellar* IMF, and
-        it keeps the M-dwarf population that dominates real microlensing
-        lenses inside the prior -- truncating at Salpeter's own 0.4 Msun
-        calibration limit would exclude most actual lenses and make the prior
-        actively wrong for the science case it is there to serve.
-
-        Contrast the FFP mass function, which gets NO automatic floor (see
-        _warn_ffp_logmass_bound).  The distinction is domain of validity, not
-        taste: a stellar IMF below the hydrogen-burning limit is being applied
-        outside its domain, which is a correctness problem, whereas the
-        sub-stellar range IS the FFP relation's domain and its lower cutoff is
-        an ordinary prior choice that belongs to the user.
-        """
-        if imf != "salpeter":
-            return None
-        return float(np.log10(HYDROGEN_BURNING_LIMIT))
+            return False
+        if isinstance(found, (list, tuple)) and not found:
+            return False
+        return True
 
     def _logmass_manifest_entry(self, system):
-        """Manifest entry for logmass: the power-law IMF floor, where it
-        applies, plus the FFP advisory.
+        """Manifest entry for logmass: ``None`` (a plain free parameter),
+        after the FFP advisories.
 
-        Returns ``None`` (a plain free parameter, byte-for-byte the
-        pre-2026-08 model) unless some star draws a power-law stellar IMF.
-
-        The floor goes through the manifest's "overrides" channel, NOT its
-        ordinary options.  Options are merged OVER the resolved config
-        (``{**cfg, **options}``), which would replace a user's tighter bound
-        with the looser floor -- i.e. silently LOWER a bound the user raised.
-        Overrides instead go through ConfigManager.resolve's ``apply_value``,
-        which for the "lower" key keeps ``max(current, new)`` (and ``min``
-        for "upper").  The user's own params go through that same
-        ``apply_value``, so the result is exactly ``max(user_lower, floor)``
-        regardless of which is applied first: a user bound above the floor
-        survives untouched, and a user bound below it is raised to the floor.
-        That last case is deliberate -- asking for Salpeter and for support
-        below the hydrogen-burning limit is incoherent, and "bounds may only
-        be tightened" is the house rule the same max() enforces everywhere.
-
-        The override is per element (NaN = "leave this one alone"), because
-        the mass function is per star: a star that opted into the FFP mass
-        function is not drawing the stellar IMF and must not inherit its
-        hydrogen-burning floor -- that is the whole point of selecting it.
+        Until review 1.7.6 this also carried the hydrogen-burning floor that
+        ``IMF: Salpeter`` imposed on star.logmass; the key went with the
+        removed ``model: simplified`` (galacticmodel raises on it), so no
+        star draws a power-law stellar IMF any more and nothing raises the
+        defaults.yaml floor.
         """
-        has_gm, imf = self._galactic_imf(system)
+        has_gm = self._has_galacticmodel(system)
 
         if self.ffp_mask.any() and not has_gm:
             names = ", ".join(
@@ -873,56 +846,411 @@ class Star(Component):
 
         if has_gm:
             self._warn_ffp_logmass_bound()
+        return None
 
-        floor = self._salpeter_logmass_floor(imf) if has_gm else None
-        if floor is None:
-            return None
+    #: What a star in an orbit group shares with its group's anchor (JDE
+    #: 2026-10-26: "if we make it some kind of orbit (even static), that
+    #: should automatically trigger several links (if fit): distance,
+    #: proper motion, initfeh, age, av"), and the systemic radial velocity
+    #: (JDE 2026-10-27): a bound system has one space velocity.
+    ORBIT_LINKED_PARAMS = (
+        "distance",
+        "pm_ra",
+        "pm_dec",
+        "rv",
+        "initfeh",
+        "age",
+        "av",
+    )
 
-        # NaN leaves an element alone; only the stars actually drawing the
-        # stellar IMF get the floor.
-        floors = np.where(self.ffp_mask, np.nan, floor)
-        if not np.any(np.isfinite(floors)):
-            return None
+    def orbit_anchors(self, system):
+        """{star index: anchor star index} for every star in an orbit group.
 
-        # Warn only where the floor actually moves the bound: resolve() gives
-        # the bound as it stands now (defaults, already merged with any user
-        # entry), in user units -- logmass's user and internal units are both
-        # dex(solMass), so no conversion is involved.
-        cfg = self.config_manager.resolve(
-            self.prefix,
-            "logmass",
-            shape=(self.n_elements,),
-            names=self.names,
-        )
-        current = cfg.get("lower")
-        for i in range(self.n_elements):
-            if not np.isfinite(floors[i]):
+        Every STAR in either group of ANY orbit (Keplerian, Taylor or
+        static) belongs to that orbit's ANCHOR, the first star of its
+        primary group; planets take no part.  Hierarchies chain to the root
+        anchor (KELT-4: B -> C in orbit BC, B and C -> A in orbit A-BC, so
+        both resolve to A).  A star whose orbits resolve to two different
+        roots, and a cycle, RAISE naming the orbits: a star has one system.
+        A star that anchors its own group and is in no other is absent.
+        """
+        orbit = getattr(system, "orbit", None)
+        if orbit is None:
+            return {}
+        parents = {}  # star -> {anchor: orbit name}
+        for k in range(orbit.n_elements):
+            prim = [int(i) for t, i in orbit.primary_bodies[k] if t == "star"]
+            comp = [
+                int(i) for t, i in orbit.companion_bodies[k] if t == "star"
+            ]
+            if not prim:
                 continue
-            old = None if current is None else float(np.atleast_1d(current)[i])
-            if old is not None and old >= floor:
+            anchor = prim[0]
+            for s in prim[1:] + comp:
+                if s != anchor:
+                    parents.setdefault(s, {})[anchor] = orbit.names[k]
+
+        def root(s, seen):
+            if s in seen:
+                raise ValueError(
+                    f"[{self.prefix}] the orbit groups form a cycle through "
+                    f"star(s) {[self.names[i] for i in seen]}: each orbit "
+                    f"ties its stars to its first primary star, so no star "
+                    f"can be its own anchor's member."
+                )
+            if s not in parents:
+                return s
+            roots = {a: root(a, seen | {s}) for a in sorted(parents[s])}
+            if len(set(roots.values())) > 1:
+                detail = ", ".join(
+                    f"orbit {parents[s][a]!r} -> {self.names[r]}"
+                    for a, r in roots.items()
+                )
+                raise ValueError(
+                    f"[{self.prefix}] star {self.names[s]} is in orbit "
+                    f"groups that belong to different systems ({detail}). "
+                    f"A star in an orbit group shares its anchor's "
+                    f"distance and motion, so its orbits must chain to one "
+                    f"root star."
+                )
+            return next(iter(roots.values()))
+
+        return {s: root(s, frozenset()) for s in sorted(parents)}
+
+    def _user_entry_for(self, i, param):
+        """Star ``i``'s most specific params-file entry on ``param``, or
+        None (index, then name, then broadcast spelling)."""
+        params = getattr(self.config_manager, "user_params", None) or {}
+        for key in (
+            f"{self.prefix}.{i}.{param}",
+            f"{self.prefix}.{self.names[i]}.{param}",
+            f"{self.prefix}.{param}",
+        ):
+            entry = user_entry(params, key)
+            if entry is not None:
+                return entry
+        return None
+
+    def _link_orbit_members(self, system):
+        """Tie every star in an orbit group to its anchor (``orbit_anchors``)
+        on ``ORBIT_LINKED_PARAMS``: a hard link, through the component
+        channel ``ConfigManager.add_link`` (never ``user_params``), made
+        hard by ``sigma: 0`` through the opt-in ``"overrides"`` channel.
+
+        The proper motion and ``rv`` are the SYSTEM's barycentric space
+        velocity: a Keplerian orbit adds the orbital motion on top where a
+        consumer models it (the gaia/abs photocenter wobble of a
+        primary-group star, a xallarap source, a lens orbit, an RV
+        dataset's ``orbit.K`` sum), and a Taylor or static orbit adds none
+        on the sky.  Under a galacticmodel a member linked on distance, pm
+        and rv contributes no velocity density of its own
+        (``linked_star_structure``).
+
+        Per (star, parameter), only where the parameter is DECLARED and
+        ACTIVE for the star; active on one of the pair and not the other
+        RAISES naming both (one system, one value), and so does a member
+        whose element is DERIVED (it already has a value of its own).  The
+        user's params file wins, per link:
+
+        - a hand link identical to this one (``initval: star.<anchor>.<p>,
+          sigma: 0``) is kept, with a warning that it is redundant;
+        - any other user statement on the member's element -- a ``mu`` or
+          ``sigma`` (a prior, a pin), any other link, or a link on the
+          anchor's element that reads the member's -- BREAKS that one link,
+          reported at startup;
+        - a bare ``initval`` is only a start; the link supplies the value.
+        """
+        anchors = self.orbit_anchors(system)
+        if not anchors:
+            return
+        cm = self.config_manager
+        n = self.n_elements
+        added, redundant, broken, superseded = {}, [], [], []
+        for param in self.ORBIT_LINKED_PARAMS:
+            if param not in self.manifest:
                 continue
-            old_txt = (
-                "unbounded"
-                if old is None
-                else f"{old:g} dex ({10.0**old:.3g} solMass)"
+            parsed = interpret_manifest_entry(self.manifest[param])
+            where = f"{self.prefix}.{param}"
+            active = parsed.activity_mask(n, where)
+            derived = np.zeros(n, dtype=bool)
+            if parsed.expr_key is not None:
+                derived[:] = True
+            for sel in (parsed.expr_selectors or {}).values():
+                derived |= normalize_selector(sel, n, where)
+            pin = []
+            for i, a in anchors.items():
+                pair = f"{self.names[i]} (member) and {self.names[a]} (anchor)"
+                if active[i] != active[a]:
+                    have, lack = (a, i) if active[a] else (i, a)
+                    raise ValueError(
+                        f"[{where}] stars {pair} are in one orbit system, "
+                        f"which shares {param}, but {param} is a parameter "
+                        f"of {self.names[have]} and not of "
+                        f"{self.names[lack]}. Give both the same topology "
+                        f"(e.g. the same mist:/parsec: switch, or an SED row "
+                        f"for both), or take the member out of the orbit "
+                        f"group."
+                    )
+                if not active[i]:
+                    continue
+                if derived[i]:
+                    raise ValueError(
+                        f"[{where}] stars {pair}: the member's {param} is "
+                        f"derived by its own expression, so it cannot also "
+                        f"be tied to the anchor's. Make the star whose "
+                        f"{param} is derived the FIRST star of the orbit's "
+                        f"primary group."
+                    )
+                target = f"{self.prefix}.{i}.{param}"
+                source = f"{self.prefix}.{a}.{param}"
+                link = cm.links.get(target, {})
+                entry = self._user_entry_for(i, param) or {}
+                reverse = any(
+                    target in pl.dep_paths
+                    for pl in cm.links.get(source, {}).values()
+                )
+                hand = link.get("initval")
+                if (
+                    set(link) == {"initval"}
+                    and hand.origin == "orbit"
+                    and hand.dep_paths == [source]
+                ):
+                    # This pass's OWN link, from an earlier stage-3 run:
+                    # System.prepare runs stage 3 a second time after a
+                    # topology revision or a start re-read (e.g. the
+                    # mulensinstrument flux bootstrap), and the solve-input
+                    # snapshot it restores is taken AFTER the first stage 3,
+                    # so the link is still there.  Re-assert it -- the
+                    # manifest was rebuilt, so the sigma pin must be
+                    # re-applied -- rather than reading it as the user's
+                    # (which warned "NOT made" on every link it had made).
+                    pin.append(i)
+                    added.setdefault((i, a), []).append(param)
+                    continue
+                if link:
+                    same = (
+                        set(link) == {"initval"}
+                        and hand.dep_paths == [source]
+                        and str(hand.expr) == source
+                        and entry.get("sigma") == 0
+                    )
+                    if same:
+                        redundant.append(f"{self.names[i]}.{param}")
+                    else:
+                        broken.append(
+                            f"{self.names[i]}.{param} (params-file link: "
+                            + ", ".join(
+                                f"{f}: {pl.expr_str}" for f, pl in link.items()
+                            )
+                            + ")"
+                        )
+                    continue
+                if reverse or "mu" in entry or "sigma" in entry:
+                    why = (
+                        "the anchor's entry links to it"
+                        if reverse
+                        else ", ".join(
+                            f"{f}: {entry[f]}"
+                            for f in ("mu", "sigma")
+                            if f in entry
+                        )
+                    )
+                    broken.append(f"{self.names[i]}.{param} ({why})")
+                    continue
+                if entry.get("initval") is not None:
+                    superseded.append(f"{self.names[i]}.{param}")
+                cm.add_link(target, source, origin="orbit")
+                pin.append(i)
+                added.setdefault((i, a), []).append(param)
+            if pin:
+                self.manifest[param] = self._merge_sigma_pin(
+                    self.manifest[param], pin
+                )
+        for (i, a), params in added.items():
+            logger.info(
+                f"[{self.prefix}] orbit group: {self.names[i]} shares "
+                f"{', '.join(params)} with {self.names[a]} (hard link)."
             )
+        if redundant:
             logger.warning(
-                f"[{self.prefix}] IMF: Salpeter -- raising the lower bound on "
-                f"{self.prefix}.{self.names[i]}.logmass from {old_txt} to "
-                f"{floor:.4f} dex ({HYDROGEN_BURNING_LIMIT:g} solMass, the "
-                f"hydrogen-burning limit), because a power-law IMF rises "
-                f"toward low mass without limit (+3.11 nats/dex) so an "
-                f"unphysically low floor becomes the answer rather than a "
-                f"safety rail, and a stellar IMF does not apply to "
-                f"sub-stellar objects.  To avoid this, use the default "
-                f"IMF: chabrier (a lognormal, calibrated across the "
-                f"sub-stellar range), set a HIGHER lower bound yourself "
-                f"if you want a different floor -- this bound can be "
-                f"tightened but not loosened -- or, for a genuinely "
-                f"sub-stellar lens, give that star "
-                f"'mass_function: ffp', whose support is not clamped."
+                f"[{self.prefix}] params-file link(s) on {redundant} repeat "
+                f"the link an orbit group makes on its own; they can be "
+                f"deleted."
             )
-        return {"overrides": {"lower": floors.tolist()}}
+        if broken:
+            logger.warning(
+                f"[{self.prefix}] orbit-group link(s) NOT made, because the "
+                f"params file states something else for the member: "
+                f"{'; '.join(broken)}."
+            )
+        if superseded:
+            logger.info(
+                f"[{self.prefix}] the params-file initval on {superseded} is "
+                f"unused: an orbit group ties the element to its anchor."
+            )
+
+    def _merge_sigma_pin(self, entry, elements):
+        """``entry`` with ``sigma: 0`` on ``elements`` in its "overrides",
+        keeping any per-element sigma override already there."""
+        parsed = interpret_manifest_entry(entry)
+        sigma = (parsed.overrides or {}).get("sigma")
+        if sigma is None:
+            out = np.full(self.n_elements, np.nan)
+        elif np.ndim(sigma) == 0:
+            out = np.full(self.n_elements, float(sigma))
+        else:
+            out = np.asarray(sigma, dtype=float).copy()
+        out[list(elements)] = 0.0
+        return merge_overrides(entry, {"sigma": out.tolist()})
+
+    def _pin_unmeasured_neighbor_pm(self, system):
+        """Pin a modeled NEIGHBOR's proper motion at the field mean when
+        NOTHING constrains it (review 8.9.7(a), 8.10.3).
+
+        A neighbor is a star on a microlensing sightline that is neither a
+        lens nor a source body nor in any orbit group (a companion moves
+        with its system).  The rule (JDE 2026-10-26): "if nothing
+        constrains it, pin it.  but if something constrains it (like
+        galactic model, distance, pm) don't."  Per neighbor, in order:
+
+        1. TIED -- the params file links its pm to another star's
+           (``star.<name>.pm_ra: {initval: star.Source.pm_ra, sigma: 0}``).
+           The link is the value, so no start is hinted.  The ``sigma: 0``
+           below is what makes an initval-only link hard rather than a
+           start (``Component._wire_user_links``).  A BOUND companion is
+           spelled as an orbit group instead (``type: static`` if it does
+           not move), which ties it automatically
+           (``_link_orbit_members``) and makes it no neighbor at all.
+        2. FREE under the galactic kinematic prior when a galacticmodel is
+           in the topology: its ``kinematic_prior`` covers the WHOLE star
+           vector, each star at its own (sampled) distance (star.md, "The
+           stellar distance prior"), so nothing is pinned at all.
+        3. FREE when a gaia/abs/catalog dataset targets it or names it in
+           ``psf_stars:`` (a catalog proper motion is the flux-weighted
+           motion of everything in its PSF).
+        4. Otherwise PINNED through the opt-in "overrides" channel (a params
+           entry frees it; no user_params write) at the bulge field mean on
+           a bulge sightline (``background.bulge_field_pm_prior``), the
+           start through ``add_hint``.  Off the bulge there is no field mean
+           to pin at: free, with a warning.
+
+        A neighbor whose DISTANCE is hard-linked to another star's but
+        whose pm is not linked is warned about in case 4: a distance link
+        alone states only a shared position (star.md, "Linked stars"), so
+        the code does not tie the pm on its own; the warning names the
+        orbit group that would.
+        """
+        event = getattr(system, "mulensevent", None)
+        if event is None or "pm_ra" not in self.manifest:
+            return
+        bodies = {
+            int(idx)
+            for t, idx in list(event.lens_bodies) + list(event.source_bodies)
+            if t == "star"
+        }
+        orbit = getattr(system, "orbit", None)
+        if orbit is not None:
+            for k in range(orbit.n_elements):
+                for t, idx in list(orbit.primary_bodies[k]) + list(
+                    orbit.companion_bodies[k]
+                ):
+                    if t == "star":
+                        bodies.add(int(idx))
+        neighbors = [i for i in range(self.n_elements) if i not in bodies]
+        if not neighbors:
+            return
+        has_gm = self._has_galacticmodel(system)
+        if has_gm:
+            logger.info(
+                f"[{self.prefix}] neighbor star(s) "
+                f"{[self.names[i] for i in neighbors]}: proper motion free "
+                f"under the galactic kinematic prior at each star's own "
+                f"distance (review 8.9.7(a))."
+            )
+            return
+        measured = set()
+        astrom = getattr(system, "astrometryinstrument", None)
+        if astrom is not None:
+            for i, m in enumerate(astrom.modes):
+                # astrometryinstrument.ABSOLUTE_MODES (import cycle)
+                if m in ("gaia", "abs", "catalog"):
+                    measured.add(int(astrom.config[i].get("star_ndx", 0)))
+                    measured |= {int(s) for s in astrom.psf_stars[i]}
+        unread = [i for i in neighbors if i not in measured]
+        if not unread:
+            return
+        cm = self.config_manager
+        pm_links = [
+            set(cm.get_element_links(self.prefix, key).get("initval", {}))
+            for key in ("pm_ra", "pm_dec")
+        ]
+        tied = [i for i in unread if i in pm_links[0] and i in pm_links[1]]
+        dist_linked = set(
+            cm.get_element_links(self.prefix, "distance").get("initval", {})
+        ) & set(self.user_pinned_stars("distance"))
+        from exozippy.components.background.background import (
+            bulge_field_pm_prior,
+            on_bulge_sightline,
+        )
+        from exozippy.components.star.position import require_star_radec
+
+        _s_type, s_idx = event.source_bodies[0]
+        ra, dec = require_star_radec(
+            self.config_manager,
+            int(s_idx),
+            f"[{self.prefix}] the sightline of the neighbor pm pin",
+        )
+        names = [self.names[i] for i in unread]
+        if not on_bulge_sightline(ra, dec):
+            logger.warning(
+                f"[{self.prefix}] neighbor star(s) {names}: no galactic "
+                f"model or astrometry constrains their proper motion and the "
+                f"sightline is off the bulge, so there is no field mean to "
+                f"pin it at; it stays free (pin it in the params file)."
+            )
+            return
+        (mu_ra, mu_dec), _sigma = bulge_field_pm_prior(ra, dec)
+        for key, mu in (("pm_ra", mu_ra), ("pm_dec", mu_dec)):
+            # The pin is structural (sigma 0 through "overrides", under the
+            # params file); the value it pins at is a ranked START, which
+            # has one channel, add_hint -- the same rank the microlensing
+            # pm seeds from the galactic model use.  A tied star's link is
+            # its value, so it gets the pin (which makes the link hard) and
+            # no hint.
+            self.manifest[key] = self._merge_sigma_pin(
+                self.manifest[key], unread
+            )
+            for i in unread:
+                if i not in tied:
+                    self.config_manager.add_hint(f"star.{i}.{key}", mu)
+        if tied:
+            logger.info(
+                f"[{self.prefix}] neighbor star(s) "
+                f"{[self.names[i] for i in tied]}: proper motion tied by the "
+                f"params-file link (a bound companion)."
+            )
+        pinned = [i for i in unread if i not in tied]
+        if not pinned:
+            return
+        logger.info(
+            f"[{self.prefix}] neighbor star(s) "
+            f"{[self.names[i] for i in pinned]}: proper motion pinned at the "
+            f"bulge field mean ({mu_ra:.2f}, {mu_dec:.2f}) mas/yr -- no "
+            f"galactic model or astrometry constrains it (review 8.9.7(a)); "
+            f"a galacticmodel block, or naming the star in a gaia/abs/catalog "
+            f"dataset's psf_stars, frees it."
+        )
+        companions = [self.names[i] for i in pinned if i in dist_linked]
+        if companions:
+            logger.warning(
+                f"[{self.prefix}] star(s) {companions}: distance hard-linked "
+                f"to another star's but proper motion pinned at the bulge "
+                f"field mean.  If this is a bound companion, put it in an "
+                f"orbit group with its host (an orbit block with primary: "
+                f"[<host>], companion: [<name>], type: static if it does "
+                f"not move), which ties its distance and proper motion to "
+                f"the host's."
+            )
 
     def _pm_manifest_entry(self, system):
         """pm_ra/pm_dec manifest entry: sampled everywhere, except that a
@@ -957,6 +1285,43 @@ class Star(Component):
         self.murel_source_map = np.full(n, int(s_idx), dtype=int)
         self.murel_traj_map = np.zeros(n, dtype=int)
         return {"expr_key": {"from_mulens_murel": [int(l_idx)]}}
+
+    def _radec_manifest_entry(self, system):
+        """ra/dec manifest entry: sampled (or pinned) everywhere, except that
+        a microlensing LENS star that carries absolute astrometry flips its
+        element to derived -- its position at the astrometric reference
+        epoch is the primary source's plus the offset the event geometry
+        fixes, ``mulensevent.lens_offset_e/n`` (review 8.10.4).  The light
+        curve already says where the lens is relative to the source at
+        every instant, so a free lens position would be a second, competing
+        statement of the same thing (and a hard link between the two was
+        wrong anyway: they differ by theta_E u_0 at t_0).  Builds the two
+        maps the expression's deps name: track_source_map (per star
+        element, the primary source star) and track_event_map.  Also
+        records ``position_roots`` (see ``position_root``).
+        """
+        event = getattr(system, "mulensevent", None)
+        if event is None:
+            return None
+        l_idx = event.lens_track_star(system)
+        if l_idx is None:
+            return None
+        _, s_idx = event.source_bodies[0]
+        n = self.n_elements
+        self.track_source_map = np.full(n, int(s_idx), dtype=int)
+        self.track_event_map = np.zeros(n, dtype=int)
+        self.position_roots = {int(l_idx): int(s_idx)}
+        return {"expr_key": {"from_mulens_track": [int(l_idx)]}}
+
+    def position_root(self, i):
+        """The star whose own ra/dec define star ``i``'s line of sight: ``i``
+        itself, or -- for a lens whose position is derived from its source
+        (``_radec_manifest_entry``) -- that source.  The two agree to the
+        lens-source separation (mas), so any consumer that freezes a line of
+        sight at a START value (the galactic model's basis) reads the root,
+        whose start is a real one; a derived element's resolved initval is
+        a bookkeeping placeholder, not a position."""
+        return self.position_roots.get(int(i), int(i))
 
     def _seed_pm_from_sgra_prior(self):
         """Start the ABSOLUTE pm where the user stated it relative to Sgr A*.
@@ -1080,6 +1445,21 @@ class Star(Component):
         self.murel_traj_map = np.zeros(n, dtype=int)
         return {"expr_key": {"from_mulens_pirel": [int(l_idx)]}}
 
+    def logmass_derived_elements(self, system):
+        """Star indices whose logmass is DERIVED rather than sampled.
+
+        Today only the ``fitthetae: true`` host (``_logmass_thetae_entry``).
+        Public for ``Planet``, which applies a user's ``planet.mass`` pin to
+        log_q only when the host's sampled logmass is pinned (review
+        2.1.26(e)); a pin on a derived logmass would hold nothing.  Pure in
+        effect: the entry's map attributes are recomputed, identically, by
+        this component's own stage 3.
+        """
+        entry = self._logmass_thetae_entry(system)
+        if entry is None:
+            return set()
+        return {int(i) for idx in entry["expr_key"].values() for i in idx}
+
     def _logmass_thetae_entry(self, system):
         """expr_key flip for `fitthetae: true` (swap 3): the HOST star's
         logmass derived from the sampled log_theta_E (through lens.theta_E)
@@ -1124,16 +1504,14 @@ class Star(Component):
 
     def register_parameters(self, system):
         """Stage 3: Declare the manifest and push to ConfigManager."""
+        # Reset per build (System may prepare more than once).
+        self.position_roots = {}
 
-        # 1. Get the stellar parameters we always want.  logmass may carry a
-        # power-law-IMF floor (None otherwise, i.e. a plain free parameter).
+        # 1. Get the stellar parameters we always want.  logmass is a plain
+        # free parameter unless fitthetae flips its expr_key.
         logmass_entry = self._logmass_manifest_entry(system)
         thetae_entry = self._logmass_thetae_entry(system)
         if thetae_entry is not None:
-            # Merge the fitthetae expr_key flip into the IMF-floor entry
-            # (both are dicts of disjoint keys; the floor's per-element
-            # "overrides" apply to the still-sampled elements, and a bound
-            # on the derived host element degrades to a soft barrier).
             logmass_entry = {**(logmass_entry or {}), **thetae_entry}
 
         self.manifest = {
@@ -1199,6 +1577,32 @@ class Star(Component):
                         self.manifest[key] = merge_options(
                             self.manifest.get(key), **pin
                         )
+                        # ...and INACTIVE wherever the user wrote nothing
+                        # for it: a pinned knob is still a row in every
+                        # table ("A_V = 0.01", "R_SED = 1 solRad" on a lens
+                        # nobody photometers), and so is everything derived
+                        # from it (loggsed, luminositysed, fbolsed inherit
+                        # the role through Component._inherit_inactivity).
+                        # A knob the user wrote a field for keeps the pin
+                        # path, which their entry outranks, so "a params
+                        # entry frees one" still holds.
+                        wrote = np.zeros(self.n_elements, dtype=bool)
+                        for field in (
+                            "initval",
+                            "mu",
+                            "sigma",
+                            "lower",
+                            "upper",
+                        ):
+                            wrote |= self.user_wrote_field(key, field)
+                        active = [
+                            bool(seen[i] or wrote[i])
+                            for i in range(self.n_elements)
+                        ]
+                        if not all(active):
+                            self.manifest[key] = merge_options(
+                                self.manifest[key], mask=active
+                            )
                     self.manifest["loggsed"] = merge_options(
                         self.manifest["loggsed"],
                         **self._unread_loggsed_bounds(unread),
@@ -1206,7 +1610,9 @@ class Star(Component):
                     names = ", ".join(self.names[i] for i in unread)
                     logger.info(
                         f"[{self.prefix}] nothing reads the SED flux of "
-                        f"{names}: {'/'.join(inv.star_knobs)} pinned and "
+                        f"{names}: {'/'.join(inv.star_knobs)} pinned (and "
+                        f"inactive, with what derives from them, unless a "
+                        f"params entry names one) and "
                         f"the BC grid's loggsed barrier lifted (radius/teff/"
                         f"feh follow the structure-activity rule; mass, "
                         f"distance and proper motion stay). An SED row, a "
@@ -1325,22 +1731,40 @@ class Star(Component):
             astrom_modes = [
                 (c or {}).get("mode", "gaia") for c in (astrom or [])
             ]
-        has_abs_astrom = any(m in ("gaia", "abs") for m in astrom_modes)
+        # astrometryinstrument.ABSOLUTE_MODES, spelled out (import cycle).
+        has_abs_astrom = any(
+            m in ("gaia", "abs", "catalog") for m in astrom_modes
+        )
+
+        # A raw-redshift RV file (rvinstrument data_format: raw_redshift)
+        # does the barycentric correction in the model, from the star's
+        # position, proper motion, parallax and absolute RV
+        # (rvinstrument.md, "Raw redshifts"): the same astrometric
+        # parameters, read by one more perspective.
+        rvi = in_topology(system, "rvinstrument")
+        rv_formats = getattr(rvi, "data_formats", None)
+        if rv_formats is None:
+            rv_formats = [
+                (c or {}).get("data_format", "rv") for c in (rvi or [])
+            ]
+        has_raw_rv = "raw_redshift" in rv_formats
 
         if (
             in_system("mulensevent")
             or in_system("galacticmodel")
             or has_abs_astrom
+            or has_raw_rv
         ):
             self.manifest.update(
                 {
-                    "ra": None,
-                    "dec": None,
+                    "ra": self._radec_manifest_entry(system),
+                    "dec": self._radec_manifest_entry(system),
                     "pm_ra": self._pm_manifest_entry(system),
                     "pm_dec": self._pm_manifest_entry(system),
                     "distance": self._distance_manifest_entry(system),
                 }
             )
+            self._pin_unmeasured_neighbor_pm(system)
         elif astrom_modes:
             self.manifest.setdefault("distance", None)
 
@@ -1360,7 +1784,7 @@ class Star(Component):
             )
             self._seed_pm_from_sgra_prior()
 
-        if in_system("galacticmodel"):
+        if in_system("galacticmodel") or has_raw_rv:
             self.manifest["rv"] = None
 
         if "distance" in self.manifest:
@@ -1383,11 +1807,7 @@ class Star(Component):
         # below and the tier reasoning on STRUCTURE_PARAMS.
         ml_source_idx = _microlensing_only_star_indices(system)
         if ml_source_idx:
-            relation_idx = set()
-            for relation in ("mann", "torres", "mamajek"):
-                comp = getattr(system, relation, None)
-                if comp is not None:
-                    relation_idx |= set(comp.star_indices)
+            relation_idx = _mass_reader_star_indices(system)
 
             abs_astrom_idx = set()
             astrom = getattr(system, "astrometryinstrument", None)
@@ -1395,11 +1815,22 @@ class Star(Component):
                 modes = getattr(astrom, "modes", None)
                 star_map = getattr(astrom, "star_map", None)
                 if modes is not None and star_map is not None:
+                    # astrometryinstrument.ABSOLUTE_MODES (spelled out: that
+                    # module imports star.position).  A psf_stars member's
+                    # position is measured too (review 8.10.3): it moves the
+                    # blended photocenter.
                     abs_astrom_idx = {
                         int(star_map[i])
                         for i, m in enumerate(modes)
-                        if m in ("gaia", "abs")
+                        if m in ("gaia", "abs", "catalog")
                     }
+                    for members in astrom.psf_stars:
+                        abs_astrom_idx |= {int(s) for s in members}
+            # A lens whose position is derived from its source's (review
+            # 8.10.4) makes the SOURCE's ra/dec measured too: pinning them at
+            # a catalog value would pin the lens track to it, at a precision
+            # (~0.1 arcsec) far below the astrometry's.
+            abs_astrom_idx |= set(self.position_roots.values())
 
             def _pin_sigma(param_name, skip_idx):
                 idx_list = sorted(ml_source_idx - skip_idx)
@@ -1426,6 +1857,7 @@ class Star(Component):
         # Last: the manifest is complete, so readership can be answered for
         # every parameter at once.
         self._apply_structure_activity(system)
+        self._link_orbit_members(system)
 
     # Floor inside the volume prior's log, in pc.  The same clip
     # galacticmodel applies before its own volume element
@@ -1465,7 +1897,7 @@ class Star(Component):
            gradient.
 
         Returns 0.0 (unnormalized, with a warning) when the bounds cannot be
-        read as finite floats, matching the IMF normalizers: a constant can
+        read as finite floats, matching the FFP normalizer: a constant can
         never change the sampling, so it is not worth failing a fit over.
         """
         bounds = sampled_bounds(self.distance)
@@ -1548,7 +1980,7 @@ class Star(Component):
             # lens, galacticmodel or astrometry) -- nothing to weight.
             return
 
-        has_galacticmodel, _ = self._galactic_imf(system)
+        has_galacticmodel = self._has_galacticmodel(system)
         if has_galacticmodel:
             logger.debug(
                 f"[{self.prefix}] galacticmodel present -- deferring the "

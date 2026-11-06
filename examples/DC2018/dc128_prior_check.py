@@ -105,9 +105,6 @@ def build_params(sol):
     return {
         "star.Lens.ra": pin(RA),
         "star.Lens.dec": pin(DEC),
-        "star.Lens.teff": {"sigma": 0.0},
-        "star.Lens.feh": {"sigma": 0.0},
-        "star.Lens.radius": {"sigma": 0.0},
         "planet.Companion.radius": {"sigma": 0},
         "star.Lens.distance": pin(sol["d_lens"]),
         "star.Source.distance": pin(sol["d_source"]),

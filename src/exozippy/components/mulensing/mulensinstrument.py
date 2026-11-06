@@ -12,12 +12,17 @@ from scipy.optimize import nnls
 
 from exozippy.compat import patch_mulensmodel_method_order
 from exozippy.components.instrument import Instrument
+from exozippy.components.star.position import probe_star_radec
 from exozippy.config import PRECEDENCE_DERIVED_DATA, user_entry
-from exozippy.ephemeris import get_observer_position
+from exozippy.ephemeris import observer_position_at_reception
 from exozippy.outputs.prose import get_collector
 from exozippy.skyframe import observer_sky_offset
 
-from ..parameterization import pin_unselected
+from ..parameterization import (
+    merge_overrides,
+    mode_manifest,
+    pin_unselected,
+)
 from ..sed.magsys import AB, parse_magsys
 from . import mmplot, peakfind
 from .physics import (
@@ -63,6 +68,44 @@ def mag_to_flux(mag, mag_err):
     return flux, (np.log(10.0) / 2.5) * flux * np.maximum(mag_err, 0.0)
 
 
+def dia_reference_is_solved(entry):
+    """True for a ``data_format: dia`` light curve with NO explicit reference.
+
+    Its reference is then solved from the pySIS ``mag`` column, which is a
+    pipeline reference (e.g. a fixed 20.0 mag at zp 28), not the star's
+    baseline (review 2.2.22c): ``f_source`` is unaffected, but ``f_blend`` and
+    ``q_source`` are relative to an arbitrary number.  The one predicate
+    every reader of a light curve's blend asks before trusting it --
+    ``sed_constrains_blend`` here, the unresolved background's light-curve
+    tie in ``background.py`` -- read from the raw config entry, so it is
+    usable before stage 1.
+    """
+    entry = entry or {}
+    return (
+        entry.get("data_format", "magnitude") == "dia"
+        and entry.get("reference_flux") is None
+        and entry.get("reference_mag") is None
+    )
+
+
+def solved_dia_reference_message(name, reader):
+    """The refusal for a blend ``reader`` on a solved-reference dia curve."""
+    return (
+        f"mulensinstrument {name!r}: {reader} reads this light curve's "
+        f"blend flux, but it is data_format: dia with no reference_flux or "
+        f"reference_mag, so its reference is solved from the pySIS mag "
+        f"column -- a pipeline reference (one number for every site and "
+        f"band, e.g. a fixed 20.0 mag at zp 28), not the star's baseline "
+        f"measured on this light curve. f_source is unaffected, but f_blend "
+        f"and q_source "
+        f"are relative to that arbitrary number, so the blend {reader} "
+        f"constrains would be fictitious. State a MEASURED baseline "
+        f"(reference_mag, with zp, or reference_flux in file units), e.g. "
+        f"from calibrated photometry of the target at baseline, or drop "
+        f"{reader}."
+    )
+
+
 class _BootstrapGeometry:
     """The flux bootstrap's reader of the event geometry (see
     ``MulensInstrument._probe_bootstrap_geometry``).
@@ -72,16 +115,33 @@ class _BootstrapGeometry:
     component hint or seed), else `default`.  `probed` is the
     ``ConfigManager.probe_start`` answer; asking for a path it does not hold
     is a KeyError -- a bookkeeping bug in the caller, not "unknown".
-    `has_companion` says whether ``lens.1`` exists (element 0 is the masked
-    primary), i.e. whether the lens.1.* geometry was probed at all.
+    `n_companions` is the event's number of companion lenses (element 0 is
+    the masked primary); `has_companion` says whether ``lens.1`` exists, i.e.
+    whether the lens.1.* geometry was probed at all.  Only lens.1 is ever
+    probed: the bootstrap's magnification is at most a BINARY lens, so with
+    more companions it is a proxy, and its warnings say so.
     """
 
-    def __init__(self, probed, has_companion):
+    #: Read at their START value whether informed or not: the model has a
+    #: parallax at whatever pi_E it starts at (review 8.6.23).
+    START_PATHS = ("mulensevent.0.pi_E_N", "mulensevent.0.pi_E_E")
+
+    def __init__(self, probed, n_companions):
         self.probed = probed
-        self.has_companion = has_companion
+        self.n_companions = int(n_companions)
+        self.has_companion = self.n_companions >= 1
 
     def __call__(self, path, default=None):
         ps = self.probed[path]
+        if path in self.START_PATHS:
+            if not ps.derivable:
+                raise RuntimeError(
+                    f"flux bootstrap: {path} has no start the relaxation "
+                    f"engine can reach ({ps.source}); every microlensing "
+                    f"model has one, so the event's symbol map or frame "
+                    f"constants are missing."
+                )
+            return ps.user_value
         return ps.user_value if ps.informed else default
 
 
@@ -121,17 +181,44 @@ class MulensInstrument(Instrument):
     blend is at most as negative as the total flux -- and must not be
     widened to accommodate a difference curve.)
 
-    The missing piece is the reference flux, and a native pySIS file
-    carries it implicitly.  Its five columns are
-    ``time dflux dflux_err mag mag_err``, where ``mag`` is the TOTAL
-    brightness, so the two are related by
+    The missing piece is the reference flux.  A native pySIS file has five
+    columns, ``time dflux dflux_err mag mag_err``, related by
 
         mag = zp - 2.5*log10(ref - dflux)
 
-    which determines ``ref`` and ``zp`` exactly (verified on MulensModel's
-    native KB180003 set: ``ref = 1584.9`` at ``zp = 28.000`` for all three
-    sites, residual rms 2.8e-5 mag).  The total flux is then
-    ``F = ref - dflux``.  Note the subtraction: in the pySIS files seen
+    which determines ``ref`` and ``zp`` exactly (MulensModel's native
+    KB180003 set: ``ref = 1584.9`` at ``zp = 28.000`` for all three sites,
+    residual rms 2.8e-5 mag), and the reader uses ``F = ref - dflux``.
+
+    **That ``ref`` is NOT the star's baseline** (review 2.2.22c).  It is a
+    PIPELINE reference, one number shared by every site and band of the
+    event, not a baseline measured on this light curve: 1584.9 is 20.0 mag
+    at zp 28, and KMT-2021-BLG-1122L gives exactly that at all six of its
+    site/band files to 3e-5 mag (other KMT events carry a catalog
+    magnitude of the target instead, again identical across sites).  So
+    a pySIS ``mag`` column carries no baseline information of its own, and
+    the solved reference imposes that number as the total flux, and with
+    it a blending fraction.  What that does and does not touch:
+
+    - ``f_source`` -- the brightening's amplitude -- is unaffected, in any
+      reference.  So are the magnification, the geometry, and the SED tie
+      on the source (the zeropoint reads ``f_source`` only).
+    - ``f_blend``, ``q_source`` and the ``q_source <= 2`` bound are NOT
+      physical: they are relative to the arbitrary reference.  With
+      nothing reading the blend (``sed_constrains_blend`` off, no
+      background tie) that is harmless, and any reference safely above
+      the data is as good as the solved one.
+    - Anything that READS the blend needs a MEASURED reference
+      (``reference_flux``/``reference_mag``, e.g. from calibrated
+      photometry of the baseline): ``sed_constrains_blend: true`` on a dia
+      light curve, or an unresolved ``background`` tied to it, RAISES
+      without one, naming the light curve (``dia_reference_is_solved``).
+    - The same is true of a ``magnitude`` file written from pySIS's
+      ``mag`` column (its baseline is the same pipeline number), but nothing
+      in such a file says where it came from, so that case is documented
+      (mulensing.md), not detected.
+
+    Note the subtraction in ``F = ref - dflux``: in the pySIS files seen
     here, ``dflux`` grows MORE NEGATIVE as the star brightens.  That is
     taken as the pipeline's convention on the strength of one independently
     sourced set (MulensModel's KB180003) -- corroboration, not a survey --
@@ -147,11 +234,11 @@ class MulensInstrument(Instrument):
     or lens mass derived from the source flux.  Supply the native file, or
     give ``reference_flux``/``reference_mag`` explicitly.
 
-    ``reference_flux`` (file units) or ``reference_mag`` (with ``zp``, or
-    with the file's own zeropoint once recovered) override the solved value
-    and let a three-column file be read.  The recovered ``zp`` is also what
-    ties this light curve's flux system to a magnitude, which is what an
-    ``sed:`` block needs.
+    ``reference_flux`` (file units) or ``reference_mag`` (with ``zp``,
+    default 28.0) override the solved value and let a three-column file be
+    read.  The flux is then in units of the reference, and
+    ``zp_ref = zp - 2.5*log10(ref)`` (``flux_system_zp``) is the magnitude
+    of unit flux, which the SED zeropoint tie subtracts (review 2.2.22a).
 
     ``f_source``/``f_blend``/``log_f_total`` are unchanged: they live in the
     file's own flux system, which for a magnitude file is the system in which
@@ -165,25 +252,29 @@ class MulensInstrument(Instrument):
     # Magnitude-space detrend coefficients MULTIPLY the flux model by
     # 10**(-0.4 X.c) (Instrument.DETREND_SPACE).
     DETREND_SPACE = "magnitude"
+    # Exposure smearing (instrument.md, "Exposure smearing";
+    # mulensing.md, "Exposure smearing"): with ninterp > 1 the
+    # magnification is averaged over each exposure, the observer placed at
+    # its ephemeris position at every node.  Gauss-Legendre: the
+    # magnification is smooth except at a caustic crossing, and no parity
+    # with another code constrains the rule.
+    supports_exposure = True
+    EXPOSURE_RULE = "gauss"
 
     # Deps of the derived `zeropoint` that are injected as context nodes by
     # add_parameter below rather than resolved as manifest parameters, so
     # graph.py leaves them out of the build-order graph.
-    context_dep_names = frozenset({"m_source_pred"})
+    context_dep_names = frozenset({"m_source_pred", "flux_zp"})
 
     # ...built with one entry per light curve, so Component._element_expression
     # may slice it to the elements that have an SED prediction (the rest of
     # the zeropoint vector is INACTIVE -- see register_parameters).
-    aligned_context_deps = frozenset({"m_source_pred"})
+    aligned_context_deps = frozenset({"m_source_pred", "flux_zp"})
 
     def __init__(self, config, config_manager):
         super().__init__(config, config_manager)
         self.label = "Microlensing Data"
         self.total_detrend_cols = 0
-        # _finite_source_limb_darkening is called from both build_likelihood
-        # and compile_plotters; the notice belongs to the topology, not to the
-        # call, so it is emitted once.
-        self._warned_multiband_ld = False
         # Each light curve's zeropoint magnitude system AS STATED, in the one
         # internal spelling (None = unstated = the band filter's native
         # system), translated at this boundary by the SAME parser the SED's
@@ -194,10 +285,37 @@ class MulensInstrument(Instrument):
             parse_magsys(c.get("magsys"), f"mulensinstrument {name!r}")
             for name, c in zip(self.names, self.config)
         ]
+        # The resolution last LOGGED per light curve (_resolve_zeropoint_
+        # systems logs it once per build, again only if it changes).
+        self._zp_magsys_logged = {}
 
     @property
     def prefix(self):
         return "mulensinstrument"
+
+    @property
+    def flux_system_zp(self):
+        """Per light curve, the magnitude of unit flux in its file's flux system.
+
+        0 for a ``magnitude`` file (``F = 10**(-0.4 m)``) and for a ``flux``
+        file (whose own scale the zeropoint absorbs, as always), and the
+        recovered ``zp_ref = zp - 2.5*log10(ref)`` for ``data_format: dia``,
+        whose flux load_data puts in units of the reference.  The instrumental
+        magnitude of a flux ``f`` is ``flux_system_zp - 2.5*log10(f)``, which
+        is what the SED zeropoint tie, the blend tie and the source-flux
+        seeding compare with the SED (review 2.2.22a: until then all three
+        read ``-2.5*log10(f)`` and a dia light curve's zeropoint carried an
+        extra ``+zp_ref``).  Stage 1 (load_data) must have run.
+        """
+        return np.array(
+            [
+                self._dia_zp[name]
+                if self.config[i].get("data_format", "magnitude") == "dia"
+                else 0.0
+                for i, name in enumerate(self.names)
+            ],
+            dtype=float,
+        )
 
     @classmethod
     def config_schema(cls):
@@ -246,7 +364,14 @@ class MulensInstrument(Instrument):
                     "data_format: dia only. The difference-imaging reference "
                     "flux in the FILE's own flux units. Overrides the value "
                     "solved from the mag column, and lets a file without one "
-                    "be read. Total flux is reconstructed as ref - dflux."
+                    "be read. Total flux is reconstructed as ref - dflux. "
+                    "A pySIS mag column's reference is a pipeline number "
+                    "(e.g. a fixed 20.0 mag at zp 28), not the star's "
+                    "baseline, so f_blend and "
+                    "q_source are physical only with a MEASURED reference "
+                    "here -- required with sed_constrains_blend or a "
+                    "background tie; any reference above the data is fine "
+                    "otherwise."
                 ),
             },
             {
@@ -309,6 +434,21 @@ class MulensInstrument(Instrument):
                 ),
             },
             {
+                "key": "fitlogqflux",
+                "kind": "option",
+                "accepts": [True, False],
+                "required": False,
+                "doc": (
+                    "Binary source only: sample log10 of this light curve's "
+                    "flux ratio q_flux = f_s2/f_s1 (log_q_flux, uniform on "
+                    "its bounds) instead of q_flux itself, which is then "
+                    "derived. Default false (q_flux uniform on its linear "
+                    "bounds). A coordinate choice like fitu0te, and so a "
+                    "choice of PRIOR: uniform in log q_flux is the scale-free "
+                    "prior on a ratio."
+                ),
+            },
+            {
                 "key": "sed_constrains_blend",
                 "kind": "option",
                 "accepts": [True, False],
@@ -348,10 +488,12 @@ class MulensInstrument(Instrument):
                 ),
             ),
             *cls._time_config_schema(),
+            *cls._exposure_config_schema(),
             cls._plot_style_config_schema(),
             cls._label_config_schema(),
             cls._gp_config_schema(),
             cls._likelihood_config_schema(),
+            cls._out_frac_prior_config_schema(),
         ]
 
     def _reference_index(self):
@@ -451,14 +593,11 @@ class MulensInstrument(Instrument):
         # stage is the user's config key order, so they may not exist yet).
         self._n_sources = int(system.source.n_elements)
 
-        # Source RA/Dec (degrees from resolve → radians for projection math).
-        # Stashed for MulensEvent._earth_vperp_en: the mu_helio -> mu_geo
-        # conversion must project Earth's velocity with the same (ra, dec)
-        # the Skowron deltas are projected with.
-        ra_deg, dec_deg = self._resolve_source_radec_deg(system)
-        ra_rad = ra_deg * np.pi / 180.0
-        dec_rad = dec_deg * np.pi / 180.0
-        self._source_radec_rad = (ra_rad, dec_rad)
+        # Source RA/Dec (radians), stashed for MulensEvent._earth_vperp_en:
+        # the mu_helio -> mu_geo conversion must project Earth's velocity
+        # with the same (ra, dec) the Skowron deltas are projected with.
+        self._source_radec_rad = self._resolve_source_radec_rad(system)
+        ra_rad, dec_rad = self._source_radec_rad
 
         # A PROVISIONAL geocentric frame, at MulensEvent's preliminary
         # t0_par, so the relaxation engine's geocentric t_E / pi_E relations
@@ -467,6 +606,9 @@ class MulensInstrument(Instrument):
         # t_0/u_0/t_E is already informed.  Re-anchored below once t0_par
         # is final, before the bootstrap's own probe.
         self._event = system.mulensevent
+        # The frame's Earth is placed at the instant it received each
+        # epoch's light, which needs the line of sight (review 1.10.13).
+        self._event.set_line_of_sight(ra_rad, dec_rad)
         _, self._earth_pos_ref, self._earth_vel_ref = (
             self._event.geocentric_frame()
         )
@@ -485,7 +627,38 @@ class MulensInstrument(Instrument):
                 # problem rather than surfacing as a column-selection
                 # IndexError.
                 self._require_dia_columns(i)
-                roles = ("time", "dflux", "err", "mag", "mag_err")
+                # An explicit reference_flux/reference_mag REPLACES the mag
+                # column (review 2.2.22b): the roles stop at the error, so a
+                # three-column file reads and a native file's mag columns
+                # are simply not selected.
+                has_ref = self._reference_flux_override(i) is not None
+                if (
+                    dia_reference_is_solved(self.config[i])
+                    and "sed" in system.active_components
+                    and self.config[i].get("sed_constrains_blend", False)
+                ):
+                    # The blend tie reads f_blend, which a solved pySIS
+                    # reference makes fictitious (review 2.2.22c).
+                    raise ValueError(
+                        solved_dia_reference_message(
+                            self.names[i], "sed_constrains_blend: true"
+                        )
+                    )
+                roles = ("time", "dflux", "err")
+                if not has_ref:
+                    roles = roles + ("mag", "mag_err")
+                spec = self.column_specs[i]
+                if has_ref and spec is not None:
+                    named = sorted({"mag", "mag_err"} & set(spec))
+                    if named:
+                        raise ValueError(
+                            f"[{self.prefix}:{self.names[i]}] columns: names "
+                            f"{named}, but reference_flux/reference_mag is "
+                            f"set, and the explicit reference replaces the "
+                            f"mag column (nothing reads it). Drop {named} "
+                            f"from columns:, or drop the explicit reference "
+                            f"to have it solved from the mag column."
+                        )
                 if self.column_specs[i] is None:
                     # A native pySIS file carries MORE than these five:
                     # KMT's is eight (`... fwhm sky secz`).  Without a
@@ -498,13 +671,7 @@ class MulensInstrument(Instrument):
                     # A user who genuinely wants to detrend against seeing
                     # or airmass can still say so with an explicit
                     # `columns:` including `detrend: [...]`.
-                    self.column_specs[i] = {
-                        "time": 0,
-                        "dflux": 1,
-                        "err": 2,
-                        "mag": 3,
-                        "mag_err": 4,
-                    }
+                    self.column_specs[i] = dict(zip(roles, range(len(roles))))
             else:
                 roles = ("time", "flux" if fmt == "flux" else "mag", "err")
             # Shared reader: columns:, mask:, time_* conversion, then sort
@@ -526,17 +693,19 @@ class MulensInstrument(Instrument):
                 ref, zp = self._dia_reference(
                     i,
                     dflux=f,
-                    mag=df.iloc[:, 3].values.astype(float),
+                    mag=None
+                    if has_ref
+                    else df.iloc[:, 3].values.astype(float),
                 )
                 # Total flux IN UNITS OF THE REFERENCE, not in raw counts.
                 # The reference is the natural unit of a difference image,
                 # and the absolute scale is arbitrary anyway without an
-                # `sed:` block to tie f_source to a magnitude -- while raw
-                # pySIS counts (f_source ~ 1.8e4 on OGLE-2016-BLG-1045) sit
-                # far outside f_source's [0, 1000] default, whose soft
-                # bound would then dominate the logp.  Dividing by `ref`
-                # puts the baseline at ~1, which is the scale those
-                # defaults were written for.  RATIOS ARE UNCHANGED, so
+                # `sed:` block to tie f_source to a magnitude.  (This was
+                # also once needed because raw pySIS counts, f_source ~ 1.8e4
+                # on OGLE-2016-BLG-1045, sat outside a [0, 1000] f_source
+                # bound; f_source/f_blend carry no bounds since review
+                # 1.6.18, so the fit is unit-free either way.)  Dividing by
+                # `ref` puts the baseline at ~1.  RATIOS ARE UNCHANGED, so
                 # q_source and the blending are unaffected; only the unit
                 # moves.  The zeropoint that recovers the absolute scale is
                 # kept in _dia_zp (zp_ref below), so nothing is lost:
@@ -589,24 +758,39 @@ class MulensInstrument(Instrument):
         # _earth_vel_ref off this instrument for the mu_helio -> mu_geo
         # conversion.
         self._event = system.mulensevent
+        self._event.set_line_of_sight(ra_rad, dec_rad)
         _, self._earth_pos_ref, self._earth_vel_ref = (
             self._event.geocentric_frame()
         )
         # ... and handed to the relaxation engine BEFORE the probe below:
-        # its t_E and pi_E relations are geocentric (review 8.6.23), so the
-        # geometry the bootstrap reads is the one the model will start at.
+        # its t_E and pi_E relations are geocentric (review 8.6.23).
         self._event.register_frame_constants(system)
+        # So are the event's kinematic start hints (body distances and
+        # masses, the galactic-model proper motions), which until 2026-10
+        # arrived only at stage 3: the probe then solved pi_E on the
+        # defaults.yaml distances and masses, and the geocentric relation
+        # made that a parallax ~150x the model's start (DC2018-069, review
+        # 8.6.23).  AFTER the peak finder, deliberately: a t_E these hints
+        # imply through the relations must not count as an informed t_E the
+        # finder holds instead of fitting.
+        self._event.register_kinematic_hints(system)
 
         # The event geometry the bootstrap below reads, as the relaxation
         # engine would start it given everything known NOW (user entries, the
         # peak finder's seed 0, hints so far) -- one probe for every file.
-        # See _probe_bootstrap_geometry.  It runs after t0_par is final and
-        # the frame constants are in (above); nothing it reads moved there.
+        # See _probe_bootstrap_geometry.  This is only the best stage 1 can
+        # know: hints pushed at stage 3 (a planet's mass, the stellar
+        # relations, the source star this very bootstrap seeds) can still
+        # move the start, so reread_after_starts compares it with the solved
+        # start after stage 4 and re-runs the bootstrap there if it moved.
         geometry = self._probe_bootstrap_geometry(system)
+        self._bootstrap_geometry = geometry
+        self._bootstrap_inputs = []
 
         # Median absolute position per instrument (used by MulensEvent to
         # detect satellite parallax when sizing the logmass scale)
         self.inst_ref_pos = []
+        self._node_obs_file = []
 
         # Pass 2: observer positions, flux bootstraps, and sanity checks.
         for i, (t, f, e, df) in enumerate(per_file):
@@ -615,7 +799,18 @@ class MulensInstrument(Instrument):
             self.inst_ref_pos.append(np.median(xyz_abs, axis=0))
 
             xyz_delta = self._abs_to_delta(t, xyz_abs)
+            # The observer at every sub-exposure node of a smeared file,
+            # from the same ephemeris and frame as xyz_delta (None for an
+            # unsmeared file, whose one node is the epoch).
+            self._node_obs_file.append(
+                self._node_observer_positions(i, t)
+                if self.ninterp[i] > 1
+                else None
+            )
 
+            # Kept for reread_after_starts, which re-runs the bootstrap at
+            # the SOLVED geometry when the start solve moved it.
+            self._bootstrap_inputs.append((t, f, xyz_delta, ra_rad, dec_rad))
             f_total, q_source, q_flux = self._estimate_flux_components(
                 t, f, xyz_delta, ra_rad, dec_rad, i, geometry
             )
@@ -834,50 +1029,55 @@ class MulensInstrument(Instrument):
             rank=30,
         )
 
-    def _resolve_source_radec_deg(self, system):
-        """Source star's sky position in degrees.
+    def _resolve_source_radec_rad(self, system):
+        """Source star's sky position in radians.
 
-        Falls back to the (primary) lens star's ra/dec when the user never
-        explicitly set the source's own -- source and lens are angularly
-        coincident by construction, so params.yaml only needs to state the
-        target coordinates once, on the lens.
+        Falls back to the (primary) lens star's ra/dec when the source's own
+        are not set -- source and lens are angularly coincident by
+        construction, so params.yaml only needs to state the target
+        coordinates once, on the lens.
+
+        Read with ``probe_star_radec`` (components/star/position.py), never
+        ``resolve()``: a source position LINKED to the lens's
+        (``star.Source.ra: {initval: star.Lens.ra}``) read as the
+        defaults.yaml placeholder (180, 0) under ``resolve()``, and the
+        line of sight, the geocentric frame and the Earth-velocity
+        conversion all followed it (KMT-2023-BLG-1454: t_E 6.394 for
+        6.438, light-curve logp +79.6 at identical parameters; review
+        1.1.10).  A STATED position (a number, or a link to numbers)
+        replaces the old ``in user_params`` test, so a link counts as set
+        and an unset position raises instead of reaching the placeholder.
         """
         # bodies, not star_map: called from load_data (stage 1), before the
         # source component's build_maps has necessarily run.
         source_ndx = int(system.source.bodies[0][1])
-        n_stars = system.star.n_elements
-        ra_all = self.config_manager.resolve("star", "ra", shape=(n_stars,))[
-            "initval"
-        ]
-        dec_all = self.config_manager.resolve("star", "dec", shape=(n_stars,))[
-            "initval"
-        ]
-
-        star_names = getattr(system.star, "names", None)
-        keys = [f"star.{source_ndx}.ra", "star.ra"]
-        if star_names:
-            keys.append(f"star.{star_names[source_ndx]}.ra")
-        user_set_source = any(
-            k in self.config_manager.user_params for k in keys
-        )
-
-        ndx = source_ndx
-        if not user_set_source:
-            # The PRIMARY lens body (entry 0), never "the first star among
-            # the lens bodies": MulensEvent._validate_bodies (stage 3)
-            # refuses a non-star primary, but this runs in stage 1, so the
-            # same rule is enforced here rather than silently borrowing a
-            # star COMPANION's coordinates.
-            p_type, p_ndx = system.lens.bodies[0]
-            if p_type != "star":
-                raise ValueError(
-                    f"[{self.prefix}] the primary lens body (lens entry 0) "
-                    f"is '{p_type}.{p_ndx}', but it must be a star "
-                    f"(see MulensEvent._validate_bodies)."
-                )
-            ndx = int(p_ndx)
-
-        return float(ra_all[ndx]), float(dec_all[ndx])
+        # The PRIMARY lens body (entry 0), never "the first star among the
+        # lens bodies": MulensEvent._validate_bodies (stage 3) refuses a
+        # non-star primary, but this runs in stage 1, so the same rule is
+        # enforced here rather than silently borrowing a star COMPANION's
+        # coordinates.
+        p_type, p_ndx = system.lens.bodies[0]
+        wanted = [source_ndx] + ([int(p_ndx)] if p_type == "star" else [])
+        pos = probe_star_radec(self.config_manager, wanted)
+        if pos[source_ndx] is not None:
+            return pos[source_ndx]
+        if p_type != "star":
+            raise ValueError(
+                f"[{self.prefix}] the source star has no ra/dec, and the "
+                f"primary lens body (lens entry 0) is '{p_type}.{p_ndx}', "
+                f"which must be a star to lend its coordinates (see "
+                f"MulensEvent._validate_bodies)."
+            )
+        if pos[int(p_ndx)] is None:
+            raise ValueError(
+                f"[{self.prefix}] the microlensing line of sight needs the "
+                f"target's sky position, but neither the source "
+                f"(star.{source_ndx}) nor the primary lens "
+                f"(star.{int(p_ndx)}) has ra/dec set (only the "
+                f"defaults.yaml placeholder exists).  Give star.<i>.ra and "
+                f"star.<i>.dec (deg) for one of them in the params file."
+            )
+        return pos[int(p_ndx)]
 
     def _probe_bootstrap_geometry(self, system):
         """The flux bootstrap's event geometry, read with ``probe_start``.
@@ -899,16 +1099,25 @@ class MulensInstrument(Instrument):
 
         Uninformed is not the same as "use the default": a defaults.yaml
         ``t_0`` or ``u_0`` describes no event, so a bootstrap built on it
-        would be a confident wrong answer.  The pi_E default (0, 0) is what
-        the bootstrap has always assumed without parallax information, so
-        the pi_E reads keep it; every other quantity comes back None and the
-        consumers say what is missing.
+        would be a confident wrong answer, so those come back None and the
+        consumers say what is missing.  pi_E is different: the model has a
+        parallax at whatever pi_E it starts at, informed or not, so the
+        bootstrap reads pi_E's START value (``_BootstrapGeometry``,
+        START_PATHS).  It used to read an uninformed pi_E as (0, 0), which
+        is not where the model starts.
 
         One probe per ``load_data`` (the probe is a full engine solve; see
         ``ConfigManager.probe_start`` on why it is not cached).  A companion
         lens's geometry is probed only when the lens HAS a companion
         (``lens.1`` -- element 0 is the masked primary).
         """
+        return _BootstrapGeometry(
+            self.config_manager.probe_start(self._bootstrap_paths(system)),
+            n_companions=system.lens.n_companions,
+        )
+
+    def _bootstrap_paths(self, system):
+        """The event-geometry paths the flux bootstrap reads."""
         paths = [
             "mulensevent.0.t_E",
             "mulensevent.0.pi_E_N",
@@ -918,10 +1127,88 @@ class MulensInstrument(Instrument):
             paths += [f"source.{j}.t_0", f"source.{j}.u_0", f"source.{j}.rho"]
         if system.lens.n_companions >= 1:
             paths += ["lens.1.s", "lens.1.log_s", "lens.1.q", "lens.1.alpha"]
-        return _BootstrapGeometry(
-            self.config_manager.probe_start(paths),
-            has_companion=system.lens.n_companions >= 1,
+        return paths
+
+    @staticmethod
+    def _geometry_moved(read, solved):
+        """The paths whose bootstrap reading differs between two geometries.
+
+        Compared as the bootstrap SEES them (``_BootstrapGeometry.__call__``),
+        to a relative 1e-6: the stage-1 probe and the stage-4 solve are two
+        runs of the same engine, whose numerical solves agree only to their
+        convergence tolerance (~1e-8 measured on DC2018-069), and a
+        difference that small moves no flux split.
+        """
+        moved = []
+        for p in read.probed:
+            a, b = read(p), solved(p)
+            if (a is None) != (b is None):
+                moved.append(p)
+            elif a is not None and not np.isclose(
+                float(a), float(b), rtol=1e-6, atol=0.0
+            ):
+                moved.append(p)
+        return moved
+
+    def reread_after_starts(self, system):
+        """After stage 4: re-run the flux bootstrap if the start moved.
+
+        The bootstrap fits each file's flux split to magnification columns
+        built from the event geometry, and its q_source / log_f_total / f_source
+        hints (and the source star they seed) must describe the geometry the
+        model STARTS at.  At stage 1 the probe can only see what is known
+        then; a hint pushed at stage 3 (a planet's mass, the stellar
+        relations, the source star this bootstrap itself seeds) can still
+        move the solved start.  On DC2018-069 (fitpirel/fitthetae/fitmurel,
+        no pi_E entry) the stage-1 probe read pi_E = (-1.46, -4.10) against
+        a start of ~(0.03, 0.02) -- the bootstrap then fit point-lens
+        columns with a parallax hundreds of times the start's and W149's
+        q_source came out 0.48 instead of 0.32 (review 8.6.23, the #455
+        regression).  So this compares the geometry the bootstrap read with
+        the seed-0 start the engine solved (``ConfigManager.solved_start``)
+        and, where any path moved, re-runs the bootstrap at the solved
+        geometry and returns the message that makes ``System.prepare``
+        run stages 3 and 4 once more with the new hints.  Asked again after
+        that pass, a geometry that still moved means the flux split and the
+        geometry depend on each other through the hints; System raises
+        rather than iterate.
+        """
+        solved = _BootstrapGeometry(
+            self.config_manager.solved_start(self._bootstrap_paths(system)),
+            n_companions=system.lens.n_companions,
         )
+        moved = self._geometry_moved(self._bootstrap_geometry, solved)
+        if not moved:
+            return []
+        read = self._bootstrap_geometry
+
+        def fmt(g, p):
+            v = g(p)
+            return "uninformed" if v is None else f"{float(v):.9g}"
+
+        what = ", ".join(
+            f"{p} {fmt(read, p)} -> {fmt(solved, p)}" for p in moved
+        )
+        self.fs_init, self.q_source_init, self.q_flux_init = [], [], []
+        for i, (t, f, xyz_delta, ra_rad, dec_rad) in enumerate(
+            self._bootstrap_inputs
+        ):
+            f_total, q_source, q_flux = self._estimate_flux_components(
+                t, f, xyz_delta, ra_rad, dec_rad, i, solved
+            )
+            self.fs_init.append(f_total)
+            self.q_source_init.append(q_source)
+            self.q_flux_init.append(q_flux)
+        self._bootstrap_geometry = solved
+        return [
+            (
+                f"[{self.prefix}] the flux bootstrap read the event geometry "
+                f"at stage 1 and the start solve moved it ({what}); the "
+                f"bootstrap was re-run at the solved start.",
+                [f"{self.prefix}.{i}.q_source" for i in range(self.n_elements)]
+                + moved,
+            )
+        ]
 
     # ------------------------------------------------------------------
     # data_format: dia -- native difference imaging
@@ -1000,6 +1287,10 @@ class MulensInstrument(Instrument):
         in magnitudes over the epochs with finite, usable values.  On
         MulensModel's native KB180003 set this returns ref = 1584.9 at
         zp = 28.000 for all three sites with a residual rms of 2.8e-5 mag.
+        That reference is pySIS's (20.0 mag), not the star's baseline
+        (review 2.2.22c, class docstring): f_source does not depend on it,
+        f_blend and q_source do, which is why a reader of the blend
+        requires an explicit one (``dia_reference_is_solved``).
 
         An explicit ``reference_flux``/``reference_mag`` short-circuits the
         solve; the zeropoint then comes from ``zp:`` (default 28.0, the
@@ -1064,7 +1355,10 @@ class MulensInstrument(Instrument):
         else:
             logger.info(
                 "[%s:%s] data_format: dia -- reference flux %.6g at "
-                "zp %.4f (residual rms %.3g mag); total flux = ref - dflux.",
+                "zp %.4f (residual rms %.3g mag); total flux = ref - dflux. "
+                "A solved pySIS reference is the pipeline's, not the "
+                "star's baseline: f_source is unaffected, f_blend and "
+                "q_source are relative to it.",
                 self.prefix,
                 label,
                 ref,
@@ -1113,8 +1407,8 @@ class MulensInstrument(Instrument):
         if t0 is None or u0 is None or tE is None:
             return
 
-        pi_E_N = geometry("mulensevent.0.pi_E_N", 0.0)
-        pi_E_E = geometry("mulensevent.0.pi_E_E", 0.0)
+        pi_E_N = geometry("mulensevent.0.pi_E_N")
+        pi_E_E = geometry("mulensevent.0.pi_E_E")
 
         delta_e, delta_n = observer_sky_offset(xyz_delta, ra_rad, dec_rad)
         A_traj = self._pspl_magnification(
@@ -1293,6 +1587,44 @@ class MulensInstrument(Instrument):
             return None
 
     @staticmethod
+    def _bootstrap_proxy_note(n_companions, binary):
+        """(model name, proxy note) for the bootstrap's magnification.
+
+        The bootstrap fits at most a BINARY lens without parallax or orbital
+        motion: the seeded lens.1 geometry when ``binary``
+        (``_binary_magnification_columns``), else a point lens
+        A(t_0, u_0, t_E).  That is the event's own lens only for a point
+        lens, or a binary whose lens.1 s/q/alpha were derivable at stage 1.
+        Otherwise -- a companion whose s/alpha only a keplerian orbit
+        produces (ob09020), or a second companion (a triple lens) -- it is a
+        PROXY with none of the missing companions' caustic features, and a
+        light curve dominated by them (an anomaly-only follow-up file) can
+        fail the fit with a correct seed (review 1.6.20).  The note says so,
+        in place of blaming the seed.  Using the seed's real magnification
+        instead would mean a stage-1 Kepler solve for s(t)/alpha(t) and the
+        triple-lens backend, i.e. the model build itself, for a start the
+        user can simply give.
+        """
+        model_name = "binary-lens (lens.1)" if binary else "point-lens"
+        n_used = 1 if binary else 0
+        if n_companions <= n_used:
+            return model_name, ""
+        if n_used:
+            omitted = (
+                f"{n_companions - 1} of its {n_companions} companion lenses"
+            )
+        elif n_companions > 1:
+            omitted = f"all {n_companions} of its companion lenses"
+        else:
+            omitted = "its companion lens"
+        return model_name, (
+            f"  This {model_name} magnification is only a proxy for this "
+            f"event's lens: it omits {omitted}, so on a light curve dominated "
+            f"by their caustic features (an anomaly-only file) it can fail "
+            f"with a correct seed, and says little about the seed."
+        )
+
+    @staticmethod
     def _baseline_flux_fallback(f):
         """A strictly positive flux scale for one file, however odd the data.
 
@@ -1327,6 +1659,37 @@ class MulensInstrument(Instrument):
             float(np.asarray(cfg[field], dtype=float).reshape(-1)[0])
             for field in ("initval", "lower", "upper")
         )
+
+    def _user_flux_starts(self, inst_idx):
+        """The user's seed-0 flux starts of light curve ``inst_idx``, when the
+        user wrote EVERY sampled one; else None.
+
+        The sampled flux coordinates are ``log_f_total`` and ``q_source``,
+        plus, with more than one source, the flux ratio in the coordinate
+        this file samples (``log_q_flux`` under ``fitlogqflux``, else
+        ``q_flux``).  A user ``initval`` -- a scalar, or a per-seed list,
+        whose length the seed assembly validates -- is the user's start at
+        every seed, so these entries outrank whatever the bootstrap would
+        compute at any seed.  Read-only on ``user_params`` (never written:
+        CLAUDE.md), under the index form ``standardize_param_names`` gives
+        every spelling.  Only the user's own entries count: a seed hint or a
+        link is not the user's start.  Returns ``{param: seed-0 value}`` in
+        user units (all four are dimensionless).
+        """
+        params = ["log_f_total", "q_source"]
+        if self._n_sources > 1:
+            log_qf = bool(self.config[inst_idx].get("fitlogqflux", False))
+            params.append("log_q_flux" if log_qf else "q_flux")
+        starts = {}
+        for param in params:
+            val = _raw_initval(
+                self.config_manager.user_params,
+                f"{self.prefix}.{inst_idx}.{param}",
+            )
+            if val is None:
+                return None
+            starts[param] = float(val)
+        return starts
 
     @staticmethod
     def _clip_q_source(q, lower, upper, what):
@@ -1385,11 +1748,17 @@ class MulensInstrument(Instrument):
 
         A NEGATIVE BLEND IS FIRST CLASS (review 2.6.23): difference imaging
         and over-subtracted crowded fields produce one, the flux likelihood
-        models it, and defaults.yaml bounds f_blend to [-1000, 1000] and
-        q_source to [0, 2] (q_source > 1 IS a negative blend).  So nothing
+        models it, and defaults.yaml bounds q_source to [0, 2] (q_source > 1
+        IS a negative blend; f_blend itself is unbounded, review 1.6.18).  So nothing
         here clamps f_b at zero, and q_source is clipped only to its DECLARED
         bounds (``_q_source_declared``, read through ``resolve`` so a user
         bound counts too), never to an invented [0.05, 0.95].
+
+        When the user wrote every sampled flux start of this file --
+        ``log_f_total`` and ``q_source`` (and the flux ratio, with two
+        sources) -- the solve is skipped and those entries are returned
+        (``_user_flux_starts``, review 1.6.20): they outrank its answer at
+        every seed, and its warnings would ask for starts already given.
 
         If the user has specified f_source and/or f_blend in their params file,
         those values are respected (they are TOTALS over sources), for any
@@ -1441,8 +1810,8 @@ class MulensInstrument(Instrument):
         t0 = geometry("source.0.t_0")
         u0 = geometry("source.0.u_0")
         tE = geometry("mulensevent.0.t_E")
-        pi_E_N = geometry("mulensevent.0.pi_E_N", 0.0)
-        pi_E_E = geometry("mulensevent.0.pi_E_E", 0.0)
+        pi_E_N = geometry("mulensevent.0.pi_E_N")
+        pi_E_E = geometry("mulensevent.0.pi_E_E")
 
         f_source_user = _get_flux("f_source")
         f_blend_user = _get_flux("f_blend")
@@ -1488,6 +1857,29 @@ class MulensInstrument(Instrument):
             )
             return f_total, q_source, q_flux_fallback
 
+        user_starts = self._user_flux_starts(inst_idx)
+        if user_starts is not None:
+            # Every sampled flux start of this file is the user's, at every
+            # seed (review 1.6.20): the solve below would only produce
+            # numbers the user's entries outrank, and its warnings would ask
+            # for starts the user already gave.  Return those entries, so
+            # the flux scale every consumer reads (the amplitude caps, the
+            # source-star seed) is the start the model is built at.
+            logger.debug(
+                f"[{label}] flux bootstrap skipped: every flux start of this "
+                f"file is a user entry ({', '.join(sorted(user_starts))})."
+            )
+            log_q_flux = user_starts.get("log_q_flux")
+            return (
+                10.0 ** user_starts["log_f_total"],
+                user_starts["q_source"],
+                (
+                    10.0**log_q_flux
+                    if log_q_flux is not None
+                    else user_starts.get("q_flux", q_flux_fallback)
+                ),
+            )
+
         missing = [
             name
             for name, val in (("t_0", t0), ("u_0", u0), ("t_E", tE))
@@ -1513,6 +1905,9 @@ class MulensInstrument(Instrument):
         # source trajectories); fall back to PSPL columns.  Missing per-source
         # params (j > 0) degrade gracefully to the single-source estimate.
         A_cols = self._binary_magnification_columns(t, n_src, geometry, label)
+        model_name, proxy_note = self._bootstrap_proxy_note(
+            geometry.n_companions, binary=A_cols is not None
+        )
         if A_cols is None:
             A_cols = [
                 self._pspl_magnification(
@@ -1629,7 +2024,7 @@ class MulensInstrument(Instrument):
                 f"({f_total:.4g}) -- the data do not constrain the blend "
                 f"(no baseline coverage?).  Starting from the split with the "
                 f"blend held >= 0 instead; give f_blend for this file if you "
-                f"know it."
+                f"know it.{proxy_note}"
             )
             f_source_est, f_blend_est, q_flux_est = _decompose(
                 free_blend=False
@@ -1642,17 +2037,22 @@ class MulensInstrument(Instrument):
             # 2.6.23 -- this returned q_source 0.95 without a word).  No
             # positive source flux means the seeded magnification does not
             # describe this light curve.
+            verdict = (
+                proxy_note.strip()
+                if proxy_note
+                else "The seeded geometry probably does not describe this file."
+            )
             logger.warning(
-                f"[{label}] flux bootstrap: fitting the seeded magnification "
-                f"(t_0={t0!r}, u_0={u0!r}, t_E={tE!r}) to this light curve "
-                f"gives f_source = {f_source_est:.4g}, f_blend = "
+                f"[{label}] flux bootstrap: fitting the seeded {model_name} "
+                f"magnification (t_0={t0!r}, u_0={u0!r}, t_E={tE!r}) to this "
+                f"light curve gives f_source = {f_source_est:.4g}, f_blend = "
                 f"{f_blend_est:.4g} (total {f_total:.4g}); a usable split "
-                f"needs a positive source flux and a positive total.  The "
-                f"seeded geometry probably does not describe this file.  "
-                f"Starting from the data's baseline flux and q_source's "
-                f"configured start ({q_start:g}: your entry, else "
-                f"defaults.yaml) instead; check the seed or give "
-                f"f_source/f_blend for this file."
+                f"needs a positive source flux and a positive total.  "
+                f"{verdict}  Starting from the data's baseline flux and "
+                f"q_source's configured start ({q_start:g}: your entry, else "
+                f"defaults.yaml) instead; check the seed or give this file's "
+                f"flux starts (log_f_total and q_source, or f_source and "
+                f"f_blend), which skip this estimate."
             )
             return (
                 self._baseline_flux_fallback(f_obs),
@@ -1694,11 +2094,28 @@ class MulensInstrument(Instrument):
 
     def get_observer_position(self, time, observer_location="earth"):
         """
-        High-precision observer position dispatcher.
-        Delegates to the shared exozippy.ephemeris module (major bodies,
-        topocentric ground sites, and spacecraft ephemeris files).
+        Observer position at the instant it received the light tagged
+        ``time`` (BJD_TDB, the data's time system).
+
+        Delegates to ``exozippy.ephemeris.observer_position_at_reception``
+        (major bodies, topocentric ground sites, and spacecraft ephemeris
+        files), which solves for the geocentric reception instant, BJD_TDB
+        minus the Roemer delay toward the source, before looking the
+        position up (review 1.10.13).  The line of sight is the source's,
+        stashed by ``load_data`` -- the same (ra, dec) the Skowron
+        deviations and the mu_helio -> mu_geo conversion project with.
         """
-        return get_observer_position(time, observer_location=observer_location)
+        radec = getattr(self, "_source_radec_rad", None)
+        if radec is None:
+            raise RuntimeError(
+                f"[{self.prefix}] get_observer_position needs the source's "
+                f"line of sight (_source_radec_rad), which load_data sets; "
+                f"it was called before stage 1."
+            )
+        ra_rad, dec_rad = radec
+        return observer_position_at_reception(
+            time, ra_rad, dec_rad, observer_location=observer_location
+        )
 
     def register_parameters(self, system):
         """Stage 3: Declare the manifest with bootstrapped fluxes."""
@@ -1748,6 +2165,8 @@ class MulensInstrument(Instrument):
         # (sources have different colors, so the ratio is chromatic).
         # _n_sources is set at the top of load_data (stage 1), before this.
         n_sources = self._n_sources
+        # Per-light-curve binary-source flux-ratio coordinate (below).
+        fitlogqflux = [bool(c.get("fitlogqflux", False)) for c in self.config]
         if n_sources > 1:
             if n_sources > 2:
                 raise NotImplementedError(
@@ -1756,13 +2175,61 @@ class MulensInstrument(Instrument):
                     "handles 2 sources. The per-source magnification path is "
                     "generic; generalize the flux parameterization to add more."
                 )
-            self.manifest["q_flux"] = None
-            for i in range(self.n_elements):
-                self.config_manager.add_hint(
-                    f"{self.prefix}.{i}.q_flux",
-                    float(self.q_flux_init[i]),
-                    rank=PRECEDENCE_DERIVED_DATA,
+            # The coordinate is a per-light-curve choice (`fitlogqflux`):
+            # q_flux itself, uniform on its bounds (the default), or
+            # log10(q_flux), uniform in the log -- the scale-free prior on a
+            # ratio that spans decades, and the one that does not put 99.9%
+            # of the prior mass on q_flux > 1 (the linear [0, 1000] does).
+            # Same shape as log_s/s and log_rho/rho: the log is sampled and
+            # q_flux is derived from it, so every reader of q_flux is
+            # unchanged.  The bootstrap's ratio seeds whichever is sampled.
+            modes = ["log" if flag else "lin" for flag in fitlogqflux]
+            table = {
+                "lin": {"q_flux": None},
+                "log": {"q_flux": "from_log_q_flux", "log_q_flux": None},
+            }
+            self.manifest.update(
+                mode_manifest(
+                    modes,
+                    table,
+                    options={"log_q_flux": {"inactive_value": 0.0}},
+                    where=self.prefix,
                 )
+            )
+            for i in range(self.n_elements):
+                q_est = float(self.q_flux_init[i])
+                if fitlogqflux[i]:
+                    if not (np.isfinite(q_est) and q_est > 0):
+                        continue  # the defaults.yaml start stands
+                    # Held a tenth of the declared span inside the bounds
+                    # (read through resolve, so a user's tighter bound
+                    # counts): the bootstrap's ratio is clipped to
+                    # [1e-3, 1e3], i.e. exactly onto the default walls,
+                    # where the logit start diverges.
+                    cfg = self.config_manager.resolve(
+                        self.prefix, "log_q_flux", element=i, names=self.names
+                    )
+                    lo, hi = (
+                        float(np.asarray(cfg[f], dtype=float).reshape(-1)[0])
+                        for f in ("lower", "upper")
+                    )
+                    pad = 0.1 * (hi - lo)
+                    self.config_manager.add_hint(
+                        f"{self.prefix}.{i}.log_q_flux",
+                        float(np.clip(np.log10(q_est), lo + pad, hi - pad)),
+                        rank=PRECEDENCE_DERIVED_DATA,
+                    )
+                else:
+                    self.config_manager.add_hint(
+                        f"{self.prefix}.{i}.q_flux",
+                        q_est,
+                        rank=PRECEDENCE_DERIVED_DATA,
+                    )
+        elif any(fitlogqflux):
+            logger.warning(
+                f"{self.prefix}: fitlogqflux is set but the event has one "
+                "source, so there is no flux ratio to sample; ignoring it."
+            )
 
         # Map each instrument to a Band instance by name.
         self.band_map = self._band_indices(system)
@@ -1776,6 +2243,25 @@ class MulensInstrument(Instrument):
             for n in missing:
                 logger.warning(
                     f"Instrument references unknown band '{n}'; LD will be skipped."
+                )
+            # Limb darkening is per light curve (_finite_source_limb_
+            # darkening), so a band-less light curve in a finite-source event
+            # sees a UNIFORM source while its neighbors see their bands'
+            # profiles.  Legitimate (nothing says which profile it should
+            # have), but worth one line: it used to borrow the first band's.
+            if (
+                system.mulensevent.finite_source
+                and np.any(self.band_map >= 0)
+                and np.any(self.band_map < 0)
+            ):
+                bandless = [
+                    n for n, b in zip(self.names, self.band_map) if b < 0
+                ]
+                logger.warning(
+                    f"{self.prefix}: light curve(s) {bandless} name no band: "
+                    "in a finite-source event, so their magnification uses a "
+                    "UNIFORM (not limb-darkened) source. Add band: to give "
+                    "them a profile."
                 )
 
         # SED-tied photometric zeropoint, one per light curve.  Declared only
@@ -1826,36 +2312,42 @@ class MulensInstrument(Instrument):
             # Roman-fidelity sims violate in 80% of events (unrelated
             # line-of-sight stars dominate the blend; the lens supplies a
             # median 15% of it) -- into the correct inequality
-            # f_blend >= f_lens_pred, positivity doing the work.  upper and
-            # the selected elements' initval scale with the bootstrapped
-            # baseline flux, the same reasoning as _scale_flux_amplitudes:
-            # the file's flux zeropoint is arbitrary.  Pinned elements keep
-            # the defaults.yaml 0.0 (NaN initval = leave alone).
+            # f_blend >= f_lens_pred.
+            #
+            # Sampled as neighbor_fraction on [0, 1] and derived as
+            # neighbor_flux = neighbor_fraction * max(f_blend, 0)
+            # (review 2.1.26(b), JDE 2026-10-31: "the physics binds").  The
+            # support is then EXACTLY the physical one -- the neighbor light
+            # is part of the blend and every other contributor is
+            # non-negative -- with no number in it: no flux scale, so nothing
+            # read from the data or the seed, and a proper, finite prior.  It
+            # replaced a uniform on [0, 2 x median observed flux], whose
+            # width was arbitrary and which, integrated against the tie,
+            # weighted f_blend by its own size (mulensing.md).
+            #
+            # Channels (config.md, "three channels"): [0, 1] are VALIDITY
+            # limits (past them a modeled star carries negative light), so
+            # they go through "overrides" -- a params-file bound may tighten
+            # them, and a looser one is clipped back with resolve's warning.
+            # Unselected light curves are pinned at 0 (no third light;
+            # sigma 0 and initval 0 through "overrides", so a user who wants
+            # one back still wins).  The selected start is the defaults.yaml
+            # 0.5, the middle of the support.
             nb_selected = [
                 bool(c.get("sed_constrains_blend", False)) for c in self.config
             ]
             if any(nb_selected):
-                entry = pin_unselected(self.n_elements, nb_selected)
-                overrides = dict(entry.get("overrides") or {})
-                scale = np.asarray(f_total_init, dtype=float)
-                overrides["upper"] = (2.0 * scale).tolist()
-                overrides["initval"] = [
-                    (0.05 * float(sc) if sel else float("nan"))
-                    for sc, sel in zip(scale, nb_selected)
-                ]
-                entry["overrides"] = overrides
-                self.manifest["neighbor_flux"] = entry
-                # Preliminary whitening scale on the light curve's own flux
-                # scale (the defaults.yaml 0.1 is meaningless against an
-                # arbitrary flux zeropoint, and a scale >> span trips the
-                # on-the-bound nudge).  The startup probe measures the real
-                # scale; this only seeds it.
-                for i, sel in enumerate(nb_selected):
-                    if sel:
-                        self.config_manager.add_scale_hint(
-                            f"{self.prefix}.{i}.neighbor_flux",
-                            0.1 * float(scale[i]),
-                        )
+                n = self.n_elements
+                overrides = {"lower": [0.0] * n, "upper": [1.0] * n}
+                if not all(nb_selected):
+                    overrides["initval"] = [
+                        np.nan if sel else 0.0 for sel in nb_selected
+                    ]
+                entry = merge_overrides(
+                    pin_unselected(n, nb_selected), overrides
+                )
+                self.manifest["neighbor_fraction"] = entry
+                self.manifest["neighbor_flux"] = "default"
 
             self._seed_source_star_from_flux(system)
 
@@ -1980,8 +2472,13 @@ class MulensInstrument(Instrument):
             if f_src <= 0:
                 continue
             # On the BC grid's (Vega) system, which m_pred below is in.
+            # The instrumental magnitude is flux_zp - 2.5*log10(f_src)
+            # (flux_system_zp: nonzero for a dia file, review 2.2.22a).
             m_meas = (
-                zp_mu - 2.5 * np.log10(f_src) - float(self.zp_ab_minus_vega[i])
+                zp_mu
+                + float(self.flux_system_zp[i])
+                - 2.5 * np.log10(f_src)
+                - float(self.zp_ab_minus_vega[i])
             )
 
             # Predicted apparent mag of each locus row through the SED's
@@ -2116,25 +2613,35 @@ class MulensInstrument(Instrument):
             manifest[param] = entry
         return manifest
 
-    def _finite_source_limb_darkening(self, system):
-        """(u1, u2, bandpass) for the magnification, or (None, None, None).
+    def _finite_source_limb_darkening(self, system, i):
+        """(u1, u2, bandpass) for light curve ``i``'s magnification, or
+        (None, None, None).
 
-        ONE resolver, called by both `build_likelihood` and
-        `compile_plotters`.  It used to live inline in `build_likelihood`
-        only, so the plotters passed neither argument, `get_magnification_op`
-        computed `effective_bandpass = None`, and every plotted/GUI model
-        curve was the UNIFORM-source magnification while the likelihood fitted
-        the limb-darkened one -- a discrepancy of up to several percent, and
-        largest exactly where these plots are read (caustic crossings, the
-        finite-source peak).  A helper rather than a cached value because both
-        call sites want the live `band.u1` node; the warn-once flag is what
-        keeps the multi-band notice from being printed twice.
+        ONE resolver, reached by `build_likelihood` and `compile_plotters`
+        (both through `_model_flux`) and by astrometryinstrument for a
+        lensed dataset's `photometry:` light curve.  It used to live inline
+        in `build_likelihood` only, so the plotters passed neither argument,
+        `get_magnification_op` computed `effective_bandpass = None`, and every
+        plotted/GUI model curve was the UNIFORM-source magnification while the
+        likelihood fitted the limb-darkened one -- a discrepancy of up to
+        several percent, and largest exactly where these plots are read
+        (caustic crossings, the finite-source peak).  A helper rather than a
+        cached value because every call site wants the live `band.u1` node.
 
-        LD applies only when the lens is finite-source AND a Band component is
-        wired to at least one of this instrument's light curves; a uniform
-        source has no limb to darken.  Multiple distinct bands across one
-        instrument's finite-source light curves are not yet supported -- the
-        first band is used, and said so.
+        PER LIGHT CURVE.  The source profile is a property of the band the
+        light curve was taken in, so the answer is light curve ``i``'s own
+        band.  It used to be ONE (u1, u2, bandpass) for the whole
+        instrument -- the first band's, with a warning -- which put band I's
+        profile on every V-band point across exactly the caustic-crossing
+        epochs that carry the finite-source information (a 17 mmag I-vs-V
+        systematic; +40-55 chi2 per solution at the start of a real
+        OGLE-2013-BLG-0341 fit).  `_model_flux` groups the rows by band
+        (`_ld_groups`) and evaluates each band's profile on its own rows.
+
+        LD applies only when the lens is finite-source AND light curve ``i``
+        names a band; a uniform source has no limb to darken, and a light
+        curve with no `band:` has no profile to apply (register_parameters
+        warns once when that happens beside light curves that do).
 
         u2 IS THE SECOND (QUADRATIC) COEFFICIENT, and it is returned rather
         than dropped because dropping it was a real defect: the magnification
@@ -2151,20 +2658,11 @@ class MulensInstrument(Instrument):
         `"u2" in band.manifest` is the only safe test -- the same one
         transit.py and rm.py use (components/sed/sed.md).
         """
-        if not (
-            system.mulensevent.finite_source
-            and hasattr(system, "band")
-            and np.any(self.band_map >= 0)
-        ):
+        if not (system.mulensevent.finite_source and hasattr(system, "band")):
             return None, None, None
-
-        unique = sorted({int(b) for b in self.band_map if b >= 0})
-        if len(unique) > 1 and not self._warned_multiband_ld:
-            self._warned_multiband_ld = True
-            logger.warning(
-                "Multiple bands for finite-source instruments; using first band's u1."
-            )
-        band_idx = unique[0]
+        band_idx = int(self.band_map[i])
+        if band_idx < 0:
+            return None, None, None
         u2 = (
             system.band.u2.value[band_idx]
             if "u2" in system.band.manifest
@@ -2176,7 +2674,159 @@ class MulensInstrument(Instrument):
             system.band.names[band_idx],
         )
 
-    def _model_flux(self, system, t, obs_pos, inst, resolve_method=False):
+    def _ld_groups(self, system):
+        """The light curves partitioned by source profile.
+
+        Returns ``(group_of_lc, groups)``: ``group_of_lc[i]`` is light curve
+        ``i``'s group, and ``groups[g]`` the (sorted) light-curve indices
+        sharing group ``g``'s (u1, u2, bandpass) -- one group per band, plus
+        one for the band-less light curves (uniform source).  An event with
+        no limb darkening at all (a point source, or no Band component) is
+        ONE group, so its magnification is one call on every row, exactly
+        as before per-band limb darkening existed.  Any member of a group
+        is a valid argument to `_finite_source_limb_darkening` for it.
+        """
+        n = len(self.names)
+        if not (system.mulensevent.finite_source and hasattr(system, "band")):
+            return np.zeros(n, dtype=int), [np.arange(n)]
+        keys = [int(b) if b >= 0 else -1 for b in self.band_map]
+        unique = sorted(set(keys))
+        group_of_lc = np.array([unique.index(k) for k in keys], dtype=int)
+        groups = [np.flatnonzero(group_of_lc == g) for g in range(len(unique))]
+        return group_of_lc, groups
+
+    def _node_observer_positions(self, i, t):
+        """Light curve ``i``'s observer at the ``(n, k)`` sub-exposure nodes
+        of epochs ``t`` (numpy): Skowron+2011 deviations, ``(n, k, 3)``,
+        from the observer's ephemeris AT each node time -- the same lookup
+        and frame as the per-epoch ``observer_pos``, so a satellite's or the
+        Earth's motion during the exposure is followed, not held."""
+        offsets, _ = self.exposure_nodes(i)
+        t_sub = np.asarray(t, dtype=float)[:, None] + offsets[None, :]
+        obs_loc = self.config[i].get("observer_location", "earth")
+        flat = t_sub.ravel()
+        dev = self._abs_to_delta(
+            flat, self.get_observer_position(flat, observer_location=obs_loc)
+        )
+        return np.asarray(dev).reshape(t_sub.shape + (3,))
+
+    def _smeared_magnifications(self, system, t, row_lc, exposure):
+        """Every source's magnification averaged over each exposure,
+        ``[<A_j>]`` -- the flux is linear in A, so ``f_s <A> + f_b`` is the
+        exposure-mean flux, and a variable source composes as ``<S_j A_j>``
+        because ``S_j`` is inside the magnification call.
+
+        ``exposure`` is ``"data"`` (the likelihood: every row of
+        ``self.time``, each file's own nodes and node observer positions,
+        through ``Instrument.smear``) or ``(i, obs_nodes)`` (a plot grid of
+        ONE light curve, ``obs_nodes`` the ``(n, k, 3)`` node positions,
+        through ``Instrument.smear_file``).  Either way the nodes are
+        flattened and handed to the one ``_magnifications`` builder, each
+        node carrying its row's light curve for the limb darkening.
+        """
+        if exposure == "data":
+            node_obs = {}
+            for i in range(self.n_elements):
+                k = int(self.ninterp[i])
+                if k == 1:
+                    continue
+                sl = self.rows(i)
+                node_obs.setdefault(
+                    k, np.full((len(self.time), k, 3), np.nan)
+                )[sl] = self._node_obs_file[i]
+            row_lc = np.asarray(row_lc)
+
+            def fn(t_sub, rows):
+                k = int(self.ninterp[self.inst_map[rows[0]]])
+                obs = (
+                    self.observer_pos[rows]
+                    if k == 1
+                    else node_obs[k][rows].reshape((-1, 3))
+                )
+                A = self._magnifications(
+                    system,
+                    t_sub.reshape((-1,)),
+                    obs,
+                    np.repeat(row_lc[rows], k),
+                )
+                return tuple(a.reshape((len(rows), k)) for a in A)
+
+            blocks = [
+                (i, np.arange(self.rows(i).start, self.rows(i).stop))
+                for i in range(self.n_elements)
+            ]
+            return list(self.smear(fn, t, blocks))
+
+        i, obs_nodes = exposure
+
+        def fn_file(t_sub):
+            A = self._magnifications(
+                system,
+                t_sub.reshape((-1,)),
+                pt.as_tensor_variable(obs_nodes).reshape((-1, 3)),
+                int(row_lc),
+            )
+            return tuple(a.reshape(t_sub.shape) for a in A)
+
+        return list(self.smear_file(fn_file, t, i))
+
+    def _magnifications(
+        self, system, t, obs_pos, row_lc, resolve_method=False
+    ):
+        """Each source's instantaneous magnification on times ``t`` with
+        observer positions ``obs_pos``, ``[A_j]`` -- the per-LD-group
+        assembly ``_model_flux`` documents."""
+        group_of_lc, groups = self._ld_groups(system)
+        row_lc = np.asarray(row_lc)
+        if row_lc.ndim == 0:
+            row_group = None
+            present = [int(group_of_lc[int(row_lc)])]
+        else:
+            row_group = group_of_lc[row_lc]
+            present = [int(g) for g in np.unique(row_group)]
+
+        event = system.mulensevent
+        A_per_source = []
+        for j in range(self._n_sources):
+            if resolve_method:
+                event.resolve_auto_vbbl(index=j)
+
+            def magnification(g, times, obs, j=j):
+                u1, u2, bandpass = self._finite_source_limb_darkening(
+                    system, int(groups[g][0])
+                )
+                return event.get_magnification_op(
+                    times,
+                    obs,
+                    system,
+                    index=j,
+                    u1=u1,
+                    u2=u2,
+                    bandpass=bandpass,
+                )
+
+            if len(present) == 1:
+                A_per_source.append(magnification(present[0], t, obs_pos))
+                continue
+            A = pt.zeros_like(pt.as_tensor_variable(t), dtype="float64")
+            for g in present:
+                rows = np.flatnonzero(row_group == g)
+                A = pt.set_subtensor(
+                    A[rows], magnification(g, t[rows], obs_pos[rows])
+                )
+            A_per_source.append(A)
+        return A_per_source
+
+    def _model_flux(
+        self,
+        system,
+        t,
+        obs_pos,
+        inst,
+        row_lc,
+        resolve_method=False,
+        exposure=None,
+    ):
         """The ONE detrend-free flux-model expression, in each row's own
         instrument flux system.
 
@@ -2192,35 +2842,55 @@ class MulensInstrument(Instrument):
         applies it through ``Instrument._detrended_model`` and the plots take
         it off the data (``detrend_corrected``), instrument.md.
 
+        ``row_lc`` (NUMPY, never symbolic) names the light curve whose limb
+        darkening each row takes: one index per row (the likelihood passes
+        ``self.inst_map``), or one int for every row (the plotter, which
+        compiles one curve per LD group, compile_plotters).  It is static
+        because the per-band partition must be: the rows of each band are
+        materialized as numpy index arrays at build time.
+
         Magnification: both the symbolic and Op paths take Skowron+2011
         geocentric deviations (AU); ``get_magnification_op`` dispatches.
-        u1/u2/bandpass come from the one LD resolver.  ``resolve_method`` is
-        the likelihood's: it lets ``resolve_auto_vbbl`` fix the backend's
-        method list before each source's Op is built (the plot grid reuses
-        that decision; the bracket spans the whole time axis, review 2.6.9).
+        ONE call per (source, LD group present), each on its group's rows
+        only, reassembled with ``pt.set_subtensor`` -- never ``pt.where``,
+        whose gradient multiplies the unselected branch by zero and turns a
+        NaN there into a NaN everywhere (CLAUDE.md).  The rows are disjoint
+        and cover the vector, so the cost stays one evaluation per epoch per
+        source however many bands there are.  With a single group present
+        (every single-band event; every point-source or LD-free one) it is
+        the one call on the whole vector, bit-identical to the
+        pre-per-band graph.  u1/u2/bandpass come from the one LD resolver.
+        ``resolve_method`` is the likelihood's: it lets ``resolve_auto_vbbl``
+        fix the backend's method list before each source's Op is built (the
+        plot grid reuses that decision; the bracket spans the whole time
+        axis, review 2.6.9).
 
         Flux: F = sum_j f_s,j A_j + f_b, with f_s,1 = f_s/(1+q_F) and
         f_s,2 = f_s q_F/(1+q_F) (q_F per instrument -- sources differ in
         colour).  No clamp: the model flux may legitimately be <= 0
         (f_blend may be negative, difference-imaging data live around zero),
         and the likelihood is Gaussian in flux, so nothing takes a log.
+
+        ``exposure`` (``None``: the magnification at each time) asks for
+        the exposure-averaged magnification instead -- ``"data"`` from the
+        likelihood when a light curve smears, ``(i, obs_nodes)`` from a
+        smeared light curve's plotter; ``_smeared_magnifications``.
         """
-        u1, u2, bandpass = self._finite_source_limb_darkening(system)
+        event = system.mulensevent
         n_src = self._n_sources
-        A_per_source = []
-        for j in range(n_src):
+        if exposure is None:
+            A_per_source = self._magnifications(
+                system, t, obs_pos, row_lc, resolve_method=resolve_method
+            )
+        else:
+            # The backend's method list is fixed once per source, on the
+            # whole time axis (resolve_auto_vbbl), BEFORE any node group's
+            # Op is built -- a per-row decision, never a per-node one.
             if resolve_method:
-                system.mulensevent.resolve_auto_vbbl(index=j)
-            A_per_source.append(
-                system.mulensevent.get_magnification_op(
-                    t,
-                    obs_pos,
-                    system,
-                    index=j,
-                    u1=u1,
-                    u2=u2,
-                    bandpass=bandpass,
-                )
+                for j in range(n_src):
+                    event.resolve_auto_vbbl(index=j)
+            A_per_source = self._smeared_magnifications(
+                system, t, row_lc, exposure
             )
 
         fs = self.f_source.value[inst]
@@ -2248,8 +2918,15 @@ class MulensInstrument(Instrument):
             t,
             self.observer_pos,
             self.inst_map_tensor,
+            self.inst_map,
             resolve_method=True,
+            exposure="data" if any(k > 1 for k in self.ninterp) else None,
         )
+
+        # Retained (detrend-free, exposure-averaged where a light curve
+        # smears) so the plotted model can be pinned to the likelihood's
+        # (tests/test_mulens_exposure.py).
+        self._model_flux_data_node = model_flux
 
         # Optional detrending against extra data columns, through the shared
         # base mechanism: the coefficients are magnitude-space (airmass,
@@ -2457,7 +3134,7 @@ class MulensInstrument(Instrument):
                 if stated is not None
                 else "the filter's native system"
             )
-            logger.info(
+            message = (
                 f"mulensinstrument {name}: zeropoint magnitude system "
                 f"{mag_system} ({how}; the SED predicts Vega, so "
                 + (
@@ -2467,6 +3144,12 @@ class MulensInstrument(Instrument):
                     else "no conversion)."
                 )
             )
+            # Stage 3 can run twice (a topology revision or a stage-1
+            # estimate re-read after the start solve, System.prepare): log a
+            # light curve's resolution once, and again only if it CHANGED.
+            if self._zp_magsys_logged.get(name) != message:
+                logger.info(message)
+                self._zp_magsys_logged[name] = message
 
     def _user_states(self, field):
         """Per light curve: did the USER state zeropoint ``field``?
@@ -2623,7 +3306,10 @@ class MulensInstrument(Instrument):
                 self._predicted_mag_on_zp_system(source_indices, i, system)
             )
 
-        return {"m_source_pred": pt.stack(m_pred)}
+        return {
+            "m_source_pred": pt.stack(m_pred),
+            "flux_zp": pt.constant(self.flux_system_zp),
+        }
 
     def _build_sed_flux_constraint(self, model, system):
         """
@@ -2640,7 +3326,9 @@ class MulensInstrument(Instrument):
             m_SED = -2.5*log10(f_source) + zp
 
         zp is the DERIVED Parameter ``mulensinstrument.zeropoint``,
-        zp_i = m_SED + 2.5*log10(f_s,i) (physics.calc_zeropoint), with m_SED
+        zp_i = m_SED + 2.5*log10(f_s,i) - flux_zp_i (physics.calc_zeropoint;
+        ``flux_zp`` is ``flux_system_zp``, nonzero only for a dia file, whose
+        flux is in units of its reference -- review 2.2.22a), with m_SED
         on the light curve's zeropoint magnitude system (``magsys:``, issue
         #313), and the USER's Gaussian prior on it -- there is no default
         (review 2.2.21); without both mu and sigma there is no tie -- is
@@ -2707,10 +3395,18 @@ class MulensInstrument(Instrument):
             # potential.  With it, positivity makes the tie one-sided: a
             # blend BRIGHTER than the lens is absorbed by f_nb, a blend
             # FAINTER than the lens still costs -- "the blend must contain
-            # at least the lens's light".
-            f_lens_inst = 10 ** (
-                -0.4 * (m_blend_pred - self.zeropoint.value[i])
-            )
+            # at least the lens's light".  f_nb = neighbor_fraction *
+            # max(f_blend, 0) <= f_blend, so the residual is
+            # 2.5*log10(f_lens/f_blend + neighbor_fraction) wherever
+            # f_blend > 0.
+            # m_inst = flux_zp - 2.5*log10(f) (flux_system_zp): a dia file's
+            # flux is in units of its reference.  Added only where nonzero,
+            # so every other light curve's graph is unchanged.
+            m_inst_blend = m_blend_pred - self.zeropoint.value[i]
+            flux_zp = float(self.flux_system_zp[i])
+            if flux_zp:
+                m_inst_blend = m_inst_blend - flux_zp
+            f_lens_inst = 10 ** (-0.4 * m_inst_blend)
             f_pred = f_lens_inst + self.neighbor_flux.value[i]
             resid = 2.5 * pt.log10(pt.maximum(f_pred, 1e-30) / fb_i)
             pm.Potential(
@@ -2786,19 +3482,73 @@ class MulensInstrument(Instrument):
         # the "physical + GP" curve is built on it too (see plot_data).  The
         # detrend term is not: it is per observation, and plot_data divides
         # it out of the data instead (Instrument.detrend_corrected).
-        model_flux = self._model_flux(system, t_input, obs_pos_input, inst_idx)
+        #
+        # ONE compiled curve per limb-darkening group (_ld_groups: one per
+        # band), each the same builder with that group's source profile on
+        # every grid point, and `_compiled_model_flux(t, obs_pos, i, ...)`
+        # dispatches on light curve i's group.  A grid point has no band of
+        # its own -- it takes the band of the light curve being drawn -- and
+        # the alternative, evaluating every band's profile on the grid and
+        # indexing by i inside one graph, multiplies the plotting VBM cost by
+        # the number of bands.  A single-group event compiles exactly the one
+        # function it always did.
+        group_of_lc, groups = self._ld_groups(system)
+        nodes, fns = [], []
+        for members in groups:
+            node = self._model_flux(
+                system, t_input, obs_pos_input, inst_idx, int(members[0])
+            )
+            nodes.append(node)
+            fns.append(
+                pytensor.function(
+                    inputs=[t_input, obs_pos_input, inst_idx] + param_symbols,
+                    outputs=node,
+                    on_unused_input="ignore",
+                )
+            )
 
         # Retained symbolically so plot_data can walk the graph for
         # param_deps (the evaluator skips components whose specs declare no
         # dependency on a moved slider -- empty deps would freeze the GUI's
-        # microlensing charts in live mode).
-        self._model_flux_node = model_flux
-
-        self._compiled_model_flux = pytensor.function(
-            inputs=[t_input, obs_pos_input, inst_idx] + param_symbols,
-            outputs=model_flux,
-            on_unused_input="ignore",
+        # microlensing charts in live mode).  Every group's curve, so a
+        # slider on any band's u1 counts.
+        self._model_flux_node = (
+            nodes[0] if len(nodes) == 1 else pt.stack(nodes)
         )
+
+        # A SMEARED light curve's own curve: the same builder averaged
+        # over each exposure (_smeared_magnifications), on the grid's own
+        # node observer positions, which it computes from t -- the obs_pos
+        # it is handed (the epochs') is not what it needs.
+        obs_nodes_input = pt.tensor3("obs_nodes")
+        smeared_fns = {}
+        for i in range(self.n_elements):
+            if self.ninterp[i] <= 1:
+                continue
+            node = self._model_flux(
+                system,
+                t_input,
+                None,
+                inst_idx,
+                int(i),
+                exposure=(i, obs_nodes_input),
+            )
+            nodes.append(node)
+            smeared_fns[i] = pytensor.function(
+                inputs=[t_input, obs_nodes_input, inst_idx] + param_symbols,
+                outputs=node,
+                on_unused_input="ignore",
+            )
+
+        def compiled_model_flux(t, obs_pos, i, *values):
+            i = int(i)
+            if i in smeared_fns:
+                return smeared_fns[i](
+                    t, self._node_observer_positions(i, t), i, *values
+                )
+            return fns[group_of_lc[i]](t, obs_pos, i, *values)
+
+        self._compiled_model_flux = compiled_model_flux
 
         # Full per-instrument f_source / f_blend vectors at a given point, used
         # by plot() to rescale every data set onto the reference instrument's

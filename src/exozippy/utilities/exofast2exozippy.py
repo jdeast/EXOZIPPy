@@ -55,7 +55,15 @@ import shutil
 import sys
 from pathlib import Path
 
-MSUN_PER_MJUP = 1047.348644  # IAU nominal GMsun/GMjup
+from exozippy.config import unit_conversion
+
+# solMass -> jupiterMass, the SAME ratio the Parameter layer reads
+# planet.mass's jupiterMass with (astropy: the IAU 2015 Resolution B3
+# nominal GM_sun/GM_jup = 1.3271244e20 / 1.2668653e17 = 1047.5655).  It was
+# the hand-written 1047.348644, the IAU 2009 Sun/Jupiter-SYSTEM mass ratio,
+# so an imported EXOFASTv2 `mpsun` prior landed at 0.99979 x its mass
+# (review 1.9.13).
+MSUN_PER_MJUP = unit_conversion("solMass", "jupiterMass", "mpsun")
 RAD_TO_DEG = 180.0 / math.pi
 
 # ----------------------------------------------------------------------
@@ -872,6 +880,20 @@ def _bool_array(val, n, keyword):
     return flags
 
 
+def _exptime_minutes_to_seconds(v, val):
+    """One EXOFASTv2 ``exptime`` entry (MINUTES) as EXOZIPPy's
+    ``exptime_s`` (SECONDS).  A value that is not a number RAISES: it is an
+    IDL expression the converter could not evaluate, and guessing would
+    smear every point over a made-up exposure."""
+    if isinstance(v, (bool, str)) or not isinstance(v, (int, float)):
+        raise ValueError(
+            f"exptime={val!r}: cannot convert {v!r} to a number of minutes. "
+            "Set it to a literal value in the driver (e.g. exptime=30) and "
+            "convert again"
+        )
+    return 60.0 * float(v)
+
+
 def convert(pro_path, outdir, base, priorfile_override=None):
     pro_path = Path(pro_path).expanduser().resolve()
     pro_dir = pro_path.parent
@@ -943,7 +965,7 @@ def convert(pro_path, outdir, base, priorfile_override=None):
 
     # /fitslope, /fitquad: EXOFASTv2's RV trend is the reflex of a companion
     # too long-period to resolve, which EXOZIPPy writes as what it is -- a
-    # Taylor orbit (type: linear / quadratic) whose primary is the observed
+    # Taylor orbit (type: constant_acceleration / constant_jerk) whose primary is the observed
     # star.  RVEPOCH is its epoch (EXOFASTv2's default, the midpoint of the
     # RV span, is also EXOZIPPy's, so it is written only when given).
     fitslope = bool(take("fitslope"))
@@ -956,7 +978,7 @@ def convert(pro_path, outdir, base, priorfile_override=None):
         else:
             trend = dict(
                 name="trend",
-                type="quadratic" if fitquad else "linear",
+                type="constant_jerk" if fitquad else "constant_acceleration",
                 epoch=None if rvepoch is None else float(rvepoch),
             )
             info(
@@ -990,13 +1012,19 @@ def convert(pro_path, outdir, base, priorfile_override=None):
         else:
             info(f"'{key}={val}' is the default (all planets modeled)")
 
-    # per-file cadence smearing
+    # per-file cadence smearing.  EXOFASTv2's exptime is in MINUTES;
+    # EXOZIPPy's exposure time is `exptime_s:`, in SECONDS (instrument.md,
+    # "Exposure smearing"), so it is converted HERE, at the boundary, and no
+    # minutes value ever reaches an emitted config.
     exptime = take("exptime")
     ninterp = take("ninterp")
     if take("longcadence"):
         exptime = exptime or 30.0
         ninterp = ninterp or 10
-        info("longcadence -> exptime: 30 min, ninterp: 10 on every transit")
+        info(
+            "longcadence -> exptime_s: 1800 (30 min), ninterp: 10 on every "
+            "transit"
+        )
     for key, val in (("exptime", exptime), ("ninterp", ninterp)):
         if val is None:
             continue
@@ -1008,7 +1036,10 @@ def convert(pro_path, outdir, base, priorfile_override=None):
             )
             continue
         for t, v in zip(transits, vals):
-            t[key] = v
+            if key == "exptime":
+                t["exptime_s"] = _exptime_minutes_to_seconds(v, val)
+            else:
+                t[key] = v
 
     # per-file Kepler-spline detrending (mkss.pro: a scalar applies to every
     # transit, an array is per transit in the sorted-filename order above).
@@ -1894,11 +1925,10 @@ def _emit_config(
         L.append("")
 
     L.append("planet:")
-    for i, p in enumerate(planet_names):
+    # Each planet's orbit and host come from the orbit blocks' groups below
+    # (one spelling); the planet carries no index of its own.
+    for p in planet_names:
         L.append(f'  - name: "{p}"')
-        if len(planet_names) > 1:
-            # Without it every planet would read orbit 0's geometry.
-            L.append(f"    orbit_ndx: {i}")
     L.append("")
 
     L.append("orbit:")
@@ -1908,14 +1938,14 @@ def _emit_config(
         L.append(f'    companion: ["{p}"]')
     if trend:
         L.append(
-            f"  # EXOFASTv2's /fit{'quad' if trend['type'] == 'quadratic' else 'slope'}: "
+            f"  # EXOFASTv2's /fit{'quad' if trend['type'] == 'constant_jerk' else 'slope'}: "
             "the reflex of a companion too long-period"
         )
         L.append(
             "  # to resolve, as a Taylor orbit: orbit.trend.gammadot is the "
             "RV slope"
         )
-        if trend["type"] == "quadratic":
+        if trend["type"] == "constant_jerk":
             L.append(
                 "  # and orbit.trend.gammaddot its curvature (TWICE "
                 "EXOFASTv2's QUAD)."
@@ -1933,8 +1963,11 @@ def _emit_config(
             L.append(f'  - name: "{t["name"]}"')
             L.append(f'    file: "{t["file"].name}"')
             L.append(f'    band: "{t["band"]}"')
-            if "exptime" in t:
-                L.append(f"    exptime: {t['exptime']} # minutes")
+            if "exptime_s" in t:
+                L.append(
+                    f"    exptime_s: {t['exptime_s']:g} # seconds "
+                    f"({t['exptime_s'] / 60.0:g} min)"
+                )
             if "ninterp" in t:
                 L.append(f"    ninterp: {int(t['ninterp'])}")
             if t.get("fitspline"):

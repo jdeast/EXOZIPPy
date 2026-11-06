@@ -762,9 +762,10 @@ def sole_orbit_index(system, context):
     if orbit is None:
         return None
     # Only a KEPLERIAN orbit has a period to find: a Taylor orbit (type:
-    # linear | quadratic, an RV trend) is invisible to a periodogram, so one
-    # planet plus a trend is still the single-orbit case.
-    keplerian = [int(i) for i in np.nonzero(~orbit.is_taylor)[0]]
+    # linear | quadratic, an RV trend) is invisible to a periodogram, and a
+    # static one has no period at all, so one planet plus a trend is still
+    # the single-orbit case.
+    keplerian = [int(i) for i in np.nonzero(orbit.is_keplerian)[0]]
     if len(keplerian) != 1:
         logger.warning(
             "[%s] the global period search is skipped: this system has %d "

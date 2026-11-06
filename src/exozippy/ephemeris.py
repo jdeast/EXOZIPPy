@@ -114,10 +114,22 @@ def get_observer_position(
     """
     High-precision observer position dispatcher.
 
+    ``time`` is the observer's own COORDINATE time, JD_TDB: the instant at
+    which the observer occupies the returned position.  It is NOT the
+    BJD_TDB tag an instrument's data carry.  A BJD_TDB tag is the light's
+    arrival time at the solar-system barycenter, up to 8.3 min later than
+    the instant the observer received it, and the observer moves 1e-4 AU
+    in that time.  Callers holding BJD_TDB tags (every instrument, since
+    the time-system layer converts data times to BJD_TDB) go through
+    :func:`observer_position_at_reception`, which solves for the reception
+    instant and calls this.  Only code that genuinely holds a coordinate
+    time -- the frame-velocity finite difference, a test building its own
+    geometry -- calls this directly.
+
     Parameters:
     -----------
     time : float or ndarray
-        Time(s) at which to calculate coordinates (BJD_TDB).
+        Coordinate time(s) at which to calculate coordinates (JD_TDB).
     observer_location : str
         One of:
           - Major bodies ('earth', 'moon')
@@ -208,6 +220,158 @@ def get_observer_position(
         )
 
 
+def get_observer_posvel(
+    time, observer_location="earth", ephemeris=DEFAULT_EPHEMERIS
+):
+    """Barycentric position AND velocity of an observer at coordinate time
+    ``time`` (JD_TDB, the observer's own -- see :func:`get_observer_position`,
+    whose ``observer_location`` vocabulary this takes unchanged).
+
+    Returns ``(xyz_au, vel_mps)``, each ``(N, 3)`` in ICRS/J2000 equatorial
+    axes: AU, and m/s.  What a Doppler measurement needs and a parallax does
+    not, so it is its own entry point rather than a flag on the position
+    dispatcher (whose outputs stay byte-identical):
+
+    * a ground site: the Earth's barycentric velocity plus the site's GCRS
+      velocity (the Earth's rotation, ~0.46 km/s at the equator, with
+      precession, nutation and polar motion from astropy/erfa and the IERS
+      tables), combined by the relativistic velocity addition Wright &
+      Eastman (2014) and barycorrpy use, ``(v_site + v_earth) / (1 +
+      v_site . v_earth / c^2)``;
+    * 'earth' / 'moon': the body's barycentric velocity;
+    * a spacecraft ``.eph`` file: the analytic derivative of the same cubic
+      spline the positions come from (the files tabulate positions only).
+      On the shipped 1-day grids that derivative is good to well below 1
+      cm/s for an L2 orbiter; a coarser grid is the user's call.
+    """
+    from astropy.coordinates import get_body_barycentric_posvel
+
+    from exozippy.constants import C_MPS
+
+    kind, target = _resolve_observer(observer_location)
+    with use_ephemeris(ephemeris):
+        t_obj = Time(time, format="jd", scale="tdb")
+        if kind == "body":
+            p, v = get_body_barycentric_posvel(target, t_obj)
+            return (
+                np.atleast_2d(p.xyz.to("au").value.T),
+                np.atleast_2d(v.xyz.to("m/s").value.T),
+            )
+        if kind == "site":
+            p_e, v_e = get_body_barycentric_posvel("earth", t_obj)
+            p_s, v_s = target.get_gcrs_posvel(t_obj)
+            r = np.atleast_2d((p_e.xyz + p_s.xyz).to("au").value.T)
+            ve = np.atleast_2d(v_e.xyz.to("m/s").value.T)
+            vs = np.atleast_2d(v_s.xyz.to("m/s").value.T)
+            dot = np.sum(ve * vs, axis=1, keepdims=True)
+            return r, (ve + vs) / (1.0 + dot / C_MPS**2)
+    # A spacecraft file: position and its spline derivative (AU/day).
+    xyz = np.atleast_2d(interpolate_ephemeris(time, target))
+    import astropy.units as u
+
+    au_per_day_to_mps = (1.0 * u.au / u.day).to(u.m / u.s).value
+    vel = np.atleast_2d(
+        interpolate_ephemeris(time, target, derivative=1) * au_per_day_to_mps
+    )
+    return xyz, vel
+
+
+def _resolve_observer(observer_location):
+    """``("body", name)``, ``("site", EarthLocation)`` or ``("file", path)``
+    for an ``observer_location`` (the vocabulary and the search order of
+    :func:`get_observer_position`); raises naming the location otherwise."""
+    if observer_location in ["earth", "moon"]:
+        return "body", observer_location
+    if "," in observer_location:
+        return "site", _parse_geodetic(observer_location)
+    try:
+        return "site", EarthLocation.of_site(observer_location)
+    except UnknownSiteException:
+        pass
+    for path in (
+        observer_location,
+        os.path.join(EPHEMERIDES_DIR, observer_location),
+        os.path.join(EPHEMERIDES_DIR, observer_location + ".eph"),
+    ):
+        if os.path.exists(path):
+            return "file", path
+    raise ValueError(
+        f"observer location not recognized: {observer_location}; "
+        f"expected 'earth'/'moon', an astropy site name, a geodetic "
+        f"'lon_deg,lat_deg[,height_m]' string, or an ephemeris file -- "
+        f"see $EXOZIPPY_PATH/src/exozippy/ephemerides/get_ephemeris.py "
+        f"to generate one"
+    )
+
+
+def observer_position_at_reception(
+    bjd_tdb, ra, dec, observer_location="earth", ephemeris=DEFAULT_EPHEMERIS
+):
+    """
+    Observer position at the instant it RECEIVED light tagged ``bjd_tdb``.
+
+    A BJD_TDB tag is the arrival time at the solar-system barycenter.  The
+    observer at barycentric position r received that light at the earlier
+    coordinate time
+
+        jd = bjd - (r(jd) . n_hat) / c          (the Roemer delay, <= 8.3 min)
+
+    with ``n_hat`` the unit vector toward the target (``ra``/``dec`` in
+    RADIANS, the internal unit).  The delay depends on where the observer
+    is, so this is a fixed point; it converges to 1e-12 d in two passes
+    (each pass is a factor v/c ~ 1e-4 better).  Returns ``(N, 3)``
+    barycentric ICRS/J2000 equatorial coordinates in AU, exactly as
+    :func:`get_observer_position` does, and takes the same
+    ``observer_location`` vocabulary -- for a spacecraft the delay uses the
+    SPACECRAFT's own position from its ephemeris file, so an observer at
+    L2 or 1 AU behind the Earth needs no special case.
+
+    Why it exists (review 1.10.13): every data component converts its
+    times to BJD_TDB and then placed the observer at that tag, 8 min late,
+    1e-4 AU off: 1e-4 of the parallax signal (0.01 mas for a 10 pc star,
+    2e-5 theta_E on a pi_E = 0.2 microlensing event).  Below any current
+    dataset, and in the direction a Gaia-era nearby-star fit would notice.
+    VBMicrolensing's ComputeParallax does exactly this iteration for its
+    HJD input (``t_in_HJD``), which is the check ``tests/test_ephemeris_
+    reception_instant.py`` runs against.
+    """
+    jd = reception_instant(
+        bjd_tdb,
+        ra,
+        dec,
+        observer_location=observer_location,
+        ephemeris=ephemeris,
+    )
+    return get_observer_position(
+        jd, observer_location=observer_location, ephemeris=ephemeris
+    )
+
+
+def reception_instant(
+    bjd_tdb, ra, dec, observer_location="earth", ephemeris=DEFAULT_EPHEMERIS
+):
+    """The observer's coordinate time (JD_TDB) of receiving light tagged
+    ``bjd_tdb``: the fixed point of ``jd = bjd - (r(jd) . n_hat) / c``
+    (see :func:`observer_position_at_reception`, which is this followed by
+    the position lookup).  Exposed for callers that need the instant
+    itself -- the frame-velocity finite difference in
+    ``MulensEvent.geocentric_frame`` differentiates the position with
+    respect to coordinate time around it."""
+    from exozippy.constants import C_AU_PER_DAY
+
+    bjd = np.atleast_1d(np.asarray(bjd_tdb, dtype=float))
+    n_hat = np.array(
+        [np.cos(dec) * np.cos(ra), np.cos(dec) * np.sin(ra), np.sin(dec)]
+    )
+    jd = bjd
+    for _ in range(2):
+        xyz = get_observer_position(
+            jd, observer_location=observer_location, ephemeris=ephemeris
+        )
+        jd = bjd - (xyz @ n_hat) / C_AU_PER_DAY
+    return jd
+
+
 @lru_cache(maxsize=32)
 def _ephemeris_spline(ephemeris_file, _stamp):
     """Parse one .eph file and fit its CubicSpline, once (review 6.10.1).
@@ -241,17 +405,24 @@ def _ephemeris_spline(ephemeris_file, _stamp):
     return spline, float(np.min(t_grid)), float(np.max(t_grid))
 
 
-def interpolate_ephemeris(time, ephemeris_file):
+def interpolate_ephemeris(time, ephemeris_file, derivative=0):
     """
     Interpolates a Barycentric ephemeris file.
 
     Parameters:
     -----------
     time : float or ndarray
-        The time(s) at which to calculate coordinates (BJD_TDB).
+        The coordinate time(s) at which to calculate coordinates (JD_TDB:
+        the instant the spacecraft occupies the returned position, which
+        is what Horizons' ``datetime_jd`` tabulates; see
+        :func:`get_observer_position` for why this is not a BJD_TDB tag).
+    derivative : int
+        0 (default) for the positions; 1 for their time derivative, AU/day
+        (the spline's own analytic derivative: what
+        :func:`get_observer_posvel` reads as the spacecraft's velocity).
     ephemeris_file : str
         Path to the file generated by ephemerides/get_ephemeris.py
-        (Format: BJD_TDB, X, Y, Z).  The XYZ columns must be barycentric
+        (Format: JD_TDB, X, Y, Z).  The XYZ columns must be barycentric
         ICRS/J2000 **equatorial** -- that is what get_ephemeris.py's
         refplane='earth' produces, and astroquery's default
         (refplane='ecliptic') is rotated 23.4 deg from what every consumer
@@ -297,4 +468,4 @@ def interpolate_ephemeris(time, ephemeris_file):
             f"ephemerides/get_ephemeris.py)."
         )
 
-    return cs(time)
+    return cs(time) if derivative == 0 else cs(time, derivative)

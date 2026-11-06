@@ -96,7 +96,7 @@ def test_an_exposure_longer_than_the_ingress_smears_it():
     t = TC + np.arange(-0.3, 0.3, 30.0 / 1440.0)
     sharp = timing.transit_information(t, sigma, TC, P, depth, T, tau)
     smeared = timing.transit_information(
-        t, sigma, TC, P, depth, T, tau, exptime=30.0 / 1440.0
+        t, sigma, TC, P, depth, T, tau, exptime_s=1800.0
     )
     assert smeared.sum() < sharp.sum()
 

@@ -19,6 +19,7 @@ except ImportError:  # pragma: no cover - older pytensor
     from pytensor.graph.basic import ancestors
 
 from exozippy import reporting
+from exozippy.angles import apply_forced as apply_forced_angles
 from exozippy.components.component import Component
 from exozippy.components.factory import discover_components, import_failures
 from exozippy.components.parameter import Parameter, SeedBoundViolation, to_vec
@@ -106,7 +107,9 @@ RESERVED_CONFIG_KEYS = frozenset(
 # KNOWN_SAMPLER_KEYS and RESERVED_CONFIG_KEYS.  Add a key here in the same
 # edit that consumes it.
 KNOWN_BLOCK_KEYS = {
-    "modes": frozenset({"ledger", "max_invalid_frac", "force", "weights"}),
+    "modes": frozenset(
+        {"ledger", "max_invalid_frac", "force", "weights", "rerun_hot_search"}
+    ),
     "mkparam": frozenset({"n_seeds", "force"}),
     "gui": frozenset({"snapshot"}),
     "modeling": frozenset({"compile"}),
@@ -400,7 +403,17 @@ class System(Component):
             for comp in self.active_components.values()
             for rev in comp.revise_after_starts(self)
         ]
-        if self.topology_revisions:
+        # And the estimates a component made at stage 1 from a start it could
+        # only PROBE (Component.reread_after_starts; today MulensInstrument's
+        # flux bootstrap, which reads the event geometry -- review 8.6.23):
+        # recomputed at the solved start where it moved, and the same one
+        # extra pass of stages 3 and 4 picks them up.
+        start_rereads = [
+            rr
+            for comp in self.active_components.values()
+            for rr in comp.reread_after_starts(self)
+        ]
+        if self.topology_revisions or start_rereads:
             self.config_manager.restore_solve_inputs(solve_inputs)
             for comp in self.active_components.values():
                 comp.register_parameters(self)
@@ -408,6 +421,24 @@ class System(Component):
             self._adopt_element_owners()
             self.config_manager.set_engine_roles(self._engine_roles())
             self.config_manager.finalize_user_params()
+            # Asked again: an estimate the extra pass moved once more depends
+            # on the start it seeds.  One pass is the contract; raise rather
+            # than iterate to a fixed point nobody has shown exists.
+            unsettled = [
+                rr
+                for comp in self.active_components.values()
+                for rr in comp.reread_after_starts(self)
+            ]
+            if unsettled:
+                raise RuntimeError(
+                    "A stage-1 estimate still disagrees with the solved start "
+                    "after it was recomputed there once, so the estimate and "
+                    "the start it seeds depend on each other: "
+                    + "; ".join(m for m, _ in unsettled)
+                )
+            for message, paths in start_rereads:
+                logger.info(message)
+                self.config_manager.record_diagnostic("info", message, paths)
             for message, paths in self.topology_revisions:
                 logger.warning(
                     f"TOPOLOGY REVISED after the start solve: {message}"
@@ -415,6 +446,14 @@ class System(Component):
                 self.config_manager.record_diagnostic(
                     "warning", message, paths
                 )
+
+        # After stage 4: a user's `fit<angle>: true` samples that angle
+        # directly instead of through its direction latents, on a window
+        # centered on the SOLVED start -- which is why it cannot happen at
+        # stage 3 (exozippy.angles; the automatic switch happens later, after
+        # the seed polish, in run.py).  Here and not in run.py so every
+        # caller of build_model -- the GUI included -- builds what was asked.
+        apply_forced_angles(self)
 
     def _adopt_element_owners(self):
         """Hand every OWNED vector's element owners to the ConfigManager.
@@ -1291,6 +1330,31 @@ class System(Component):
                     params.append(attr)
         return params
 
+    def evidence_log_norm(self, breakdown=False):
+        """Constant (nats) that normalizes the model logp's prior terms.
+
+        The sum of every Parameter's ``evidence_log_norm_terms`` at the
+        CURRENT whitening -- call it once the whitening the trace was
+        sampled under is in place (it is, at report time).  Adding it to a
+        bridge-sampling lnZ computed from ``model.compile_logp`` turns that
+        lnZ into the normalized log evidence, comparable across runs (whose
+        whitening scales differ) and across model architectures.  The
+        model's sampled logp is left unnormalized on purpose: the constant
+        moves nothing a sampler sees.  See
+        ``Parameter.evidence_log_norm_terms`` for the terms and parameter.md
+        for what is not covered.
+
+        With ``breakdown=True`` returns ``(total, rows)``, rows being
+        ``(label, element, kind, value)``.
+        """
+        total = 0.0
+        rows = []
+        for par in self.get_all_parameters():
+            for i, kind, value in par.evidence_log_norm_terms():
+                total += value
+                rows.append((par.label, i, kind, value))
+        return (total, rows) if breakdown else total
+
     def get_raw_start(self, model):
         """
         Build the raw-space starting point explicitly from each Parameter's
@@ -1584,8 +1648,9 @@ class System(Component):
 
         1. LOGIT elements -- ``Parameter.recenter_on_start`` folds the
            displacement into the ANCHOR and zeroes ``raw_initval``.  Free:
-           section C's correction cancels the raw N(0,1) symbolically, so the
-           anchor is pure parameterization and moving it changes no density.
+           a logit element's raw coordinate is flat and section C's Jacobian
+           alone makes its prior uniform, so the anchor is pure
+           parameterization and moving it changes no density.
            ``raw = 0`` then IS the polished start.
         2. GAUSSIAN-PATH elements -- the center is NOT touched.  There
            ``raw ~ N(0,1)`` IS the prior and ``gaussian_mus`` is the prior
@@ -1706,51 +1771,46 @@ class System(Component):
         the same PHYSICAL posterior density -- the observation term is
         identical and every prior term is symmetric under the reflection, both
         asserted in tests/test_node_degeneracy.py -- so a folded draw's stored
-        lp is still its lp.  Where a coordinate's raw excursion trips
-        `_RAW_CANCELLATION_CLIP` (tc's does, by ~1e5 raw units), the
-        difference that clip introduces is an artifact of the sampled
-        coordinate rather than a density, and re-deriving lp from the folded
-        raws would record the artifact instead of removing it.
+        lp is still its lp.  The RAW-space lp of the two labels differs only
+        by tc's logit Jacobian (~1 nat on the test system: the moved tc sits
+        at a different q), an artifact of the sampled coordinate rather than
+        a density, and re-deriving lp from the folded raws would record the
+        artifact instead of removing it.  (Before review 1.2.9 the artifact
+        was the raw-cancellation clip's wall at |raw| = 1e4 -- tc's excursion
+        reaches ~1e5 -- worth ~1e10 nats; the logit raw coordinate is flat
+        now and that clip is gone.)
+
+        Nothing here is caught (review 1.3.11).  A fold or a regeneration
+        that fails is a code bug, and the wrap-up runs AFTER the trace is
+        saved, so raising costs a `recompute_trace: false` rerun; logging
+        and continuing instead reported both labels' draws, or folded raws
+        beside unfolded derived columns, in every table and plot.
+
+        Every variable that changes is REPLACED through the xarray API with
+        a new array, never written through ``.values``: the buffer behind a
+        sampler's posterior may be read-only (a JAX sampler's is), which is
+        exactly how the swallowed crash happened.
         """
-        posterior = getattr(idata, "posterior", None)
-        if posterior is None:
-            return set()
+        posterior = idata.posterior
         moved = False
         for comp in self.active_components.values():
             fold = getattr(comp, "fold_node_degeneracy", None)
             if fold is None:
                 continue
-            try:
-                moved = bool(fold(posterior)) or moved
-            except Exception as exc:  # a fold must never kill a finished fit
-                logger.warning(
-                    "[%s] degeneracy fold failed (%s); the draws are left "
-                    "unfolded, so any diagnostic on the degenerate "
-                    "coordinate is computed on both labels at once.",
-                    getattr(comp, "prefix", comp),
-                    exc,
-                )
+            moved = bool(fold(posterior)) or moved
         if not moved:
             return set()
-        try:
-            regenerated = pm.compute_deterministics(
-                posterior,
-                model=model,
-                merge_dataset=False,
-                progressbar=False,
-            )
-        except Exception as exc:
-            logger.warning(
-                "could not regenerate the deterministics after the "
-                "degeneracy fold (%s); the raw draws are folded and the "
-                "derived ones are NOT, so they disagree -- treat this "
-                "trace's derived columns as unreliable.",
-                exc,
-            )
-            return set()
+        regenerated = pm.compute_deterministics(
+            posterior,
+            model=model,
+            merge_dataset=False,
+            progressbar=False,
+        )
         for name in regenerated.data_vars:
             if name in posterior:
-                posterior[name].values[...] = regenerated[name].values
+                posterior[name] = posterior[name].copy(
+                    data=np.array(regenerated[name].values)
+                )
         logger.info(
             "degeneracy fold applied; %d deterministics regenerated.",
             len(regenerated.data_vars),
@@ -1855,6 +1915,31 @@ class System(Component):
             for label, p in self.get_parameter_lookup().items()
             if p.report_only_node
         )
+
+    def inactive_element_masks(self):
+        """``{label: boolean ACTIVE mask}`` for every built Parameter that
+        has an INACTIVE element.
+
+        The answer is ``Parameter.element_is_active`` -- the predicate the
+        startup table, the LaTeX table and ``<prefix>_results.csv`` already
+        filter on, inherited inactivity included
+        (``Component._inherit_inactivity``) -- asked once per element, so
+        the consumers that enumerate the TRACE (the summary, the corners,
+        the detailed trace plots; ``run.without_inactive``) leave out exactly
+        the elements the tables leave out.  An inactive element is a
+        bookkeeping pin, not a parameter of its instance, and reporting it
+        as "constant at 0" was review 2.11.26.  A Parameter every element of
+        which is active is absent.  Valid after ``build_model()``.
+        """
+        out = {}
+        for label, p in self.get_parameter_lookup().items():
+            mask = np.array(
+                [p.element_is_active(i) for i in range(p._n_elements())],
+                dtype=bool,
+            )
+            if not mask.all():
+                out[label] = mask
+        return out
 
     def restart_aliases(self):
         """``{sampled label: derived label}`` for every built Parameter whose

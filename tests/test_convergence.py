@@ -98,7 +98,7 @@ def test_converged_on_tail_true_for_stationary():
     # Given a stationary trace
     x = {"p.x_raw": _stationary(6, 3000)}
     # When we run the cheap tail check
-    converged, rhat, ess = C.converged_on_tail(
+    converged, rhat, ess, _drift = C.converged_on_tail(
         x, None, min_ess=100, max_rhat=1.01
     )
     # Then it reports converged
@@ -110,7 +110,7 @@ def test_converged_on_tail_false_when_transient_exceeds_tail():
     # Given a transient occupying the first 70% -- longer than the 50% tail
     x = {"p.x_raw": _transient(6, 3000, frac=0.7)}
     # When we run the cheap tail check (keeps the last half)
-    converged, rhat, ess = C.converged_on_tail(
+    converged, rhat, ess, _drift = C.converged_on_tail(
         x, None, min_ess=100, max_rhat=1.01
     )
     # Then the still-contaminated tail keeps it from declaring convergence

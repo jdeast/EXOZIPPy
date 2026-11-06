@@ -1,12 +1,7 @@
-# HAT-P-3 full fit + MIST + the Claret limb-darkening tie (hat3_mist_claret.yaml).
-#
-# Start values are hat3.params.yaml's (the MAP of a converged Torres fit of
-# the same data), with two deliberate differences:
-#   - no hand-supplied mass prior: with the MIST tracks in the fit the mass
-#     is constrained by them (hat3_mist.params.yaml says why);
-#   - no band.TESS.q1/q2 start: the tie seeds them from the Claret table at
-#     the star's start, which is the point of testing it.  A start written
-#     here would win over that seed.
+# HAT-P-3 full fit + MIST + the Claret limb-darkening tie
+# (hat3_mist_claret.yaml).  Start values are hat3.params.yaml's, without
+# its hand mass prior (the tracks constrain the mass) and without a
+# band.TESS q1/q2 start (the tie seeds them from the Claret table; README).
 overdisperse: true
 
 star.A.feh:
@@ -30,9 +25,8 @@ star.A.radiussed:
 star.A.distance:
     initval: 133.92614673
 
-# The initial metallicity, seeded slightly above the surface value (diffusion
-# depletes a K dwarf's surface), as in hat3_mist.params.yaml.  star.A.eep is
-# left to the component's grid search.
+# Initial metallicity, as in hat3_mist.params.yaml; eep is left to the
+# component's grid search.
 star.A.initfeh:
     initval: 0.30
 
@@ -66,9 +60,6 @@ orbit.b.secosw:
     initval: 0.14033024
 orbit.b.sesinw:
     initval: 0.09205694
-
-# The tie's width is band.TESS.du1/du2's sigma (default 0.05, the tables'
-# systematic floor, applied once per band).
 
 rvinstrument.HIRES.gamma:
     initval: -14.01010534

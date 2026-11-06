@@ -28,6 +28,7 @@ astrometryinstrument:
     file: "HIP1349.Hipparcos.astrom"
     mode: "gaia"                 # 1-D along-scan epoch astrometry
     observer_location: "earth"   # Hipparcos: geocentric to ~3e-4 AU
+    reference_point: [4.22329974, -52.65159230]  # w's origin: the IAD header position
     epoch: 2448349.0625          # J1991.25, reference epoch of ra/dec
 
 parameter_file: "hip1349.params.yaml"

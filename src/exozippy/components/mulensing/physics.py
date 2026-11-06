@@ -459,7 +459,8 @@ def clip_q(q):
       the DE polish and the seed polish) never once entered the branch.
     * If it *were* reached it could only do harm.  q is NaN only when an input
       is already NaN, i.e. the raw vector itself carries a NaN -- and that raw
-      variable's own N(0, 1) prior term already makes the total logp NaN, so
+      variable's own density term (NaN-propagating on every element, flat or
+      not: parameter.py's _raw_logp) already makes the total logp NaN, so
       the proposal is rejected whatever q does (verified: setting
       ``star.logmass_raw`` or ``planet.log_q_raw`` to NaN gives logp = nan).
       Substituting Q_MIN could therefore never rescue a sample; it only
@@ -571,8 +572,28 @@ THETA_E_LENSING_MIN = 1e-6  # mas
 #
 # Both are the values that were already in force everywhere they appeared, so
 # naming them changed no result; see the PR that introduced them.
+#
+# S_FLOOR no longer reaches VBM (review 1.6.22): the vbm_direct Op MERGES a
+# pair closer than S_MERGE (below) instead of clamping it.  It stays as a
+# division guard on the t0_par separation (calc_beta, calc_period_min: s =
+# 10**log_s > 0, so it never binds there), on the flux bootstrap's stage-1
+# seed and on the MulensModel A/B reference builder (binary, static s).
 S_FLOOR = 1e-6  # Einstein radii (binary separation)
 RHO_FLOOR = 1e-9  # Einstein radii (source radius)
+
+# S_MERGE    two lenses closer than this ARE one lens of their summed mass, at
+#            their center of mass (op.close_lens_groups/merge_lens_groups;
+#            review 1.6.22).  Exact in the limit, and the only well-posed
+#            answer below it: VBM's polynomial roots lose accuracy as a pair
+#            closes, so a pair handed to it at 1e-6 (the old S_FLOOR clamp,
+#            reached whenever a linear orbit's s(t) crossed zero inside the
+#            data span) returned magnifications wrong by up to 10%.
+#            Measured (mulensing.md, "A lens pair closer than S_MERGE is one
+#            lens"): the merge error at 1e-3 is at most ~1e-5 of A (point
+#            source, A <= 1e4; smaller for a finite one), while VBM's error
+#            on the unmerged pair is at Tol only from ~3e-4 up (three
+#            lenses, Multipoly) and ~1e-5 up (two).
+S_MERGE = 1e-3  # Einstein radii (lens-lens separation)
 
 
 def apply_u_0_floor(u_0):
@@ -696,15 +717,38 @@ def calc_f_blend(log_f_total, q_source):
 
 
 @register_physics
-def calc_zeropoint(m_source_pred, f_source):
+def calc_neighbor_flux(neighbor_fraction, f_blend):
+    """Neighbor third light from its fraction of the blend.
+
+    The support is exactly the physical one, ``[0, f_blend]``: every other
+    contributor to the blend is non-negative.  A negative ``f_blend``
+    (``q_source > 1``) leaves no room for third light, so the flux is 0
+    there.  The ``maximum`` enters the blend tie linearly (``f_lens +
+    neighbor_flux`` with ``f_lens > 0``), never under a sqrt or a log, so its
+    zero gradient on the clamped side multiplies nothing infinite.
+    """
+    return neighbor_fraction * pt.maximum(f_blend, 0.0)
+
+
+@register_physics
+def calc_zeropoint(m_source_pred, f_source, flux_zp):
     """Photometric zeropoint of one light curve's own flux system.
 
-    ``zp = m_SED + 2.5*log10(f_source)`` -- the offset between the SED's
-    calibrated source magnitude and the instrumental one, which is what a
-    user's ``zeropoint`` Gaussian prior constrains (see
+    ``zp = m_SED - m_inst`` -- the offset between the SED's calibrated
+    source magnitude and the instrumental one, which is what a user's
+    ``zeropoint`` Gaussian prior constrains (see
     ``MulensInstrument._build_sed_flux_constraint``).  ``m_source_pred`` is
     already on the zeropoint's magnitude system (issue #313:
     ``MulensInstrument._predicted_mag_on_zp_system``).
+
+    The instrumental magnitude is ``m_inst = flux_zp - 2.5*log10(f_source)``,
+    where ``flux_zp`` is the magnitude of unit flux in the file's flux
+    system (``MulensInstrument.flux_system_zp``): 0 for a magnitude or flux
+    file (``F = 10**(-0.4 m)``), and the recovered ``zp_ref = zp -
+    2.5*log10(ref)`` for ``data_format: dia``, whose flux is in units of the
+    reference.  So a dia file and the equivalent magnitude file give the
+    same zeropoint (review 2.2.22a; until then a dia light curve's
+    zeropoint carried an extra ``+zp_ref``, e.g. +16 mag).
 
     The flux floor mirrors the one the hand-built node carried: f_source's
     own lower bound is 0, and log10(0) is -inf.
@@ -715,7 +759,9 @@ def calc_zeropoint(m_source_pred, f_source):
     onto the prior center -- which, once defaults.yaml stopped supplying a
     center (review 2.2.21), would have reported a number nobody stated.
     """
-    return m_source_pred + 2.5 * pt.log10(pt.maximum(f_source, 1e-30))
+    return (
+        m_source_pred + 2.5 * pt.log10(pt.maximum(f_source, 1e-30)) - flux_zp
+    )
 
 
 @register_physics
@@ -776,7 +822,138 @@ def calc_rho_from_log(log_rho):
 
 
 @register_physics
+def calc_q_flux_from_log(log_q_flux):
+    # Binary-source flux ratio f_s2/f_s1 from the sampled log10 (a light
+    # curve with `fitlogqflux: true`), mirroring calc_rho_from_log.
+    return pt.power(10.0, log_q_flux)
+
+
+@register_physics
 def calc_s(log_s):
     # Projected binary separation from the sampled log10(s).  Sampling log_s
     # makes close/wide an exact reflection log_s -> -log_s (|J| = 1).
     return pt.power(10.0, log_s)
+
+
+# --- The lens's sky position, derived from the source's (review 8.10.4) ---
+#
+# The light curve fixes where the lens is relative to the source at every
+# instant: C9's lens-minus-source separation, seen from the geocenter at
+# t0_par (where the Skowron deviation is zero by construction), is
+# theta_E * [((t0_par - t_0)/t_E) tau_hat + u_0 beta_hat].  Seen from the
+# observer each star is displaced by its own parallax times the parallax
+# factor P (skyframe.md), so the BARYCENTRIC separation is that minus
+# pi_rel * P_earth(t0_par), and the barycentric separation moves with the
+# HELIOCENTRIC relative proper motion.  Hence, at the astrometric reference
+# epoch,
+#
+#   (lens - source)_bary(epoch) = theta_E dtheta_geo(t0_par)
+#                                 - pi_rel P_earth(t0_par)
+#                                 + mu_rel,helio (epoch - t0_par)
+#
+# which reproduces the light curve's own trajectory at EVERY epoch exactly
+# (the residual is (mu_geo - mu_helio + pi_rel v_perp)(t - t0_par), zero by
+# calc_mu_*_rel_geo), so a lens track built from it IS the trajectory the
+# light curve fits.  t_0/u_0/alpha refer to the lens CENTER OF MASS (C12);
+# the luminous primary sits at host_offset_from_com from it.
+
+
+def host_offset_from_com(s, alpha, q):
+    """The primary lens body's position relative to the lens center of
+    mass, ``(x, y)`` in Einstein radii on C9's ``(tau_hat, beta_hat)`` axes.
+
+    C15 puts companion ``j`` at ``s_j (cos alpha_j, -sin alpha_j)`` from the
+    primary, so the center of mass sits at ``q/(1+q)`` of that vector and
+    the primary at minus it.  One companion; ``(s, alpha, q)`` broadcast.
+    """
+    w = q / (1.0 + q)
+    return -w * s * pt.cos(alpha), w * s * pt.sin(alpha)
+
+
+def lens_offset_en(
+    t_0,
+    u_0,
+    t_E,
+    theta_E,
+    mu_ra_rel_geo,
+    mu_dec_rel_geo,
+    mu_rel_geo_mag,
+    mu_ra_rel,
+    mu_dec_rel,
+    pi_rel,
+    epoch,
+    t0_par,
+    earth_pe,
+    earth_pn,
+    host_x=0.0,
+    host_y=0.0,
+):
+    """``(dE, dN)`` in mas: the barycentric lens-minus-source offset at
+    ``epoch`` (see the block comment above).  ``earth_pe``/``earth_pn`` are
+    the Earth's parallax factors at ``t0_par`` (``skyframe.parallax_factors``
+    of its position at the reception instant, C4); ``host_x``/``host_y``
+    the primary's offset from the center of mass (``host_offset_from_com``)."""
+    tau_n = mu_dec_rel_geo / mu_rel_geo_mag
+    tau_e = mu_ra_rel_geo / mu_rel_geo_mag
+    # beta_hat = tau_hat rotated +90 deg North through East: (c, d) -> (-d, c)
+    beta_n, beta_e = -tau_e, tau_n
+    tau = (t0_par - t_0) / t_E + host_x
+    beta = u_0 + host_y
+    dt_yr = (epoch - t0_par) / DAYS_PER_YEAR
+    off_e = (
+        theta_E * (tau * tau_e + beta * beta_e)
+        - pi_rel * earth_pe
+        + mu_ra_rel * dt_yr
+    )
+    off_n = (
+        theta_E * (tau * tau_n + beta * beta_n)
+        - pi_rel * earth_pn
+        + mu_dec_rel * dt_yr
+    )
+    return off_e, off_n
+
+
+@register_physics
+def calc_lens_offset_e(
+    t_0, u_0, t_E, theta_E, mu_e_geo, mu_n_geo, mu_geo, mu_e, mu_n, pi_rel,
+    epoch, t0_par, earth_pe, earth_pn,
+):  # fmt: skip
+    return lens_offset_en(
+        t_0, u_0, t_E, theta_E, mu_e_geo, mu_n_geo, mu_geo, mu_e, mu_n,
+        pi_rel, epoch, t0_par, earth_pe, earth_pn,
+    )[0]  # fmt: skip
+
+
+@register_physics
+def calc_lens_offset_n(
+    t_0, u_0, t_E, theta_E, mu_e_geo, mu_n_geo, mu_geo, mu_e, mu_n, pi_rel,
+    epoch, t0_par, earth_pe, earth_pn,
+):  # fmt: skip
+    return lens_offset_en(
+        t_0, u_0, t_E, theta_E, mu_e_geo, mu_n_geo, mu_geo, mu_e, mu_n,
+        pi_rel, epoch, t0_par, earth_pe, earth_pn,
+    )[1]  # fmt: skip
+
+
+@register_physics
+def calc_lens_offset_e_binary(
+    t_0, u_0, t_E, theta_E, mu_e_geo, mu_n_geo, mu_geo, mu_e, mu_n, pi_rel,
+    epoch, t0_par, earth_pe, earth_pn, s, alpha, q,
+):  # fmt: skip
+    hx, hy = host_offset_from_com(s, alpha, q)
+    return lens_offset_en(
+        t_0, u_0, t_E, theta_E, mu_e_geo, mu_n_geo, mu_geo, mu_e, mu_n,
+        pi_rel, epoch, t0_par, earth_pe, earth_pn, hx, hy,
+    )[0]  # fmt: skip
+
+
+@register_physics
+def calc_lens_offset_n_binary(
+    t_0, u_0, t_E, theta_E, mu_e_geo, mu_n_geo, mu_geo, mu_e, mu_n, pi_rel,
+    epoch, t0_par, earth_pe, earth_pn, s, alpha, q,
+):  # fmt: skip
+    hx, hy = host_offset_from_com(s, alpha, q)
+    return lens_offset_en(
+        t_0, u_0, t_E, theta_E, mu_e_geo, mu_n_geo, mu_geo, mu_e, mu_n,
+        pi_rel, epoch, t0_par, earth_pe, earth_pn, hx, hy,
+    )[1]  # fmt: skip

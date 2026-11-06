@@ -195,6 +195,258 @@ def test_matches_allesfast_reference():
 
 
 # --------------------------------------------------------------------------
+# 3b. The GEOMETRY end to end (review 7.16.1): orbit -> true anomaly -> sky
+#     -> projected obliquity, through the production Orbit and
+#     compute_rm_rv.  Every kernel test above is fed pre-projected (x, y),
+#     so a flipped lambda, swapped x/y, a reversed spin sense or a wrong
+#     tc -> tp branch would only ever show up as a finite system logp.
+# --------------------------------------------------------------------------
+_RM_P = 3.0
+_RM_TC = 2450000.0
+
+
+@pytest.fixture(scope="module")
+def rm_through_the_orbit():
+    """compute_rm_rv compiled on a standalone production Orbit.
+
+    The orbit's free inputs (logP, tc, secosw, sesinw, cosi, svcoslam,
+    svsinlam) and the times are function inputs; a/R*, Rp/R*, the LD pair
+    and the stellar broadening terms are constants on stand-in components
+    (compute_rm_rv only reads ``.value`` off them).  Spies on the module's
+    rm_planet_xyz and quad_limb_darkened_flux record the tensors
+    compute_rm_rv builds, so the kernel's actual inputs are outputs too.
+    Light-travel time is off: the bare harness has no bodies, so it has
+    neither the masses nor the semi-major axis the delay needs.
+    """
+    from types import SimpleNamespace
+
+    import pymc as pm
+
+    from conftest import _DummySystem
+    from exozippy.components.orbit.orbit import Orbit
+    from exozippy.config import ConfigManager
+
+    user_params = {
+        "orbit.0.logP": {"initval": np.log10(_RM_P)},
+        "orbit.0.tc": {"initval": _RM_TC},
+        "orbit.0.secosw": {"initval": 0.0},
+        "orbit.0.sesinw": {"initval": 0.0},
+    }
+    dummy_system = _DummySystem()
+    dummy_system.config = {"rvinstrument": [{"rm": "test"}]}
+
+    def const(v):
+        return SimpleNamespace(value=pt.as_tensor_variable(np.array([v])))
+
+    captured = {}
+    xyz_orig, flux_orig = rm.rm_planet_xyz, rm.quad_limb_darkened_flux
+
+    def xyz_spy(*args):
+        captured["xyz"] = xyz_orig(*args)
+        return captured["xyz"]
+
+    def flux_spy(*args):
+        captured["flux"] = flux_orig(*args)
+        return captured["flux"]
+
+    with (
+        pytensor.config.change_flags(mode="FAST_COMPILE"),
+        pytest.MonkeyPatch.context() as mp,
+    ):
+        mp.setattr(rm, "rm_planet_xyz", xyz_spy)
+        mp.setattr(rm, "quad_limb_darkened_flux", flux_spy)
+        orbit = Orbit([{"name": "test"}], ConfigManager(user_params))
+        with pm.Model():
+            orbit.register_parameters(system=dummy_system)
+            for name in orbit.manifest:
+                orbit.add_parameter(
+                    model=pm.modelcontext(None),
+                    param_name=name,
+                    system=dummy_system,
+                )
+            system = SimpleNamespace(
+                orbit=orbit,
+                star=SimpleNamespace(
+                    vmacro=const(3000.0),
+                    vbeta=const(4000.0),
+                    vmicro=const(1000.0),
+                ),
+                planet=SimpleNamespace(ar=const(10.0), p=const(0.1)),
+                band=SimpleNamespace(
+                    u1=const(0.3), u2=const(0.2), manifest={"u1", "u2"}
+                ),
+            )
+            t = pt.dvector("t")
+            rv = rm.compute_rm_rv(
+                system, t, 0, 0, 0, light_travel_time_active=False
+            )
+            inputs = [
+                orbit.logP.value,
+                orbit.tc.value,
+                orbit.secosw.value,
+                orbit.sesinw.value,
+                orbit.cosi.value,
+                orbit.svcoslam.value,
+                orbit.svsinlam.value,
+                t,
+            ]
+            fn = pytensor.function(
+                inputs,
+                [rv, *captured["xyz"], captured["flux"]],
+                on_unused_input="ignore",
+            )
+
+    def evaluate(t, ecc, omega, inc, lam, vsini):
+        se = np.sqrt(ecc)
+        sv = np.sqrt(vsini)
+        return fn(
+            np.array([np.log10(_RM_P)]),
+            np.array([_RM_TC]),
+            np.array([se * np.cos(omega)]),
+            np.array([se * np.sin(omega)]),
+            np.array([np.cos(inc)]),
+            np.array([sv * np.cos(lam)]),
+            np.array([sv * np.sin(lam)]),
+            np.asarray(t, dtype=float),
+        )
+
+    return evaluate
+
+
+def test_rm_geometry_through_the_orbit_matches_allesfast(
+    rm_through_the_orbit,
+):
+    """
+    Given allesfast's own scenario (a/R* = 10, P = 3 d, i = 87 deg, e = 0,
+    omega_* = 90 deg, lambda = 30 deg), on the production Orbit,
+    When compute_rm_rv is evaluated at tc + 0.01 d * (-5..5) -- the
+    epochs of allesfast's _REF_X/_REF_Y/_REF_Z (inverting the fixture
+    gives true anomalies stepping by 2 pi / 300 about conjunction to
+    1e-11, i.e. 0.01 d at P = 3 d),
+    Then the (x, y, z) handed to the kernel equal allesfast's to 2e-8 R*
+    (the float resolution of a BJD, see below), and the RM curve equals
+    the allesfast-validated kernel fed that geometry and an independently
+    integrated limb-darkened flux.
+
+    A flipped lambda moves x by up to 0.9 R*, swapped x/y or a mirrored
+    sky by more, and a tc -> tp branch error moves the planet off
+    conjunction at tc; each fails by orders of magnitude.
+    """
+    from test_transit_thermal import _ref_ld_transit_flux
+
+    # Arrange
+    times = _RM_TC + 0.01 * np.arange(-5, 6)
+    vsini = 5000.0
+
+    # Act
+    rv, x, y, z, flux = rm_through_the_orbit(
+        times,
+        ecc=0.0,
+        omega=np.pi / 2,
+        inc=np.radians(87.0),
+        lam=np.radians(30.0),
+        vsini=vsini,
+    )
+
+    # Assert: the geometry is allesfast's.  The floor is the TIME, not the
+    # geometry: one ulp of a BJD near 2.45e6 is 4.7e-10 d, i.e. a/R* x n x
+    # ulp = 10 x 2.09 x 4.7e-10 ~ 1e-8 R* of planet motion (measured
+    # 4.1e-9); allesfast's epochs were exact phases.
+    np.testing.assert_allclose(x, _REF_X, rtol=0, atol=2e-8)
+    np.testing.assert_allclose(y, _REF_Y, rtol=0, atol=2e-8)
+    np.testing.assert_allclose(z, _REF_Z, rtol=0, atol=2e-8)
+    # The blocked flux is the textbook disk integral of the LD law.
+    ref_flux = np.array(
+        [_ref_ld_transit_flux(r, 0.1, 0.3, 0.2) for r in np.hypot(x, y)]
+    )
+    np.testing.assert_allclose(flux, ref_flux, rtol=0, atol=1e-10)
+    # And the RV is the (allesfast-pinned) kernel on exactly that input.
+    xs, ys, zs, fs = pt.dvectors("x", "y", "z", "f")
+    kernel = pytensor.function(
+        [xs, ys, zs, fs],
+        rm.rm_delta_v_core(
+            xs,
+            ys,
+            zs,
+            fs,
+            vsini,
+            0.3,
+            0.2,
+            vzeta=3000.0,
+            vbeta=4000.0,
+            vgamma=1000.0,
+            n_sigma=201,
+        ),
+    )
+    np.testing.assert_allclose(
+        rv, kernel(_REF_X, _REF_Y, _REF_Z, ref_flux), rtol=0, atol=1e-6
+    )
+    # Non-vacuity: a real in-transit anomaly of tens of m/s.
+    assert np.max(np.abs(rv)) > 10.0
+
+
+def _kepler_true_anomaly(t, period, tp, ecc):
+    mean = 2 * np.pi * (t - tp) / period
+    E = mean.copy()
+    for _ in range(100):
+        E = E - (E - ecc * np.sin(E) - mean) / (1 - ecc * np.cos(E))
+    return 2 * np.arctan2(
+        np.sqrt(1 + ecc) * np.sin(E / 2), np.sqrt(1 - ecc) * np.cos(E / 2)
+    )
+
+
+@pytest.mark.parametrize(
+    "ecc, omega, inc_deg, lam_deg",
+    [(0.3, 1.0, 88.0, -50.0), (0.6, -2.2, 86.5, 140.0)],
+)
+def test_rm_geometry_through_an_eccentric_orbit_matches_a_rotation_reference(
+    rm_through_the_orbit, ecc, omega, inc_deg, lam_deg
+):
+    """
+    Given an eccentric, misaligned orbit on the production Orbit,
+    When compute_rm_rv's kernel input is evaluated through a transit,
+    Then it equals an independent construction to 1e-9 R*: a numpy
+    Kepler solve from tp, where tp puts the conjunction f = pi/2 - omega_*
+    at tc; the COMPANION's sky position (omega_* + pi) by explicit
+    rotation with the node along +X (skyframe.md), in the left-handed
+    frame X = North, Y = East, Z = away from the observer; z = -Z (the
+    planet in front, toward the observer, is z > 0); and (x, y) rotated by
+    the projected obliquity as allesfast does (pinned at e = 0 by the test
+    above).
+    """
+    # Arrange
+    inc, lam = np.radians(inc_deg), np.radians(lam_deg)
+    f_c = np.pi / 2 - omega
+    E_c = 2 * np.arctan2(
+        np.sqrt(1 - ecc) * np.sin(f_c / 2), np.sqrt(1 + ecc) * np.cos(f_c / 2)
+    )
+    tp = _RM_TC - (E_c - ecc * np.sin(E_c)) * _RM_P / (2 * np.pi)
+    times = _RM_TC + np.linspace(-0.12, 0.12, 49)
+
+    f = _kepler_true_anomaly(times, _RM_P, tp, ecc)
+    r = 10.0 * (1 - ecc**2) / (1 + ecc * np.cos(f))
+    w_comp = omega + np.pi
+    X = r * np.cos(w_comp + f)  # North
+    Y = r * np.sin(w_comp + f) * np.cos(inc)  # East
+    Z = r * np.sin(w_comp + f) * np.sin(inc)  # away from the observer
+    x_ref = X * np.cos(lam) - Y * np.sin(lam)
+    y_ref = X * np.sin(lam) + Y * np.cos(lam)
+
+    # Act
+    _rv, x, y, z, _flux = rm_through_the_orbit(
+        times, ecc=ecc, omega=omega, inc=inc, lam=lam, vsini=5000.0
+    )
+
+    # Assert
+    np.testing.assert_allclose(x, x_ref, rtol=0, atol=1e-9)
+    np.testing.assert_allclose(y, y_ref, rtol=0, atol=1e-9)
+    np.testing.assert_allclose(z, -Z, rtol=0, atol=1e-9)
+    # The planet is in front at tc and the window holds a transit.
+    i_tc = np.argmin(np.abs(times - _RM_TC))
+    assert z[i_tc] > 0 and np.hypot(x[i_tc], y[i_tc]) < 1.0
+
+
+# --------------------------------------------------------------------------
 # 4. End-to-end: the KELT-17 example (transit + RV with rm:) builds and yields
 #    a finite initial logp (skipped only if the example files are absent).
 # --------------------------------------------------------------------------

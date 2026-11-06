@@ -26,5 +26,18 @@ That sign relation is exactly what review 4.6.3 mis-read as astrometry carrying 
 
 Two things `skyframe` deliberately does **not** own. `op.py`'s basis used to be built as MulensModel `Coordinates` builds it (`east = normalize(z x direction)`, `north = direction x east`); that is the same basis to **1 ulp**, not bit-identical, so sharing the definition moved the Op path's line of sight in its last bit and nothing else (all three shipped examples exercised -- ob08092 symbolic, GaiaBH1 astrometry, ob161003 binary-lens Op -- are bit-identical in start logp *and* full initial point). And **`alpha`**, the binary-lens orientation, is a genuinely microlensing-only convention with no universal-frame analogue: `op.py` puts companion *j* at `s(cos alpha, -sin alpha)` in a frame where the source sits at `(-tau, -u)`. It is pinned against MulensModel by `tests/test_vbm_direct_vs_mulensmodel.py` and has a known 180-degree offset against some published values (`alpha_MM = 180 - alpha_paper` for ob161003). Do not fold it into this section's argument.
 
+## The photocenter of an unresolved pair (review 8.10.6)
+
+An orbit's `get_sky_position(relative=False)` traces the PRIMARY group's own orbit about the barycenter (argument of periastron `omega_*`); `relative=True` traces the companion group relative to the primary, `x_rel = x_companion_group - x_primary_group` (`omega_* + 180`). About the barycenter the two groups sit at
+
+    x_P = -(M_c/M) x_rel        x_C = +(M_p/M) x_rel
+
+and an unresolved PSF holding the target (light `1 - b`) and one other light (`b`) centroids at `(1 - b) x_target + b x_other`. So a gaia/abs/catalog photocenter wobbles as
+
+    target in the PRIMARY group:    x_rel (b - M_c/M)
+    target in the COMPANION group:  x_rel (M_p/M - b)
+
+with `b` always the OTHER side's share of the PSF's light (`fluxfrac`, or the SED's `F_c/(F_c + F_target)`). The two are the same point when they describe the same PSF (`b_p = 1 - b_c`), as they must: a photocenter does not depend on which star the catalog calls the source. For dark other light (`b = 0`) the two targets move in OPPOSITE directions in the ratio `-M_p/M_c` -- the companion's reflex is the primary's mirrored and scaled, exactly as an RV consumer writes it (`RVInstrument._orbit_rv_terms`, `-K M_p/M_c`). `AstrometryInstrument._photocenter_terms` builds both through `relative=False`, the companion case as a negated amplitude `a_rel (b - M_p/M)`, the way the RV consumer negates K. Tests: `tests/test_astrometry_companion_wobble.py` (an independent rotation-matrix reference, both signs, the equal-mass equal-light null, and the KELT-4 C nesting).
+
 Tests: `tests/test_skyframe.py` (helper contract, plus the two first-principles physics tests -- the Keplerian left-handedness claims and the microlensing handedness check -- each of which fails loudly under a mirrored convention).
 

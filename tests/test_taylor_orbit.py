@@ -1,4 +1,5 @@
-"""Taylor orbits: `orbit: type: linear | quadratic` (review 8.8.14).
+"""Taylor orbits: `orbit: type: constant_acceleration | constant_jerk`
+(review 8.8.14) as RV trends.
 
 An orbit too long for the data to resolve is written as the low-order time
 derivatives of what each consumer measures, about a reference epoch.  It is
@@ -81,14 +82,18 @@ def _at_start(system, model, node):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("otype", ["linear", "quadratic"])
+@pytest.mark.parametrize("otype", ["constant_acceleration", "constant_jerk"])
 def test_the_trend_is_the_taylor_series_about_the_epoch(tmp_path, otype):
     """
     Given a star whose only orbit is a Taylor orbit, with seeded coefficients,
     When the RV model is evaluated at the start,
-    Then it is exactly gamma + gammadot (t - epoch) [+ gammaddot (t -
+    Then it is exactly gamma + gammadot (t' - epoch) [+ gammaddot (t' -
       epoch)**2 / 2] -- a DERIVATIVE, not EXOFASTv2's QUAD coefficient --
-      with no constant term of its own (gamma carries it).
+      with no constant term of its own (gamma carries it), at the star's
+      EMISSION time t' = t - Z(t')/c, Z = gammadot dt^2/2 [+ gammaddot
+      dt^3/6] the trend's own line-of-sight displacement (the star's light
+      travel time, on by default; solved here by fixed point, independently
+      of RVInstrument._emission_time's Taylor solve).
     """
     rv = _write_rv(tmp_path / "t.rv")
     orbit = {"name": "trend", "type": otype, "primary": ["A"]}
@@ -96,7 +101,7 @@ def test_the_trend_is_the_taylor_series_about_the_epoch(tmp_path, otype):
         "orbit.trend.gammadot": {"initval": -1.25},
         "rvinstrument.TRES.gamma": {"initval": 300.0},
     }
-    if otype == "quadratic":
+    if otype == "constant_jerk":
         params["orbit.trend.gammaddot"] = {"initval": 0.006}
     system, model = _system(_config(rv, [orbit]), params)
     rvi = system.rvinstrument
@@ -105,9 +110,14 @@ def test_the_trend_is_the_taylor_series_about_the_epoch(tmp_path, otype):
         _at_start(system, model, rvi._rv_model_data_node) * rvi._rv_factor()
     )
     epoch = system.orbit.taylor_epoch[0]
+    gdd = 0.006 if otype == "constant_jerk" else 0.0
     dt = rvi.time - epoch
+    for _ in range(10):
+        z_m = (-1.25 * dt**2 / 2.0 + gdd * dt**3 / 6.0) * 86400.0
+        dt = rvi.time - epoch - z_m / 299792458.0 / 86400.0
+    assert np.max(np.abs(dt - (rvi.time - epoch))) * 86400.0 > 0.1
     expected = 300.0 - 1.25 * dt
-    if otype == "quadratic":
+    if otype == "constant_jerk":
         expected = expected + 0.5 * 0.006 * dt**2
     # atol: the start round-trips through the logit raw coordinate (~1e-8).
     np.testing.assert_allclose(model_ms, expected, rtol=1e-10, atol=1e-6)
@@ -125,7 +135,11 @@ def test_a_slope_reports_its_companion_mass_over_r2_bound(tmp_path):
       bound and entering no potential.
     """
     rv = _write_rv(tmp_path / "t.rv")
-    orbit = {"name": "trend", "type": "linear", "primary": ["A"]}
+    orbit = {
+        "name": "trend",
+        "type": "constant_acceleration",
+        "primary": ["A"],
+    }
     system, model = _system(
         _config(rv, [orbit]), {"orbit.trend.gammadot": {"initval": -0.8}}
     )
@@ -154,9 +168,17 @@ def test_a_trend_beside_a_planet_adds_to_the_keplerian(tmp_path):
         rv,
         [
             {"name": "b", "primary": ["A"], "companion": ["b"]},
-            {"name": "trend", "type": "linear", "primary": ["A"]},
+            {
+                "name": "trend",
+                "type": "constant_acceleration",
+                "primary": ["A"],
+            },
         ],
         planets=[{"name": "b"}],
+        # The column bookkeeping at the arrival time: with the star's light
+        # travel on, the planet's displacement would retard the trend
+        # column too (tests/test_rv_light_travel.py covers the composition).
+        rv_extra={"light_travel_time": False},
     )
     params = {
         "orbit.b.period": {"initval": 7.43},
@@ -189,7 +211,11 @@ def test_the_default_epoch_is_the_midpoint_of_the_rvs(tmp_path):
       EXOFASTv2's RVEPOCH default (mkss.pro).
     """
     rv = _write_rv(tmp_path / "t.rv")
-    orbit = {"name": "trend", "type": "linear", "primary": ["A"]}
+    orbit = {
+        "name": "trend",
+        "type": "constant_acceleration",
+        "primary": ["A"],
+    }
     system, _ = _system(_config(rv, [orbit]), build=False)
     assert system.orbit.taylor_epoch[0] == pytest.approx(
         0.5 * sum(_EPOCH_SPAN), abs=1e-9
@@ -204,7 +230,7 @@ def test_a_user_epoch_is_honored_and_shown_in_the_table_note(tmp_path):
     rv = _write_rv(tmp_path / "t.rv")
     orbit = {
         "name": "trend",
-        "type": "linear",
+        "type": "constant_acceleration",
         "primary": ["A"],
         "epoch": 2459700.25,
     }
@@ -232,7 +258,11 @@ def test_the_keplerian_elements_are_inactive_on_a_taylor_orbit(tmp_path):
         rv,
         [
             {"name": "b", "primary": ["A"], "companion": ["b"]},
-            {"name": "trend", "type": "linear", "primary": ["A"]},
+            {
+                "name": "trend",
+                "type": "constant_acceleration",
+                "primary": ["A"],
+            },
         ],
         planets=[{"name": "b"}],
     )
@@ -301,7 +331,11 @@ def test_restrict_active_narrows_every_selector():
     [
         ({"type": "Linear"}, ValueError, "case-sensitive"),
         ({"type": "nbody"}, NotImplementedError, "nbody"),
-        ({"type": "linear", "fitvcve": True}, ValueError, "Keplerian"),
+        (
+            {"type": "constant_acceleration", "fitvcve": True},
+            ValueError,
+            "Keplerian",
+        ),
         ({"epoch": 2459700.0}, ValueError, "epoch"),
     ],
 )
@@ -326,7 +360,7 @@ def test_a_taylor_orbit_needs_an_explicit_primary(tmp_path):
     rv = _write_rv(tmp_path / "t.rv")
     with pytest.raises(ValueError, match="primary"):
         System(
-            _config(rv, [{"name": "trend", "type": "linear"}]),
+            _config(rv, [{"name": "trend", "type": "constant_acceleration"}]),
             user_params=dict(_STAR),
         )
 
@@ -341,12 +375,16 @@ def test_an_unread_taylor_orbit_raises(tmp_path):
     cfg = _config(
         rv,
         [
-            {"name": "trend", "type": "linear", "primary": ["B"]},
+            {
+                "name": "trend",
+                "type": "constant_acceleration",
+                "primary": ["B"],
+            },
             {"name": "AB", "primary": ["A"], "companion": ["B"]},
         ],
     )
     cfg["star"].append({"name": "B", "mist": False})
-    with pytest.raises(ValueError, match="nothing in the model reads"):
+    with pytest.raises(ValueError, match="nothing observable"):
         _system(cfg, {"star.B.mass": {"initval": 0.5}}, build=False)
 
 
@@ -362,7 +400,7 @@ def test_the_rv_star_on_the_companion_side_is_refused(tmp_path):
         [
             {
                 "name": "trend",
-                "type": "linear",
+                "type": "constant_acceleration",
                 "primary": ["B"],
                 "companion": ["A"],
             }
@@ -373,10 +411,13 @@ def test_the_rv_star_on_the_companion_side_is_refused(tmp_path):
         _system(cfg, {"star.B.mass": {"initval": 0.5}}, build=False)
 
 
-def test_a_planet_on_a_taylor_orbit_is_refused(tmp_path):
+def test_a_planet_on_a_taylor_orbit_has_no_keplerian_geometry(tmp_path):
     """
-    Given a planet whose orbit_ndx points at a Taylor orbit,
-    Then stage 3 raises: its transit and derived geometry need a Keplerian.
+    Given a planet in a Taylor orbit's companion group and NO transit,
+    Then it builds without Keplerian geometry (review 8.8.20): nothing reads
+      the planet's p, a, K, ..., so none is declared.  (With a transit block
+      the same planet is refused: tests below and
+      tests/test_planet_taylor_orbit.py.)
     """
     rv = _write_rv(tmp_path / "t.rv")
     cfg = _config(
@@ -384,15 +425,17 @@ def test_a_planet_on_a_taylor_orbit_is_refused(tmp_path):
         [
             {
                 "name": "trend",
-                "type": "linear",
+                "type": "constant_acceleration",
                 "primary": ["A"],
                 "companion": ["b"],
             }
         ],
-        planets=[{"name": "b", "orbit_ndx": 0}],
+        planets=[{"name": "b"}],
     )
-    with pytest.raises(ValueError, match="Keplerian orbit"):
-        _system(cfg, build=False)
+    system, _ = _system(cfg, build=False)
+    assert not system.planet.keplerian_geometry(system)
+    for name in ("p", "a", "K"):
+        assert name not in system.planet.manifest
 
 
 # ---------------------------------------------------------------------------
@@ -410,10 +453,163 @@ def test_the_coefficients_are_seeded_from_the_rvs(tmp_path):
       coefficient).
     """
     rv = _write_rv(tmp_path / "t.rv", gammadot=-1.0, gammaddot=0.004)
-    orbit = {"name": "trend", "type": "quadratic", "primary": ["A"]}
+    orbit = {"name": "trend", "type": "constant_jerk", "primary": ["A"]}
     system, _ = _system(_config(rv, [orbit]))
     orbit_c = system.orbit
     gd = orbit_c.gammadot.from_internal(orbit_c.gammadot.initval)
     gdd = orbit_c.gammaddot.from_internal(orbit_c.gammaddot.initval)
     assert float(np.atleast_1d(gd)[0]) == pytest.approx(-1.0, rel=1e-6)
     assert float(np.atleast_1d(gdd)[0]) == pytest.approx(0.004, rel=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# 5. Inactive elements are never reported -- not by the consumers that
+#    enumerate the trace either (review 2.11.26)
+# ---------------------------------------------------------------------------
+
+
+def _fake_trace(model, n_chains=2, n_draws=40, seed=0):
+    """A posterior with every free RV jittered about the start, and every
+    Deterministic computed from it -- the variable set a fit's trace holds.
+    """
+    import arviz as az
+    import pymc as pm
+
+    rng = np.random.default_rng(seed)
+    ip = model.initial_point()
+    raws = {
+        v.name: np.asarray(ip[v.name])
+        + 1e-3
+        * rng.standard_normal(
+            (n_chains, n_draws) + np.shape(np.asarray(ip[v.name]))
+        )
+        for v in model.value_vars
+    }
+    idata = az.from_dict({"posterior": raws})
+    derived = pm.compute_deterministics(
+        idata.posterior.to_dataset(),
+        model=model,
+        merge_dataset=False,
+        progressbar=False,
+    )
+    for name in derived.data_vars:
+        idata.posterior[name] = derived[name]
+    return idata
+
+
+def test_inactive_elements_reach_no_trace_report(tmp_path, caplog):
+    """
+    Given a planet orbit beside a Taylor orbit -- whose Keplerian elements
+      (period, ecc, K, ...) are INACTIVE bookkeeping pins on the Taylor
+      element and whose gammadot is inactive on the planet's -- and a trace
+      that, like a fit's, carries every element of every vector,
+    When the summary table, the corner columns and the trace-plot rows are
+      built from what the wrap-up hands them,
+    Then no inactive element appears in any of them, and every active one
+      still does.  The LaTeX table and the CSV already left them out; these
+      listed each as a row and warned "constant at 0".  The filter is
+      ``Parameter.element_is_active``, the tables' own predicate.
+    """
+    import logging
+
+    from exozippy import run
+    from exozippy.corner_utils import collect_corner_samples
+
+    # Arrange
+    rv = _write_rv(tmp_path / "t.rv", gammadot=-1.0)
+    cfg = _config(
+        rv,
+        [
+            {"name": "b", "primary": ["A"], "companion": ["b"]},
+            {
+                "name": "trend",
+                "type": "constant_acceleration",
+                "primary": ["A"],
+            },
+        ],
+        planets=[{"name": "b"}],
+    )
+    params = {
+        "orbit.b.period": {"initval": 7.43},
+        "orbit.b.tc": {"initval": 2459650.0},
+    }
+    system, model = _system(cfg, params)
+    idata = _fake_trace(model)
+    masks = system.inactive_element_masks()
+    lookup = system.get_parameter_lookup()
+    for label, mask in masks.items():
+        p = lookup[label]
+        assert list(mask) == [
+            p.element_is_active(i) for i in range(mask.size)
+        ], label
+    # The premise: the trace does carry inactive elements to leave out.
+    assert np.asarray(idata.posterior["orbit.period"]).shape[-1] == 2
+    assert not masks["orbit.period"][1] and masks["orbit.period"][0]
+    assert masks["orbit.gammadot"].tolist() == [False, True]
+
+    report_only = set(system.report_only_labels())
+
+    def inactive_labels():
+        return {
+            f"{label}[{i}]"
+            for label, mask in masks.items()
+            if label in idata.posterior and label not in report_only
+            for i in np.flatnonzero(~mask)
+        }
+
+    def active_labels():
+        return {
+            f"{label}[{i}]"
+            for label, mask in masks.items()
+            if label in idata.posterior and label not in report_only
+            for i in np.flatnonzero(mask)
+        }
+
+    assert "orbit.period[1]" in inactive_labels()
+
+    # Act
+    reported = run.without_inactive(idata, masks)
+    diag = {
+        "burnin": 0,
+        "burnin_frac": 0.0,
+        "n_draws": 40,
+        "n_chains_used": 2,
+        "converged": True,
+    }
+    # What the wrap-up passes: the report-only nodes (review 2.6.14) are
+    # left out of every enumerating consumer as well.
+    summary = run._format_summary(reported, diag, system, exclude=report_only)
+    _, corner_labels = collect_corner_samples(
+        reported,
+        [
+            (v, run._element_coord_labels(reported.posterior[v]))
+            for v in reported.posterior.data_vars
+            if "_raw" not in v and v not in report_only
+        ],
+    )
+    plot_vars = [
+        p.label
+        for p in system.get_all_parameters()
+        if p.label in reported.posterior and p.label not in report_only
+    ]
+    with caplog.at_level(logging.WARNING):
+        run._split_degenerate_vars(reported, plot_vars)
+    trace_rows = {
+        label
+        for v in plot_vars
+        for _, label, _ in run._element_rows(reported.posterior, v)
+    }
+
+    # Assert
+    rows = {line.split()[0] for line in summary.splitlines()[1:] if line}
+    for label in inactive_labels():
+        assert label not in rows, label
+        assert label not in corner_labels, label
+        assert label not in trace_rows, label
+        assert label not in caplog.text, label
+    for label in active_labels():
+        assert label in rows, label
+        assert label in corner_labels, label
+        assert label in trace_rows, label
+    # The full trace is untouched for the mode pass, the tables and mkparam.
+    assert np.asarray(idata.posterior["orbit.period"]).shape[-1] == 2

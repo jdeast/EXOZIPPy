@@ -78,6 +78,8 @@ def _track_table(pairs, eeps=EEPS, **overrides):
                     "age_mist": 1.0e9 * (k + 1),
                     "dEEP_dage": 1.0e-9 * (k + 1),
                     "here_be_dragons": 0.0,
+                    # No mass loss: the present-day axis IS the initial one.
+                    "star_mass": float(mass),
                 }
             )
     df = pd.DataFrame(rows)
@@ -1015,13 +1017,14 @@ def test_the_model_builds_and_adds_one_potential_per_term(built):
     """
     Given a star tied to the tracks with the default `constrain:`,
     When the model is built,
-    Then the four penalties, the EEP Jacobian and the dragon penalty are all
-    present and finite at the start point.
+    Then the four penalties, the EEP and mass Jacobians and the dragon
+    penalty are all present and finite at the start point.
     """
     # Arrange
     system, model = built
     expected = {f"evolutionarymodel.{q}_prior" for q in CONSTRAINABLE} | {
         "evolutionarymodel.eep_age_jacobian",
+        "evolutionarymodel.mass_jacobian",
         "evolutionarymodel.dragon_penalty",
     }
 
@@ -2186,6 +2189,36 @@ def test_the_built_jacobian_clips_a_sentinel_derivative(defect_root):
 
     assert float(values["evolutionarymodel.eep_age_jacobian"]) == (
         pytest.approx(-np.log(DEEP_DAGE_MAX), rel=1e-6)
+    )
+
+
+@pytest.mark.parametrize(
+    "eep,frac",
+    [(300.0, 0.25), (454.0, 0.5)],
+)
+def test_the_built_jacobian_reads_the_tracks_own_derivative(
+    model_root, eep, frac
+):
+    """
+    Given the synthetic grid, whose dEEP_dage column is the same at every
+      mass and initfeh, 1e-9 (1 + 50 |frac - 0.5|) per year (conftest's
+      write_synthetic_mist_grid), and a star starting ON a grid EEP,
+    When the model's own eep_age_jacobian potential is evaluated,
+    Then it is -log of that tabulated derivative, to 1e-9 -- in the
+      interior of the clip, where the clip tests above say nothing.
+
+    test_slow_evolution_is_favored_over_fast scores a COPY of the formula,
+    and the two clip tests see only the clip values, so a built term that
+    read the wrong output column, the wrong star's row, or dage/dEEP for
+    dEEP/dage passed all three (review 7.16.1).  Both EEPs are checked so
+    the slow-beats-fast ordering is pinned by value, not by sign.
+    """
+    values, _ = _potentials_at_start(model_root, eep)
+
+    deep_dage = 1e-9 * (1.0 + 50.0 * abs(frac - 0.5))
+    assert DEEP_DAGE_MIN < deep_dage < DEEP_DAGE_MAX
+    assert float(values["evolutionarymodel.eep_age_jacobian"]) == (
+        pytest.approx(-np.log(deep_dage), rel=1e-9)
     )
 
 

@@ -1,7 +1,7 @@
 # TOI-3919: a 7.43-day eccentric giant planet (TESS + ground-based transits,
 # TRES radial velocities) whose RVs also carry a LINEAR TREND -- the first
 # shipped example of a Taylor orbit.  The trend is orbit 'trend' below,
-# `type: linear`, with the star as its primary and no companion named: the
+# `type: constant_acceleration`, with the star as its primary and no companion named: the
 # reflex of a body too long-period to resolve, fitted as orbit.trend.gammadot
 # (m/s/day) about the midpoint of the RVs.  See README.md.
 #
@@ -45,53 +45,53 @@ orbit:
   # EXOFASTv2's /fitslope: the reflex of a companion too long-period
   # to resolve, as a Taylor orbit: orbit.trend.gammadot is the RV slope
   - name: "trend"
-    type: linear
+    type: constant_acceleration
     primary: ["A"]
 
 transit:
   - name: "TESS_UT20190912"
     file: "n20190912.TESS.TESS.TOI-3919SlimFlat.S16.1800sunbinned.dat"
     band: "TESS"
-    exptime: 30 # minutes
+    exptime_s: 1800 # exposure time in seconds (30 min)
     ninterp: 10
     fitdilute: true
   - name: "TESS_UT20200319"
     file: "n20200319.TESS.TESS.TOI-3919SlimFlat.S23.1800sunbinned.dat"
     band: "TESS"
-    exptime: 30 # minutes
+    exptime_s: 1800 # exposure time in seconds (30 min)
     ninterp: 10
     fitdilute: true
   - name: "CALOU-0m4_UT20220114"
     file: "n20220114.R.CALOU-0m4.TOI-3919.dat"
     band: "R"
-    exptime: 1 # minutes
+    exptime_s: 60 # exposure time in seconds (1 min)
     ninterp: 1
   - name: "TESS_UT20220226"
     file: "n20220226.TESS.TESS.TOI-3919SlimFlat.S49.120sunbinned.dat"
     band: "TESS"
-    exptime: 2 # minutes
+    exptime_s: 120 # exposure time in seconds (2 min)
     ninterp: 1
     fitdilute: true
   - name: "TESS_UT20220326"
     file: "n20220326.TESS.TESS.TOI-3919SlimFlat.S50.120sunbinned.dat"
     band: "TESS"
-    exptime: 2 # minutes
+    exptime_s: 120 # exposure time in seconds (2 min)
     ninterp: 1
     fitdilute: true
   - name: "KeplerCam_UT20220428"
     file: "n20220428.Sloani.KeplerCam.TOI-3919.dat"
     band: "Sloani"
-    exptime: 1 # minutes
+    exptime_s: 60 # exposure time in seconds (1 min)
     ninterp: 1
   - name: "WCO_UT20220428"
     file: "n20220428.Sloanr.WCO.TOI-3919.dat"
     band: "Sloanr"
-    exptime: 1 # minutes
+    exptime_s: 60 # exposure time in seconds (1 min)
     ninterp: 1
   - name: "LCO-McD-1m0_UT20230306"
     file: "n20230306.Sloani.LCO-McD-1m0.TOI-3919.dat"
     band: "Sloani"
-    exptime: 1 # minutes
+    exptime_s: 60 # exposure time in seconds (1 min)
     ninterp: 1
 
 band:

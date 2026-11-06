@@ -1183,6 +1183,10 @@ class SED(Component):
             tie the zeropoint is only reported, so nothing reads the
             source's flux through it (review 2.9.11; until then every
             source counted as read);
+          * an unresolved background's flux is tied to a light curve
+            (``Background.sed_read_stars``: the primary source and the
+            tied instance's psf_stars, whose SED fluxes the derived
+            fluxratio subtracts);
           * a light curve with a prediction carries
             ``sed_constrains_blend: true``: f_blend is tied to the
             non-source stars' predicted flux through the zeropoint, which
@@ -1276,6 +1280,13 @@ class SED(Component):
                 bool(c.get("sed_constrains_blend", False)) for c in _cfgs(mi)
             ):
                 _mark("blend tie", range(n))
+
+        # 3b. the unresolved background's light-curve tie (background.md):
+        # its derived flux reads the primary source's and every psf_stars
+        # member's predicted flux in the tied band.
+        bg = in_topology(system, "background")
+        if isinstance(bg, Component):
+            _mark("background light-curve tie", bg.sed_read_stars(system))
 
         # 4. transit seddeblend, 5. absolute astrometry: conservative.
         if in_topology(system, "band") is not None:

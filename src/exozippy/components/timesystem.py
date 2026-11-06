@@ -51,6 +51,8 @@ import logging
 
 import numpy as np
 
+from exozippy.components.star.position import require_star_radec
+
 logger = logging.getLogger(__name__)
 
 # Time-system vocabulary for the per-file time_scale/time_frame keys.
@@ -271,38 +273,108 @@ class TimeSystem:
         )
         return out
 
+    def _to_observer_tdb(self, t, i, observer_location):
+        """File ``i``'s raw times as the OBSERVER's coordinate time JD_TDB
+        at reception -- what a component that models the light travel
+        itself needs (``rvinstrument``'s ``data_format: raw_redshift``,
+        whose Roemer delay is a function of the fitted star), where every
+        other reader wants a BJD_TDB tag (``_to_bjd_tdb``).
+
+        ``time_offset`` first, as always.  Then by ``time_frame``:
+
+        * ``jd`` -- the observer's own clock (a flux-weighted exposure
+          midpoint in UTC, typically): the scale converted to TDB at the
+          observer (astropy/erfa; the ground site's location enters the
+          topocentric TDB-TT term, ~2 us, and UT1 nothing);
+        * ``bjd`` -- barycentric tags (a spacecraft archive's, e.g. Gaia's
+          TCB): the scale converted to TDB, then the reception instant
+          solved from the observer's own position and the start direction
+          (``ephemeris.reception_instant``; a direction wrong by an arcsec
+          moves it by 2.4 ms);
+        * ``hjd`` raises: no instrument tags raw spectra heliocentrically.
+
+        The observer's place comes from ``observer_location``, the one
+        spelling in this mode, so ``time_location`` is refused by the host
+        at construction.
+        """
+        spec = self.time_specs[i]
+        if spec["offset"] != 0.0:
+            t = t + spec["offset"]
+        label = f"{self.prefix}[{self.names[i]}]"
+        if t.min() < _MIN_ABS_JD:
+            raise ValueError(
+                f"[{label}] the observer-time conversion needs absolute "
+                f"Julian Dates, but the smallest time after time_offset is "
+                f"{t.min():.3f}. Set time_offset to restore full JDs (e.g. "
+                f"2450000 for JD-2450000 data, 2400000.5 for MJD)."
+            )
+        from astropy.time import Time
+
+        from exozippy.ephemeris import _resolve_observer, reception_instant
+
+        kind, target = _resolve_observer(observer_location)
+        location = target if kind == "site" else None
+        if spec["frame"] == "jd":
+            out = Time(
+                t, format="jd", scale=spec["scale"], location=location
+            ).tdb.jd
+        elif spec["frame"] == "bjd":
+            t_tdb = Time(
+                t, format="jd", scale=spec["scale"], location=location
+            ).tdb.jd
+            coord = self._time_coord(i, label)
+            out = reception_instant(
+                t_tdb,
+                coord.ra.rad,
+                coord.dec.rad,
+                observer_location=observer_location,
+                ephemeris=spec["ephemeris"],
+            )
+        else:
+            raise ValueError(
+                f"[{label}] time_frame: {spec['frame']} cannot tag a raw "
+                f"spectrum; use jd (the observer's own clock) or bjd "
+                f"(barycentric tags)."
+            )
+        logger.info(
+            "[%s] converted %d times from %s_%s to the observer's JD_TDB "
+            "(median shift %+.3f s).",
+            label,
+            t.size,
+            spec["frame"].upper(),
+            spec["scale"].upper(),
+            float(np.median(out - t)) * 86400.0,
+        )
+        return out
+
     def _time_coord(self, i, label):
         """The target ICRS direction for file ``i``'s light-travel terms.
 
         Reuses the star component's ra/dec exactly as astrometry and mulens
         do (``star_ndx`` on the file's config entry picks the star, default
         0; every star in one system is the same direction at the accuracy
-        that matters here).  Requiring ``user_modified`` is deliberate: the
-        defaults.yaml ra/dec are placeholders, and a conversion run against
-        them would corrupt every BJD by up to +/-8 minutes with no error.
+        that matters here).  Read with ``require_star_radec`` (components/star/position.py),
+        never ``resolve()``: a position given as a
+        LINK reads as the defaults.yaml placeholder (180, 0) under
+        ``resolve()`` with ``user_modified`` True, and the conversion ran
+        against it (+4.2 s on every KMT time; review 1.1.10).  Requiring an
+        INFORMED start is deliberate: a conversion run against the
+        placeholder would corrupt every BJD by up to +/-8 minutes with no
+        error.
         """
         star_ndx = self.resolve_star_ndx(
             self.config[i].get("star_ndx"),
             f"[{self.prefix}] {self.names[i]} star_ndx",
         )
-        ra = self.config_manager.resolve("star", "ra", element=star_ndx)
-        dec = self.config_manager.resolve("star", "dec", element=star_ndx)
-        if not (ra["user_modified"] and dec["user_modified"]):
-            raise ValueError(
-                f"[{label}] time_scale/time_frame conversion needs the "
-                f"target's coordinates: set star.{star_ndx}.ra and "
-                f"star.{star_ndx}.dec (deg) in the params file."
-            )
+        ra, dec = require_star_radec(
+            self.config_manager,
+            star_ndx,
+            f"[{label}] time_scale/time_frame conversion",
+        )
         import astropy.units as u
         from astropy.coordinates import SkyCoord
 
-        # resolve() returns per-element arrays even for shape=(); take the
-        # single element rather than float()-ing an ndarray (NumPy 2 error).
-        return SkyCoord(
-            ra=float(np.ravel(ra["initval"])[0]) * u.Unit(ra["unit"] or "deg"),
-            dec=float(np.ravel(dec["initval"])[0])
-            * u.Unit(dec["unit"] or "deg"),
-        )
+        return SkyCoord(ra=ra * u.rad, dec=dec * u.rad)
 
     def _time_location(self, i):
         """File ``i``'s observer EarthLocation (geocenter when unset)."""

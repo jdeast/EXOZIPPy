@@ -139,14 +139,15 @@ def main():
     bands = tuple(b.strip() for b in args.bands.split(","))
     files = C.light_curve_files(d, args.event, bands=bands)
 
+    # Either layout, in the flux system the fit uses (the full release's
+    # files are magnitudes; dc18_common.LAYOUT_FORMAT).
+    data_format = C.LAYOUT_FORMAT[C.data_layout(d)][0]
     curves, names = [], []
     for b in bands:
-        arr = np.loadtxt(files[b])
-        t, f, e = arr[:, 0], arr[:, 1], arr[:, 2]
-        ok = np.isfinite(t) & np.isfinite(f) & np.isfinite(e) & (e > 0)
-        curves.append((t[ok], f[ok], 1.0 / e[ok] ** 2))
+        t, f, e = C.read_light_curve(files[b], data_format)
+        curves.append((t, f, 1.0 / e**2))
         names.append(os.path.basename(files[b]))
-        print("  %s: %d points" % (b, ok.sum()), flush=True)
+        print("  %s: %d points" % (b, t.size), flush=True)
 
     seed = find_seed(curves)
     t_0, u_0, t_E = seed["t_0"], seed["u_0"], seed["t_E"]

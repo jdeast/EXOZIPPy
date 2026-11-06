@@ -107,13 +107,23 @@ _SUPPORTED_FUNCS = {
 
 @dataclass
 class ParamLink:
-    """One user-defined link: <target_path>.<field> = f(dep_paths...)."""
+    """One parameter link: <target_path>.<field> = f(dep_paths...).
+
+    ``origin`` is who stated it: ``"user"`` for a params-file expression
+    (``extract_links``), or the name of the component rule that added it
+    through ``ConfigManager.add_link`` (``"orbit"``: a star in an orbit
+    group shares its anchor's distance, proper motion, ... --
+    ``Star._link_orbit_members``).  The runtime treats both alike; the
+    provenance ledger does not, because a component link is a statement
+    the user never wrote.
+    """
 
     target_path: str  # standardized index form, e.g. "star.0.age"
     field: str  # one of LINKABLE_FIELDS
     expr_str: str  # original user string (for error messages)
     expr: sp.Expr  # symbols named by standardized dep paths (user units)
     dep_paths: List[str] = field(default_factory=list)
+    origin: str = "user"
 
 
 def _resolve_instance(comp_key, instance, system_config):

@@ -1,0 +1,51 @@
+run:
+  name: "Gaia4"
+
+prefix: "fitresults/Gaia4_outer"
+logger_level: INFO
+
+# Gaia-4b (Stefansson et al. 2025, AJ 169, 107): an 11.8 M_J planet on a
+# 571-day orbit around a 0.64 Msun K/M dwarf at 73 pc.  REAL Gaia DR4
+# epoch astrometry (the June 2026 pre-release, read as DPAC ships it) plus
+# the HPF, NEID and FIES radial velocities.  See README.md.
+# VARIANT: + an outer companion c on its own Keplerian orbit (Jacobi).
+
+star:
+  - name: "A"
+    mist: False
+
+planet:
+  - name: "b"
+  - name: "c"
+
+orbit:
+  - name: "b"
+    primary: ["A"]
+    companion: ["b"]
+  # A second, outer companion on its own Keplerian orbit.
+  - name: "c"
+    primary: ["A", "b"]     # Jacobi: c orbits the A+b barycenter
+    companion: ["c"]
+
+rvinstrument:
+  - name: "HPF"
+    file: "Gaia4.HPF.rv"
+  - name: "NEID"
+    file: "Gaia4.NEID.rv"
+  - name: "FIES"
+    file: "Gaia4.FIES.rv"
+
+astrometryinstrument:
+  - name: "GaiaDR4"
+    file: "GAIA_DR4_PRERELEASE_EPOCH_ASTROMETRY_RAW.xml"
+    mode: "gaia"                 # 1-D along-scan epoch astrometry
+    data_format: "gaia_epoch"    # the archive table itself, CCD by CCD
+    source_id: 1457486023639239296
+    epoch: 2457936.87477064      # J2017.5 TCB (the DR4 reference epoch) in BJD_TDB
+
+parameter_file: "gaia4_outer.params.yaml"
+
+sampler:
+  # The outer period is multimodal over 650-1e5 days: tempered DE.
+  method: ptde
+  cores: 16

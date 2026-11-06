@@ -652,16 +652,19 @@ def test_the_only_logp_change_is_the_cancellation_it_removes(nuts_dispatch):
 
     THE START LOGP IS NOT EXACTLY EQUAL, AND THAT IS NOT A MODEL CHANGE --
     recorded here because the obvious assertion is exact equality and it is
-    wrong for a reason worth keeping.  Section C's correction potential
-    cancels the raw N(0,1) SYMBOLICALLY, so each `(RV:X_raw,
-    POT:logit_uniform_prior.X)` pair moves by exactly equal and opposite
-    amounts (verified term by term on `examples/kelt4`: +2.347e5 against
-    -2.347e5 on `rvinstrument.jitter_variance`, +226.2 against -226.2 on
-    `orbit.cosi`, and so on for all 13 pairs).  What does not cancel is
-    float64 round-off: summing two numbers of magnitude `0.5*raw**2` to get
-    a residual of order 1 loses `0.5*raw**2 * 2**-52` nats, and that is the
-    same cancellation `parameter.py`'s `_RAW_CANCELLATION_CLIP` and the
-    runaway-lp bug are both about.
+    wrong for a reason worth keeping.  Until review 1.2.9 section C's
+    correction potential cancelled a raw N(0,1) on every logit element, so
+    each `(RV:X_raw, POT:logit_uniform_prior.X)` pair moved by equal and
+    opposite amounts (measured term by term on `examples/kelt4`: +2.347e5
+    against -2.347e5 on `rvinstrument.jitter_variance`, +226.2 against
+    -226.2 on `orbit.cosi`, and so on for all 13 pairs), and what did not
+    cancel was float64 round-off: summing two numbers of magnitude
+    `0.5*raw**2` to get a residual of order 1 loses `0.5*raw**2 * 2**-52`
+    nats -- the same residual the PTDE runaway fed on.  A logit raw
+    coordinate is now flat (parameter.py, `_raw_logp`), so there is no pair
+    and only the last-bit noise of summing the terms at all remains; the
+    bound below still holds, now with room to spare, and is kept because it
+    is still the right ceiling for whatever the coordinate change costs.
 
     Re-centering drives it to ZERO, because the start becomes `raw = 0`.  So
     the direction is the good one: same density, better arithmetic.  Measured

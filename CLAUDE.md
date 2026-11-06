@@ -26,8 +26,8 @@ poetry run pytest
 poetry run pytest tests/test_config_healing.py::test_name -n0 -x
 
 # Run the fitter on an example
-cd examples/kelt4rvonly && poetry run exozippy kelt4.yaml
-cd examples/ob140939   && poetry run exozippy ob140939.yaml
+cd examples/kelt4    && poetry run exozippy kelt4_rvonly.yaml
+cd examples/ob140939 && poetry run exozippy ob140939.yaml
 
 # Dump the full repo for AI review (see scripts/dump_code.py for flags)
 poetry run python scripts/dump_code.py
@@ -86,16 +86,19 @@ Each line names when to read the doc. Read it first; do not reconstruct its reas
 
 - Before adding a component, or touching the manifest vocabulary (`manifest.py`), the build graph (`graph.py`) or the physics registry (`physics_registry.py`), read `src/exozippy/components/components.md`.
 - Before changing how a config value, hint, override, bound or link is resolved, how the relaxation engine (`src/exozippy/relaxation.py`) decides which start absorbs a discrepancy, a `defaults.yaml` `rank:` or the precedence ladder -- or the three user-facing spellings of an element name -- read `src/exozippy/config.md`.
-- Before changing how a `Parameter` becomes a PyMC node (units, start values, pins, per-element roles, how a component-added prior is reported), read `src/exozippy/components/parameter.md`.
+- Before changing how a `Parameter` becomes a PyMC node (units, start values, pins, per-element roles, how a component-added prior is reported, the direction latents and the automatic direct-angle switch in `angles.py`), read `src/exozippy/components/parameter.md`.
 - Before touching `init_scale`, `bound_scale`, the startup probe or the persisted whitening state, read `src/exozippy/whitening.md`.
 - Before projecting anything onto the sky, or "fixing" a sign in orbit, astrometry or microlensing geometry, read `src/exozippy/skyframe.md`.
 - Before changing the run flow, the restart-file writer (`mkparam.py`) or trace reuse (`trace_meta.py`), read `src/exozippy/run.md`.
 - Before touching how data files are read (columns, masks), detrending, the noise model, Gaussian-process noise or robust likelihoods, read `src/exozippy/components/instrument.md`. The astronomical time systems (`time_frame`, `time_scale`, BJD_TDB conversion) are a separable mixin in `src/exozippy/components/timesystem.py`, deliberately NOT part of the field-neutral data scaffolding -- its defaults convert nothing, so a component from another field could inherit it, work, and still advertise a barycentric correction it never applies.
+- Before changing what an RV file means, the RV model's time argument or the instrument offset `gamma` -- or touching the in-model barycentric correction (`data_format: raw_redshift`: raw measured redshifts, corrected from the FITTED star and orbits per Wright & Eastman 2014, `components/rvinstrument/redshift.py`) -- read `src/exozippy/components/rvinstrument/rvinstrument.md`; the recommended format for PUBLISHING raw redshifts is `docs/raw_redshift_data.md`.
 - Before touching the microlensing likelihood, the seeding (the built-in peak finder; the removed MMEXOFAST keys), or the lens/source body maps, read `src/exozippy/components/mulensing/mulensing.md`.
 - Before comparing a microlensing parameter to a published one, converting to or from another modelling code, or "fixing" a microlensing sign, read `src/exozippy/components/mulensing/conventions.md` -- the origins, the parallax signs, `alpha`, `q > 1`, and the mappings onto the other common literature conventions. The Conventions section of paper III carries the same numbered claims. The chi2 tables behind the `alpha` rules (C18, C21, C22) are in `docs/alpha_conventions.md`.
+- Before giving the blended light of a microlensing target a parameter of its own, touching the unresolved-background component (its per-band flux, its light-curve tie, its photocenter and proper-motion prior), adding a prior on the background's fluxes or colors, or letting another component read it, read `src/exozippy/components/background/background.md`.
 - Before changing a stellar prior (IMF, the FFP mass function, distance), an empirical stellar or planetary relation, the planet mass coordinate, or the planet radius prior (uniform in R_P/R_*), read `src/exozippy/components/star/star.md`.
+- Before touching the galactic model's coordinates -- the galactocentric frame, `line_of_sight_basis`, `galactic_xyz`, `polar_velocity`, the bar angle, or any sign in the velocity transform -- read `src/exozippy/components/galacticmodel/galacticmodel.md`. Positions and velocities come from ONE astropy transform, mirrored in x into genulens's orientation; building either by hand is how review 1.7.1 happened.
 - Before touching the MIST evolutionary tracks, the grid loader, the systematic floors or the EEP -> age Jacobian, read `src/exozippy/components/evolutionarymodel/evolutionarymodel.md`.
-- Before changing orbit topology, the orbit `type:` (Keplerian vs a linear/quadratic Taylor orbit -- the RV slope/curvature and the lens's linear orbital motion), the `tc` window, or the eccentricity/inclination coordinates (`fitvcve`, `fitchord`), read `src/exozippy/components/orbit/orbit.md`.
+- Before changing orbit topology or planet membership (a planet's orbit and host come from the orbit groups, one spelling), the orbit `type:` (Keplerian, a linear/quadratic Taylor orbit -- the RV slope/curvature and the lens's linear orbital motion -- or a `static` pairing with no dynamics), the `tc` window, or the eccentricity/inclination coordinates (`fitvcve`, `fitchord`), read `src/exozippy/components/orbit/orbit.md`.
 - Before touching limb darkening, filter identity, the bolometric-correction grid or an SED flux hook, read `src/exozippy/components/sed/sed.md`.
 - Before adding a sampler, or changing chain sizing or start populations, read `src/exozippy/samplers/samplers.md`.
 - Before adding a table column, a LaTeX macro, a prose sentence or a plot, read `src/exozippy/outputs/outputs.md`.

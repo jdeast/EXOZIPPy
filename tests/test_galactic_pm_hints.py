@@ -214,17 +214,19 @@ def test_seeds_are_skipped_when_parallax_is_already_measured():
     )
 
 
-def test_seeds_are_skipped_without_user_coordinates():
+def test_a_config_without_coordinates_is_refused():
     """
     Given a config whose RA/Dec are left at the defaults.yaml placeholder,
-    When start values are resolved,
-    Then the proper motions fall back to defaults rather than being seeded off
-    a placeholder direction -- and building the model is REFUSED, because a
-    galactic prior with no sky position is a prior for the wrong patch of sky
-    (the 2026-09 DC2018 sweep ran that way: notes 2026-09-24).
+    When the system is prepared,
+    Then it is REFUSED at stage 1, naming the missing position: the
+    microlensing line of sight (and with it the galactic prior, whose mean
+    is a function of direction) would otherwise be built for the wrong
+    patch of sky (the 2026-09 DC2018 sweep ran that way: notes 2026-09-24).
 
-    The prior's mean is a function of direction, so seeding from a placeholder
-    would be worse than not seeding.
+    Until review 1.1.10 the line of sight ran silently on the placeholder,
+    the proper-motion seeds were skipped, and only the galactic model's
+    build refused; every stage-1 position reader now raises on an unstated
+    position instead (components/star/position.py).
     """
     # Arrange
     config, user_params = _inputs()
@@ -232,18 +234,6 @@ def test_seeds_are_skipped_without_user_coordinates():
         if key.endswith(".ra") or key.endswith(".dec"):
             del user_params[key]
 
-    # Act: prepare only -- the seeds are decided at stage 3/4
-    params = _prepared(config, user_params, build=False)
-
-    # Assert: no galactic-model seed was pushed.  (The start itself is no
-    # longer the defaults.yaml -3: under the KS relaxation rule, review
-    # 3.14.22, the DEFAULT_WEAK proper motions are the lowest seeds on the
-    # chain and absorb whatever the rest of it implies -- which is the
-    # point of their rank.  What this test guards is the SEED.)
-    system = params["__system__"]
-    pm_hints = [k for k in system.config_manager.hints if ".pm_" in k]
-    assert pm_hints == []
-
-    # And the galactic model refuses to build on the unpositioned anchor.
-    with pytest.raises(ValueError, match="has no sky position"):
-        params["__system__"].build_model()
+    # Act / Assert
+    with pytest.raises(ValueError, match="sky position"):
+        _prepared(config, user_params, build=False)

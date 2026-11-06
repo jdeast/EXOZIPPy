@@ -57,6 +57,14 @@ full-length pinned vectors like the GP hyperparameters, and a file cannot set
 both ``gp:`` and ``likelihood:`` (celerite2's closed-form marginal is
 Gaussian-only).  Off by default everywhere: with no ``likelihood:`` key the
 model is byte-for-byte what it was before this feature existed.
+
+Exposure smearing is owned here too: the per-file ``exptime_s:`` (SECONDS)
+and ``ninterp:`` keys, the per-row partition into sub-exposure node groups,
+and ``smear``, the one helper a child's model builder calls to average its
+model over each exposure (components/exposure.py holds the rules; the
+design is in instrument.md, "Exposure smearing").  A child opts in with
+``supports_exposure = True`` and an ``EXPOSURE_RULE``; every other child
+REFUSES the keys rather than ignoring them.
 """
 
 import copy
@@ -69,6 +77,7 @@ import pytensor.tensor as pt
 import sympy as sp
 
 from ..physics_registry import register_physics
+from . import exposure as exposure_rules
 from . import gp as gp_support
 from . import likelihood as robust_support
 from .component import Component
@@ -294,7 +303,7 @@ class ConcatenatedData:
             df = self._read_data(i, roles=("time", "rv", "err"), detrend=True)
             ...per-file work...
             blocks.add(i, time=..., obs=..., err=..., df=df)
-        blocks.finalize("rv", user_factor=...)
+        blocks.finalize("rv", user_factor=..., hint_unit="m/s")
 
     WHY AN ACCUMULATOR AND NOT A TEMPLATE METHOD WITH A PER-FILE HOOK.  The
     three children disagree about *when* the files are read:
@@ -413,7 +422,7 @@ class ConcatenatedData:
         self.counts.append(n_obs)
 
     # -- after the loop --------------------------------------------------
-    def finalize(self, observable, user_factor=1.0):
+    def finalize(self, observable, user_factor=1.0, hint_unit=None):
         """Concatenate, publish on the owner, and run the optional hooks.
 
         Sets ``time``, ``<observable>``, ``err``, ``inst_map``,
@@ -424,9 +433,11 @@ class ConcatenatedData:
         no-ops unless a file set ``gp:`` / ``likelihood:``.
 
         ``user_factor`` converts the concatenated error from the internal unit
-        it is held in to the user unit the GP amplitude and the robust
-        ``out_scale`` are declared in (both are declared in the same unit as
-        the data, so one factor serves both).
+        it is held in to ``hint_unit``, the defaults.yaml unit the GP
+        amplitude and the robust ``out_scale`` are declared in (both are
+        declared in the same unit as the data, so one factor serves both).
+        The start hints are pushed stating ``hint_unit`` (review 1.5.10);
+        ``None`` for a dimensionless observable.
         """
         owner = self.owner
         if len(self.counts) != owner.n_elements:
@@ -457,10 +468,17 @@ class ConcatenatedData:
         ) = owner._build_block_detrend(self.detrend, owner.n_total_obs)
 
         owner._prepare_gp(
-            owner.time, owner.err, owner.inst_map, user_factor=user_factor
+            owner.time,
+            owner.err,
+            owner.inst_map,
+            user_factor=user_factor,
+            hint_unit=hint_unit,
         )
         owner._prepare_robust(
-            owner.err, owner.inst_map, user_factor=user_factor
+            owner.err,
+            owner.inst_map,
+            user_factor=user_factor,
+            hint_unit=hint_unit,
         )
 
     def row_ranges(self):
@@ -515,6 +533,19 @@ class Instrument(TimeSystem, Component):
     # pair in DETREND_SPACES, never a child's own spelling (review 1.6.7).
     DETREND_SPACE = None
 
+    # Exposure smearing (instrument.md, "Exposure smearing").  A child whose
+    # model builder averages its model over each exposure through ``smear``
+    # sets ``supports_exposure = True`` and names its quadrature rule, a key
+    # of ``exposure.RULES`` ("midpoint" or "gauss").  A child that does not
+    # smear REFUSES the ``exptime_s:``/``ninterp:`` keys, naming itself, so a
+    # stated exposure is never silently ignored.  ``OWN_EXPOSURE_KEYS`` lists
+    # the keys a non-smearing child reads ITSELF and the base must therefore
+    # leave alone (rvinstrument's raw-redshift ``ninterp:``, #565, until its
+    # exposure average is folded into ``smear``).
+    supports_exposure = False
+    EXPOSURE_RULE = None
+    OWN_EXPOSURE_KEYS = ()
+
     def __init__(self, component_config, config_manager):
         super().__init__(component_config, config_manager)
         # Every instrument reads its data from per-element files and tracks a
@@ -557,6 +588,7 @@ class Instrument(TimeSystem, Component):
         self._load_plot_styles()
         self._load_gp_config()
         self._load_likelihood_config()
+        self._load_exposure_config()
 
     # ------------------------------------------------------------------
     # Per-instrument plot styling (config, not Parameters -- no sampling)
@@ -831,7 +863,15 @@ class Instrument(TimeSystem, Component):
     # ------------------------------------------------------------------
     # Shared file reading: columns, mask, time system, sort
     # ------------------------------------------------------------------
-    def _read_data(self, i, roles, detrend=False, shared_roles=()):
+    def _read_data(
+        self,
+        i,
+        roles,
+        detrend=False,
+        shared_roles=(),
+        observer_time=None,
+        row_index=False,
+    ):
         """Read data file ``i`` into canonical column order, ready to use.
 
         One call replaces the read/mask/sort triplet every child used to
@@ -856,6 +896,19 @@ class Instrument(TimeSystem, Component):
         ``shared_roles`` names groups of roles this component allows to
         read the SAME file column (see ``_check_no_duplicate_columns``);
         every other collision is an error.
+
+        ``observer_time`` -- an ``observer_location`` (the
+        ``ephemeris.get_observer_position`` vocabulary) for a component
+        that models the light's travel ITSELF (``rvinstrument``'s
+        ``data_format: raw_redshift``): step 3 then delivers the OBSERVER's
+        coordinate time JD_TDB at reception (``_to_observer_tdb``) instead
+        of a BJD_TDB tag.  None (every other reader) is step 3 as above.
+
+        ``row_index`` -- True returns ``(df, rows)`` instead: ``rows`` the
+        0-based ON-DISK row of each returned row (comment lines not
+        counted, the ``mask:`` convention), in the returned (sorted) order
+        -- for a side file keyed by exposure (``rvinstrument``'s
+        ``exposure_meter:``).
         """
         if roles[0] != "time":
             raise ValueError(
@@ -870,6 +923,37 @@ class Instrument(TimeSystem, Component):
                 f"apply the fitted trend the same way (components/"
                 f"instrument.md, 'One detrend mechanism')."
             )
+        df = self._read_table(i)
+        df = self._select_columns(df, i, roles, detrend, shared_roles)
+        if row_index:
+            # Carried through the mask and the sort as one more column (not
+            # a positional one: every role and detrend column keeps its
+            # place), then split off.
+            df["_disk_row"] = np.arange(len(df))
+        df = self._apply_mask(df, i)
+        raw_t = df.iloc[:, 0].values.astype(float)
+        if observer_time is None:
+            t = self._to_bjd_tdb(raw_t, i)
+        else:
+            t = self._to_observer_tdb(raw_t, i, observer_time)
+        df[df.columns[0]] = t
+        df = self._sort_by_time(df)
+        if not row_index:
+            return df
+        rows = df.pop("_disk_row").values.astype(int)
+        return df, rows
+
+    def _read_table(self, i):
+        """File ``i`` as a DataFrame of its on-disk columns, unaltered.
+
+        The one step of ``_read_data`` a child may replace: a component
+        whose data come as a structured product rather than whitespace
+        columns (astrometry's ``data_format: gaia_epoch``, a Gaia archive
+        table) overrides this to deliver the same thing -- positional
+        columns, ``time`` first, in the file's own time system -- and
+        everything after it (``columns:``, ``mask:``, ``time_*:``, the sort)
+        stays shared.
+        """
         # A bad path or an unreadable file used to surface as pandas' own
         # error -- a bare FileNotFoundError, or "No columns to parse from
         # file" -- with no instrument and no config key in it, so on a
@@ -891,11 +975,7 @@ class Instrument(TimeSystem, Component):
                 f"[{self.prefix}[{self.names[i]}]] could not parse data "
                 f"file {path!r} (the 'file:' key of this entry): {e}"
             ) from e
-        df = self._select_columns(df, i, roles, detrend, shared_roles)
-        df = self._apply_mask(df, i)
-        t = self._to_bjd_tdb(df.iloc[:, 0].values.astype(float), i)
-        df[df.columns[0]] = t
-        return self._sort_by_time(df)
+        return df
 
     # ------------------------------------------------------------------
     # Optional per-file column layout (columns:)
@@ -1155,7 +1235,9 @@ class Instrument(TimeSystem, Component):
             ]
         return names
 
-    def _prepare_gp(self, time, err, inst_map, user_factor=1.0):
+    def _prepare_gp(
+        self, time, err, inst_map, user_factor=1.0, hint_unit=None
+    ):
         """Stage 1: index and seed the GP terms from the loaded data.
 
         Call at the end of ``load_data``, once the concatenated ``time``,
@@ -1177,8 +1259,11 @@ class Instrument(TimeSystem, Component):
            knows the activity amplitude should just set ``initval``.
 
         ``user_factor`` converts the error from the internal unit the caller
-        holds it in to the user unit the amplitude parameter is declared in
-        (hints are pushed in user units).
+        holds it in to ``hint_unit``, the unit the amplitude parameter is
+        declared in (its defaults.yaml ``unit``), and the hint is pushed
+        STATING that unit, so a user ``unit:`` override on the amplitude
+        cannot rescale it (review 1.5.10).  ``hint_unit=None`` for a
+        dimensionless observable.
         """
         if not self.has_gp:
             return
@@ -1210,8 +1295,8 @@ class Instrument(TimeSystem, Component):
                 path = (
                     f"{self.prefix}.{i}.{gp_support.GP_AMPLITUDE_PARAM[kind]}"
                 )
-                self.config_manager.add_hint(path, amp)
-                self.config_manager.add_scale_hint(path, amp)
+                self.config_manager.add_hint(path, amp, unit=hint_unit)
+                self.config_manager.add_scale_hint(path, amp, unit=hint_unit)
 
     def _register_gp(self, manifest):
         """Stage 3: add this component's GP hyperparameters to ``manifest``.
@@ -1397,6 +1482,24 @@ class Instrument(TimeSystem, Component):
                 section="noise",
                 key=f"{self.prefix}.robust.hogg",
                 rank=40,
+            )
+        beta = sorted(getattr(self, "_out_frac_beta", {}) or {})
+        if beta:
+            shapes = ", ".join(
+                f"{names[i]}: $a = {self._out_frac_beta[i][0]:.3g}$, "
+                f"$b = {self._out_frac_beta[i][1]:.3g}$"
+                for i in beta
+            )
+            prose.add(
+                "The outlier fraction of "
+                + join_names([names[i] for i in beta])
+                + " carried a Beta prior favouring a small outlier "
+                "fraction, renormalized on its allowed range ("
+                + shapes
+                + ").",
+                section="noise",
+                key=f"{self.prefix}.robust.hogg.beta",
+                rank=41,
             )
         if robust["studentt"]:
             prose.add(
@@ -1602,6 +1705,7 @@ class Instrument(TimeSystem, Component):
         caught at construction.
         """
         self.likelihood_kinds = []
+        self._out_frac_prior_specs = []
         for i, c in enumerate(self.config):
             label = f"{self.prefix}[{self.names[i]}]"
             kind = robust_support.parse_likelihood_spec(
@@ -1621,7 +1725,23 @@ class Instrument(TimeSystem, Component):
                     f"likelihood is Gaussian-only, so a robust observation "
                     f"model cannot be marginalized through it. Choose one."
                 )
+            prior_spec = c.get(robust_support.OUT_FRAC_PRIOR_KEY)
+            if (
+                kind != "hogg"
+                and robust_support.parse_out_frac_prior(
+                    prior_spec, context=label
+                )
+                is not None
+            ):
+                raise ValueError(
+                    f"[{label}] '{robust_support.OUT_FRAC_PRIOR_KEY}:' is a "
+                    f"prior on the hogg mixture's outlier fraction, but this "
+                    f"file's likelihood is "
+                    f"'{kind or 'gaussian'}'. Add 'likelihood: hogg' or "
+                    f"remove the key."
+                )
             self.likelihood_kinds.append(kind)
+            self._out_frac_prior_specs.append(prior_spec)
         self.has_robust_likelihood = any(self.likelihood_kinds)
 
         # Element index -> indices into the concatenated observation arrays
@@ -1630,10 +1750,18 @@ class Instrument(TimeSystem, Component):
         # per-file symbolic outlier log-odds (filled by
         # _add_robust_likelihoods), their lazily compiled evaluators, and the
         # linear values of log-sampled parameters.
+        # Also: the per-element Beta shapes of an opted-in out_frac prior
+        # (filled by _prepare_robust, which knows each file's N), and the
+        # per-file symbolic (Gaussian, hogg) log-likelihood sums the post-fit
+        # audit evaluates (filled by _add_robust_likelihoods) with their
+        # lazily compiled evaluator.
         self._robust_obs_index = {}
         self._robust_scale_caps = {}
+        self._out_frac_beta = {}
         self._hogg_logodds = {}
         self._hogg_prob_fns = None
+        self._hogg_logl = {}
+        self._hogg_logl_fns = None
         self._robust_linear = {}
 
     def _robust_elements(self, kind):
@@ -1645,7 +1773,13 @@ class Instrument(TimeSystem, Component):
         """The shared ``likelihood`` config-schema entry; children append it."""
         return robust_support.likelihood_config_schema_entry()
 
-    def _prepare_robust(self, err, inst_map, user_factor=1.0):
+    @staticmethod
+    def _out_frac_prior_config_schema():
+        """The shared ``out_frac_prior`` config-schema entry; children
+        append it next to ``_likelihood_config_schema``."""
+        return robust_support.out_frac_prior_config_schema_entry()
+
+    def _prepare_robust(self, err, inst_map, user_factor=1.0, hint_unit=None):
         """Stage 1: index the robust files and seed the mixture scale.
 
         Call at the end of ``load_data``, right next to ``_prepare_gp``.
@@ -1656,9 +1790,12 @@ class Instrument(TimeSystem, Component):
         median(err)`` (with a matching whitening scale hint -- the start is
         the natural width of the parameter), and a CAP of ``SCALE_CAP_FACTOR
         x median(err)`` recorded in ``_robust_scale_caps`` for
-        ``_register_robust`` to attach at stage 3.  Both are in the USER
-        unit ``out_scale`` is declared in (``user_factor`` converts from the
-        internal unit the caller holds the errors in).
+        ``_register_robust`` to attach at stage 3.  Both are in
+        ``hint_unit``, the defaults.yaml unit ``out_scale`` is declared in
+        (``user_factor`` converts from the internal unit the caller holds
+        the errors in): the start hint states it (review 1.5.10), and the
+        cap is a manifest bound, which ``resolve()`` reads in the defaults
+        unit.
 
         The start used to be 10x the median, "so the two mixture components
         start separated and cannot swap roles during tuning".  Review 8.6.3
@@ -1690,6 +1827,13 @@ class Instrument(TimeSystem, Component):
                     f"is set but the file contributed no observations."
                 )
             self._robust_obs_index[i] = sel
+            if kind == "hogg":
+                shapes = robust_support.parse_out_frac_prior(
+                    self._out_frac_prior_specs[i],
+                    context=f"{self.prefix}[{self.names[i]}]",
+                )
+                if shapes is not None:
+                    self._out_frac_beta[i] = shapes
 
             scale_param = robust_support.LIKELIHOOD_SCALE_PARAM.get(kind)
             if scale_param is None:
@@ -1705,8 +1849,8 @@ class Instrument(TimeSystem, Component):
                 robust_support.SCALE_CAP_FACTOR * median_err
             )
             path = f"{self.prefix}.{i}.{scale_param}"
-            self.config_manager.add_hint(path, start)
-            self.config_manager.add_scale_hint(path, start)
+            self.config_manager.add_hint(path, start, unit=hint_unit)
+            self.config_manager.add_scale_hint(path, start, unit=hint_unit)
 
     def _register_robust(self, manifest):
         """Stage 3: add this component's robust-likelihood parameters.
@@ -1790,6 +1934,8 @@ class Instrument(TimeSystem, Component):
         # fewer files cannot leave a stale entry either.
         self._hogg_logodds = {}
         self._hogg_prob_fns = None
+        self._hogg_logl = {}
+        self._hogg_logl_fns = None
 
         self._build_robust_deterministics()
         for i in sorted(self._robust_obs_index):
@@ -1810,6 +1956,16 @@ class Instrument(TimeSystem, Component):
                     self.out_frac.value[i],
                     self.out_scale.value[i],
                 )
+                # The audit's pair: the same residuals and the same sigma
+                # (err_scale/jitter included) scored both ways, so their
+                # difference is exactly what the mixture forgives.
+                self._hogg_logl[i] = (
+                    pt.sum(robust_support.gaussian_logl(resid, sigma[idx])),
+                    pt.sum(logp),
+                    self.out_scale.value[i],
+                )
+                if i in self._out_frac_beta:
+                    self._add_out_frac_beta_prior(i)
             else:  # "studentt"
                 pm.StudentT(
                     f"{name}.t.{self.names[i]}",
@@ -1825,6 +1981,126 @@ class Instrument(TimeSystem, Component):
                 kind,
                 idx.size,
             )
+
+    def _add_out_frac_beta_prior(self, i):
+        """File ``i``'s opted-in Beta(a, b) prior on ``out_frac``.
+
+        A normalized ``pm.Potential`` over the element's own resolved
+        ``[lower, upper]`` (default [0, 0.5]), declared with
+        ``add_prior_contribution(supersedes_bounds=True)`` so the Prior
+        column says Beta rather than Uniform -- the parameter.md rule for a
+        component-added prior.  It REPLACES the flat prior the logit
+        transform implies; a user's own ``mu``/``sigma`` on out_frac still
+        multiplies it.  A pinned element (``sigma: 0``, the easy way to fix
+        f) gets no term: it would be a constant.
+        """
+        param = self.out_frac
+        if hasattr(param, "element_is_sampled") and param._built_roles():
+            if not param.element_is_sampled(i):
+                return
+        a, b = self._out_frac_beta[i]
+
+        def bound(field, default):
+            vec = np.atleast_1d(getattr(param, field, default))
+            try:
+                return float(vec[min(i, vec.size - 1)])
+            except TypeError:  # a linked (symbolic) bound
+                return float("nan")
+
+        # out_frac is unitless, so the internal bound IS the user bound.
+        lower, upper = bound("lower", 0.0), bound("upper", 0.5)
+        if not (np.isfinite(lower) and np.isfinite(upper)):
+            raise ValueError(
+                f"[{self.prefix}[{self.names[i]}]] "
+                f"{robust_support.OUT_FRAC_PRIOR_KEY} needs numeric, finite "
+                f"bounds on out_frac to normalize over; got "
+                f"[{lower}, {upper}]."
+            )
+        pm.Potential(
+            f"{self.prefix}.out_frac.beta.{self.names[i]}",
+            robust_support.beta_logp(
+                param.value[i], a, b, lower=lower, upper=upper
+            ),
+        )
+        if hasattr(param, "add_prior_contribution"):
+            param.add_prior_contribution(
+                rf"$\mathcal{{B}}({a:.3g}, {b:.3g})$",
+                text=f"Beta({a:.3g}, {b:.3g})",
+                elements=[i],
+                supersedes_bounds=True,
+            )
+
+    def robust_fit_summary(self, system, point):
+        """Per hogg file, what the mixture did at ``point``.
+
+        The instrument half of the post-fit robust-likelihood audit
+        (``outputs/outliers.py`` is the other): a list of dicts, one per
+        file with ``likelihood: hogg``, each holding ``name``, ``n``,
+        ``gauss_logl`` and ``hogg_logl`` (the file's summed log-likelihood
+        under a plain Gaussian and under the mixture, the SAME residuals and
+        the same err_scale-inflated sigma), ``membership`` (per-point
+        posterior outlier probability), ``times`` (the epochs, or None if
+        this component keeps none) and ``scale_frac`` (out_scale at the
+        point over its upper bound -- the data-driven cap -- both internal,
+        so the ratio is unit-free; None when the bound is not a finite
+        number).  Empty when no file uses the mixture.
+        Compiled lazily against ``system.plot_params`` like
+        ``outlier_prob_at_data``.
+        """
+        if not self._hogg_logl:
+            return []
+        if self._hogg_logl_fns is None:
+            import pytensor
+
+            param_symbols = [p.value for p in system.plot_params]
+            self._hogg_logl_fns = {
+                i: pytensor.function(
+                    inputs=param_symbols,
+                    outputs=list(nodes),
+                    on_unused_input="ignore",
+                )
+                for i, nodes in self._hogg_logl.items()
+            }
+        values = self._point_to_plot_params(point, system)
+        prob = self.outlier_prob_at_data(system, point)
+        times = getattr(self, "time", None)
+        out = []
+        for i in sorted(self._hogg_logl_fns):
+            idx = self._robust_obs_index[i]
+            gauss, hogg, scale = self._hogg_logl_fns[i](*values)
+            cap = self._out_scale_upper(i)
+            out.append(
+                {
+                    "name": self.names[i],
+                    "index": i,
+                    "n": int(idx.size),
+                    "gauss_logl": float(gauss),
+                    "hogg_logl": float(hogg),
+                    "membership": np.asarray(prob[idx], dtype=float),
+                    "scale_frac": (
+                        None if cap is None else float(scale) / cap
+                    ),
+                    "times": (
+                        None
+                        if times is None
+                        else np.asarray(times, dtype=float)[idx]
+                    ),
+                }
+            )
+        return out
+
+    def _out_scale_upper(self, i):
+        """Element ``i``'s resolved ``out_scale`` upper bound (internal
+        unit), or None when it is absent, symbolic or not positive."""
+        upper = getattr(self.out_scale, "upper", None)
+        if upper is None:
+            return None
+        try:
+            vec = np.atleast_1d(np.asarray(upper, dtype=float))
+        except (TypeError, ValueError):
+            return None
+        val = float(vec[min(i, vec.size - 1)])
+        return val if np.isfinite(val) and val > 0 else None
 
     def outlier_prob_at_data(self, system, point):
         """Posterior outlier probability of every observation, at ``point``.
@@ -1878,6 +2154,310 @@ class Instrument(TimeSystem, Component):
     # was wrong for celerite2; transit's own turned out to be fixable rather
     # than fundamental, and is gone too (exoplanet-core >= 0.4.0 makes the
     # limb-darkening op JAX-differentiable).
+
+    # ------------------------------------------------------------------
+    # Exposure smearing (instrument.md, "Exposure smearing")
+    # ------------------------------------------------------------------
+    #: The inert exposure time a file that states none carries, in seconds.
+    #: It is never smeared over (such a file has ninterp 1, a lone node at
+    #: the timestamp); its one reader is transit's tc-information estimate
+    #: (``timing.transit_information``), where it is a floor on the ingress
+    #: duration, and the value is the one that estimate always used.
+    INERT_EXPTIME_S = 60.0
+
+    #: The per-file keys the base parses.
+    EXPOSURE_KEYS = ("exptime_s", "ninterp")
+
+    def _load_exposure_config(self):
+        """Read the per-file ``exptime_s:`` / ``ninterp:`` keys (at
+        construction, in ``__init__``).
+
+        For a child with ``supports_exposure`` this populates, per element,
+        ``self.exptime_s`` (the exposure time in SECONDS; the inert
+        ``INERT_EXPTIME_S`` where none is stated or the stated one is
+        rejected), ``self.ninterp`` (sub-exposure nodes, 1 = the
+        instantaneous model) and ``self.exptime_stated`` (whether
+        ``exptime_s`` is the file's own, stated and accepted).
+
+        Three outcomes per file, each deliberate:
+
+        - the retired ``exptime:`` (MINUTES) RAISES on every component,
+          naming the replacement and the converted value: read as seconds,
+          an old ``exptime: 30`` would silently smear over 30 s instead of
+          30 min (config.md, the one-spelling rule; instrument.md);
+        - a non-numeric value RAISES naming the file and the value (review
+          2.14.3): ``exptime_s: "abc"`` is a typo with no sensible fallback;
+        - an out-of-range combination (``ninterp < 1``, ``exptime_s <= 0``,
+          or ``ninterp > 1`` with no ``exptime_s`` to smear over) WARNS and
+          falls back to the instantaneous model -- user input, not an
+          internal invariant, so the rope-not-gates rule applies.
+
+        A child without ``supports_exposure`` RAISES on either key (except
+        the ones it lists in ``OWN_EXPOSURE_KEYS``), naming itself.
+        """
+        for i, c in enumerate(self.config):
+            if "exptime" in c:
+                raise ValueError(
+                    self._retired_exptime_message(i, c["exptime"])
+                )
+        if not self.supports_exposure:
+            for i, c in enumerate(self.config):
+                stated = [
+                    k
+                    for k in self.EXPOSURE_KEYS
+                    if k in c and k not in self.OWN_EXPOSURE_KEYS
+                ]
+                if stated:
+                    raise NotImplementedError(
+                        f"[{self.prefix}[{self.names[i]}]] exposure smearing "
+                        f"({', '.join(stated)}) is not supported by the "
+                        f"{self.prefix} component: its model is evaluated at "
+                        f"each timestamp. Remove the key."
+                    )
+            return
+        if self.EXPOSURE_RULE not in exposure_rules.RULES:
+            raise ValueError(
+                f"{type(self).__name__} sets supports_exposure but its "
+                f"EXPOSURE_RULE {self.EXPOSURE_RULE!r} is not one of "
+                f"{sorted(exposure_rules.RULES)}."
+            )
+        n = len(self.config)
+        self.exptime_s = [self.INERT_EXPTIME_S] * n
+        self.ninterp = [1] * n
+        self.exptime_stated = [False] * n
+        for i, c in enumerate(self.config):
+            where = f"{self.prefix}[{self.names[i]}]"
+            try:
+                exptime = float(c.get("exptime_s", self.INERT_EXPTIME_S))
+                ninterp = int(c.get("ninterp", 1))
+            except (TypeError, ValueError) as e:
+                raise ValueError(
+                    f"[{where}] exptime_s/ninterp must be numeric (the "
+                    f"exposure duration in seconds and the number of "
+                    f"sub-exposure nodes); got "
+                    f"exptime_s={c.get('exptime_s', '<unset>')!r}, "
+                    f"ninterp={c.get('ninterp', '<unset>')!r}: {e}"
+                ) from e
+            if (
+                ninterp < 1
+                or exptime <= 0
+                or (ninterp > 1 and "exptime_s" not in c)
+            ):
+                logger.warning(
+                    f"{self.prefix} {self.names[i]}: invalid exposure "
+                    f"smearing config (exptime_s="
+                    f"{c.get('exptime_s', '<unset>')} s, "
+                    f"ninterp={c.get('ninterp', '<unset>')}): needs "
+                    f"ninterp >= 1 and, when ninterp > 1, an explicit "
+                    f"exptime_s > 0. Ignoring -- defaulting to ninterp=1 "
+                    f"(no smearing)."
+                )
+                exptime, ninterp = self.INERT_EXPTIME_S, 1
+            else:
+                self.exptime_stated[i] = "exptime_s" in c
+            self.exptime_s[i] = exptime
+            self.ninterp[i] = ninterp
+
+    def _retired_exptime_message(self, i, value):
+        """The migration message for the retired per-file ``exptime:``."""
+        try:
+            hint = (
+                f" For this file write 'exptime_s: {60.0 * float(value):g}' "
+                f"(= {float(value):g} min)."
+            )
+        except (TypeError, ValueError):
+            hint = ""
+        return (
+            f"[{self.prefix}[{self.names[i]}]] 'exptime:' is retired: it was "
+            f"the exposure time in MINUTES. The exposure time is now "
+            f"'exptime_s:', in SECONDS, so an old value cannot be read in "
+            f"the wrong unit.{hint}"
+        )
+
+    @staticmethod
+    def _exposure_config_schema():
+        """The shared ``exptime_s`` / ``ninterp`` config-schema entries; a
+        child with ``supports_exposure`` appends them."""
+        return [
+            {
+                "key": "exptime_s",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Exposure time of every point in this file, in SECONDS "
+                    "(e.g. 1800 for a 30-minute cadence). The model is "
+                    "averaged over each exposure on ninterp sub-exposure "
+                    "nodes. Read only with ninterp > 1."
+                ),
+            },
+            {
+                "key": "ninterp",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Sub-exposure nodes per point for exposure smearing "
+                    "(default 1: the model at the timestamp). Needs "
+                    "exptime_s when > 1."
+                ),
+            },
+        ]
+
+    @staticmethod
+    def _blocks_inst_map(blocks):
+        """The per-row instrument index (numpy) of a builder's row blocks
+        ``[(inst_idx, rows), ...]`` (instrument.md, the builder contract)."""
+        n_rows = int(sum(len(rows) for _, rows in blocks))
+        inst_map = np.empty(n_rows, dtype=int)
+        for inst_idx, rows in blocks:
+            inst_map[np.asarray(rows, dtype=int)] = int(inst_idx)
+        return inst_map
+
+    def _exposure_partition(self, inst_map, ninterp=None):
+        """The sub-exposure node groups of rows with per-row instrument
+        index ``inst_map``: ``exposure.partition`` on each row's own file's
+        exposure time (in days) and node count, with this child's
+        ``EXPOSURE_RULE``.  A list of ``(rows, offsets, weights)``.
+
+        ``ninterp`` (per FILE, optional) replaces the files' node counts --
+        the hook that lets a file be evaluated at two node counts and the
+        results compared (``smear``/``smear_file``/``exposure_nodes`` all
+        take it), without touching the configured ``self.ninterp``."""
+        if not self.supports_exposure:
+            raise TypeError(
+                f"{type(self).__name__} does not declare supports_exposure; "
+                f"it has no exposure description to partition."
+            )
+        inst_map = np.asarray(inst_map, dtype=int)
+        exptime_days = (
+            np.asarray(self.exptime_s, dtype=float)
+            / exposure_rules.SECONDS_PER_DAY
+        )
+        ninterp = np.asarray(
+            self.ninterp if ninterp is None else ninterp, dtype=int
+        )
+        return exposure_rules.partition(
+            exptime_days[inst_map], ninterp[inst_map], self.EXPOSURE_RULE
+        )
+
+    def _record_exposure_groups(self, time, inst_map):
+        """Record the data's node groups as ``self._exposure_groups``, a
+        list of ``(rows, grid, weights)`` with ``grid`` the concrete
+        ``(n_g, k_g)`` sub-exposure times -- the partition ``smear`` makes
+        of the likelihood's rows, materialized on the data's own times: the
+        inspectable record of what the likelihood smears over
+        (tests/test_transit_exptime_ninterp.py)."""
+        time = np.asarray(time, dtype=float)
+        self._exposure_groups = []
+        for rows, offsets, weights in self._exposure_partition(inst_map):
+            if offsets is None:
+                grid = time[rows][:, None]
+            else:
+                grid = time[rows][:, None] + offsets
+            self._exposure_groups.append((rows, grid, weights))
+
+    def smear(self, fn, t, blocks, ninterp=None):
+        """The exposure-averaged model on times ``t``, in ROW order.
+
+        ``fn(t_sub, rows)`` builds the instantaneous model on one node
+        group: ``rows`` the (numpy) row indices of ``t`` in the group,
+        ``t_sub`` the ``(n_g, k_g)`` tensor of their sub-exposure times
+        (``k_g = 1``, the timestamp itself, for an unsmeared row).  It
+        returns a TUPLE of tensors, each ``(n_g, k_g, ...)``; every member
+        is averaged over its node axis with the SAME weights and comes back
+        ``(N, ...)`` in the row order of ``t``.  The tuple is what makes the
+        helper observable-shape-agnostic: a child with a vector observable
+        (astrometry's (dE, dN)) averages the vector's components together,
+        on one partition, and forms its observable from the averaged vector
+        afterwards.
+
+        ``blocks`` is the builder contract's ``[(inst_idx, rows), ...]``
+        (instrument.md), so the plot grid and the data smear identically.
+        Groups are built per node count (``exposure.partition``); with
+        ``ninterp == 1`` everywhere there is exactly one group of width 1 and
+        the result is ``fn``'s own output at the timestamps.
+        """
+        groups = self._exposure_partition(
+            self._blocks_inst_map(blocks), ninterp
+        )
+        inverse_order = np.argsort(np.concatenate([g[0] for g in groups]))
+        per_member = None
+        for rows, offsets, weights in groups:
+            t_rows = t[rows][:, None]  # (n_g, 1)
+            if offsets is None:
+                t_sub = t_rows
+            else:
+                t_sub = t_rows + pt.constant(offsets)  # (n_g, k_g)
+            out = fn(t_sub, rows)
+            if not isinstance(out, tuple):
+                raise TypeError(
+                    f"{type(self).__name__}.smear: the model function must "
+                    f"return a tuple of tensors, got {type(out).__name__}."
+                )
+            if per_member is None:
+                per_member = [[] for _ in out]
+            elif len(out) != len(per_member):
+                raise ValueError(
+                    f"{type(self).__name__}.smear: the model function "
+                    f"returned {len(out)} members for one node group and "
+                    f"{len(per_member)} for another."
+                )
+            w_g = pt.constant(weights)  # (k_g,)
+            for m, x in enumerate(out):
+                per_member[m].append(self._node_mean(x, w_g))
+        return tuple(
+            pt.concatenate(parts)[inverse_order] for parts in per_member
+        )
+
+    @staticmethod
+    def _node_mean(x, w):
+        """The weighted mean of ``x`` (``(n, k, ...)``) over its node axis
+        1 with weights ``w`` (``(k,)`` tensor, summing to 1); with k == 1 an
+        identity (single column, weight 1).  The one averaging step of
+        ``smear`` and ``smear_file``."""
+        w_b = w[(None, slice(None)) + (None,) * (x.ndim - 2)]
+        return pt.sum(x * w_b, axis=1)
+
+    def exposure_nodes(self, i, ninterp=None):
+        """File ``i``'s sub-exposure node offsets in DAYS and their weights,
+        ``(offsets (k,), weights (k,))`` from this child's ``EXPOSURE_RULE``
+        and the file's ``exptime_s`` / ``ninterp``.  One node at offset 0
+        for an unsmeared file."""
+        if not self.supports_exposure:
+            raise TypeError(
+                f"{type(self).__name__} does not declare supports_exposure; "
+                f"it has no exposure description."
+            )
+        k = int(self.ninterp[i] if ninterp is None else ninterp)
+        if k == 1:
+            return np.zeros(1), np.ones(1)
+        frac, weights = exposure_rules.RULES[self.EXPOSURE_RULE](k)
+        return frac * (
+            self.exptime_s[i] / exposure_rules.SECONDS_PER_DAY
+        ), weights
+
+    def smear_file(self, fn, t, i, ninterp=None):
+        """``smear`` for a time vector that belongs to ONE file, ``i``, of
+        any (even symbolic) length: every row shares the file's nodes, so
+        the sub-exposure times are ``t[:, None] + offsets[None, :]``,
+        ``(N, k)``, with no row partition.  ``fn(t_sub)`` returns a tuple
+        of ``(N, k, ...)`` tensors; each comes back node-averaged,
+        ``(N, ...)``.  The child that keeps one dataset per file
+        (astrometry) uses this; the concatenating children use ``smear``.
+        """
+        offsets, weights = self.exposure_nodes(i, ninterp)
+        t_sub = pt.as_tensor_variable(t)[:, None] + pt.constant(
+            offsets[None, :]
+        )
+        out = fn(t_sub)
+        if not isinstance(out, tuple):
+            raise TypeError(
+                f"{type(self).__name__}.smear_file: the model function must "
+                f"return a tuple of tensors, got {type(out).__name__}."
+            )
+        w = pt.constant(weights)
+        return tuple(self._node_mean(x, w) for x in out)
 
     def add_parameter(self, model, param_name, system, context_nodes=None):
         """Stage 6, plus the detrend coefficients' whitening scale.

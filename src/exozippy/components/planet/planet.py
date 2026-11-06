@@ -4,18 +4,30 @@ import numpy as np
 import pymc as pm
 import pytensor.tensor as pt
 
-from exozippy.components.component import Component
+from exozippy.components.component import Component, in_topology
 from exozippy.components.parameterization import (
+    merge_options,
     merge_overrides,
     mode_manifest,
     pin_unselected,
 )
 from exozippy.config import user_entry
-from exozippy.constants import KEPLER_CONST, MSUN_TO_MEARTH, RSUN_TO_REARTH
+from exozippy.constants import (
+    KEPLER_CONST,
+    MSUN_TO_MEARTH,
+    RJUP_TO_REARTH,
+    RSUN_TO_REARTH,
+)
 from exozippy.outputs.prose import get_collector, join_names
 from exozippy.outputs.texutils import latex_escape
 from exozippy.potentials import soft_lower_bound
 
+from ..orbit.bodies import (
+    REMOVED_PLANET_KEYS,
+    component_instance_names,
+    orbit_types,
+    planet_membership,
+)
 from ..orbit.orbit import (
     amplitude_constrained_orbits,
     inclination_constrained_orbits,
@@ -73,7 +85,12 @@ def _mass_parameterization_removed(value):
 # message (the mulensing bodies.REMOVED_KEYS pattern): a config naming one was
 # written for a spelling that no longer exists, and the user needs the
 # replacement, not silence.  {key: message(value)}.
-REMOVED_KEYS = {"mass_parameterization": _mass_parameterization_removed}
+# `orbit_ndx:` and `star_ndx:` are the second spelling of the orbit groups
+# (owned by orbit/bodies.py, whose `planet_membership` is the one reader).
+REMOVED_KEYS = {
+    "mass_parameterization": _mass_parameterization_removed,
+    **REMOVED_PLANET_KEYS,
+}
 
 
 def parse_mass_flags(entry, where):
@@ -304,26 +321,35 @@ class Planet(Component):
                     "fitvcve. At most one of fitlogq/fitmsini may be true."
                 ),
             },
-            {
-                "key": "star_ndx",
-                "kind": "ref",
-                "accepts": ["star"],
-                "required": False,
-                "doc": "Index of the host star (default 0).",
-            },
-            {
-                "key": "orbit_ndx",
-                "kind": "ref",
-                "accepts": ["orbit"],
-                "required": False,
-                "doc": "Index of the orbit this planet is on (default 0).",
-            },
         ]
 
     def build_maps(self):
-        """Stage 2: Define logical Numpy arrays. (Base class auto-converts to Tensors)."""
-        self.star_map = np.array([p.get("star_ndx", 0) for p in self.config])
-        self.orbit_map = np.array([p.get("orbit_ndx", 0) for p in self.config])
+        """Stage 2: the planet -> host star and planet -> orbit index maps.
+
+        Both are DERIVED from the orbit blocks' primary:/companion: groups
+        (`orbit.bodies.planet_membership`, the one reader): a planet carries
+        no key of its own for either, so the two cannot disagree.
+
+        `star_map` always exists -- every planet has a host.  `orbit_map`
+        exists only when EVERY planet is named by an orbit block; a planet
+        paired implicitly with no orbit (a static lens companion with no
+        orbit block) has none, and `orbit_ndx` (the per-planet list, None
+        there) is what to ask.  No sentinel index is invented: a reader that
+        needs an orbit for an orbit-less planet fails loudly instead of
+        indexing orbit -1.
+        """
+        membership = planet_membership(self.config_manager.system_config)
+        if len(membership) != self.n_elements:
+            raise RuntimeError(
+                f"[{self.prefix}] the system config declares "
+                f"{len(membership)} planet(s), but this component has "
+                f"{self.n_elements}; planet membership is read off the "
+                f"system config, which must hold this component's block."
+            )
+        self.orbit_ndx = [o for o, _ in membership]
+        self.star_map = np.array([h for _, h in membership], dtype=int)
+        if all(o is not None for o in self.orbit_ndx):
+            self.orbit_map = np.array(self.orbit_ndx, dtype=int)
 
     #: The summary figure's header, per planet: the Parameter label and the
     #: element it is read at -- the planet's own index, or the index of the
@@ -350,9 +376,11 @@ class Planet(Component):
         lookup = system.get_parameter_lookup()
         lines = []
         for p_idx, pname in enumerate(self.names):
-            o_idx = int(self.orbit_map[p_idx])
+            o_idx = self.orbit_ndx[p_idx]
             parts = []
             for label, owner in self.SUMMARY_HEADER:
+                if owner == "orbit" and o_idx is None:
+                    continue  # no orbit, so no period or eccentricity
                 param = lookup.get(label)
                 index = o_idx if owner == "orbit" else p_idx
                 summ = reported_summary(param, index)
@@ -369,9 +397,72 @@ class Planet(Component):
                 lines.append(prefix + "   |   ".join(parts))
         return lines
 
+    def keplerian_geometry(self, system):
+        """Do this system's planets have Keplerian orbital GEOMETRY?
+
+        Everything Planet derives from an orbit -- p, a, a/R*, b, K, msini,
+        teq, the transit durations, the radius prior and the msini/crossing
+        potentials -- is Keplerian.  A planet on a Taylor orbit (`type:
+        linear|quadratic`: a lens companion's linear orbital motion, or an
+        unresolved trend), on a `type: static` orbit (a pairing with no
+        dynamics), or on no orbit at all (the implicit static pairing of
+        `orbit.bodies.planet_membership`) has none of it, and reading a
+        non-Keplerian orbit's inactive bookkeeping as an orbit would be a
+        silently wrong number.  So the question is per planet, not "is
+        there an orbit component" (#485).
+
+        True when every planet's orbit is Keplerian, False when none is.  A
+        MIX raises: the manifest entries are whole-component, so one
+        planet's geometry cannot be declared while another's is absent
+        (yet).  A TRANSIT block with any planet off a Keplerian orbit raises
+        first: every transit file models every planet's transit geometry
+        (p, b, a/R*, the durations).
+        """
+        sys_cfg = self.config_manager.system_config
+        types = orbit_types(sys_cfg)
+        orbit_names = component_instance_names(sys_cfg, "orbit")
+        kinds = [None if o is None else types[o] for o in self.orbit_ndx]
+        keplerian = [k == "keplerian" for k in kinds]
+        if in_topology(system, "transit") is not None and not all(keplerian):
+            off = [
+                f"'{n}' ("
+                + (
+                    "in no orbit block"
+                    if k is None
+                    else f"on the type: {k} orbit '{orbit_names[o]}'"
+                )
+                + ")"
+                for n, k, o, kep in zip(
+                    self.names, kinds, self.orbit_ndx, keplerian
+                )
+                if not kep
+            ]
+            raise ValueError(
+                f"[{self.prefix}] planet(s) {', '.join(off)} have no "
+                f"Keplerian orbit, and this system has a transit block, "
+                f"which models every planet's Keplerian transit geometry.  "
+                f"Name each planet in the companion group of a Keplerian "
+                f"orbit block (type: keplerian, the default)."
+            )
+        if all(keplerian):
+            return True
+        if not any(keplerian):
+            return False
+        raise NotImplementedError(
+            f"[{self.prefix}] planets "
+            f"{[n for n, kep in zip(self.names, keplerian) if not kep]} have "
+            f"no Keplerian orbit and "
+            f"{[n for n, kep in zip(self.names, keplerian) if kep]} do; a mix "
+            f"is not supported yet (the planet's orbit-derived parameters are "
+            f"declared for every planet or none)."
+        )
+
     def register_parameters(self, system):
         """Stage 3: Auto-estimates and Manifest declaration."""
-        has_orbit = "orbit" in system.active_components
+        # Keplerian GEOMETRY, not merely "an orbit component exists": a lens
+        # planet on a linear lens orbit has no Keplerian elements to derive
+        # p, a, K, ... from (keplerian_geometry).
+        has_orbit = self.keplerian_geometry(system)
 
         self._resolve_mass_parameterization(system)
 
@@ -398,6 +489,7 @@ class Planet(Component):
             mass_entries["msini"] = self._msini_bounds_override(
                 mass_entries["msini"]
             )
+        mass_entries = self._mass_pin_entries(mass_entries)
 
         # Insertion order is load-bearing, so it is preserved exactly: graph.py
         # registers the build-order nodes in manifest order, and that order is
@@ -595,7 +687,11 @@ class Planet(Component):
                     f"{self.prefix}.{i}.{key}",
                     f"{self.prefix}.{key}",
                 )
-                if user_entry(up, spelled) is not None
+                # A `unit:`-only entry is how the user READS the quantity,
+                # not a value for it, so it supersedes nothing (1.5.10's K
+                # twin: `planet.b.K: {unit: km/s}` used to drop the
+                # estimate as though the user had stated a K).
+                if set(user_entry(up, spelled) or ()) - {"unit"}
             ]
             if stated:
                 cm.supersede_hint(
@@ -615,7 +711,8 @@ class Planet(Component):
                     "or planet.log_q to start from the RV amplitude."
                 )
                 continue
-            cm.add_hint(f"{self.prefix}.{i}.K", k_ms)
+            # k_ms is in m/s whatever unit the user reads K in (1.5.10).
+            cm.add_hint(f"{self.prefix}.{i}.K", k_ms, unit="m/s")
 
     def _resolve_mass_parameterization(self, system):
         """Pick the sampled mass coordinate (stage 3, topology known).
@@ -655,7 +752,12 @@ class Planet(Component):
         planet override it: true selects that coordinate, false rules it out.
         """
         mass_sides = self._mass_constrained(system)
-        orbit = system.active_components.get("orbit")
+        # Only a Keplerian orbit carries an inclination (keplerian_geometry).
+        orbit = (
+            system.active_components.get("orbit")
+            if self.keplerian_geometry(system)
+            else None
+        )
         if orbit is not None:
             inc_constrained = inclination_constrained_orbits(system, orbit)
             inc_modes = orbit.inclination_modes(system)
@@ -685,7 +787,7 @@ class Planet(Component):
 
         modes, reasons = [], []
         for p, (flags, nm) in enumerate(zip(self.mass_flags, self.names)):
-            o = int(self.orbit_map[p])
+            o = self.orbit_ndx[p]
             has_orbit = orbit is not None
             chord = bool(chord_orbits)
 
@@ -769,15 +871,17 @@ class Planet(Component):
             )
 
         self.mass_parameterizations = modes
-        self._reconcile_mass_user_params()
+        self._reconcile_mass_user_params(system)
 
     def _user_pinned_mass(self, index):
         """Did the user pin planet `index`'s mass (sigma: 0)?
 
         A coordinate that is ON BY DEFAULT must not throw away a constraint
         the user wrote, and `sigma: 0` on an element the flip makes DERIVED
-        is dropped (with a warning) -- the orbit's `_pin_blocks_default` rule,
-        for the same reason.  Read in the two spellings that survive
+        cannot hold by itself (it is applied to log_q when that is
+        unambiguous, and raises otherwise, `_reconcile_mass_user_params`) --
+        the orbit's `_pin_blocks_default` rule, for the same reason.  Read
+        in the two spellings that survive
         `standardize_param_names` (indexed, and the broadcast that covers
         every element), as `Orbit._user_pinned` does.
         """
@@ -819,25 +923,45 @@ class Planet(Component):
             entry, {"lower": lower.tolist(), "upper": upper.tolist()}
         )
 
-    def _reconcile_mass_user_params(self):
-        """Move a user's ``sigma: 0`` from planet.mass onto log_q, and reject
-        a stale log_q entry in linear mode.
+    def _reconcile_mass_user_params(self, system):
+        """Check the user's planet.mass / log_q entries against the coordinate
+        each planet samples.  READ-ONLY on ``user_params`` (CLAUDE.md).
 
-        In log_q mode planet.mass is derived, and sigma=0 on a derived
-        parameter is a no-op that only emits a warning -- so a user pinning a
-        planet's mass would silently get a free one.  Fixing the sampled
-        coordinate instead is exactly equivalent.  Bounds are deliberately
-        NOT translated: they are absolute masses and the host mass is not
-        known here, and a derived parameter's bounds already become soft
-        barriers on the physical value, which is the semantics we want.
+        * ``sigma: 0`` on planet.mass where the mass is DERIVED is a pin on a
+          quantity nothing samples.  Where it propagates UNAMBIGUOUSLY to the
+          sampled coordinate it is applied there as a convenience (JDE
+          2026-10-31): a log_q planet whose host's sampled logmass the user
+          also pinned has log_q = log10(m_p/m_host) a fixed number, so log_q
+          is pinned through the manifest "overrides" channel and the engine
+          solves its value from the user's mass and the host's
+          (``self._mass_pin_on_log_q``, applied by ``_mass_pin_entries``).
+          The user's own entry stays exactly as written -- the ledger,
+          ``export_solution`` and mkparam report the planet.mass pin, and no
+          log_q user entry is invented.  Every other case RAISES naming the
+          coordinate to pin (``_raise_derived_mass_pin``): with the host mass
+          sampled the pin fixes neither log_q nor the host alone, and m sin i
+          is not m.  A sigma > 0 is a real prior and works on the derived
+          node as a potential, so it is left alone; bounds are not a pin
+          either (soft barriers on the physical value).
+        * A non-positive mass initval in log_q mode raises (unrepresentable).
+        * A ``planet.<i>.log_q`` entry on a planet that does not sample log_q
+          raises (a stale mkparam restart file).
         """
         up = self.config_manager.user_params
+        self._mass_pin_on_log_q = np.zeros(self.n_elements, dtype=bool)
         for i in range(self.n_elements):
             mass_key, log_q_key = f"planet.{i}.mass", f"planet.{i}.log_q"
+            mode = self.mass_parameterizations[i]
+            if mode != "linear" and self._user_pinned_mass(i):
+                if mode == "log_q" and self._log_q_pin_is_unambiguous(
+                    system, i
+                ):
+                    self._mass_pin_on_log_q[i] = True
+                else:
+                    self._raise_derived_mass_pin(i, mode)
 
             # Per planet, because the coordinate is: a stale log_q entry is
             # only stale for the planets that do not sample log_q.
-            mode = self.mass_parameterizations[i]
             if mode != "log_q":
                 if log_q_key in up:
                     raise ValueError(
@@ -868,20 +992,136 @@ class Planet(Component):
                     "what you want."
                 )
 
-            if entry.get("sigma") is None:
-                continue
-            # sigma > 0 is a real prior and needs no help: a derived
-            # parameter gets its Gaussian potential on the physical value.
-            if float(entry["sigma"]) != 0.0:
-                continue
-
-            entry.pop("sigma")
-            log_entry = up.setdefault(log_q_key, {})
-            log_entry["sigma"] = 0.0
+        for i in np.nonzero(self._mass_pin_on_log_q)[0]:
+            name = self.names[i]
             logger.info(
-                f"'{mass_key}' sigma=0: holding the planet mass fixed by "
-                f"fixing the sampled '{log_q_key}' instead."
+                f"'{self.prefix}.{name}.mass' sigma: 0 -- planet '{name}' "
+                f"samples log_q = log10(m_p/m_host) and its host's logmass "
+                f"is pinned too, so the pin is applied to "
+                f"'{self.prefix}.{name}.log_q' (solved from the two masses). "
+                "Your params entry is unchanged."
             )
+
+    def _log_q_pin_is_unambiguous(self, system, index):
+        """Does planet ``index``'s planet.mass pin fix its sampled log_q?
+
+        Only when the host mass is itself a fixed number: the user pinned
+        the host's SAMPLED logmass (``sigma: 0`` with a numeric initval --
+        a link is an expression, not a number) and gave the planet mass a
+        numeric initval.  Then log_q = log10(m_p/m_host) is determined.  A
+        user log_q initval or sigma beside the mass pin is a second
+        statement of one quantity, and raises.  Each user value carries its
+        own unit; the number is solved in internal units by the relaxation
+        engine, so no conversion is written here.
+        """
+        star = system.active_components.get("star")
+        if star is None:
+            return False
+        host = int(self.star_map[index])
+        if host not in star.user_pinned_stars("logmass"):
+            return False
+        if host in star.logmass_derived_elements(system):
+            return False
+        up = self.config_manager.user_params
+
+        def most_specific(keys):
+            for key in keys:
+                entry = user_entry(up, key)
+                if entry is not None:
+                    return entry
+            return None
+
+        host_entry = most_specific(
+            (
+                f"star.{host}.logmass",
+                f"star.{star.names[host]}.logmass",
+                "star.logmass",
+            )
+        )
+        mass_entry = most_specific(
+            (
+                f"planet.{index}.mass",
+                f"planet.{self.names[index]}.mass",
+                "planet.mass",
+            )
+        )
+        for entry in (host_entry, mass_entry):
+            if not isinstance(entry.get("initval"), (int, float, list)):
+                return False
+
+        name = self.names[index]
+        for key in (f"planet.{index}.log_q", f"planet.{name}.log_q"):
+            entry = user_entry(up, key)
+            if entry is not None and ("initval" in entry or "sigma" in entry):
+                raise ValueError(
+                    f"'{self.prefix}.{name}.mass' is pinned (sigma: 0) and "
+                    f"'{key}' sets log_q's own initval/sigma: two statements "
+                    "of one quantity.  Keep one of them."
+                )
+        return True
+
+    def _mass_pin_entries(self, mass_entries):
+        """Apply the translated planet.mass pins (``_mass_pin_on_log_q``):
+        ``sigma: 0`` on those log_q elements through "overrides" (NaN leaves
+        the others alone; a pin of a coordinate the user did not write, the
+        channel config.md names for it), and ``pin_held_by`` on the derived
+        mass so its build does not warn that the user's sigma: 0 is a
+        no-op."""
+        pinned = self._mass_pin_on_log_q
+        if not pinned.any():
+            return mass_entries
+        out = dict(mass_entries)
+        out["log_q"] = merge_overrides(
+            out["log_q"], {"sigma": np.where(pinned, 0.0, np.nan).tolist()}
+        )
+        out["mass"] = merge_options(
+            out["mass"],
+            pin_held_by=[
+                f"{self.prefix}.{nm}.log_q" if p else None
+                for nm, p in zip(self.names, pinned)
+            ],
+        )
+        return out
+
+    def _raise_derived_mass_pin(self, index, mode):
+        """RAISE for a user ``sigma: 0`` on planet ``index``'s DERIVED mass.
+
+        Names the parameter and the remedy; never moves the pin (see
+        ``_reconcile_mass_user_params``).  The default coordinate already
+        avoids m sin i when the mass is pinned (``_resolve_mass_parameterization``),
+        so reaching here means log_q (explicit, a lens body, or no signed
+        observable) or an explicit ``fitmsini: true``.
+        """
+        name = self.names[index]
+        if mode == "log_q":
+            what = "log10(m_p/m_host) ('log_q')"
+            remedy = (
+                f"Pin the sampled coordinate instead -- "
+                f"'{self.prefix}.{name}.log_q: {{initval: <log10(m_p/m_host)>, "
+                f"sigma: 0}}', both masses in one unit -- or set "
+                f"'fitlogq: false' on planet '{name}' to sample the linear "
+                "mass, and pin that.  (A planet.mass pin, with a numeric "
+                "initval, is applied to log_q for you only when the host "
+                "star's logmass is pinned too, so that log_q is a fixed "
+                "number.)"
+            )
+        elif mode == "msini":
+            what = "m sin i ('msini')"
+            remedy = (
+                f"Drop 'fitmsini: true' (or set it false) on planet '{name}' "
+                "to sample the linear mass, and pin that.  Pinning msini "
+                "would not fix the mass, which is msini / sin i."
+            )
+        else:
+            raise ValueError(
+                f"[{self.prefix}.{name}] _raise_derived_mass_pin called for "
+                f"mass coordinate {mode!r}, which samples the mass itself."
+            )
+        raise ValueError(
+            f"'{self.prefix}.{name}.mass' has 'sigma: 0', but planet "
+            f"'{name}' samples {what} and DERIVES its mass, so a pin on "
+            f"planet.mass cannot hold it fixed. {remedy}"
+        )
 
     def _mass_constrained(self, system):
         """Per planet: does RV or astrometric data measure its orbit?
@@ -990,6 +1230,7 @@ class Planet(Component):
         )
 
         self._add_chen_potential()
+        self._warn_chen_only_mass(system)
         self._annotate_chen_table_notes(system)
         # Modeling-draft prose, declared next to the potential it describes
         # (outputs/prose.py's declare-at-site rule).
@@ -1006,7 +1247,7 @@ class Planet(Component):
                 key=f"{self.prefix}.chen",
             )
 
-        if "orbit" not in system.active_components:
+        if not self.keplerian_geometry(system):
             return
 
         orbits = system.orbit
@@ -1504,6 +1745,98 @@ class Planet(Component):
         pm.Potential(
             f"{self.prefix}.chen_prior",
             pt.sum(pt.where(pt.as_tensor_variable(mask), logp, 0.0)),
+        )
+
+    def chen_only_mass_planets(self, system):
+        """Planets whose mass ONLY the Chen relation constrains and whose
+        radius start reaches the relation's degenerate Jovian regime.
+
+        Returns ``{index: radius start in Earth radii}``.  Review 2.8.18: in
+        a transit-only fit the mass is set by the radius through Chen &
+        Kipping, which at and above ~1 RJ is nearly flat in radius with
+        kinks at its breaks, so the mass spans decades and NUTS does not mix
+        it (SBC: 218 of 300 transit replicates failed convergence on log_q;
+        296 of 300 converged with log_q pinned).  The relation is NOT
+        smoothed and the coordinate is NOT changed (JDE 2026-10-30); the
+        user is told instead.
+
+        Excluded: a planet whose mass something else reads -- RV or
+        astrometry (then Chen does not derive the mass), a microlensing
+        lens body, or the user's own pin, prior or link on any mass
+        coordinate (``planet.mass``/``log_q``/``msini``).  The radius is
+        the stage-4 start (``probe_start``), the best a build-time check
+        has; the threshold is ``physics.CHEN_DEGENERATE_RPEARTH``.
+        """
+        lens = system.active_components.get("lens")
+        lens_bodies = set(lens.bodies) if lens is not None else set()
+        candidates = []
+        for p in range(self.n_elements):
+            if not self.chen[p] or "mass" not in self.chen_derives[p]:
+                continue
+            if ("planet", p) in lens_bodies:
+                continue
+            user_says = False
+            for coord in ("mass", "log_q", "msini"):
+                for field in ("sigma", "mu"):
+                    user_says |= bool(self.user_wrote_field(coord, field)[p])
+                for per_elem in self.config_manager.get_element_links(
+                    self.prefix, coord
+                ).values():
+                    user_says |= p in {int(i) for i in per_elem}
+            if not user_says:
+                candidates.append(p)
+        if not candidates:
+            return {}
+        paths = [f"{self.prefix}.{p}.radius" for p in candidates]
+        probed = self.config_manager.probe_start(paths)
+        out = {}
+        for p, path in zip(candidates, paths):
+            start = probed[path]
+            if start.value is None:
+                raise ValueError(
+                    f"[{self.prefix}.{self.names[p]}] the radius has no "
+                    f"start at build time ({start.source}); the Chen-only "
+                    "mass check needs one."
+                )
+            rpearth = float(start.value) * RSUN_TO_REARTH
+            if rpearth >= physics.CHEN_DEGENERATE_RPEARTH:
+                out[p] = rpearth
+        return out
+
+    def _warn_chen_only_mass(self, system):
+        """Warn per planet found by :meth:`chen_only_mass_planets`."""
+        for p, rpearth in self.chen_only_mass_planets(system).items():
+            nm = self.names[p]
+            logger.warning(
+                f"[{self.prefix}.{nm}] the mass is constrained ONLY by the "
+                f"Chen & Kipping (2017) mass-radius relation (no RV, "
+                f"astrometry or prior measures it), and the radius start "
+                f"({rpearth / RJUP_TO_REARTH:.2f} RJ) reaches the relation's "
+                f"degenerate Jovian regime (>= "
+                f"{physics.CHEN_DEGENERATE_RPEARTH / RJUP_TO_REARTH:.2f} RJ), "
+                f"where nearly every mass from Saturn to the hydrogen-burning "
+                f"limit predicts the same radius and the regime breaks are "
+                f"kinks.  The mass, and everything derived from it, is "
+                f"unlikely to mix under NUTS.  {self._chen_pin_advice(p)} "
+                f"or give the mass a prior (mu/sigma)."
+            )
+
+    def _chen_pin_advice(self, index):
+        """The pin to recommend: on the SAMPLED mass coordinate, because a
+        sigma: 0 on a derived planet.mass raises (2.1.26(e))."""
+        nm = self.names[index]
+        mode = self.mass_parameterizations[index]
+        if mode == "linear":
+            return f"Pin it ({self.prefix}.{nm}.mass: {{initval: <value>, sigma: 0}})"
+        if mode == "log_q":
+            return (
+                f"Pin its sampled coordinate ({self.prefix}.{nm}.log_q: "
+                f"{{initval: <log10(m_p/m_host)>, sigma: 0}}; or set "
+                f"'fitlogq: false' and pin {self.prefix}.{nm}.mass)"
+            )
+        return (
+            f"Pin its sampled coordinate ({self.prefix}.{nm}.msini: "
+            f"{{initval: <value>, sigma: 0}})"
         )
 
     CHEN_TABLE_NOTE = r"Derived from \citet{Chen:2017}"

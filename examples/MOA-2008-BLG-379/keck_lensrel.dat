@@ -1,0 +1,14 @@
+# MOA-2008-BLG-379: the resolved lens minus the source, Keck-II NIRC2
+# narrow camera, Ks (Bennett et al. 2024, AJ 168, 15, the table "Keck
+# NIRC2 Narrow Camera Fit Parameters": its two epoch rows "2018 May" and
+# "2018 Aug", not the weighted sum; star 1 = lens, star 2 = source, as
+# identified with the 2013 Hubble images in their Hubble section).
+#
+# Columns: time [BJD_TDB]  dE [mas]  dN [mas]  err_E [mas]  err_N [mas]  corr
+#   dE = RA_1 - RA_2 (true arc), dN = DEC_1 - DEC_2.
+#   time: the paper gives only the UT dates (2018 May 26, 2018 Aug 6); the
+#   rows are placed at 12:00 UT, mid-night at Maunakea.  Half a day is
+#   0.008 mas of motion at 5.76 mas/yr, far below the errors.
+#   corr: not published; 0.
+2458265.0  55.91  18.57  1.55  0.80  0.0
+2458337.0  53.79  19.44  0.69  0.44  0.0

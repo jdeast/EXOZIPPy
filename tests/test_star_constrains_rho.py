@@ -171,6 +171,79 @@ def test_rho_pred_reports_the_chain(kmt_severed):
     assert np.isclose(rho_pred2, rho_pred, rtol=1e-12)
 
 
+def test_rho_pred_matches_an_astropy_theta_star_over_an_independent_theta_e(
+    kmt_severed,
+):
+    """
+    Given star_constrains_rho: false on the KMT example (a star + planet
+      lens),
+    When rho_pred is evaluated at the start,
+    Then it equals theta_star / theta_E with BOTH factors recomputed in the
+      test from the model's physical inputs alone: theta_star = R_* / D_S
+      through astropy units (R_sun -> pc -> mas), and theta_E =
+      sqrt(4 G M_tot pi_rel / (c^2 AU)) from astropy constants, with M_tot
+      the host star mass plus the planet's mass (the TOTAL lens mass, C13,
+      the planet's read in its user unit and converted by astropy) and
+      pi_rel = 1 AU / D_L - 1 AU / D_S.  Tolerance is float precision.
+
+    The margin test above compares to the model's own theta_E and a
+    hard-coded R_sun/AU constant at rtol 1e-3, so a theta_E bug cancels
+    and a 0.1% constant slip passes.  Here no number is shared with the
+    production chain except the leaf inputs (masses, radius, distances).
+    """
+    import astropy.constants as const
+    import astropy.units as u
+
+    system, model, point = kmt_severed
+    src = int(system.source.star_map[0])
+    host = int(system.mulensevent.primary_lens_map[0])
+    assert src != host
+
+    def star_val(name):
+        return np.atleast_1d(
+            _eval(model, getattr(system.star, name).value, point)
+        )
+
+    radius = star_val("radius")[src] * u.R_sun
+    d_s = star_val("distance")[src] * u.pc
+    d_l = star_val("distance")[host] * u.pc
+    m_host = star_val("mass")[host] * u.M_sun
+    planet_mass = system.planet.mass
+    m_planet_user = planet_mass.from_internal(
+        np.atleast_1d(_eval(model, planet_mass.value, point))
+    )
+    # The user unit is the parameter's own (jupiterMass); astropy, not a
+    # hand-written factor, takes it to solar masses.
+    assert planet_mass.unit[0] == u.M_jup
+    m_planet = float(np.atleast_1d(m_planet_user)[0]) * planet_mass.unit[0]
+    m_tot = m_host + m_planet
+
+    theta_star = (radius / d_s).to(
+        u.mas, equivalencies=u.dimensionless_angles()
+    )
+    pi_rel = (const.au / d_l - const.au / d_s).to(
+        u.mas, equivalencies=u.dimensionless_angles()
+    )
+    theta_e = np.sqrt(
+        (4.0 * const.G * m_tot / (const.c**2 * const.au)).to(
+            u.mas, equivalencies=u.dimensionless_angles()
+        )
+        * pi_rel
+    ).to(u.mas)
+    expected = float((theta_star / theta_e).decompose())
+
+    rho_pred = float(
+        np.atleast_1d(_eval(model, system.source.rho_pred.value, point))[0]
+    )
+    assert np.isclose(rho_pred, expected, rtol=1e-12, atol=0.0), (
+        rho_pred,
+        expected,
+    )
+    # Non-vacuity: the planet's share of the lens mass is above the
+    # tolerance, so a theta_E built from the host mass alone would fail.
+    assert float(m_planet / m_tot) > 1e-9
+
+
 @pytest.mark.slow
 def test_soft_tie_composes_with_link_machinery():
     """

@@ -30,7 +30,8 @@ that **a `C`-rule is not finished until both carry it**: pull the paper repo, ma
 matching edit there, and name that commit in this one. Both are in step through `C31`
 (paper commits `3476111`, 2026-09-23, which added `C29` and `C30`, `7eeeb42`, 2026-09-24,
 which brought `C30` to stage 2, `eaa5936`, 2026-10-02, which corrected `C21`/`C22`
-with this file's 3.6.5 edit, and `a7745ed`, 2026-10-06, which added `C31`). The paper is not licensed to run ahead -- it did once, and
+with this file's 3.6.5 edit, `a7745ed`, 2026-10-06, which added `C31`, and `5182558` + `6e6dbd1`,
+2026-10-26, which gave `C30` the general blended photocenter and the catalog solution). The paper is not licensed to run ahead -- it did once, and
 the drift lasted exactly as long as it took somebody to notice.
 
 ## Notation used below
@@ -132,6 +133,29 @@ The hand-off was removed 2026-10-01; the peak finder reads the CONVERTED times, 
 went with it. `examples/DC2018/convert_mmexofast_json.py` keeps the refusal for the JSONs
 it converts.)
 
+A BJD_TDB tag is the light's arrival time at the solar-system barycenter. The lens-source
+motion is uniform in that clock, so the trajectory term `(t - t_0)/t_E` takes the tag as
+is. The OBSERVER, however, received that light earlier, at its own coordinate time
+`jd = bjd - (r_obs . n_hat)/c` (the Roemer delay, up to 8.3 min; `n_hat` toward the source),
+and that is the instant its position enters the parallax terms. Every observer-position
+lookup therefore goes through `ephemeris.observer_position_at_reception`, which solves that
+fixed point with the observer's OWN position (a spacecraft's from its ephemeris file) and
+only then calls `get_observer_position`, whose argument is the coordinate time. Placing the
+Earth at the tag itself puts it 1e-4 AU too far along its orbit: 1e-4 of the parallax
+signal, 2e-5 `theta_E` on a `pi_E = 0.2` event (review 1.10.13). The two time arguments are
+what VBMicrolensing's `ComputeParallax` keeps apart for its HJD input (`t_in_HJD`), and
+what BAGLE 1.0.5 does not (it places the Earth at its geocentric tag and leaves the
+trajectory on it, the opposite face, 1.4e-4 `theta_E` on the same event). Spacecraft `.eph`
+files tabulate the coordinate time of the state (Horizons' `datetime_jd`), i.e. the
+observer's `JD_TDB`, not a BJD.
+
+- Pinned by: `tests/test_ephemeris_reception_instant.py` -- the reception instant against
+  astropy's own barycentric light-travel time, and the delay itself against the one
+  VBMicrolensing adds to its trajectory time when told its tags are JD (`t_in_HJD` off,
+  `pi_E = 0`), which matches astropy's heliocentric delay to 0.2 s and ours to the
+  Sun-barycenter difference. VBM's internal Earth VECTOR is not a usable reference at this
+  level: it differs from a geometric heliocentric Earth by a fixed ~8e-5 AU map of its own.
+
 ### C5 -- the geocentric frame, anchored at `t0_par`
 
 Parameters live in the Skowron+2011 geocentric inertial frame: the frame moving with
@@ -145,6 +169,16 @@ picks it in the order explicit `mulensevent: t0_par:` > user `source.0.t_0` init
 `pm_dec` are barycentric observables, so `physics.calc_mu_ra_rel_geo` /
 `calc_mu_dec_rel_geo` apply the Gould (2004) conversion
 `mu_geo = mu_helio - pi_rel * v_earth_perp(t0_par) / AU` before `t_E` and `pi_E` are formed.
+
+The frame's anchors are built by `MulensEvent.geocentric_frame`: the Earth's barycentric
+position at the instant it received the light tagged `t0_par` (C4), and its PHYSICAL
+velocity, `d(position)/d(coordinate time)`, by a central difference of +/-0.05 d about that
+instant (relative error `(omega h)^2/6 = 1.2e-7`). The step is a convention, not a
+numerical detail: the velocity cancels exactly in `u(t)` (the rectilinear term and the
+deviations use the same one), but it sets the reported `t_E` and the direction of `pi_E`,
+and a `(t_0, u_0)` quoted by another code is comparable only in a frame spanned by the same
+velocity -- a 0.5 d step (1.2e-5) was the last 7e-7 `theta_E` between EXOZIPPy and BAGLE
+on the Lu et al. 2026 Figure 12 event before it was matched.
 
 - Pinned by: `tests/test_mu_rel_geo.py::test_mu_geo_sign_matches_first_principles_trajectory`
   (the flipped sign changes `t_E` by tens of percent at `pi_rel ~ 0.35 mas`).
@@ -376,8 +410,23 @@ frame anchor both come from it), `x_b` the blend photocenter (`astrometryinstrum
 `blend_dN`, mas from the reference position, fixed on the sky, pinned at 0 by default).
 The first bracket is dilution -- time dependent, suppressed exactly at peak; the second is
 the blend dragging the centroid as the source brightens and fades, and in a bulge field it
-can dominate. The lens's own flux is part of `f_b` and sits at `x_s + theta_E dtheta`; it is
-NOT split out (follow-up in review 8.10.1).
+can dominate. Unless the dataset says otherwise the lens's own flux is part of `f_b` and the
+blend is fixed on the sky. The general form (review 8.10.3), with every flux relative to the
+source's baseline flux `f_s` in the astrometric band, puts each MODELED star j in the PSF (the
+lens, at `x_s + theta_E dtheta` by C9 and its own parallax; a modeled neighbor) on its own
+track `x_j(t)` and the light no star models -- the sightline's unresolved background,
+`src/exozippy/components/background/background.md` -- at its own photocenter
+`x_bg(t) = x_s(t_ref) + d_bg + mu_bg (t - t_ref)`, with no parallax of its own:
+
+    x_obs(t) = [A (x_s + delta_theta) + sum_j r_j x_j(t) + r_bg x_bg(t)] / (A + sum_j r_j + r_bg)
+
+which is the display above when nothing is split out: one blend carrying all of `f_b`, held
+at a fixed `x_b`.
+A CATALOG solution (Gaia, VIRAC2) is the catalog's own weighted least-squares five-parameter
+fit to `x_obs(t)` at its epochs, never `x_s`'s parameters: at baseline
+`mu_cat - mu_s = [sum_j r_j (mu_j - mu_s) + r_bg (mu_bg - mu_s)] / (1 + sum_j r_j + r_bg)`,
+the lens's term being `r_L mu_rel` (C7), plus whatever the event inside the window maps
+onto.
 
 - Implemented in: `MulensEvent.get_centroid_shift` (the shift, from the same `(tau, beta)`
   pair `get_magnification` builds, rotated onto `(N, E)` by C9's `tau_hat`/`beta_hat`) and
@@ -400,6 +449,12 @@ NOT split out (follow-up in review 8.10.1).
   astrometric Op is a SEPARATE INSTANCE and the light curve stays bit-identical. Always
   VBM, whatever the photometric `backend:` (MulensModel has no centroid; C18 makes the
   trajectories identical). No gradient, like the photometry it rides with.
+- The general form is `AstrometryInstrument._apply_lens` with `psf_stars:` (members on
+  `_star_track`, ratios from `_flux_ratios`) and `background:` (`Background.track`,
+  `Background.flux_ratio`); the catalog
+  observable is `mode: catalog` (`catalog_projection`). Pinned by
+  `tests/test_catalog_astrometry.py` against tracks simulated from the three stars' own
+  motions and an independent least-squares fit.
 - Pinned by: `tests/test_astrometric_microlensing.py` -- the closed form against a direct
   image solve of the lens equation, and the HANDEDNESS test (a lens passing North of the
   source pushes the centroid South, East pushes West), which fails under a mirrored
@@ -476,7 +531,7 @@ is the single commonest source of a 180-degree offset in the literature (C21).
   `::test_multi_lens_frame_reduces_to_binary`, which is what pins the N-body layout against
   the binary rotation.
 
-### C16 -- `alpha` is sampled as an unconstrained pair
+### C16 -- `alpha` is sampled as an unconstrained pair, unless the light curve pins it
 
 `alpha = arctan2(yalpha, xalpha)` (`physics.calc_alpha`), with `xalpha` and `yalpha` the
 sampled coordinates. The angle therefore never wraps and needs no periodic boundary. A user
@@ -484,7 +539,20 @@ seeding `lens.<name>.alpha` in degrees is propagated to the pair by the relaxati
 `alpha`'s user unit is degrees and its internal unit is radians; both magnification
 backends take degrees, which is what `Lens._alpha_deg` converts to.
 
+Where the light curve measures `alpha` to better than 0.1 rad (5.7 deg) at the start, the
+pair's posterior is a narrow ray from the origin that a diagonal metric cannot straighten, so
+`alpha` itself is sampled instead, uniform on a full turn centered on the start -- its one
+boundary opposite the start, where a measured posterior has no mass. The switch is automatic
+and announced with a warning; `fitalpha:` on the companion's lens block overrides it
+(`src/exozippy/angles.py`; `components/parameter.md`, "A MEASURED angle is sampled
+directly"). Either way this is a parameterization choice and not a convention: the prior on
+`alpha` is uniform in both, and the reported `alpha` means C15.
+
 ### C24 -- lens orbital motion: `ds_dt`, `dalpha_dt`, and the gamma identities
+
+**Every companion moves on its own orbit, or not at all** (review 8.6.33): companion `j`'s
+`orbit:` names an orbit whose `type:` sets its mode, any number of companions may move, and
+a companion without one is static (zero rates) beside moving ones.
 
 **The linear mode is definitional.** Per companion `j`, with `t0_par` the same anchor the
 parallax uses (C5; Skowron Eq. A17 recommends `t_0,kep = t_0,par`, which is what makes the
@@ -498,11 +566,28 @@ is rad/yr and its user unit deg/yr -- the identity mapping to MulensModel's `ds_
 `dalpha_dt` (C18 extends to both), and Skowron's own Section 3.3.1 parameterization up to
 the sign vocabulary below.
 
+**The straight-line mode is its first-order twin** (orbit `type: constant_velocity`).  The
+same rates define, at `t0_par`, the companion's position and velocity in the trajectory
+frame of C15, and the straight-line mode holds that velocity constant:
+
+    r_j(t) = r_j0 + v_j * (t - t0_par)/365.25
+    r_j0   = s_j0 (cos alpha_j0, -sin alpha_j0)
+    v_j    = ds_dt_j (cos alpha_j0, -sin alpha_j0) - s_j0 dalpha_dt_j (sin alpha_j0, cos alpha_j0)
+
+with `s_j(t) = |r_j(t)|` and `alpha_j(t)` the angle of `r_j(t)` in C15's placement.  It is
+the linear mode's position and velocity AT `t0_par`, so `gamma_par`, `gamma_perp` (below),
+beta (A19) and every sign rule here carry over unchanged; the two modes differ at second
+order, where the linear mode keeps rotating (acceleration `-s_j0 dalpha_dt_j^2` radially and
+`2 ds_dt_j dalpha_dt_j` tangentially at `t0_par`) and the straight line does not.  Neither
+MulensModel nor VBMicrolensing has a straight-line mode.
+
 **Skowron's gamma vocabulary maps onto these with ONE minus sign, and it is not optional:**
 
-    gamma_par     = ds_dt / s_0
-    gamma_perp    = -dalpha_dt        [rad/yr]
-    d(PA_axis)/dt = +gamma_perp = -dalpha_dt
+    gamma_par_j     = ds_dt_j / s_j0
+    gamma_perp_j    = -dalpha_dt_j      [rad/yr]
+    d(PA_axis_j)/dt = +gamma_perp_j = -dalpha_dt_j
+
+with `PA_axis_j` the position angle of the primary -> companion `j` axis.
 
 The identity `gamma_perp = -dalpha/dt` is Skowron+2011 Appendix A.4 verbatim, and their
 Section 3.3.1 writes the linear expansion as `alpha(t) = alpha_0 - gamma_perp (t - t0_par)`.
@@ -525,8 +610,10 @@ mirror seed must flip all four or it is a different (and usually terrible) model
 degenerate partner.
 
 **The keplerian mode projects an orbit through the same definitions**: with
-`delta_j(t) = (dE, dN)` the companion's offset from the primary in Einstein radii
-(`Orbit.state_vectors` scaled by `a / (D_L * theta_E)`),
+`delta_j(t) = (dE, dN)` companion `j`'s offset from the primary in Einstein radii
+(`Orbit.state_vectors` of companion `j`'s own orbit, scaled by `a / (D_L * theta_E)`) --
+which is why that orbit must pair exactly the lens primary with companion `j` (`Lens`
+raises otherwise; a hierarchical orbit is 8.6.33 phase 2),
 
     s_j(t)      = |delta_j(t)|
     PA_axis(t)  = atan2(dE, dN)
@@ -560,11 +647,16 @@ sign is pinned by a synthetic orbit with KNOWN inclination rather than by a chi2
 improvement.
 
 - Implemented in: `Lens` (config key `orbit:` on the companion's entry; the referenced
-  orbit's `type: linear|keplerian` selects the mode, and a linear orbit owns the rates as
-  `orbit.<name>.ds_dt` / `orbit.<name>.dalpha_dt`),
-  `mulensing/physics.py`, `op.VBMDirectMagOp` (per-epoch `s_t`/`alpha_t` inputs).
+  orbit's `type: uniform_rotation|constant_velocity|keplerian` selects the mode -- `uniform_rotation` was
+  spelled `linear` until 2026-11, and that spelling now raises with the migration -- and a
+  uniform_rotation orbit owns the rates as `orbit.<name>.ds_dt` / `orbit.<name>.dalpha_dt`
+  and serves the definitional series below through `Orbit.state_vectors`),
+  `mulensing/physics.py`, `MulensEvent._companion_geometry_series` (one row per
+  companion), `op.VBMDirectMagOp` (per-epoch `(n_companions, n_epochs)` geometry inputs).
 - Pinned by: `tests/test_lens_orbital_motion.py` -- the known-inclination sign test, the
-  MulensModel linear-motion parity test, and the A16 mirror test.
+  MulensModel linear-motion parity test, and the A16 mirror test; and
+  `tests/test_nbody_lens_motion.py` for several moving companions.
+- Paper III carries the per-companion form (paper commit 99133d7).
 
 ### C25 -- source orbital motion (xallarap): the SOURCE's offset at the parallax slot
 
@@ -594,10 +686,17 @@ peaked at A = 8.58 where MulensModel at the published values gives 4.22, and aga
 real OGLE photometry the wrong sign cost chi2 = 781,739 on 351 points where the corrected
 chain gives 2,062 (MulensModel itself: 2,063).
 
-The offset itself is the orbit component's primary-body track in Einstein units:
-`dsigma(t) = [r_1(t) - r_1(t0_par)]`, `r_1` from `a_1 = a * m_companion / m_total`
-projected through the SAME kernel and Thiele-Innes owner as everything else, scaled by
-`a_1 / (D_S * theta_E)`.  NO new sampled parameters: the orbit's period, eccentricity,
+**Each source `j` moves on its own orbit, or not at all, alone on one side of it**
+(review 8.6.9).  Its offset is its own barycentric track in Einstein units:
+`dsigma_j(t) = [r_j(t) - r_j(t0_par)]`, projected through the SAME kernel and
+Thiele-Innes owner as everything else and scaled by `a_j / (D_S * theta_E)`, with
+
+    a_j = +a * m_companion / m_total     (source on the orbit's PRIMARY side)
+    a_j = -a * m_primary   / m_total     (source on the COMPANION side: the opposite track)
+
+Two sources on one orbit, one per side, are the LINKED BINARY SOURCE: their offsets are
+exactly opposite and in the mass ratio.  (Paper III carries the same form, paper commit
+6a3e048.)  NO new sampled parameters: the orbit's period, eccentricity,
 orientation and the companion mass (through the barycentric scale) are the physical
 coordinates, which is Mroz et al. (2026)'s "ET" philosophy expressed through the component
 graph rather than bolted on.  A LINEAR source drift is deliberately not offered: it is
@@ -628,8 +727,8 @@ direction is `tau_hat`; operationally:
 A published `xi_*` solution therefore drops into an EXOZIPPy config through these six
 lines; `examples/ob170114` is the shipped worked case (Mroz et al. 2026 Table B.1).
 
-- Implemented in: `Lens._source_offset_series` (config key `source_orbit:`, naming a
-  `type: keplerian` orbit),
+- Implemented in: `MulensEvent._source_offset_series` (config key `orbit:` on each
+  source entry, naming a `type: keplerian` orbit),
   `mulensing/physics.source_offset_from_orbit` / `xallarap_trajectory_shift`,
   `Lens.get_magnification` (symbolic) and `op.VBMDirectMagOp(source_motion=True)`.
 - Pinned by: `tests/test_xallarap.py` -- the C9 reconstruction with a displaced

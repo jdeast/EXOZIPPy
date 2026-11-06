@@ -10,7 +10,6 @@ mulensevent:
   fitmurel: true
   fitpirel: true
   fitthetae: true
-  mmexofast: /home/jeastman/python/EXOZIPPy/examples/DC2018/events/069/DC2018_069_seed.json
 lens:
 - body: star.Lens
 - body: planet.Companion

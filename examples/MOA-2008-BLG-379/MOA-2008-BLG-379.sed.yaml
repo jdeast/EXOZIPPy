@@ -1,0 +1,54 @@
+# MOA-2008-BLG-379: the high-resolution photometry of the lens and source,
+# as Bennett et al. (2024, AJ 168, 15) apply it to their light-curve models
+# (their section on applying the image constraints to the light-curve
+# models).  Every row is a measurement; the mass-luminosity
+# relation uncertainties the paper adds in quadrature (0.09 mag in K, 0.19
+# in I) are NOT added here, because this fit has no mass-luminosity
+# relation: MIST predicts each star's flux, with its own systematic floors.
+#
+# The Hubble WFC3/UVIS F814W magnitudes were calibrated by the authors to
+# the OGLE-III catalog (standard I), and the Keck Ks magnitudes to VVV Ks
+# (itself on the 2MASS system).  So the rows use Cousins I and 2MASS Ks.
+model: NextGen
+filters:
+    # Hubble F814W (2013 Oct 9), the lens: I_L = 22.742 +/- 0.488.
+    - name: "Generic/Cousins.I"
+      mag: 22.742
+      err: 0.488
+      magsys: Vega
+      photType:
+        pos: [Lens]
+
+    # Hubble F814W, the source: I_S = 21.557 +/- 0.149.
+    - name: "Generic/Cousins.I"
+      mag: 21.557
+      err: 0.149
+      magsys: Vega
+      photType:
+        pos: [Source]
+
+    # Hubble F814W, the two stars combined.  Measured 21.243 +/- 0.011; the
+    # paper's 0.10 mag systematic for the photometry of two partially
+    # resolved stars (0.74 UVIS pixels apart) is kept: 21.243 +/- 0.101.
+    - name: "Generic/Cousins.I"
+      mag: 21.243
+      err: 0.101
+      magsys: Vega
+      photType:
+        pos: [Lens, Source]
+
+    # Keck NIRC2 Ks (2018), the lens ("star 1"): K_L = 18.815 +/- 0.056.
+    - name: "2MASS/2MASS.Ks"
+      mag: 18.815
+      err: 0.056
+      magsys: Vega
+      photType:
+        pos: [Lens]
+
+    # Not used, as in the paper (README, "Constraints"):
+    #   Keck Ks of the source, 18.871 +/- 0.056 (shares the 0.05 mag
+    #     calibration of the combined-flux image with the lens row);
+    #   Hubble F555W of the source, V_S = 23.67 +/- 0.06 (a source colour,
+    #     which this fit's R_V = 3.1 law cannot match to the bulge's);
+    #   Hubble F555W of the lens, V_L > 26.49: a one-sided limit, which an
+    #     SED row cannot express.

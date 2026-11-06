@@ -279,3 +279,69 @@ def test_a_stage_3_probe_reads_the_roles_of_registered_components(
     assert probed["orbit.0.secosw"].source == "default"
     assert probed["orbit.0.sesinw"].source == "default"
     assert probed["orbit.0.ecc"].value == pytest.approx(2e-4, rel=1e-9)
+
+
+def _drop_companion_q(params):
+    params.pop("lens.Companion.q")
+    return params
+
+
+def test_an_unseeded_companion_q_never_absorbs_a_pinned_t_E(monkeypatch):
+    """
+    Given examples/DC2018_128 (2L1S, t_E and rho pinned) with the
+      companion's q seed removed, so planet.log_q starts at its
+      defaults.yaml -3 (review 8.6.42),
+    When the starts are solved,
+    Then log_q keeps that default and the pinned t_E is delivered by the
+      event chain, not by the planet's mass: the companion's mass
+      coordinate is LIKELIHOOD_BACKED (the light curve measures q
+      independently of the event's scale), so it decides above the
+      distance guesses and the host carries the lens mass.  Before, log_q
+      was the only DEFAULT-tier seed upstream of theta_E^2 = kappa M_tot
+      pi_rel; its settle drove it to a bound and the escalation held it
+      there -- q = 10 on DC2018 sweep configs, ~1e6 nats of start logp, and
+      event 131 refused to build.
+    """
+    system = _prepare(
+        monkeypatch, "DC2018_128", "DC2018_128.yaml", _drop_companion_q
+    )
+    cm = system.config_manager
+    assert "planet.0.log_q" in cm.likelihood_backed
+    assert cm._last_resolved["planet.0.log_q"] == pytest.approx(-3.0)
+    rep = cm._last_keep_report
+    assert "mulensevent.0.t_E" in rep["kept"]
+    assert "planet.0.log_q" not in {m for m, *_ in rep["moved"]}
+    assert not rep["unsettled"], rep["unsettled"]
+    q = cm._last_resolved["lens.1.q"]
+    assert q == pytest.approx(1e-3, rel=1e-9)
+    assert cm._last_resolved["mulensevent.0.mlens_total"] == pytest.approx(
+        cm._last_resolved["star.0.mass"] * (1.0 + q), rel=1e-9
+    )
+
+
+@pytest.mark.slow
+def test_an_unseeded_companion_q_starts_at_the_pinned_t_E(monkeypatch):
+    """
+    Given the same config (q unseeded, t_E pinned),
+    When the model is BUILT,
+    Then it starts at the pinned t_E with log_q at its -3 default, and
+      check_user_starts reports no t_E miss.
+    """
+    from exozippy.diagnostics import ModelAuditor
+
+    system = _prepare(
+        monkeypatch, "DC2018_128", "DC2018_128.yaml", _drop_companion_q
+    )
+    model = system.build_model()
+    with model:
+        auditor = ModelAuditor(model, system, system.get_mcmc_init(model))
+        findings = auditor.check_user_starts()
+        point = system.get_internal_point(model, system.get_raw_start(model))
+    assert not [f for f in findings if "t_E" in f["key"]], findings
+    pinned = system.config_manager._last_resolved["mulensevent.0.t_E"]
+    assert float(np.ravel(point["mulensevent.t_E"])[0]) == pytest.approx(
+        pinned, rel=1e-6
+    )
+    assert float(np.ravel(point["planet.log_q"])[0]) == pytest.approx(
+        -3.0, abs=1e-6
+    )

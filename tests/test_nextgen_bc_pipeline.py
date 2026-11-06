@@ -141,6 +141,161 @@ def test_extinction_slope_uses_the_law_in_microns(solar_blackbody):
     assert -0.14 < slope < -0.11
 
 
+# Magnitudes per unit optical depth, 2.5 / ln(10) = 1.0857362...: A_lam =
+# MAG_PER_TAU * tau_lam exactly. The generator divides by the rounded 1.086
+# instead, so its tau is A / 1.086 and every A it applies is short by
+# 1 - MAG_PER_TAU / 1.086 = 2.43e-4 relative. See the xfail test below.
+_MAG_PER_TAU = 2.5 / np.log(10.0)
+_GENERATOR_TAU_DIVISOR = 1.086
+
+
+def _independent_band_mean(filter_id, teff, av, power):
+    """
+    The band-averaged F_lambda of a Teff blackbody behind Av magnitudes of
+    extinction, written from scratch for the exact checks below:
+
+        <F> = int(F_lam 10^(-0.4 Av k(lam)/k(V)) S lam^power dlam)
+              / int(S lam^power dlam)
+
+    F_lam is the Planck surface flux evaluated analytically on the filter
+    profile's own grid, k is ``models/extinction_law.ascii`` read with
+    np.loadtxt and interpolated linearly in MICRONS, k(V) at 0.55 um,
+    power = 0 is energy weighting and 1 photon weighting. Nothing from
+    bolometric_correction.py is used, only the SVO filter profile.
+    """
+    from exozippy.components.sed.bc_grid import DEFAULT_MODEL_ROOT
+    from exozippy.filters.filter import Filter
+
+    wave, profile = Filter(filter_id).ProcessedFilterCurve
+    law = np.loadtxt(DEFAULT_MODEL_ROOT / "extinction_law.ascii")
+    k = np.interp(wave * 1e-4, law[:, 0], law[:, 1])
+    k_v = np.interp(0.55, law[:, 0], law[:, 1])
+    weight = profile * wave**power
+    flux = _blackbody_flambda(wave, teff) * 10.0 ** (-0.4 * av * k / k_v)
+    return np.trapezoid(flux * weight, wave) / np.trapezoid(weight, wave)
+
+
+def _independent_extinction(filter_id, teff, av, power):
+    """A_band = -2.5 log10(<F>(Av) / <F>(0)) from the integral above."""
+    return -2.5 * np.log10(
+        _independent_band_mean(filter_id, teff, av, power)
+        / _independent_band_mean(filter_id, teff, 0.0, power)
+    )
+
+
+_EXTINCTION_CASES = [
+    ("2MASS/2MASS.Ks", "photon"),
+    ("2MASS/2MASS.J", "photon"),
+    ("WISE/WISE.W3", "energy"),
+]
+
+
+@pytest.mark.parametrize("filter_id, weighting", _EXTINCTION_CASES)
+def test_band_extinction_matches_an_independent_integral_up_to_the_rounded_1086(
+    solar_blackbody, filter_id, weighting
+):
+    """
+    Given a solar blackbody through 2MASS Ks / J (photon counters) and
+    WISE W3 (energy counter),
+    When BolometricCorrection computes BC at Av = 0, 1 and 6,
+    Then BC(0) - BC(Av) equals an independent Planck x profile x weight x
+    10^(-0.4 Av k/k_V) integral to 1e-12 mag -- once Av is scaled by
+    2.5/ln(10)/1.086, the one known departure (the rounded optical-depth
+    divisor; see the strict xfail below). This is the exact form of the
+    margin test above: microns vs Angstrom, the wrong k_V, the wrong
+    weighting power or the wrong law file all miss by >> 1e-12. When the
+    1.086 is fixed, drop the Av scaling here.
+    """
+    # ARRANGE
+    av = np.array([0.0, 1.0, 6.0])
+    star = {"teff": 5800.0, "logg": 4.5, "feh": 0.0, "av": av}
+    power = {"energy": 0, "photon": 1}[weighting]
+    av_applied = av * _MAG_PER_TAU / _GENERATOR_TAU_DIVISOR
+
+    # ACT
+    bc = BolometricCorrection([filter_id], star, spectrum=solar_blackbody)
+    code = bc.BC_by_av[0, 0] - bc.BC_by_av[:, 0]
+    ref = np.array(
+        [
+            _independent_extinction(filter_id, 5800.0, a, power)
+            for a in av_applied
+        ]
+    )
+
+    # ASSERT
+    assert bc.filter_weightings == [weighting]
+    np.testing.assert_allclose(code, ref, rtol=0, atol=1e-12)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "BC generator rounds 2.5/ln(10) to 1.086 in tau = A k/k_V / 1.086 "
+        "(bolometric_correction.py and make_bc.py): every applied extinction "
+        "is short by 2.43e-4 relative -- measured A_Ks(Av=1) 3.1e-5 mag, "
+        "A_J(Av=6) 4.4e-4 mag, A_W3(Av=6) 6.5e-5 mag below the exact law."
+    ),
+)
+@pytest.mark.parametrize("filter_id, weighting", _EXTINCTION_CASES)
+def test_band_extinction_matches_the_exact_magnitude_law(
+    solar_blackbody, filter_id, weighting
+):
+    """
+    Given a solar blackbody through 2MASS Ks / J and WISE W3,
+    When BolometricCorrection computes BC at Av = 0, 1 and 6,
+    Then BC(0) - BC(Av) equals the independent integral with the exact
+    magnitude law 10^(-0.4 A) (A = 2.5 log10(e) tau) to 1e-12 mag.
+    """
+    # ARRANGE
+    av = np.array([0.0, 1.0, 6.0])
+    star = {"teff": 5800.0, "logg": 4.5, "feh": 0.0, "av": av}
+    power = {"energy": 0, "photon": 1}[weighting]
+
+    # ACT
+    bc = BolometricCorrection([filter_id], star, spectrum=solar_blackbody)
+    code = bc.BC_by_av[0, 0] - bc.BC_by_av[:, 0]
+    ref = np.array(
+        [_independent_extinction(filter_id, 5800.0, a, power) for a in av]
+    )
+
+    # ASSERT
+    np.testing.assert_allclose(code, ref, rtol=0, atol=1e-12)
+
+
+def test_w3_photon_minus_energy_bc_matches_an_independent_integral(
+    solar_blackbody,
+):
+    """
+    Given a solar blackbody through WISE W3 at Av = 0,
+    When BCs are computed photon-weighted and energy-weighted,
+    Then BC_photon - BC_energy = 2.5 log10(<F>_photon / <F>_energy) from
+    the independent integral to 1e-12 mag (the Vega zeropoint and the
+    bolometric term cancel in the difference). Exact form of the
+    "> 0.1 mag" check in the detector-weighting test: a wrong power of
+    lambda (lam^2, 1/lam) or a weight left out of the normalization
+    misses by > 0.1 mag.
+    """
+    # ARRANGE
+    filters = ["WISE/WISE.W3"]
+    star = {"teff": 5800.0, "logg": 4.5, "feh": 0.0, "av": 0.0}
+
+    # ACT
+    pho = BolometricCorrection(
+        filters, star, spectrum=solar_blackbody, weighting="photon"
+    ).BC
+    ene = BolometricCorrection(
+        filters, star, spectrum=solar_blackbody, weighting="energy"
+    ).BC
+    ref = 2.5 * np.log10(
+        _independent_band_mean("WISE/WISE.W3", 5800.0, 0.0, 1)
+        / _independent_band_mean("WISE/WISE.W3", 5800.0, 0.0, 0)
+    )
+
+    # ASSERT
+    assert float(pho - ene) == pytest.approx(ref, abs=1e-12)
+    assert abs(ref) > 0.1  # the check has teeth: W3 is broad
+
+
 def test_av_array_matches_scalar_av(solar_blackbody):
     """
     Given the same spectrum and filters,

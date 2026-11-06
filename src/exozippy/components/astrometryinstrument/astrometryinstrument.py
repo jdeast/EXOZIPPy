@@ -23,7 +23,7 @@ Supports three data modes (set per instrument via 'mode' in the config):
          COMPANION group relative to its PRIMARY group.  Use 'orbit'
          (orbit instance name or index) to select which orbit the
          measurements trace; 'planet_ndx' remains as a legacy alias
-         (resolved through that planet's orbit_ndx).  When a group holds
+         (resolved to the orbit whose companion group holds that planet).  When a group holds
          several bodies, the modeled position is the group photocenter:
          the barycenter orbit of the referenced orbit, plus the
          photocenter wobble of any sub-orbit nested inside a group
@@ -31,9 +31,91 @@ Supports three data modes (set per instrument via 'mode' in the config):
          companion needs no SED; otherwise the photocenter is
          approximated by the barycenter with a warning).
 
+  lensrel : a RESOLVED microlensing lens relative to its source (review
+         8.10.4) -- the observable a resolved-pair fit to HST or Roman
+         imaging delivers, years after the event.
+         File columns: time[BJD_TDB]  dE[mas]  dN[mas]  err_E[mas]
+                       err_N[mas]  corr
+         (dE, dN) is the lens's position minus the source's in one image,
+         East (true arc) and North; corr is the correlation coefficient of
+         the two components' errors (|corr| < 1).  Being a DIFFERENCE in
+         one image it is immune to that image's frame registration, which
+         a pair of abs datasets is not.  Modeled as theta_E times the
+         light curve's own trajectory at the observer (C9; the primary
+         offset from the lens center of mass for a binary lens, C12),
+         minus the source's own centroid shift (C30) -- the source is
+         measured through its images, the lens is not lensed.  Requires a
+         mulensevent and its light curve; the primary source only.
+
+  catalog : a published astrometric SOLUTION of the (blended) target --
+         Gaia, VIRAC2 -- rather than its epochs (review 8.10.3).
+         File: ONE row, in the Gaia archive's column order,
+           5 parameters (default): time ra dec parallax pmra pmdec
+             ra_error dec_error parallax_error pmra_error pmdec_error
+             ra_dec_corr ra_parallax_corr ra_pmra_corr ra_pmdec_corr
+             dec_parallax_corr dec_pmra_corr dec_pmdec_corr
+             parallax_pmra_corr parallax_pmdec_corr pmra_pmdec_corr
+           2 parameters (`catalog_parameters: 2`): time ra dec ra_error
+             dec_error ra_dec_corr
+         time is the solution's reference epoch [BJD_TDB; the time_* keys
+         convert it like any other file's], ra/dec in deg, ra_error the
+         true-arc error, every error in mas (mas/yr for pm).  The model is
+         the SAME weighted linear least-squares fit the catalog made: the
+         modeled photocenter track (everything gaia/abs mode models, the
+         microlensing centroid shift and the blend included) is evaluated at
+         the catalog's epochs and projected onto (position at the epoch,
+         parallax, pm) -- a constant matrix, so a track that is not linear
+         during an event maps exactly as the catalog's own fit would map it.
+         The likelihood is the multivariate normal with the file's
+         covariance.  The epochs are `catalog_epochs:` (a list of BJD_TDB
+         times, or a file of `time [weight]` rows), or `catalog_span:
+         [t_start, t_end]` with `catalog_n_epochs:` (default 100) uniformly
+         spaced ones, which is announced with a warning: the catalog's real
+         epoch distribution is then approximated.  A catalog's errors are its
+         own; the jitter is INACTIVE on a catalog dataset.
+
 Per-instrument config keys:
-  file              : data file (whitespace-separated, '#' comments)
-  mode              : gaia | abs | rel   (default gaia)
+  file              : data file (whitespace-separated, '#' comments; see
+                      data_format)
+  mode              : gaia | abs | rel | lensrel | catalog (default gaia)
+  data_format       : columns (default: the whitespace file above) |
+                      gaia_epoch (mode gaia only): a Gaia epoch-astrometry
+                      table as the archive delivers it (the DR4
+                      epoch_astrometry product; VOTable, ECSV or FITS),
+                      read by read_gaia_epoch_astrometry: one record per
+                      CCD observation AGIS used along scan, w =
+                      centroid_pos_al measured from the file's (ra0, dec0)
+                      -- which is then the tangent point -- and times in
+                      barycentric TCB (obs_time_tcb + obs_time_bary_corr,
+                      ns from 2010-01-01), converted to BJD_TDB.  The
+                      format fixes layout and time system, so columns:
+                      and time_* keys raise; observer_location must be
+                      gaia.  The model's along-scan parallax factors are
+                      checked against the file's parallax_factor_al at
+                      load (warned beyond 1e-3; the DR4 pre-release
+                      agrees to 1.5e-5).
+  source_id         : gaia_epoch only: the source to read from a table of
+                      several
+  reference_point   : mode gaia columns files only: [ra, dec] (deg), the
+                      point the file's abscissae w are measured from, which
+                      is then the dataset's tangent point (as a gaia_epoch
+                      file's (ra0, dec0) is).  Default: the star's ra/dec
+                      start.  Needed when two datasets of one star measure
+                      from two points -- Hipparcos IAD about the J1991.25
+                      catalog position (exozippy-getdata --hipparcos-iad
+                      prints it) and Gaia DR4 about its own (ra0, dec0).
+  fithipframe       : gaia/abs only: this dataset is in the Hipparcos
+                      reference frame, and its offset from the frame the
+                      other datasets define (Gaia) is fit -- a position
+                      offset at J1991.25 (frame_dE, frame_dN) and a
+                      proper-motion offset (frame_dpmE, frame_dpmN), with
+                      Gaussian priors from the Hipparcos-Gaia
+                      cross-calibration.  Default: true for a dataset that
+                      IS Hipparcos (mode gaia, not observed by Gaia, every
+                      epoch inside the Hipparcos mission) when another
+                      absolute dataset is in the fit, false otherwise; an
+                      explicit value wins.  See frametie.py and "Hipparcos
+                      and Gaia together" below.
   observer_location : ephemeris for parallax factors (default 'gaia' for
                       gaia mode, 'earth' otherwise; see exozippy.ephemeris)
   star_ndx          : index of the host star (default 0); also sets the
@@ -48,15 +130,20 @@ Per-instrument config keys:
                       the filter of the SED-derived fluxfrac below.  rel:
                       the filter in which the SED weighs the two sides of
                       each NESTED orbit's photocenter (_pair_beta).
-  companion_star_ndx: gaia/abs only -- index of the star modeling the
-                      luminous companion.  When band, companion_star_ndx,
-                      and a sed: block are all present, the photocenter
-                      flux fraction is derived from the SED
-                      (beta = F_c/(F_c+F_host) in the band) instead of
-                      being sampled; the sampled fluxfrac element is
+  companion_star_ndx: gaia/abs/catalog -- index of the OTHER luminous
+                      star inside the target's PSF: for a primary-group
+                      target its companion, for a companion-group target
+                      the primary (it names "the target's companion in
+                      the PSF", not an orbit-group role).  It must share
+                      a Keplerian orbit with star_ndx (raises otherwise).
+                      When band, companion_star_ndx, and a sed: block are
+                      all present, the photocenter flux fraction is
+                      derived from the SED (b = F_c/(F_c+F_target) in
+                      the band; a band the BC grid lacks raises) instead
+                      of being sampled; the sampled fluxfrac element is
                       fixed (unused).  Ignored with a warning on a rel
                       dataset, which has no per-instrument fraction.
-  microlensing      : gaia/abs only -- model the astrometric microlensing
+  microlensing      : gaia/abs/catalog -- model the astrometric microlensing
                       centroid shift when star_ndx is a microlensing
                       SOURCE body (default true whenever a mulensevent:
                       block exists; false opts out).  See below.
@@ -66,6 +153,31 @@ Per-instrument config keys:
                       required when there are several).  A lensed dataset
                       with no light curve at all RAISES: the blend fraction
                       and the geocentric frame anchor both come from it.
+  psf_stars         : lensed gaia/abs/catalog only -- modeled non-source
+                      stars inside the PSF (the blend split, below).
+  fitpsfflux        : sample each psf_stars member's flux ratio
+                      (psf_fluxratio) instead of predicting it from the SED.
+  background        : the `background:` instance (the sightline's
+                      unresolved background, components/background) whose
+                      light is inside this dataset's PSF (the split, below).
+  catalog_parameters, catalog_epochs, catalog_span, catalog_n_epochs :
+                      catalog mode only; see above.
+
+Hipparcos and Gaia together (frametie.py).  The Hipparcos Intermediate
+Astrometric Data (mode gaia, observer earth, reference_point the J1991.25
+catalog position) and Gaia DR4 epoch astrometry (data_format: gaia_epoch)
+of one star fit jointly give the 25-year lever arm the Hipparcos-Gaia
+Catalog of Accelerations (Brandt 2018, 2021) is built on, from the epochs:
+one star.ra/dec/pm/parallax and one photocenter orbit serve both, so a
+companion of decades to centuries bends the track between the missions.
+The two frames differ by an orientation and a spin, which for one star is a
+position offset and a proper-motion offset of the Hipparcos dataset;
+`fithipframe` fits them (four parameters, INACTIVE elsewhere, added to the
+star's track inside _absolute_model so likelihood and plots agree); it is
+on by default for Hipparcos data fit with another absolute dataset, and
+`fithipframe: false` takes the frames as identical.  The 1997 IAD
+abscissae of the FAST and NDAC consortia are correlated and are treated as
+independent unless getdata merged them (--hip-merge-consortia).
 
 Astrometric microlensing (conventions.md C30; review 8.10.1 stage 1).  A
 gaia/abs dataset of a microlensing source carries, inside the
@@ -85,7 +197,25 @@ with f_b/f_s from the `photometry:` light curve and x_b the blend
 photocenter: `blend_dE`/`blend_dN` (mas from the reference position,
 fixed on the sky, pinned at 0 by default -- free them to fit the drag).
 Both are INACTIVE on a dataset without the lens term, like fluxfrac on a
-rel dataset.  A point-source single lens takes the symbolic closed form
+rel dataset.
+
+The blend split (review 8.10.3).  Instead of that one fixed blend, a
+lensed dataset may say what its PSF holds: `psf_stars: [Lens, ...]`, the
+MODELED stars -- the lens, a companion, a resolved neighbor with its own
+star block -- each on its OWN track (the lens at the source's position plus
+the event's lens offset, review 8.10.4); and `background: <name>`, the
+sightline's unresolved background (components/background: the light no
+star models, one instance per sightline, with a sampled flux per band and a
+photocenter with its own proper motion).  Then
+
+    x_obs = [A (x_s + delta) + sum_j r_j x_j + r_bg x_bg] / (A + sum_j r_j + r_bg)
+
+with every flux relative to the source's baseline flux in the dataset's
+`band:`.  r_j is the SED's prediction in that band (raising when the SED
+cannot predict it), or a sampled `psf_fluxratio` with `fitpsfflux: true`;
+r_bg is the background's `fluxratio` element for that band.  A dataset
+that names neither keeps the formula above; a lensed CATALOG must name at
+least one (a blend fixed on the sky is the bias that mode removes).  A point-source single lens takes the symbolic closed form
 and stays differentiable (NUTS); a finite-source, binary or N-lens event
 takes VBMicrolensing's disk-integrated centroid through
 VBMDirectMagOp(astrometry=True) (MulensEvent.get_astrometric_terms,
@@ -108,18 +238,74 @@ unknowable from sky-plane data); this is handled by restricting bigomega
 to [0, 180] (Orbit._restrict_bigomega_halfplane), with a table note
 documenting the artificial boundary.
 
-Model limitations (v1): the gaia/abs photocenter wobble sums over the
-orbits whose PRIMARY group contains the target star, with a single
-per-instrument companion flux fraction (fluxfrac, default 0 = dark
-companions); orbits holding the star in their companion group are not yet
-modeled there (warned).  Relative positions are Keplerian two-body per
-orbit plus one level of nested photocenter wobble; light travel time and
-aberration are neglected.
+The photocenter of an absolute dataset (gaia/abs/catalog; review 8.10.6;
+skyframe.md, "The photocenter of an unresolved pair").  The modeled track
+is star_ndx's five-parameter track -- its ra/dec at the epoch, the
+system's proper motion and parallax (an orbit member's pm and distance are
+tied to its orbit anchor, orbit.md) -- plus the photocenter's wobble about
+the SYSTEM BARYCENTER.  So star.<target>.ra/dec is the barycenter's
+position at the epoch as that dataset sees it, not the star's own mean
+position, whichever group the star is in.  With x_rel = x_companion_group
+- x_primary_group of an orbit, the primary group sits at -(M_c/M) x_rel and
+the companion group at +(M_p/M) x_rel, and the PSF's photocenter is
+(1 - b) x_target + b x_other, b the OTHER side's share of the light:
+
+    target in the PRIMARY group:    x_rel (b - M_c/M)
+    target in the COMPANION group:  x_rel (M_p/M - b)
+
+summed over EVERY Keplerian orbit holding the target, on either side (a
+KELT-4 C target moves with BC and with A-BC), each with its own mass
+fractions.  `fluxfrac` (and the SED's fraction) is always "the other
+star's share of the light in this PSF" -- the companion's for a primary
+target, the primary's for a companion target; one spelling for both.  The
+PSF holds the target and at most ONE other light
+(orbit.bodies.photocenter_stars):
+
+  * SED path (band + companion_star_ndx + sed): the named star, at its own
+    position in every orbit (the one it shares with the target, and any
+    the target is not in -- its own inner orbit moves it too).  Every
+    other star is outside the PSF.
+  * sampled fluxfrac: a light standing at the other GROUP's barycenter of
+    the target's orbit.  Unambiguous only for a target in ONE Keplerian
+    orbit whose other group holds no orbit of its own; otherwise a
+    nonzero fluxfrac RAISES (which orbit's light? where inside the group?)
+    and the remedy is the SED path.  The dark default (fluxfrac pinned at
+    0) is legal in any topology: no other light, the target's own motion.
+
+A long-period companion as a Taylor orbit (orbit.md, "Taylor orbits";
+review 8.8.14).  A `type: constant_acceleration` (or `constant_jerk`) orbit
+whose PRIMARY group holds a photocenter light moves the absolute track by
+the primary's reflex from Orbit.state_vectors -- accel (t - epoch)^2 / 2
+(+ jerk (t - epoch)^3 / 6), accel_ra/accel_dec in mas/yr^2 (jerk_ra/jerk_dec
+in mas/yr^3), t - epoch in Julian years, Gaia DR3's convention -- less its
+value and velocity at the astrometric epoch, which are this star's ra/dec/pm
+(_taylor_sky_offset).  The photocenter rules above hold with the group's
+reflex in place of its orbit: all of the light moves when both lights are
+in the primary group, (1 - b) when only the target is, b when only the
+other light is (_taylor_photocenter_terms).  A light in the Taylor orbit's
+COMPANION group is refused (it needs a mass ratio no Taylor orbit has), as
+are rel/lensrel astrometry of a star on one and a uniform_rotation orbit
+(a lens pair's relative frame).  constant_velocity adds nothing: a constant
+sky velocity is the proper motion.  With such a term, pm_ra/pm_dec are the
+inner system's at the astrometric epoch, not the barycentric ones.  It is
+built in _photocenter_offset, the one builder, so the likelihood, the
+catalog projection and the plots share it.
+
+Model limitations: one other light per PSF (a PSF holding three luminous
+stars -- KELT-4 C with both B and A unresolved -- cannot be stated);
+relative positions are Keplerian two-body per orbit plus one level of
+nested photocenter wobble; light travel time and aberration are neglected.
+Each member star with absolute data carries its OWN ra/dec, so two
+datasets on two stars of one system fit two barycenter zero points (their
+separation is not used); linking ra/dec to the anchor would be the step
+that joins them.
 """
 
 import logging
+import os
 
 import numpy as np
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -129,21 +315,154 @@ import pymc as pm
 import pytensor
 import pytensor.tensor as pt
 
+from exozippy.components.astrometryinstrument.frametie import (
+    FRAME_PARAMS,
+    add_frame_prose,
+    check_frame_reference,
+    frame_offset,
+    numpy_frame_offset,
+    parse_frame_flags,
+    resolve_frame_defaults,
+)
 from exozippy.components.instrument import Instrument
-from exozippy.components.orbit.bodies import component_instance_names
+from exozippy.components.orbit.bodies import (
+    component_instance_names,
+    photocenter_stars,
+    planet_membership,
+)
 from exozippy.components.parameterization import (
     merge_overrides,
     pin_unselected,
 )
+from exozippy.components.star.position import require_star_radec
 from exozippy.constants import DAYS_PER_YEAR
-from exozippy.ephemeris import get_observer_position
+from exozippy.ephemeris import observer_position_at_reception
 from exozippy.outputs.texutils import latex_escape
 from exozippy.skyframe import parallax_factors
 
 RAD2MAS = (1.0 * u.rad).to(u.mas).value  # 2.06264806e8
 RSUN_AU = (1.0 * u.solRad).to(u.AU).value  # 4.6505e-3
 
-VALID_MODES = ("gaia", "abs", "rel")
+VALID_MODES = ("gaia", "abs", "rel", "lensrel", "catalog")
+# The modes whose model is a star's ABSOLUTE track (position, proper motion,
+# parallax, photocenter orbit, microlensing centroid shift): gaia and abs
+# observe it epoch by epoch, catalog through a published solution of it.
+ABSOLUTE_MODES = ("gaia", "abs", "catalog")
+
+# The catalog file's columns, in the Gaia archive's order (review 8.10.3).
+# The solution vector is ordered (dE at the epoch, dN at the epoch,
+# parallax, pm_ra*, pm_dec) -- Gaia's (ra, dec, parallax, pmra, pmdec).
+CATALOG_ROLES = {
+    5: (
+        "time",
+        "ra",
+        "dec",
+        "parallax",
+        "pmra",
+        "pmdec",
+        "ra_error",
+        "dec_error",
+        "parallax_error",
+        "pmra_error",
+        "pmdec_error",
+        "ra_dec_corr",
+        "ra_parallax_corr",
+        "ra_pmra_corr",
+        "ra_pmdec_corr",
+        "dec_parallax_corr",
+        "dec_pmra_corr",
+        "dec_pmdec_corr",
+        "parallax_pmra_corr",
+        "parallax_pmdec_corr",
+        "pmra_pmdec_corr",
+    ),
+    2: ("time", "ra", "dec", "ra_error", "dec_error", "ra_dec_corr"),
+}
+CATALOG_PARAM_NAMES = {
+    5: ("ra", "dec", "parallax", "pmra", "pmdec"),
+    2: ("ra", "dec"),
+}
+# Uniform epochs when only a span is given (catalog_span without
+# catalog_epochs); announced with a warning.
+CATALOG_DEFAULT_N_EPOCHS = 100
+CATALOG_KEYS = (
+    "catalog_parameters",
+    "catalog_epochs",
+    "catalog_span",
+    "catalog_n_epochs",
+)
+SPLIT_KEYS = ("psf_stars", "fitpsfflux", "background")
+
+
+def catalog_design_matrix(t, t_ref, P_E, P_N, n_par):
+    """The catalog's linear model at epochs ``t``: (2K, n_par), the K East
+    rows first, then the K North rows.
+
+    Columns (dE0, dN0, parallax, pm_ra*, pm_dec) for a five-parameter
+    solution -- position at ``t_ref`` [mas], parallax [mas], proper motion
+    [mas/yr] -- and (dE0, dN0) for a two-parameter one.  ``P_E``/``P_N`` are
+    the parallax factors (skyframe.parallax_factors) at each epoch, so a row
+    is the same ``x0 + mu dt + plx P`` every gaia/abs model line is.
+    """
+    t = np.asarray(t, dtype=float)
+    k = len(t)
+    dt = (t - float(t_ref)) / DAYS_PER_YEAR
+    one, zero = np.ones(k), np.zeros(k)
+    if n_par == 5:
+        east = np.column_stack([one, zero, P_E, dt, zero])
+        north = np.column_stack([zero, one, P_N, zero, dt])
+    elif n_par == 2:
+        east = np.column_stack([one, zero])
+        north = np.column_stack([zero, one])
+    else:
+        raise ValueError(
+            f"catalog solutions have 2 or 5 parameters; got {n_par}"
+        )
+    return np.vstack([east, north])
+
+
+def catalog_projection(t, t_ref, P_E, P_N, n_par, weights=None):
+    """The (n_par, 2K) matrix taking a track (dE at the K epochs, then dN)
+    to the weighted least-squares catalog solution of it.
+
+    ``(M^T W M)^{-1} M^T W`` with ``M`` the ``catalog_design_matrix`` and
+    ``W`` the per-epoch weights (the same weight on East and North), so a
+    track that IS a five-parameter line comes back as exactly its own
+    parameters and anything else (an orbit, a microlensing centroid shift, a
+    blend moving on its own) maps as a catalog's fit would map it.  Raises
+    when the epochs cannot determine the solution (fewer epochs than the
+    columns need, or a parallax column degenerate with the others).
+    """
+    M = catalog_design_matrix(t, t_ref, P_E, P_N, n_par)
+    w = np.ones(len(np.asarray(t))) if weights is None else np.asarray(weights)
+    if w.shape != (len(np.asarray(t)),) or not np.all(w > 0):
+        raise ValueError(
+            f"catalog epoch weights must be one positive number per epoch; "
+            f"got shape {w.shape} for {len(np.asarray(t))} epochs."
+        )
+    W = np.concatenate([w, w])
+    normal = M.T @ (W[:, None] * M)
+    if np.linalg.matrix_rank(normal) < n_par:
+        raise ValueError(
+            f"the catalog epochs ({len(np.asarray(t))} of them) cannot "
+            f"determine a {n_par}-parameter solution: its normal matrix is "
+            f"singular.  Give more epochs, or a longer span."
+        )
+    return np.linalg.solve(normal, M.T * W[None, :])
+
+
+def catalog_covariance(row, n_par):
+    """The n_par x n_par covariance from one catalog row's errors and
+    correlation coefficients (Gaia's layout: ``<a>_error`` and
+    ``<a>_<b>_corr`` for a before b in CATALOG_PARAM_NAMES)."""
+    names = CATALOG_PARAM_NAMES[n_par]
+    err = np.array([row[f"{a}_error"] for a in names], dtype=float)
+    corr = np.eye(n_par)
+    for i, a in enumerate(names):
+        for j in range(i + 1, n_par):
+            c = float(row[f"{a}_{names[j]}_corr"])
+            corr[i, j] = corr[j, i] = c
+    return corr * np.outer(err, err)
 
 
 def wrap_ra_diff(delta_rad):
@@ -176,6 +495,203 @@ def wrap_ra_diff_pt(delta_rad):
     return pt.arctan2(pt.sin(delta_rad), pt.cos(delta_rad))
 
 
+# ----------------------------------------------------------------------
+# Gaia epoch astrometry, read as the archive delivers it
+# (data_format: gaia_epoch)
+# ----------------------------------------------------------------------
+DATA_FORMATS = ("columns", "gaia_epoch")
+# The origin of obs_time_tcb: 2010-01-01T00:00:00 TCB, as a JD (the DR4
+# data model; the VOTable's TIMESYS states it, and it is checked there).
+GAIA_EPOCH_TIME_ORIGIN = 2455197.5
+# Config keys that describe a file's time system or layout -- the format
+# fixes both, so a value for any of them would be a second, competing
+# description (one spelling: the file's).
+GAIA_EPOCH_FIXED_KEYS = (
+    "columns",
+    "time_offset",
+    "time_scale",
+    "time_frame",
+    "time_location",
+    "time_ephemeris",
+)
+# Per-transit columns, and the per-CCD (array-valued) ones, with the unit
+# each must carry when the file states one.
+GAIA_EPOCH_TRANSIT_COLUMNS = {
+    "source_id": None,
+    "transit_id": None,
+    "ra0": "deg",
+    "dec0": "deg",
+    "obs_time_bary_corr": "ns",
+    "parallax_factor_al": None,
+}
+GAIA_EPOCH_CCD_COLUMNS = {
+    "obs_time_tcb": "ns",
+    "centroid_pos_al": "mas",
+    "centroid_pos_error_al": "mas",
+    "scan_pos_angle": "deg",
+    "used_by_agis_al": None,
+}
+GAIA_EPOCH_READERS = {
+    ".xml": "votable",
+    ".vot": "votable",
+    ".votable": "votable",
+    ".ecsv": "ascii.ecsv",
+    ".fits": "fits",
+    ".fit": "fits",
+}
+
+
+def read_gaia_epoch_astrometry(path, source_id=None, where=""):
+    """One source's along-scan CCD observations from a Gaia epoch-astrometry
+    table (the DR4 ``epoch_astrometry`` product: VOTable, ECSV or FITS).
+
+    Each row of the product is one field-of-view transit, its per-CCD
+    quantities arrays.  This keeps the CCD observations AGIS used along
+    scan (``used_by_agis_al``, as DPAC's ``gaiasupdate`` does), one record
+    each, in the file's order, and returns ``(df, meta)``:
+
+    * ``df`` columns, positionally: the barycentric TCB instant as a JD
+      (``2455197.5 + (obs_time_tcb + obs_time_bary_corr)/86400e9``; the
+      same instant ``gaiasupdate.set_relative_time`` forms), ``w`` =
+      ``centroid_pos_al`` [mas], its error [mas], ``scan_pos_angle``
+      [deg], and DPAC's ``parallax_factor_al`` (a cross-check only; the
+      model computes its own from the spacecraft ephemeris);
+    * ``meta``: ``ra0``/``dec0`` [deg], the reference point ``w`` is
+      measured from, plus ``source_id`` and the number of field-of-view
+      transits ``n_transits``.
+
+    ``source_id`` selects the source; it may be omitted only when the file
+    holds one.  Raises, naming the file, on a missing column, a unit other
+    than the data model's, a VOTable TIMESYS other than TCB from
+    2455197.5, CCD arrays of unequal length, a used CCD without a
+    centroid, or a reference point that changes between transits.
+    """
+    from astropy.table import Table
+
+    label = f"{where} gaia_epoch file {path!r}".strip()
+    ext = os.path.splitext(str(path))[1].lower()
+    if ext not in GAIA_EPOCH_READERS:
+        raise ValueError(
+            f"{label}: unrecognized extension {ext!r}; a Gaia epoch-"
+            f"astrometry table is read as {sorted(GAIA_EPOCH_READERS)}."
+        )
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"{label}: data file not found.")
+    fmt = GAIA_EPOCH_READERS[ext]
+    if fmt == "votable":
+        from astropy.io.votable import parse
+
+        vot = parse(path)
+        timesys = [ts for res in vot.resources for ts in res.time_systems]
+        if len(timesys) > 1:
+            raise ValueError(
+                f"{label}: {len(timesys)} TIMESYS elements; expected one."
+            )
+        if timesys:
+            ts = timesys[0]
+            if (
+                str(ts.timescale).upper() != "TCB"
+                or float(ts.timeorigin) != GAIA_EPOCH_TIME_ORIGIN
+            ):
+                raise ValueError(
+                    f"{label}: TIMESYS says timescale {ts.timescale!r} from "
+                    f"JD {ts.timeorigin}; the Gaia epoch-astrometry data "
+                    f"model is TCB from {GAIA_EPOCH_TIME_ORIGIN} "
+                    f"(2010-01-01T00:00:00 TCB)."
+                )
+        table = vot.get_first_table().to_table()
+    else:
+        table = Table.read(path, format=fmt)
+
+    wanted = {**GAIA_EPOCH_TRANSIT_COLUMNS, **GAIA_EPOCH_CCD_COLUMNS}
+    missing = [c for c in wanted if c not in table.colnames]
+    if missing:
+        raise ValueError(
+            f"{label}: missing column(s) {missing} of the Gaia epoch-"
+            f"astrometry data model."
+        )
+    for col, unit in wanted.items():
+        have = table[col].unit
+        if unit is not None and have is not None and str(have) != unit:
+            raise ValueError(
+                f"{label}: column {col!r} is in {have}; the data model "
+                f"has it in {unit}."
+            )
+
+    ids = np.unique(np.asarray(table["source_id"], dtype=np.int64))
+    if source_id is None:
+        if len(ids) != 1:
+            raise ValueError(
+                f"{label}: holds {len(ids)} sources {ids.tolist()}; name "
+                f"one with `source_id:`."
+            )
+        source_id = int(ids[0])
+    rows = table[np.asarray(table["source_id"], dtype=np.int64) == source_id]
+    if len(rows) == 0:
+        raise ValueError(
+            f"{label}: source_id {source_id} is not in the file; it holds "
+            f"{ids.tolist()}."
+        )
+    ra0 = np.asarray(rows["ra0"], dtype=float)
+    dec0 = np.asarray(rows["dec0"], dtype=float)
+    if np.ptp(ra0) != 0.0 or np.ptp(dec0) != 0.0:
+        raise ValueError(
+            f"{label}: the reference point (ra0, dec0) of source "
+            f"{source_id} changes between transits; w is measured from one."
+        )
+
+    out = []
+    for r in rows:
+        ccd = {c: np.ma.asarray(r[c]) for c in GAIA_EPOCH_CCD_COLUMNS}
+        sizes = {c: a.size for c, a in ccd.items()}
+        if len(set(sizes.values())) != 1:
+            raise ValueError(
+                f"{label}: transit {r['transit_id']} has per-CCD arrays of "
+                f"unequal length {sizes}."
+            )
+        used = np.ma.filled(ccd["used_by_agis_al"].astype(bool), False)
+        if not used.any():
+            continue
+        # Per-transit values: masked on some transits, which is harmless
+        # only when the transit contributes nothing.
+        bary = r["obs_time_bary_corr"]
+        plx = r["parallax_factor_al"]
+        if np.ma.is_masked(bary) or np.ma.is_masked(plx):
+            raise ValueError(
+                f"{label}: transit {r['transit_id']} has CCDs used_by_agis_al "
+                f"but a masked obs_time_bary_corr or parallax_factor_al."
+            )
+        bary, plx = float(bary), float(plx)
+        for k in np.flatnonzero(used):
+            vals = [
+                ccd[c][k]
+                for c in GAIA_EPOCH_CCD_COLUMNS
+                if c != "used_by_agis_al"
+            ]
+            if any(np.ma.is_masked(v) for v in vals):
+                raise ValueError(
+                    f"{label}: transit {r['transit_id']} CCD {k} is "
+                    f"used_by_agis_al but has a masked time, centroid, "
+                    f"error or scan angle."
+                )
+            t_ns, w, err, psi = vals
+            jd = GAIA_EPOCH_TIME_ORIGIN + (int(t_ns) + bary) / 86400e9
+            out.append((jd, float(w), float(err), float(psi), plx))
+    if not out:
+        raise ValueError(
+            f"{label}: source {source_id} has no CCD observation used by "
+            f"AGIS along scan."
+        )
+    df = pd.DataFrame(out, columns=range(5))
+    meta = {
+        "source_id": int(source_id),
+        "ra0": float(ra0[0]),
+        "dec0": float(dec0[0]),
+        "n_transits": len(rows),
+    }
+    return df, meta
+
+
 class AstrometryInstrument(Instrument):
     prose_noun = "astrometry"
     # No per-file Gaussian process here.  Unlike the other instruments, an
@@ -190,6 +706,13 @@ class AstrometryInstrument(Instrument):
     # out_scale is one scale in the data's own unit, and these files carry
     # two observables in different units.  _load_likelihood_config raises.
     supports_robust_likelihood = False
+    # Exposure smearing (instrument.md, "Exposure smearing"): a dataset with
+    # ninterp > 1 is modeled as the exposure-mean POSITION -- (dE, dN)
+    # averaged together on one set of nodes, every observable formed from
+    # the averaged vector afterwards (_exposure_model).  Gauss-Legendre:
+    # the track is smooth over an exposure, and no parity constrains it.
+    supports_exposure = True
+    EXPOSURE_RULE = "gauss"
 
     def __init__(self, config, config_manager):
         super().__init__(config, config_manager)
@@ -210,8 +733,8 @@ class AstrometryInstrument(Instrument):
         ]
 
         # rel mode: which orbit the measurements trace (name or index in
-        # 'orbit'; legacy 'planet_ndx' resolves through the planet's
-        # orbit_ndx).
+        # 'orbit'; legacy 'planet_ndx' resolves to the orbit holding that
+        # planet).
         sys_cfg = getattr(config_manager, "system_config", None) or {}
         orbit_names = component_instance_names(sys_cfg, "orbit")
         planet_cfgs = sys_cfg.get("planet") or []
@@ -238,12 +761,355 @@ class AstrometryInstrument(Instrument):
                         f"[{self.prefix}.{self.names[i]}] unknown orbit "
                         f"'{ref}'; orbits are {orbit_names}."
                     )
+            elif "planet_ndx" not in c:
+                # Neither key: orbit 0, the documented default (unchanged).
+                idx = 0
             else:
-                j = int(c.get("planet_ndx", 0))
-                p_cfg = planet_cfgs[j] if j < len(planet_cfgs) else {}
-                # same default as Planet.build_maps' orbit_map
-                idx = int((p_cfg or {}).get("orbit_ndx", 0))
+                j = int(c["planet_ndx"])
+                if j >= len(planet_cfgs):
+                    raise ValueError(
+                        f"[{self.prefix}.{self.names[i]}] planet_ndx {j} out "
+                        f"of range; the system has {len(planet_cfgs)} "
+                        f"planet(s).  Name the orbit with 'orbit:' instead."
+                    )
+                # The planet's orbit, from the orbit blocks' groups (the one
+                # reader, orbit.bodies.planet_membership).
+                idx = planet_membership(sys_cfg)[j][0]
+                if idx is None:
+                    raise ValueError(
+                        f"[{self.prefix}.{self.names[i]}] planet_ndx {j} "
+                        f"names a planet that no orbit block holds, so "
+                        f"there is no orbit to trace; name the orbit with "
+                        f"'orbit:'."
+                    )
             self.rel_orbit.append(idx)
+
+        # A catalog dataset observes a SOLUTION (positions, parallax and
+        # proper motion at one epoch), not a time series of exposures:
+        # there is nothing to average, so the exposure keys are refused.
+        for i, (m, c) in enumerate(zip(self.modes, self.config)):
+            stated = [k for k in self.EXPOSURE_KEYS if k in c]
+            if m == "catalog" and stated:
+                raise ValueError(
+                    f"[{self.prefix}.{self.names[i]}] mode 'catalog' is a "
+                    f"catalog solution, not a time series of exposures; "
+                    f"{', '.join(stated)} does not apply. Remove the key."
+                )
+
+        self._parse_catalog_and_split_keys()
+        self._parse_data_formats()
+        # The Hipparcos-to-Gaia frame tie (frametie.py), per dataset: the
+        # explicit values here, the unset ones (None) resolved from the
+        # epochs at the end of load_data.
+        self.fithipframe = parse_frame_flags(self)
+
+    def _parse_catalog_and_split_keys(self):
+        """The catalog-mode and blend-split keys (review 8.10.3), checked at
+        construction so a misplaced key fails before any file is read.
+
+        Sets ``catalog_n_par[i]`` (2 or 5; None off catalog mode),
+        ``catalog_epoch_spec[i]`` (("list", times), ("file", path) or
+        ("span", (t0, t1), n); None off catalog mode), ``psf_stars[i]``
+        (star indices, [] when absent), ``fitpsfflux[i]`` (bool) and
+        ``background_ref[i]`` (the raw ``background:`` reference, resolved
+        at stage 3 against the background component; None when absent).
+        Whether a dataset is LENSED -- the
+        condition the split needs -- is known only at stage 3
+        (``_resolve_lens_hook``), which checks the rest.
+        """
+        self.catalog_n_par = []
+        self.catalog_epoch_spec = []
+        self.psf_stars = []
+        self.fitpsfflux = []
+        self.background_ref = []
+        for i, c in enumerate(self.config):
+            mode = self.modes[i]
+            where = f"[{self.prefix}.{self.names[i]}]"
+            if mode != "catalog":
+                given = [k for k in CATALOG_KEYS if k in c]
+                if given:
+                    raise ValueError(
+                        f"{where} {given} are catalog-mode keys and this "
+                        f"dataset is mode '{mode}'."
+                    )
+                self.catalog_n_par.append(None)
+                self.catalog_epoch_spec.append(None)
+            else:
+                n_par = c.get("catalog_parameters", 5)
+                if isinstance(n_par, bool) or n_par not in (2, 5):
+                    raise ValueError(
+                        f"{where} catalog_parameters must be 5 (position, "
+                        f"parallax, proper motion) or 2 (position only); "
+                        f"got {n_par!r}."
+                    )
+                self.catalog_n_par.append(int(n_par))
+                self.catalog_epoch_spec.append(
+                    self._parse_catalog_epochs(c, where)
+                )
+            if mode not in ABSOLUTE_MODES:
+                given = [k for k in SPLIT_KEYS if k in c]
+                if given:
+                    raise ValueError(
+                        f"{where} {given} describe the blended photocenter "
+                        f"of a gaia/abs/catalog dataset; this dataset is "
+                        f"mode '{mode}'."
+                    )
+            refs = c.get("psf_stars") or []
+            if not isinstance(refs, list):
+                raise ValueError(
+                    f"{where} psf_stars must be a list of star names or "
+                    f"indices; got {refs!r}."
+                )
+            stars = [
+                self.resolve_star_ndx(r, f"{where} psf_stars entry {r!r}")
+                for r in refs
+            ]
+            if len(set(stars)) != len(stars):
+                raise ValueError(
+                    f"{where} psf_stars names a star twice: {refs}."
+                )
+            self.psf_stars.append(stars)
+            flag = c.get("fitpsfflux", False)
+            if not isinstance(flag, bool):
+                raise ValueError(
+                    f"{where} fitpsfflux must be true or false; got {flag!r}."
+                )
+            self.fitpsfflux.append(flag)
+            self.background_ref.append(c.get("background"))
+            if self.fitpsfflux[i] and not stars:
+                raise ValueError(
+                    f"{where} fitpsfflux: true samples the flux of each "
+                    f"psf_stars member, and psf_stars is empty."
+                )
+
+    @staticmethod
+    def _parse_catalog_epochs(c, where):
+        """One catalog dataset's epoch specification: exactly one of
+        ``catalog_epochs`` (a list of BJD_TDB times, or a path to a file of
+        ``time [weight]`` rows) and ``catalog_span`` ([t_start, t_end] in
+        BJD_TDB, with ``catalog_n_epochs`` uniform epochs)."""
+        epochs = c.get("catalog_epochs")
+        span = c.get("catalog_span")
+        n = c.get("catalog_n_epochs")
+        if (epochs is None) == (span is None):
+            raise ValueError(
+                f"{where} a catalog solution is modeled by fitting the model "
+                f"track at the catalog's epochs: give exactly one of "
+                f"`catalog_epochs:` (a list of BJD_TDB times, or a file of "
+                f"`time [weight]` rows) and `catalog_span: [t_start, t_end]` "
+                f"(uniform epochs, `catalog_n_epochs:` of them, default "
+                f"{CATALOG_DEFAULT_N_EPOCHS})."
+            )
+        if epochs is not None:
+            if n is not None:
+                raise ValueError(
+                    f"{where} catalog_n_epochs goes with catalog_span; with "
+                    f"catalog_epochs the epochs are the ones listed."
+                )
+            if isinstance(epochs, str):
+                return ("file", epochs)
+            if isinstance(epochs, list) and all(
+                isinstance(e, (int, float)) and not isinstance(e, bool)
+                for e in epochs
+            ):
+                return ("list", [float(e) for e in epochs])
+            raise ValueError(
+                f"{where} catalog_epochs must be a list of BJD_TDB times or "
+                f"the path of a `time [weight]` file; got {epochs!r}."
+            )
+        if (
+            not isinstance(span, list)
+            or len(span) != 2
+            or not all(
+                isinstance(e, (int, float)) and not isinstance(e, bool)
+                for e in span
+            )
+            or not float(span[1]) > float(span[0])
+        ):
+            raise ValueError(
+                f"{where} catalog_span must be [t_start, t_end] in BJD_TDB "
+                f"with t_end > t_start; got {span!r}."
+            )
+        if n is None:
+            n = CATALOG_DEFAULT_N_EPOCHS
+        if isinstance(n, bool) or not isinstance(n, int) or n < 3:
+            raise ValueError(
+                f"{where} catalog_n_epochs must be an integer >= 3; got {n!r}."
+            )
+        return ("span", (float(span[0]), float(span[1])), int(n))
+
+    def _parse_data_formats(self):
+        """``data_format:`` per dataset (at construction).
+
+        ``columns`` (the default) is the whitespace file of the mode's
+        roles.  ``gaia_epoch`` is a Gaia epoch-astrometry TABLE as the
+        archive delivers it (``read_gaia_epoch_astrometry``), legal only in
+        ``mode: gaia`` with the Gaia spacecraft as observer.  The format
+        states the file's layout and its time system (barycentric TCB, ns
+        from 2010-01-01), so the keys that would describe either again --
+        ``columns:`` and every ``time_*:`` key -- raise rather than compete
+        with it; the time spec is set here to what the format says, and the
+        shared reader converts it to BJD_TDB like any other file's.
+        ``source_id:`` picks the source in a multi-source table and is a
+        gaia_epoch key only.
+        """
+        self.data_formats = []
+        self.source_ids = []
+        self.reference_points = []
+        self._gaia_epoch_meta = [None] * self.n_elements
+        for i, c in enumerate(self.config):
+            where = f"[{self.prefix}.{self.names[i]}]"
+            fmt = c.get("data_format", "columns")
+            if fmt not in DATA_FORMATS:
+                raise ValueError(
+                    f"{where} data_format must be one of {list(DATA_FORMATS)}; "
+                    f"got {fmt!r}."
+                )
+            self.reference_points.append(
+                self._parse_reference_point(c, where, fmt)
+            )
+            sid = c.get("source_id")
+            if fmt != "gaia_epoch":
+                if sid is not None:
+                    raise ValueError(
+                        f"{where} source_id selects a source in a "
+                        f"data_format: gaia_epoch table; this dataset is "
+                        f"data_format: {fmt}."
+                    )
+                self.data_formats.append(fmt)
+                self.source_ids.append(None)
+                continue
+            if self.modes[i] != "gaia":
+                raise ValueError(
+                    f"{where} data_format: gaia_epoch is Gaia along-scan "
+                    f"epoch astrometry, i.e. mode: gaia; this dataset is "
+                    f"mode '{self.modes[i]}'."
+                )
+            if self.observers[i] != "gaia":
+                raise ValueError(
+                    f"{where} data_format: gaia_epoch was observed by the "
+                    f"Gaia spacecraft; observer_location "
+                    f"{self.observers[i]!r} would compute its parallax "
+                    f"factors for the wrong observer.  Drop the key."
+                )
+            given = [k for k in GAIA_EPOCH_FIXED_KEYS if k in c]
+            if given:
+                raise ValueError(
+                    f"{where} data_format: gaia_epoch fixes the file's "
+                    f"layout and time system (barycentric TCB from "
+                    f"2010-01-01, converted to BJD_TDB on read); {given} "
+                    f"would describe them a second time.  Drop them."
+                )
+            if sid is not None and (
+                isinstance(sid, bool) or not isinstance(sid, (int, np.integer))
+            ):
+                raise ValueError(
+                    f"{where} source_id must be the integer Gaia source_id; "
+                    f"got {sid!r}."
+                )
+            self.data_formats.append(fmt)
+            self.source_ids.append(None if sid is None else int(sid))
+            # What the format says: barycentric (frame bjd) TCB, absolute
+            # JDs once read.  needs_conversion also makes the data prose
+            # say the times were converted, which they are.
+            self.time_specs[i] = {
+                "offset": 0.0,
+                "scale": "tcb",
+                "frame": "bjd",
+                "location": None,
+                "ephemeris": "builtin",
+                "needs_conversion": True,
+            }
+
+    def _parse_reference_point(self, c, where, fmt):
+        """``reference_point: [ra, dec]`` (deg) of a mode-gaia columns
+        file: the point its abscissae w are measured from, which is then the
+        dataset's tangent point (as a gaia_epoch file's own (ra0, dec0) is).
+
+        Without it the tangent point is the star's ra/dec start, which is
+        right only when w was reconstructed about that same point: two
+        datasets of one star measured from two points (Hipparcos IAD about
+        the J1991.25 catalog position, Gaia DR4 about its own reference
+        point 25 years of proper motion away) need each its own, or every
+        abscissa of one is offset by the difference.  Returns the pair in
+        radians, or None.
+        """
+        ref = c.get("reference_point")
+        if ref is None:
+            return None
+        if fmt == "gaia_epoch":
+            raise ValueError(
+                f"{where} reference_point: a gaia_epoch file states its own "
+                f"(ra0, dec0); giving it a second time would compete with "
+                f"the file.  Drop the key."
+            )
+        if c.get("mode", "gaia") != "gaia":
+            raise ValueError(
+                f"{where} reference_point: is the origin of a mode-gaia "
+                f"file's along-scan abscissae; this dataset is mode "
+                f"'{c.get('mode')}'."
+            )
+        if (
+            not isinstance(ref, list)
+            or len(ref) != 2
+            or not all(
+                isinstance(v, (int, float)) and not isinstance(v, bool)
+                for v in ref
+            )
+            or not -90.0 <= float(ref[1]) <= 90.0
+        ):
+            raise ValueError(
+                f"{where} reference_point must be [ra, dec] in degrees; "
+                f"got {ref!r}."
+            )
+        return np.radians(float(ref[0])), np.radians(float(ref[1]))
+
+    def _read_table(self, i):
+        """``data_format: gaia_epoch`` reads the archive table; every other
+        file is the shared whitespace read."""
+        if self.data_formats[i] != "gaia_epoch":
+            return super()._read_table(i)
+        df, meta = read_gaia_epoch_astrometry(
+            self.files[i],
+            source_id=self.source_ids[i],
+            where=f"[{self.prefix}.{self.names[i]}]",
+        )
+        self._gaia_epoch_meta[i] = meta
+        logger.info(
+            f"[{self.prefix}.{self.names[i]}] Gaia epoch astrometry of "
+            f"source {meta['source_id']}: {len(df)} along-scan CCD "
+            f"observations used by AGIS, from {meta['n_transits']} "
+            f"field-of-view transits; w measured from (ra0, dec0) = "
+            f"({meta['ra0']:.9f}, {meta['dec0']:.9f}) deg."
+        )
+        return df
+
+    # The along-scan parallax factors of a gaia_epoch dataset, ours against
+    # DPAC's, may differ by this much before a warning (HIP1349's Hipparcos
+    # check uses the same tolerance; the twelve DR4 pre-release sources agree
+    # to <= 1.5e-5, i.e. 0.2 microarcsec of parallax for Gaia-4).
+    PARALLAX_FACTOR_TOL = 1e-3
+
+    def _check_gaia_parallax_factors(self, i, d):
+        """Compare the model's along-scan parallax factors (the spacecraft
+        ephemeris at the reception instant) with the ones DPAC ships in a
+        gaia_epoch file.  They measure the same thing, so a disagreement
+        means the ephemeris, the observer or the time conversion is off;
+        warned, not raised -- the fit can still be run to look."""
+        ours = d["P_E"] * d["sin_psi"] + d["P_N"] * d["cos_psi"]
+        diff = float(np.max(np.abs(ours - d["plx_al_dpac"])))
+        msg = (
+            f"[{self.prefix}.{self.names[i]}] along-scan parallax factors, "
+            f"model minus DPAC: max |diff| = {diff:.1e}"
+        )
+        if diff > self.PARALLAX_FACTOR_TOL:
+            logger.warning(
+                msg + f" exceeds {self.PARALLAX_FACTOR_TOL:g}: the "
+                f"spacecraft ephemeris, the observer or the time "
+                f"conversion disagrees with Gaia's own."
+            )
+        else:
+            logger.info(msg + ".")
 
     @property
     def prefix(self):
@@ -312,11 +1178,15 @@ class AstrometryInstrument(Instrument):
             {
                 "key": "mode",
                 "kind": "option",
-                "accepts": ["gaia", "abs", "rel"],
+                "accepts": ["gaia", "abs", "rel", "lensrel", "catalog"],
                 "required": False,
                 "doc": (
-                    "Astrometry data mode: 'gaia'/'abs' absolute positions "
-                    "or 'rel' relative separations. Default 'gaia'."
+                    "Astrometry data mode: 'gaia'/'abs' absolute positions, "
+                    "'rel' relative separations of an orbit's companion, "
+                    "'lensrel' the resolved microlensing lens minus its "
+                    "source (dE, dN, errors, correlation), or 'catalog' a "
+                    "published five- (or two-) parameter solution with its "
+                    "covariance (Gaia, VIRAC2). Default 'gaia'."
                 ),
             },
             {
@@ -379,8 +1249,12 @@ class AstrometryInstrument(Instrument):
                 "accepts": ["star"],
                 "required": False,
                 "doc": (
-                    "gaia/abs only. Index or name of the companion star for "
-                    "the SED-derived photocenter flux fraction (with band). "
+                    "gaia/abs/catalog only. Index or name of the OTHER luminous "
+                    "star "
+                    "inside the target's PSF (the companion of a primary-group "
+                    "target, the primary of a companion-group one) for the "
+                    "SED-derived photocenter flux fraction (with band); it "
+                    "must share a Keplerian orbit with star_ndx. "
                     "Ignored with a warning in rel mode, whose photocenter "
                     "is weighed per nested orbit instead -- a rel dataset's "
                     "fluxfrac is inactive, not merely pinned."
@@ -399,7 +1273,7 @@ class AstrometryInstrument(Instrument):
                 "accepts": None,
                 "required": False,
                 "doc": (
-                    "gaia/abs only. Model the astrometric microlensing "
+                    "gaia/abs/catalog only. Model the astrometric microlensing "
                     "centroid shift of this dataset's star when it is a "
                     "microlensing source (conventions.md C30): the "
                     "point-lens shift theta_E*u/(u^2+2) away from the lens, "
@@ -428,6 +1302,145 @@ class AstrometryInstrument(Instrument):
                 ),
             },
             {
+                "key": "psf_stars",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Lensed gaia/abs/catalog only. Names (or indices) of "
+                    "modeled non-source stars whose light is inside this "
+                    "dataset's PSF -- the lens, a modeled neighbor. Each "
+                    "moves on its own track, weighted by its flux in "
+                    "`band:` (from the SED, or sampled with fitpsfflux); "
+                    "the light no star models is the `background:`. "
+                    "Default: none (with no background either, all "
+                    "non-source light is the fixed blend_dE/dN)."
+                ),
+            },
+            {
+                "key": "fitpsfflux",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "true: SAMPLE each psf_stars member's flux relative to "
+                    "the source in this dataset's band "
+                    "(astrometryinstrument.<name>.psf_fluxratio_<k>), for a "
+                    "band the SED cannot predict. Default false: the SED "
+                    "predicts it, and a band it cannot predict raises."
+                ),
+            },
+            {
+                "key": "background",
+                "kind": "ref",
+                "accepts": ["background"],
+                "required": False,
+                "doc": (
+                    "Lensed gaia/abs/catalog only. Name (or index) of the "
+                    "`background:` instance -- the sightline's unresolved "
+                    "background, the light no star block models -- whose "
+                    "light is inside this dataset's PSF. It is weighted by "
+                    "its fluxratio in this dataset's `band:` and placed at "
+                    "its own moving photocenter. Default: none (no "
+                    "unmodeled light in the PSF beyond psf_stars)."
+                ),
+            },
+            {
+                "key": "catalog_parameters",
+                "kind": "option",
+                "accepts": [5, 2],
+                "required": False,
+                "doc": (
+                    "catalog mode: 5 (position, parallax, proper motion; "
+                    "the default) or 2 (position only)."
+                ),
+            },
+            {
+                "key": "catalog_epochs",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "catalog mode: the epochs [BJD_TDB] the catalog's "
+                    "solution was fit to, as a list or a file of "
+                    "`time [weight]` rows. Exclusive with catalog_span."
+                ),
+            },
+            {
+                "key": "catalog_span",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "catalog mode: [t_start, t_end] in BJD_TDB; the model "
+                    "track is sampled at catalog_n_epochs uniform epochs "
+                    "there (warned: an approximation of the real epochs)."
+                ),
+            },
+            {
+                "key": "catalog_n_epochs",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": "catalog mode with catalog_span: number of epochs (default 100).",
+            },
+            {
+                "key": "data_format",
+                "kind": "option",
+                "accepts": list(DATA_FORMATS),
+                "required": False,
+                "doc": (
+                    "columns (default): a whitespace file of the mode's "
+                    "columns. gaia_epoch (mode: gaia only): a Gaia "
+                    "epoch-astrometry table as the archive delivers it "
+                    "(VOTable, ECSV or FITS; the DR4 epoch_astrometry "
+                    "product), read CCD by CCD, keeping the observations "
+                    "AGIS used along scan, in its own time system "
+                    "(barycentric TCB) and from its own reference point "
+                    "(ra0, dec0); columns: and time_* keys raise."
+                ),
+            },
+            {
+                "key": "source_id",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "data_format: gaia_epoch only. The Gaia source_id to "
+                    "read from a table holding several sources."
+                ),
+            },
+            {
+                "key": "reference_point",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "mode: gaia columns file only. [ra, dec] in deg: the "
+                    "point its abscissae w are measured from (Hipparcos IAD: "
+                    "the J1991.25 catalog position), which is then the "
+                    "tangent point. Default: the star's ra/dec start."
+                ),
+            },
+            {
+                "key": "fithipframe",
+                "kind": "option",
+                "accepts": [True, False],
+                "required": False,
+                "doc": (
+                    "gaia/abs only. Default: true for Hipparcos epoch data "
+                    "(mode gaia, every epoch in the Hipparcos mission) fit "
+                    "with another absolute dataset, else false. This "
+                    "dataset is in the Hipparcos reference frame: fit its "
+                    "offset from the "
+                    "frame of the other datasets (Gaia) as a position "
+                    "offset at J1991.25 (frame_dE, frame_dN, mas) and a "
+                    "proper-motion offset (frame_dpmE, frame_dpmN, mas/yr) "
+                    "with Gaussian priors from the Hipparcos-Gaia "
+                    "cross-calibration (frametie.py)."
+                ),
+            },
+            {
                 "key": "epoch",
                 "kind": "option",
                 "accepts": None,
@@ -441,10 +1454,15 @@ class AstrometryInstrument(Instrument):
                 note=(
                     "The roles depend on the file's mode -- gaia: time, w, "
                     "err, psi; abs: time, ra, dec, err_e, err_n; rel: time, "
-                    "sep, err_sep, pa, err_pa."
+                    "sep, err_sep, pa, err_pa; lensrel: time, de, dn, err_e, "
+                    "err_n, corr; catalog: time, ra, dec, parallax, pmra, "
+                    "pmdec, the five errors and the ten correlations in "
+                    "the Gaia archive's order (time, ra, dec, ra_error, "
+                    "dec_error, ra_dec_corr for two parameters)."
                 ),
             ),
             *cls._time_config_schema(),
+            *cls._exposure_config_schema(),
             cls._plot_style_config_schema(),
             cls._label_config_schema(),
         ]
@@ -458,20 +1476,14 @@ class AstrometryInstrument(Instrument):
         self.jittervar_lower = [0.0] * self.n_elements
         self.n_total_obs = 0
 
-        n_stars = system.star.n_elements if hasattr(system, "star") else 1
-        ra_cfg = self.config_manager.resolve("star", "ra", shape=(n_stars,))[
-            "initval"
-        ]
-        dec_cfg = self.config_manager.resolve("star", "dec", shape=(n_stars,))[
-            "initval"
-        ]
-        ra_cfg = np.atleast_1d(ra_cfg)
-        dec_cfg = np.atleast_1d(dec_cfg)
+        event = getattr(system, "mulensevent", None)
+        lens_track = None if event is None else event.lens_track_star(system)
 
         mode_roles = {
             "gaia": ("time", "w", "err", "psi"),
             "abs": ("time", "ra", "dec", "err_e", "err_n"),
             "rel": ("time", "sep", "err_sep", "pa", "err_pa"),
+            "lensrel": ("time", "de", "dn", "err_e", "err_n", "corr"),
         }
         # Roles a columns: spec may point at the SAME file column
         # (everything else collides -- Instrument._check_no_duplicate_columns).
@@ -484,29 +1496,84 @@ class AstrometryInstrument(Instrument):
             # Shared reader: columns:, mask:, time_* conversion, then sort
             # before the parallax factors are computed from t, so every
             # per-epoch quantity stays aligned regardless of mode.
+            roles = (
+                CATALOG_ROLES[self.catalog_n_par[i]]
+                if mode == "catalog"
+                else mode_roles[mode]
+            )
             df = self._read_data(
                 i,
-                roles=mode_roles[mode],
+                roles=roles,
                 detrend=False,
                 shared_roles=mode_shared.get(mode, ()),
             )
             t = df.iloc[:, 0].values.astype(float)
 
             star_ndx = int(self.config[i].get("star_ndx", 0))
-            ra_ref = float(ra_cfg[star_ndx]) * np.pi / 180.0  # rad
-            dec_ref = float(dec_cfg[star_ndx]) * np.pi / 180.0  # rad
-
+            # The tangent point of the (dE, dN) offsets.  A microlensing
+            # lens whose position is DERIVED from its source's (review
+            # 8.10.4) has no position entry of its own to read -- resolve()
+            # would hand back the defaults.yaml placeholder -- so its
+            # dataset is projected about the source, which it matches to
+            # the lens-source separation (mas; small-angle exact).
+            ref_ndx = star_ndx
+            if lens_track is not None and star_ndx == lens_track:
+                ref_ndx = int(system.mulensevent.source_bodies[0][1])
+            if mode == "lensrel":
+                # The trajectory is the PRIMARY SOURCE's line of sight, so
+                # the observer is placed toward it (C4); star_ndx plays no
+                # part in this mode.
+                if event is None:
+                    raise ValueError(
+                        f"[{self.prefix}.{self.names[i]}] mode 'lensrel' "
+                        f"measures a microlensing lens relative to its "
+                        f"source, but the system has no mulensevent: block."
+                    )
+                ref_ndx = int(event.source_bodies[0][1])
             d = {
                 "name": self.names[i],
                 "index": i,
                 "mode": mode,
                 "time": t,
                 "star_ndx": star_ndx,
-                "ra_ref": ra_ref,
-                "dec_ref": dec_ref,
             }
+            if mode != "rel":
+                # The tangent point, which also aims the observer and the
+                # parallax factors.  rel (separation/PA between two orbit
+                # bodies) uses neither, so it needs no sky position at all
+                # (examples/kelt4 gives none) and carries no ra_ref key.
+                # require_star_radec, not resolve(): a position given as a LINK read as
+                # the defaults.yaml placeholder (180, 0) under resolve(),
+                # which put an abs dataset ~3e8 mas from its tangent point
+                # (review 1.1.10).  An unset position raises rather than
+                # projecting about the placeholder.
+                ra_ref, dec_ref = require_star_radec(  # rad
+                    self.config_manager,
+                    ref_ndx,
+                    f"[{self.prefix}.{self.names[i]}] the astrometry "
+                    f"tangent point",
+                )
+                if self.data_formats[i] == "gaia_epoch":
+                    # The file measures w from ITS reference point, so that
+                    # is the tangent point: projecting about the star's
+                    # start instead would offset every abscissa by the
+                    # difference.  The star's start (required above all
+                    # the same) is then only where the sampler begins.
+                    meta = self._gaia_epoch_meta[i]
+                    ra_ref = np.radians(meta["ra0"])
+                    dec_ref = np.radians(meta["dec0"])
+                elif self.reference_points[i] is not None:
+                    # The same rule for a columns file whose config states
+                    # the origin of its abscissae (reference_point:).
+                    ra_ref, dec_ref = self.reference_points[i]
+                d["ra_ref"] = ra_ref
+                d["dec_ref"] = dec_ref
 
             if mode == "gaia":
+                if self.data_formats[i] == "gaia_epoch":
+                    # DPAC's along-scan parallax factor, kept to check the
+                    # model's own (below); the model never reads it.
+                    d["plx_al_dpac"] = df.iloc[:, 4].values.astype(float)
                 d["w"] = df.iloc[:, 1].values.astype(float)  # mas
                 d["err"] = df.iloc[:, 2].values.astype(float)  # mas
                 psi = df.iloc[:, 3].values.astype(float) * np.pi / 180.0
@@ -527,6 +1594,28 @@ class AstrometryInstrument(Instrument):
                 d["err_E"] = df.iloc[:, 3].values.astype(float)  # mas
                 d["err_N"] = df.iloc[:, 4].values.astype(float)  # mas
                 min_err = min(np.min(d["err_E"]), np.min(d["err_N"]))
+            elif mode == "lensrel":
+                d["dE_obs"] = df.iloc[:, 1].values.astype(float)  # mas
+                d["dN_obs"] = df.iloc[:, 2].values.astype(float)  # mas
+                d["err_E"] = df.iloc[:, 3].values.astype(float)  # mas
+                d["err_N"] = df.iloc[:, 4].values.astype(float)  # mas
+                d["corr"] = df.iloc[:, 5].values.astype(float)
+                if not np.all(np.abs(d["corr"]) < 1.0):
+                    raise ValueError(
+                        f"[{self.prefix}.{self.names[i]}] the corr column "
+                        f"must satisfy |corr| < 1 on every row (a correlation "
+                        f"coefficient); got {d['corr'].tolist()}."
+                    )
+                # The jitter is an isotropic variance added to the 2x2
+                # covariance, which stays positive definite for jitter >
+                # -lambda_min; the floor is _jitter_floor of the smallest
+                # eigenvalue's square root, i.e. -0.95 lambda_min.
+                a, b = d["err_E"] ** 2, d["err_N"] ** 2
+                c = d["corr"] * d["err_E"] * d["err_N"]
+                lam_min = 0.5 * (a + b) - np.sqrt(0.25 * (a - b) ** 2 + c**2)
+                min_err = float(np.sqrt(np.min(lam_min)))
+            elif mode == "catalog":
+                min_err, t = self._load_catalog(i, d, df, ra_ref, dec_ref)
             else:  # rel
                 factor = u.Unit(self.config[i].get("sep_unit", "mas")).to(
                     u.mas
@@ -551,21 +1640,39 @@ class AstrometryInstrument(Instrument):
                     np.min(d["err_sep"]), np.min(d["err_pa"] * d["sep"])
                 )
 
-            # Parallax factors (needed for gaia/abs only)
-            if mode in ("gaia", "abs"):
-                xyz = get_observer_position(
-                    t, observer_location=self.observers[i]
+            # Parallax factors (needed for gaia/abs only; lensrel keeps the
+            # observer positions for the trajectory's Skowron deviations)
+            if mode in ("gaia", "abs", "lensrel", "catalog"):
+                # At the instant the observer RECEIVED each epoch's light
+                # (the tag minus the Roemer delay toward the target), not
+                # at the BJD_TDB tag itself (review 1.10.13).
+                xyz = observer_position_at_reception(
+                    t, ra_ref, dec_ref, observer_location=self.observers[i]
                 )
                 # Apparent displacement of the source = parallax * (P_E, P_N)
                 d["P_E"], d["P_N"] = parallax_factors(xyz, ra_ref, dec_ref)
+                if "plx_al_dpac" in d:
+                    self._check_gaia_parallax_factors(i, d)
                 # Kept for the centroid shift of a lensed source: the
                 # trajectory wants the observer's Skowron+2011 deviations,
                 # which need t0_par and so are formed at stage 7
                 # (MulensEvent.skowron_deviations), not here.
                 d["xyz"] = xyz
 
+            if mode == "catalog":
+                # The projection needs the epochs' parallax factors, so it
+                # is formed here, after them (catalog_projection).
+                d["proj"] = catalog_projection(
+                    t,
+                    d["cat_epoch"],
+                    d["P_E"],
+                    d["P_N"],
+                    d["n_par"],
+                    weights=d["weights"],
+                )
             self.jittervar_lower[i] = self._jitter_floor([min_err])
-            self.n_total_obs += len(t)
+            # A catalog dataset observes its n_par solution, not its epochs.
+            self.n_total_obs += d["n_par"] if mode == "catalog" else len(t)
             self.datasets.append(d)
 
         # Reference epoch for ra/dec/pm: first explicit config wins, else the
@@ -593,10 +1700,16 @@ class AstrometryInstrument(Instrument):
                 )
             self.epoch = distinct[0]
         else:
+            # A catalog solution contributes its own reference epoch (the
+            # instant its position refers to), not its sampled epochs.
             t_all = [
                 d["time"]
                 for d in self.datasets
                 if d["mode"] in ("gaia", "abs")
+            ] + [
+                np.array([d["cat_epoch"]])
+                for d in self.datasets
+                if d["mode"] == "catalog"
             ]
             self.epoch = (
                 float(np.mean(np.concatenate(t_all))) if t_all else 0.0
@@ -604,6 +1717,95 @@ class AstrometryInstrument(Instrument):
         logger.info(
             f"[{self.prefix}] reference epoch for ra/dec/pm: {self.epoch:.4f}"
         )
+        self.fithipframe = resolve_frame_defaults(self)
+
+    def _load_catalog(self, i, d, df, ra_ref, dec_ref):
+        """Fill catalog dataset ``d`` from its one-row file ``df`` (review
+        8.10.3) and return ``(min_err, epochs)``.
+
+        The observed vector is the solution in the frame every other
+        absolute mode uses: the position at the catalog's epoch as (dE, dN)
+        mas from the tangent point, then parallax and proper motion as
+        given.  The epochs are where the model track is evaluated; the
+        projection onto the solution is formed by the caller once their
+        parallax factors exist.
+        """
+        where = f"[{self.prefix}.{self.names[i]}]"
+        n_par = self.catalog_n_par[i]
+        if len(df) != 1:
+            raise ValueError(
+                f"{where} a catalog file holds ONE solution (one row); "
+                f"{self.files[i]!r} has {len(df)} rows after the mask."
+            )
+        row = dict(zip(CATALOG_ROLES[n_par], df.iloc[0].values.astype(float)))
+        ra_obs = row["ra"] * np.pi / 180.0
+        dec_obs = row["dec"] * np.pi / 180.0
+        y = [
+            wrap_ra_diff(ra_obs - ra_ref) * np.cos(dec_ref) * RAD2MAS,
+            (dec_obs - dec_ref) * RAD2MAS,
+        ]
+        if n_par == 5:
+            y += [row["parallax"], row["pmra"], row["pmdec"]]
+        cov = catalog_covariance(row, n_par)
+        try:
+            np.linalg.cholesky(cov)
+        except np.linalg.LinAlgError as e:
+            raise ValueError(
+                f"{where} the catalog covariance built from the file's "
+                f"errors and correlations is not positive definite; check "
+                f"the column order against the Gaia archive's."
+            ) from e
+
+        kind = self.catalog_epoch_spec[i]
+        weights = None
+        if kind[0] == "list":
+            epochs = np.asarray(kind[1], dtype=float)
+        elif kind[0] == "file":
+            path = os.path.expanduser(kind[1])
+            try:
+                arr = np.atleast_2d(np.loadtxt(path, comments="#", ndmin=2))
+            except OSError as e:
+                raise FileNotFoundError(
+                    f"{where} catalog_epochs file not found: {path!r}."
+                ) from e
+            if arr.shape[1] not in (1, 2):
+                raise ValueError(
+                    f"{where} catalog_epochs file {path!r} must have one "
+                    f"column (time) or two (time, weight); it has "
+                    f"{arr.shape[1]}."
+                )
+            epochs = arr[:, 0]
+            if arr.shape[1] == 2:
+                weights = arr[:, 1]
+        else:  # span
+            (t0, t1), n = kind[1], kind[2]
+            epochs = np.linspace(t0, t1, n)
+            logger.warning(
+                f"{where} no catalog_epochs given: the model track is "
+                f"fit at {n} UNIFORM epochs over [{t0:.2f}, {t1:.2f}] "
+                f"BJD_TDB, standing in for the catalog's real epochs and "
+                f"weights.  Where the track is not linear (an orbit, the "
+                f"microlensing centroid shift) the modeled solution is then "
+                f"an approximation of the catalog's; give the epochs with "
+                f"catalog_epochs: to make it exact."
+            )
+        order = np.argsort(epochs, kind="stable")
+        epochs = epochs[order]
+        if weights is not None:
+            weights = weights[order]
+        d["time"] = epochs
+        d["weights"] = weights
+        d["n_par"] = n_par
+        d["cat_epoch"] = row["time"]
+        d["y_obs"] = np.asarray(y, dtype=float)
+        d["cov"] = cov
+        d["param_names"] = CATALOG_PARAM_NAMES[n_par]
+        logger.info(
+            f"{where} catalog solution ({n_par} parameters) at epoch "
+            f"{row['time']:.4f} BJD_TDB, modeled from {len(epochs)} epochs "
+            f"over [{epochs[0]:.2f}, {epochs[-1]:.2f}]."
+        )
+        return float(min(row["ra_error"], row["dec_error"])), epochs
 
     # ------------------------------------------------------------------
     # Stage 2
@@ -612,8 +1814,8 @@ class AstrometryInstrument(Instrument):
         # star_map only.  There WAS a `planet_map` here, built from the
         # legacy `planet_ndx` key and read by nothing: rel-mode orbit
         # resolution moved into __init__ (self.rel_orbit, which resolves
-        # `orbit:` by name or index and falls back to the named planet's
-        # orbit_ndx), and every other consumer wants the orbit, not the
+        # `orbit:` by name or index, or the orbit holding the named
+        # planet), and every other consumer wants the orbit, not the
         # planet.  Stage 5 auto-converts every `*_map` attribute into an
         # int32 shared variable, so the dead assignment cost one per fit.
         self.star_map = np.array([c.get("star_ndx", 0) for c in self.config])
@@ -627,7 +1829,8 @@ class AstrometryInstrument(Instrument):
 
         The membership ``orbit.amplitude_constrained_orbits`` reads: a rel
         dataset times the orbit it names; a gaia/abs photocenter wobble sums
-        the orbits whose PRIMARY group contains the target star.  An epoch's
+        every Keplerian orbit holding one of its ``photocenter_stars``, on
+        either side (review 8.10.6).  An epoch's
         information is its squared sky-plane speed over its squared error
         (``timing.sky_speed_sq``, at the seeded e, omega, cos i and
         conjunction), averaged over direction -- the node and the scan angle
@@ -636,10 +1839,11 @@ class AstrometryInstrument(Instrument):
           * rel: the speed of the relative orbit, whose angular size is read
             off the data themselves (the median separation), against the
             mean of the radial and tangential variances;
-          * gaia/abs: the photocenter of a dark companion, ``a parallax M_c
-            / M_total`` from the seeded group masses, period and parallax
-            (a luminous companion pulls it in by its flux fraction, which
-            is ignored), against the along-scan error (half the speed
+          * gaia/abs: the target's own orbit about the barycenter, ``a
+            parallax M_c / M_total`` for a primary-group target and ``a
+            parallax M_p / M_total`` for a companion-group one, from the
+            seeded group masses, period and parallax (the flux fraction,
+            which pulls the photocenter in, is ignored), against the along-scan error (half the speed
             squared, for one dimension of two) or the mean E/N variance.
         """
         from ..orbit import timing
@@ -649,21 +1853,30 @@ class AstrometryInstrument(Instrument):
         for i, mode in enumerate(self.modes):
             d = self.datasets[i]
             t = np.asarray(d["time"], dtype=float)
+            if mode == "lensrel":
+                continue  # measures no orbit (the lens-source trajectory)
+            if mode == "catalog":
+                # A published solution averages the track over its epochs;
+                # it is not counted as phase information on any orbit.
+                continue
             if mode == "rel":
-                targets = (
-                    [] if self.rel_orbit[i] is None else [self.rel_orbit[i]]
-                )
+                # Timing information on KEPLERIAN orbits only: a
+                # constant_velocity orbit has no phase to time.
+                o = self.rel_orbit[i]
+                targets = [] if o is None or not orbit.is_keplerian[o] else [o]
                 amplitude = float(np.median(d["sep"]))
                 inv_var = 0.5 * (
                     d["err_sep"] ** -2.0 + (d["err_pa"] * d["sep"]) ** -2.0
                 )
             else:
                 s = int(self.config[i].get("star_ndx", 0))
-                targets = [
-                    o
-                    for o, role in orbit.star_membership(s)
-                    if role == "primary"
-                ]
+                stars = photocenter_stars(
+                    self.config[i], self.config_manager.system_config
+                )
+                roles = {}
+                for star in reversed(stars):  # the target's role wins
+                    roles.update(orbit.star_membership(star))
+                targets = sorted(roles)
                 plx = self._seeded_parallax(system, orbit, s)
                 if mode == "gaia":
                     inv_var = 0.5 * d["err"] ** -2.0
@@ -674,10 +1887,13 @@ class AstrometryInstrument(Instrument):
                 if mode != "rel":
                     m_pri, m_com = orbit.seeded_group_masses(system, o)
                     m_tot = m_pri + m_com
+                    # A body's own orbit about the barycenter: M_c/M for a
+                    # primary-group one, M_p/M for a companion-group one.
+                    m_other = m_com if roles[o] == "primary" else m_pri
                     amplitude = (
                         timing.semimajor_axis_au(seed.period[o], m_tot)
                         * plx
-                        * m_com
+                        * m_other
                         / m_tot
                     )
                 v2 = timing.sky_speed_sq(
@@ -724,9 +1940,19 @@ class AstrometryInstrument(Instrument):
         # more than one luminous pair (KELT-4's A-BC data see the B+C
         # photocenter).  `band:` is meaningful there; `companion_star_ndx:`
         # is not.
-        active = [m in ("gaia", "abs") for m in self.modes]
+        active = [m in ABSOLUTE_MODES for m in self.modes]
         self.manifest = {"fluxfrac": {"mask": active, "inactive_value": 0.0}}
         self._register_noise(self.manifest, self.jittervar_lower)
+        if "catalog" in self.modes:
+            # A catalog solution's covariance is its own error model, and a
+            # jitter in mas^2 has no meaning on a vector that mixes mas and
+            # mas/yr: INACTIVE there (the derived jitter inherits it).
+            # Declared only when a catalog exists, so no other manifest
+            # changes.
+            self.manifest["jitter_variance"]["mask"] = [
+                m != "catalog" for m in self.modes
+            ]
+            self.manifest["jitter_variance"]["inactive_value"] = 0.0
 
         # SED-derived fluxfrac: gaia/abs instruments with band +
         # companion_star_ndx in a system with a sed: block get their
@@ -769,11 +1995,10 @@ class AstrometryInstrument(Instrument):
                             f"`band:` instead."
                         )
                     continue
-                if (
-                    c.get("band") is None
-                    or c.get("companion_star_ndx") is None
-                ):
+                stars = photocenter_stars(c, self.config_manager.system_config)
+                if len(stars) == 1:
                     continue
+                self._check_sed_pair(system, i, *stars)
                 self._sed_fluxfrac[i] = True
 
         # The OPT-IN pin, through the one helper (review 3.14.11).  "Selected"
@@ -799,10 +2024,57 @@ class AstrometryInstrument(Instrument):
         # reported nowhere).  Declared only when some dataset is lensed,
         # so a system without a lens has no such rows at all.
         self._resolve_lens_hook(system)
+        self._check_split(system)
         if any(j is not None for j in self._lens_source):
             lensed = [j is not None for j in self._lens_source]
             for key in ("blend_dE", "blend_dN"):
                 self.manifest[key] = {"mask": lensed, "inactive_value": 0.0}
+            self._register_blend_split(lensed)
+
+        # The Hipparcos-to-Gaia frame tie (frametie.py): four terms on each
+        # dataset with fithipframe: true, INACTIVE elsewhere, and declared
+        # only when one exists (no rows, no graph change otherwise).
+        if any(self.fithipframe):
+            check_frame_reference(self)
+            for key in FRAME_PARAMS:
+                self.manifest[key] = {
+                    "mask": list(self.fithipframe),
+                    "inactive_value": 0.0,
+                }
+
+    def _check_sed_pair(self, system, i, target, other):
+        """The SED path's ``companion_star_ndx`` must name ANOTHER star of
+        the target's own orbit system: the model places that light by the
+        orbits the two share (``_photocenter_terms``), from the system's one
+        barycenter.  A star sharing no Keplerian orbit with the target sits
+        on its own track -- a blend, not a companion -- and this model has
+        no term for it (for a microlensing source, `psf_stars:` does), so
+        it RAISES rather than reading its light as if it rode the
+        target's orbit, which is what it used to do."""
+        where = f"[{self.prefix}.{self.names[i]}]"
+        if other == target:
+            raise ValueError(
+                f"{where} companion_star_ndx {other} is the target star "
+                f"itself (star_ndx); it names the OTHER luminous star "
+                f"inside the PSF."
+            )
+        orbits = getattr(system, "orbit", None)
+        shared = (
+            set()
+            if orbits is None
+            else {o for o, _ in orbits.star_membership(target)}
+            & {o for o, _ in orbits.star_membership(other)}
+        )
+        if not shared:
+            raise ValueError(
+                f"{where} companion_star_ndx {other} shares no Keplerian "
+                f"orbit with the target star {target}, so its light is not "
+                f"a companion's on the target's orbit: an unrelated star in "
+                f"the PSF is a blend, which gaia/abs/catalog mode models "
+                f"only around a microlensing source (`psf_stars:`). Put "
+                f"both stars in one orbit's groups, or drop "
+                f"companion_star_ndx."
+            )
 
     def _resolve_lens_hook(self, system):
         """Which datasets carry the centroid shift, of which source, with
@@ -835,6 +2107,20 @@ class AstrometryInstrument(Instrument):
             if flag is not None and not flag:
                 continue
             where = f"{self.prefix}.{self.names[i]}"
+            if self.modes[i] == "lensrel":
+                # Always the lens-source trajectory (load_data refused a
+                # system without an event); the light curve supplies the
+                # limb darkening of the source's centroid shift and the
+                # geocentric frame anchor, as for a lensed abs dataset.
+                if flag is not None:
+                    logger.warning(
+                        f"[{where}] microlensing is a gaia/abs key; a "
+                        f"'lensrel' dataset is the lens-source trajectory "
+                        f"by definition and the key is ignored."
+                    )
+                event.check_lens_offset_supported(where)
+                self._lens_phot[i] = self._resolve_lens_photometry(system, i)
+                continue
             if self.modes[i] == "rel":
                 if explicit_on:
                     logger.warning(
@@ -916,35 +2202,268 @@ class AstrometryInstrument(Instrument):
         )
 
     # ------------------------------------------------------------------
+    # The blend split (review 8.10.3)
+    # ------------------------------------------------------------------
+    def _check_split(self, system):
+        """Stage 3: refuse the blend-split configurations the model cannot
+        represent, and resolve where each flux ratio comes from.
+
+        Sets ``self._split_band[i]`` (the MIST filter key the SED predicts
+        dataset ``i``'s psf_stars fluxes in, or None: no psf_stars, or
+        ``fitpsfflux: true``) and ``self._background[i]`` (the background
+        instance index, or None).  ``self.has_split(i)`` is the one
+        predicate the model reads.
+        """
+        n = self.n_elements
+        self._split_band = [None] * n
+        self._background = [None] * n
+        event = getattr(system, "mulensevent", None)
+        for i, c in enumerate(self.config):
+            where = f"[{self.prefix}.{self.names[i]}]"
+            members = self.psf_stars[i]
+            bg_ref = self.background_ref[i]
+            if not members and bg_ref is None:
+                if self._lens_source[i] is not None and (
+                    self.modes[i] == "catalog"
+                ):
+                    raise ValueError(
+                        f"{where} a catalog solution of a lensed source is "
+                        f"the motion of everything in its PSF, and the "
+                        f"blend fixed on the sky is exactly the bias this "
+                        f"mode removes: name the modeled stars in it "
+                        f"(`psf_stars:`) and/or the sightline's unresolved "
+                        f"background (`background:`, a background: block)."
+                    )
+                continue
+            if self._lens_source[i] is None:
+                raise ValueError(
+                    f"{where} psf_stars / background describe the blended "
+                    f"light around a microlensing source, and this dataset "
+                    f"carries no lens term (no mulensevent, star_ndx not a "
+                    f"source, or microlensing: false).  An unresolved "
+                    f"luminous companion of an ordinary star is fluxfrac / "
+                    f"companion_star_ndx."
+                )
+            target = int(self.star_map[i])
+            sources = [int(s) for s in system.source.star_map]
+            lens_primary = event.lens_bodies[0]
+            for s in members:
+                if s == target or s in sources:
+                    raise ValueError(
+                        f"{where} psf_stars names star {s}, which is a "
+                        f"microlensing SOURCE: its light is lensed and is "
+                        f"modeled through its images, not as a blend member."
+                    )
+                if any(
+                    t == "star" and int(idx) == s
+                    for t, idx in event.lens_bodies
+                ) and not (
+                    lens_primary[0] == "star" and int(lens_primary[1]) == s
+                ):
+                    raise NotImplementedError(
+                        f"{where} psf_stars names star {s}, a lens "
+                        f"COMPANION: only the primary lens star's track is "
+                        f"derived from the event (review 8.10.4)."
+                    )
+            if members and not self.fitpsfflux[i]:
+                self._split_band[i] = self._sed_filter_or_raise(system, i)
+            if bg_ref is not None:
+                bg = getattr(system, "background", None)
+                if bg is None:
+                    raise ValueError(
+                        f"{where} background: {bg_ref!r} names an unresolved "
+                        f"background, and the system has no background: "
+                        f"block."
+                    )
+                k = bg.instance_index(bg_ref, f"{where} background:")
+                band = c.get("band")
+                if band is None:
+                    raise ValueError(
+                        f"{where} the background's flux is sampled per band, "
+                        f"and this dataset names no `band:` to read it in."
+                    )
+                if band not in bg.bands[k]:
+                    raise ValueError(
+                        f"{where} reads background '{bg.names[k]}' in band "
+                        f"{band!r}, which its `bands:` ({bg.bands[k]}) does "
+                        f"not list; add it there."
+                    )
+                if bg.tied_band(k, band):
+                    # In a light-curve band the background's flux is the
+                    # light curve's blend LESS the background's psf_stars;
+                    # this dataset must split the same light the same way,
+                    # or a star is counted twice (or not at all).
+                    if sorted(members) != sorted(bg.psf_stars[k]):
+                        raise ValueError(
+                            f"{where} reads background '{bg.names[k]}' in "
+                            f"band {band!r}, where its flux is derived from "
+                            f"a light curve minus its psf_stars "
+                            f"{bg.psf_stars[k]}; this dataset's psf_stars "
+                            f"are {members}.  Name the same stars in both."
+                        )
+                    if self.fitpsfflux[i]:
+                        raise ValueError(
+                            f"{where} fitpsfflux samples the members' flux, "
+                            f"and in band {band!r} the background's derived "
+                            f"flux already uses their SED prediction: drop "
+                            f"fitpsfflux here."
+                        )
+                self._background[i] = k
+
+    def has_split(self, i):
+        """Does dataset ``i`` weigh its PSF member by member (psf_stars
+        and/or a background) instead of the one fixed blend?"""
+        return bool(self.psf_stars[i]) or self._background[i] is not None
+
+    def _sed_filter_or_raise(self, system, i):
+        """The MIST filter key in which the SED predicts dataset ``i``'s
+        psf_stars fluxes, or a raise naming the alternative.  Never a silent
+        substitute: a member whose flux nobody can predict is either
+        sampled (``fitpsfflux: true``) or left out of psf_stars, which puts
+        its light in the remainder."""
+        where = f"[{self.prefix}.{self.names[i]}]"
+        alt = (
+            "set `fitpsfflux: true` to sample each member's flux ratio "
+            "(astrometryinstrument.<name>.psf_fluxratio_<k>) with a prior "
+            "you state, or drop the star from psf_stars (its light then "
+            "belongs to the unmodeled remainder)"
+        )
+        band_name = self.config[i].get("band")
+        if band_name is None:
+            raise ValueError(
+                f"{where} psf_stars needs each member's flux in this "
+                f"dataset's band, and the dataset names no `band:` for the "
+                f"SED to predict it in; {alt}."
+            )
+        sed = getattr(system, "sed", None)
+        band = getattr(system, "band", None)
+        if sed is None or band is None:
+            raise ValueError(
+                f"{where} psf_stars takes each member's flux in band "
+                f"'{band_name}' from the SED, and the system has no sed: "
+                f"block; {alt}."
+            )
+        band_names = list(band.names)
+        if band_name not in band_names:
+            raise ValueError(
+                f"{where} unknown band '{band_name}'. Available bands: "
+                f"{band_names}."
+            )
+        filter_key = band.filter_mist[band_names.index(band_name)]
+        if not sed.has_filter(filter_key):
+            raise ValueError(
+                f"{where} psf_stars takes each member's flux from the SED, "
+                f"and band '{band_name}' (filter '{filter_key}') is not in "
+                f"the SED's bolometric-correction grid; {alt}."
+            )
+        return filter_key
+
+    def _register_blend_split(self, lensed):
+        """Stage 3 manifest entry of the members' sampled flux ratios
+        (review 8.10.3): ``psf_fluxratio``, one element per (dataset,
+        member) where ``fitpsfflux``, addressed by its owner
+        (``element_owners``, the detrend_coeffs mechanism).  The unmodeled
+        light's parameters belong to the background component."""
+        n = self.n_elements
+        owners, self._psf_flux_index = [], [None] * n
+        for i in range(n):
+            if lensed[i] and self.fitpsfflux[i]:
+                start = len(owners)
+                owners += [self.names[i]] * len(self.psf_stars[i])
+                self._psf_flux_index[i] = list(range(start, len(owners)))
+        if owners:
+            self.manifest["psf_fluxratio"] = {
+                "shape": (len(owners),),
+                "element_owners": owners,
+            }
+            logger.info(
+                f"[{self.prefix}] psf_fluxratio SAMPLED on "
+                f"{sorted(set(owners))} (each psf_stars member's flux "
+                f"relative to the source's baseline flux in the dataset's "
+                f"band), uniform on the defaults.yaml bounds [0, 1000] "
+                f"unless the params file states a prior."
+            )
+
+    def _flux_ratios(self, system, i):
+        """``(r_members, r_bg)`` of split dataset ``i``, every flux relative
+        to the source's baseline flux in its band: one tensor per psf_stars
+        member (the SED's prediction in ``band:``, ``_split_band``, or the
+        sampled ``psf_fluxratio`` elements), and the background's
+        ``fluxratio`` in that band (None without a background)."""
+        members = self.psf_stars[i]
+        r = []
+        if members:
+            if self._split_band[i] is not None:
+                sed, fk = system.sed, self._split_band[i]
+                needed = [int(self.star_map[i])] + list(members)
+                if not sed.can_predict(needed):
+                    raise ValueError(
+                        f"[{self.prefix}.{self.names[i]}] the SED severed one "
+                        f"of stars {needed} (no BC grid hosts its start; "
+                        f"sed.md, the no-grid fallback), so it cannot weigh "
+                        f"psf_stars in band '{self.config[i].get('band')}'; "
+                        f"set `fitpsfflux: true`."
+                    )
+                m_s = sed.predict_star_appmag(
+                    int(self.star_map[i]), fk, system
+                )
+                r = [
+                    10
+                    ** (-0.4 * (sed.predict_star_appmag(s, fk, system) - m_s))
+                    for s in members
+                ]
+            else:
+                idx = self._psf_flux_index[i]
+                r = [self.psf_fluxratio.value[e] for e in idx]
+        k = self._background[i]
+        if k is None:
+            return r, None
+        r_bg = system.background.flux_ratio(
+            k, self.config[i]["band"], f"[{self.prefix}.{self.names[i]}]"
+        )
+        return r, r_bg
+
+    # ------------------------------------------------------------------
     # Model pieces (PyTensor)
     # ------------------------------------------------------------------
     def _sed_beta_node(self, system, i):
         """
-        Photocenter flux fraction for instrument i: the SED-predicted
-        beta = F_companion / (F_companion + F_host) in the instrument's
-        band when configured (see module docstring), else the sampled
-        fluxfrac element. Falls back to the sampled parameter with a
-        warning if the band's filter is missing from the SED's BC grid.
+        Photocenter flux fraction ``b`` of dataset i: the fraction of the
+        light in its PSF that comes from the OTHER star of the pair the
+        photocenter holds -- for a primary-group target the companion side,
+        for a companion-group target the primary side (module docstring,
+        "The photocenter").  On the SED path (band + companion_star_ndx +
+        a sed: block) it is ``F_c / (F_c + F_target)`` in the dataset's
+        band, c = companion_star_ndx; otherwise the sampled fluxfrac
+        element.
+
+        A band whose filter the SED's BC grid lacks RAISES.  It used to warn
+        and return the sampled element -- which the SED path pins at 0, so
+        the fit silently became a dark-companion fit the user had not asked
+        for.
         """
-        if not getattr(self, "_sed_fluxfrac", [False] * self.n_elements)[i]:
+        if not self._sed_fluxfrac[i]:
             return self.fluxfrac.value[i]
 
+        where = f"[{self.prefix}.{self.names[i]}]"
         sed = system.sed
-        band_name = self.config[i].get("band")
-        band_names = list(system.band.names) if hasattr(system, "band") else []
+        band_name = self.config[i]["band"]
+        band = getattr(system, "band", None)
+        band_names = [] if band is None else list(band.names)
         if band_name not in band_names:
             raise ValueError(
-                f"astrometryinstrument {self.names[i]} references unknown "
-                f"band '{band_name}'. Available bands: {band_names}."
+                f"{where} references unknown band '{band_name}'. Available "
+                f"bands: {band_names}."
             )
-        filter_key = system.band.filter_mist[band_names.index(band_name)]
+        filter_key = band.filter_mist[band_names.index(band_name)]
         if not sed.has_filter(filter_key):
-            logger.warning(
-                f"astrometryinstrument {self.names[i]}: band filter "
-                f"'{filter_key}' is not in the SED's BC grid; using the "
-                f"sampled fluxfrac (fixed at its initval)."
+            raise ValueError(
+                f"{where} band '{band_name}' (filter '{filter_key}') is not "
+                f"in the SED's BC grid, so the SED cannot weigh the "
+                f"photocenter (companion_star_ndx). Use a band the grid "
+                f"carries, or drop companion_star_ndx and set fluxfrac in "
+                f"the params file."
             )
-            return self.fluxfrac.value[i]
 
         host = int(self.star_map[i])
         comp = int(self.config[i]["companion_star_ndx"])
@@ -952,29 +2471,126 @@ class AstrometryInstrument(Instrument):
         F_h = 10 ** (-0.4 * sed.predict_star_appmag(host, filter_key, system))
         return F_c / (F_c + F_h)
 
-    def _photocenter_terms(self, system, star_idx, beta):
+    def _photocenter_orbits(self, system, i):
+        """``[(orbit, role_target, role_other), ...]`` of absolute dataset i:
+        every KEPLERIAN orbit that moves its photocenter, ascending, with the
+        target's role in it and the other light's ('primary', 'companion', or
+        None when that body is not in the orbit).
+
+        The photocenter holds the target and at most ONE other light
+        (``orbit.bodies.photocenter_stars``): on the SED path the star
+        ``companion_star_ndx`` names, with its own role per orbit; on the
+        sampled-fluxfrac path a body standing for "the other side" of the
+        target's orbit, so its role is always the opposite of the target's.
+        The sampled path can say that only where it is unambiguous, and
+        RAISES otherwise (``_check_sampled_photocenter``)."""
+        orbits = system.orbit
+        stars = photocenter_stars(
+            self.config[i], self.config_manager.system_config
+        )
+        roles = [dict(orbits.star_membership(s)) for s in stars]
+        flip = {"primary": "companion", "companion": "primary"}
+        out = []
+        for o in sorted(set().union(*roles)):
+            r_t = roles[0].get(o)
+            r_c = roles[1].get(o) if len(stars) == 2 else flip[r_t]
+            out.append((o, r_t, r_c))
+        return out
+
+    def _fluxfrac_is_dark(self, i):
+        """True when dataset i's sampled fluxfrac is pinned at 0 -- the
+        dark-companion default (defaults.yaml) -- so no other light enters
+        its photocenter.  Read off the BUILT parameter's roles (stage 6+)."""
+        p = self.fluxfrac
+        if p.element_is_sampled(i) or p.element_is_derived(i):
+            return False
+        return float(np.ravel(p.initval)[i]) == 0.0
+
+    def _check_sampled_photocenter(self, system, i, terms):
+        """Refuse what a single sampled fluxfrac cannot describe.
+
+        A sampled ``fluxfrac`` is one number, "the other side's light", and
+        it places that light at the other GROUP's barycenter.  Two
+        topologies make that a guess, and each RAISES naming the dataset and
+        the orbits (CLAUDE.md, no fallbacks) -- unless fluxfrac is the dark
+        default 0, where there is no other light to place:
+
+          * the target is in two or more Keplerian orbits: which orbit's
+            other side is the light?  (KELT-4 A: the planet b, or B+C?)
+          * the other group of its one orbit holds a Keplerian orbit of its
+            own: the light then wobbles inside that group, by an amount one
+            fraction cannot split (the SED can, star by star).
+
+        The remedy for both is the SED path: ``band:`` +
+        ``companion_star_ndx:`` naming the luminous star in the PSF.
         """
-        Photocenter wobble of one star for gaia/abs data: per-orbit
-        semimajor axes in mas, a_phot = a_rel*(M_c/M_tot - beta)*plx, over
-        the orbits whose primary group contains the star.  Returns
-        (a_phot vector node, orbit index array), or (None, None) when no
-        orbit moves this star.
+        if self._fluxfrac_is_dark(i):
+            return
+        orbits = system.orbit
+        where = f"[{self.prefix}.{self.names[i]}]"
+        remedy = (
+            "Name the luminous star inside the PSF with `band:` + "
+            "`companion_star_ndx:` (a sed: block weighs it star by star), "
+            "or pin fluxfrac at 0 (dark companions)."
+        )
+        if len(terms) > 1:
+            names = [orbits.names[o] for o, _, _ in terms]
+            raise ValueError(
+                f"{where} star {int(self.star_map[i])} is in Keplerian "
+                f"orbits {names}, and a sampled fluxfrac cannot say which "
+                f"orbit's other side its light comes from. {remedy}"
+            )
+        o, r_t, _ = terms[0]
+        other = set(
+            orbits.companion_bodies[o]
+            if r_t == "primary"
+            else orbits.primary_bodies[o]
+        )
+        nested = [
+            orbits.names[o2]
+            for o2 in range(orbits.n_elements)
+            if o2 != o
+            and orbits.is_keplerian[o2]
+            and set(orbits.bodies(o2)) <= other
+        ]
+        if nested:
+            raise ValueError(
+                f"{where} the other group of orbit {orbits.names[o]} holds "
+                f"Keplerian orbit(s) {nested}, so the light a sampled "
+                f"fluxfrac places at that group's barycenter actually "
+                f"wobbles inside it. {remedy}"
+            )
+
+    def _photocenter_terms(self, system, i, beta):
+        """
+        Photocenter wobble of absolute dataset i: per-orbit scales in mas per
+        solRad of ``Orbit.get_sky_position(relative=False)`` -- the relative
+        separation along ``-x_rel``, the direction of the PRIMARY group's own
+        orbit about the barycenter, in solRad (review 4.8.3(d): the
+        amplitude, mass and flux fractions and the unit conversion are this
+        caller's) -- over every Keplerian orbit that moves the photocenter
+        (``_photocenter_orbits``).  Returns ``(scale vector node, orbit index
+        array)``, or ``(None, None)`` when no orbit moves it.
+
+        With x_P = -(M_c/M) x_rel and x_C = +(M_p/M) x_rel, the photocenter
+        ``(1 - b) x_target + b x_other`` is ``k x_rel`` with, per orbit
+        (scale = -k RSUN_AU plx):
+
+            target primary,   other companion:  k = b - M_c/M
+            target companion, other primary:    k = M_p/M - b
+            both in one group:                  k = -M_c/M  or  +M_p/M
+            target only (other not in orbit):   k = (1 - b)(-M_c/M or +M_p/M)
+            other only (target not in orbit):   k = b (-M_c/M or +M_p/M)
+
+        The first row is the only one there was before review 8.10.6, and
+        it is built as the same expression, so a primary-group fit is
+        bit-identical.
         """
         orbits = getattr(system, "orbit", None)
         if orbits is None:
             return None, None
-        members = orbits.star_membership(star_idx)
-        if any(role == "companion" for _, role in members):
-            names = [
-                orbits.names[o] for o, role in members if role == "companion"
-            ]
-            logger.warning(
-                f"[{self.prefix}] star {star_idx} is in the COMPANION "
-                f"group of orbit(s) {names}; that photocenter contribution "
-                f"is not modeled for gaia/abs data yet."
-            )
-        prim = [o for o, role in members if role == "primary"]
-        if not prim:
+        terms = self._photocenter_orbits(system, i)
+        if not terms:
             return None, None
         if not hasattr(orbits, "a"):
             raise ValueError(
@@ -982,13 +2598,212 @@ class AstrometryInstrument(Instrument):
                 f"parameters (a/masses), but the orbit component's "
                 f"body groups did not resolve against the active system."
             )
-        omap = np.asarray(prim, dtype=int)
-        mass_frac = orbits.m_companion.value[omap] / orbits.m_total.value[omap]
-        plx = system.star.parallax.value[star_idx]
-        return (
-            orbits.a.value[omap] * RSUN_AU * (mass_frac - beta) * plx,
-            omap,
+        if not self._sed_fluxfrac[i]:
+            self._check_sampled_photocenter(system, i, terms)
+        omap = np.asarray([o for o, _, _ in terms], dtype=int)
+        plx = system.star.parallax.value[int(self.star_map[i])]
+        if all(r == ("primary", "companion") for _, *r in terms):
+            mass_frac = (
+                orbits.m_companion.value[omap] / orbits.m_total.value[omap]
+            )
+            coef = mass_frac - beta
+        else:
+            coef = pt.stack(
+                [self._photocenter_coef(orbits, *term, beta) for term in terms]
+            )
+        return RSUN_AU * coef * plx, omap
+
+    def _photocenter_offset(
+        self, system, i, beta, t, keplerian=True, taylor=True
+    ):
+        """The photocenter's motion about the system barycenter's linear
+        track, ``(dE, dN)`` mas at times ``t`` for absolute dataset ``i``:
+        the Keplerian wobble (``_photocenter_terms``) plus the sky-plane
+        Taylor terms (``_taylor_photocenter_terms``).  ``(None, None)`` when
+        nothing moves it.  THE one builder of that offset: the likelihood
+        (through ``_absolute_model``) and the plotters both call it, and
+        the ``keplerian``/``taylor`` switches exist only so the sky plot's
+        orbit panel can draw the Keplerian part alone.
+        """
+        dE = dN = None
+        if keplerian:
+            scale, omap = self._photocenter_terms(system, i, beta)
+            if scale is not None:
+                dE_orb, dN_orb = system.orbit.get_sky_position(
+                    pt.as_tensor_variable(t), omap
+                )
+                dE = pt.sum(dE_orb * scale[None, :], axis=1)
+                dN = pt.sum(dN_orb * scale[None, :], axis=1)
+        if taylor:
+            for o, weight in self._taylor_photocenter_terms(system, i, beta):
+                tE, tN = self._taylor_sky_offset(system, i, o, t)
+                if weight is not None:
+                    tE, tN = weight * tE, weight * tN
+                dE = tE if dE is None else dE + tE
+                dN = tN if dN is None else dN + tN
+        return dE, dN
+
+    def _taylor_sky_offset(self, system, i, o, t):
+        """Taylor orbit ``o``'s sky-plane displacement of the primary group,
+        ``(dE, dN)`` mas at times ``t``, as dataset ``i`` reads it: the
+        state from ``Orbit.state_vectors`` (solRad, its angular sky
+        coefficients converted with the target's parallax, which every
+        orbit member shares with the anchor), less the constant and linear
+        terms at the astrometric reference epoch -- those are this star's
+        ra/dec/pm, so pm stays the photocenter's velocity at THIS epoch
+        whatever the orbit's own ``epoch:`` (identically zero, and not
+        built, where the two epochs coincide, the default)."""
+        orbits = system.orbit
+        plx = system.star.parallax.value[int(self.star_map[i])]
+        omap = np.array([o])
+        X, Y, _, VX, VY, _ = orbits.state_vectors(
+            pt.as_tensor_variable(t), omap, parallax=pt.stack([plx])
         )
+        dN, dE = X[:, 0], Y[:, 0]
+        if float(orbits.taylor_epoch[o]) != float(self.epoch):
+            X0, Y0, _, VX0, VY0, _ = orbits.state_vectors(
+                np.array([float(self.epoch)]), omap, parallax=pt.stack([plx])
+            )
+            dt = pt.as_tensor_variable(t) - float(self.epoch)
+            dN = dN - (X0[0, 0] + VX0[0, 0] * dt)
+            dE = dE - (Y0[0, 0] + VY0[0, 0] * dt)
+        scale = RSUN_AU * plx  # mas per solRad at this parallax
+        return dE * scale, dN * scale
+
+    def _taylor_photocenter_terms(self, system, i, beta):
+        """``[(orbit, weight), ...]`` -- the Taylor orbits whose sky terms
+        move absolute dataset i's photocenter, each with the share of the
+        PSF's light that moves with it (None for all of it).
+
+        A Taylor orbit's state is the reflex of its PRIMARY group; a light in
+        its companion group would need a mass ratio the orbit does not have,
+        and Orbit._taylor_astrometry_consumers
+        refuses that at stage 3 for the lights ``photocenter_stars`` names.
+        Of the PSF's two lights (the target, share ``1 - b``, and the other
+        one, share ``b``), the photocenter moves with
+
+            both in the primary group:   all of it (b cancels)
+            the target only:             (1 - b)
+            the other light only:        b
+
+        -- the "target only"/"other only" rows of ``_photocenter_terms``'s
+        table, with the group's acceleration in place of its orbit.  The
+        other light is the SED path's ``companion_star_ndx``; on the sampled
+        path it stands at the other group of the target's ONE Keplerian
+        orbit (``_check_sampled_photocenter``), and with fluxfrac at the dark
+        default 0 there is no other light.  A sampled light that a Taylor
+        orbit's companion group holds, or that the target has no Keplerian
+        orbit to place, RAISES naming the dataset (no fallbacks): the remedy
+        is the SED path or a dark fluxfrac.  A type whose sky polynomial
+        has no term the star's own ra/dec/pm do not already absorb
+        (constant_velocity) adds nothing and is left out.
+        """
+        orbits = getattr(system, "orbit", None)
+        if orbits is None or not np.any(orbits.is_taylor):
+            return []
+        stars = photocenter_stars(
+            self.config[i], self.config_manager.system_config
+        )
+        target = stars[0]
+        t_roles = dict(orbits.taylor_membership(target))
+        if len(stars) == 2:
+            o_roles = dict(orbits.taylor_membership(stars[1]))
+        elif self._fluxfrac_is_dark(i):
+            o_roles = None  # no other light in the PSF
+        else:
+            o_roles = self._sampled_light_taylor_roles(system, i, target)
+        quad = [
+            o
+            for o in sorted(set(t_roles) | set(o_roles or {}))
+            if orbits.TAYLOR_COEFFS["astrometry"].get(orbits.types[o])
+        ]
+        out = []
+        for o in quad:
+            in_t, in_o = o in t_roles, o_roles is not None and o in o_roles
+            if o_roles is None or (in_t and in_o):
+                out.append((o, None))
+            elif in_t:
+                out.append((o, 1.0 - beta))
+            else:
+                out.append((o, beta))
+        return out
+
+    def _sampled_light_taylor_roles(self, system, i, target):
+        """``{taylor orbit: 'primary'}`` for the sampled-fluxfrac light of
+        dataset i, which stands at the other group of the target's one
+        Keplerian orbit; RAISES where that light has no place a Taylor term
+        can move (see ``_taylor_photocenter_terms``)."""
+        orbits = system.orbit
+        where = f"[{self.prefix}.{self.names[i]}]"
+        remedy = (
+            "Name the luminous star inside the PSF with `band:` + "
+            "`companion_star_ndx:` (a sed: block weighs it star by star), "
+            "or pin fluxfrac at 0 (dark companions)."
+        )
+        taylor = [int(o) for o in np.nonzero(orbits.is_taylor)[0]]
+        kep = orbits.star_membership(target)
+        if not kep:
+            touched = [
+                orbits.names[o] for o, _ in orbits.taylor_membership(target)
+            ]
+            if not touched:
+                return {}  # no orbit moves the target or its light
+            raise ValueError(
+                f"{where} star {target} is on Taylor orbit(s) {touched} and "
+                f"in no Keplerian orbit, so a sampled fluxfrac's light would "
+                f"stand on the Taylor orbit's other side, whose motion needs "
+                f"a mass ratio the Taylor orbit does not have. {remedy}"
+            )
+        if len(kep) > 1:
+            # _check_sampled_photocenter raises this first wherever the
+            # Keplerian wobble is built; stated here for the same reason.
+            names = [orbits.names[o] for o, _ in kep]
+            raise ValueError(
+                f"{where} star {target} is in Keplerian orbits {names}, and "
+                f"a sampled fluxfrac cannot say which orbit's other side its "
+                f"light comes from. {remedy}"
+            )
+        o_k, r_t = kep[0]
+        other = set(
+            orbits.companion_bodies[o_k]
+            if r_t == "primary"
+            else orbits.primary_bodies[o_k]
+        )
+        roles = {}
+        for o in taylor:
+            if other <= set(orbits.primary_bodies[o]):
+                roles[o] = "primary"
+            elif other & set(orbits.bodies(o)):
+                raise ValueError(
+                    f"{where} the light a sampled fluxfrac places at the "
+                    f"other group of orbit {orbits.names[o_k]} is not wholly "
+                    f"in the PRIMARY group of Taylor orbit "
+                    f"{orbits.names[o]}, so its sky acceleration needs a "
+                    f"mass ratio the Taylor orbit does not have. {remedy}"
+                )
+        return roles
+
+    @staticmethod
+    def _photocenter_coef(orbits, o, r_t, r_c, beta):
+        """One orbit's coefficient of its a_rel, for
+        ``get_sky_position(relative=False)``: ``-k`` of the table in
+        ``_photocenter_terms``."""
+        m_tot = orbits.m_total.value[o]
+        # Each body's displacement along the PRIMARY's direction (-x_rel):
+        # +M_c/M for a primary-group body, -M_p/M for a companion-group one.
+        along = {
+            "primary": orbits.m_companion.value[o] / m_tot,
+            "companion": -orbits.m_primary.value[o] / m_tot,
+        }
+        if r_t == "primary" and r_c == "companion":
+            return along["primary"] - beta
+        if r_t == "companion" and r_c == "primary":
+            return beta - orbits.m_primary.value[o] / m_tot
+        if r_t == r_c:
+            return along[r_t]
+        if r_c is None:
+            return (1.0 - beta) * along[r_t]
+        return beta * along[r_c]
 
     def _pair_beta(self, system, i, o2):
         """
@@ -1061,22 +2876,36 @@ class AstrometryInstrument(Instrument):
         group's position is its photocenter: the two-body barycenter arc,
         corrected by the photocenter wobble of any orbit fully nested in a
         group, r_phot - r_bary = (beta - M_c/M_tot) * r_rel.
+
+        A type: constant_velocity orbit (review 8.8.14) is a relative
+        straight line, its rel_* coefficients read through
+        ``Orbit.state_vectors`` with this star's parallax (shared with the
+        orbit's anchor) and scaled back to mas.
         """
         orbits = system.orbit
         o = self.rel_orbit[i]
-        if not hasattr(orbits, "a"):
-            raise ValueError(
-                f"[{self.prefix}.{self.names[i]}] relative astrometry "
-                f"needs the orbit scale parameters (a/masses), but the "
-                f"orbit component's body groups did not resolve against "
-                f"the active system."
-            )
         plx = system.star.parallax.value[self.star_map[i]]
-        a_rel = orbits.a.value[o] * RSUN_AU * plx
-        dE_rel, dN_rel = orbits.get_sky_position(
-            t_node, pt.stack([a_rel]), np.array([o]), relative=True
-        )
-        dE, dN = dE_rel[:, 0], dN_rel[:, 0]
+        # mas per solRad of separation (review 4.8.3(d): the caller scales)
+        scale = RSUN_AU * plx
+        if orbits.is_taylor[o]:
+            dN_rel, dE_rel, *_ = orbits.state_vectors(
+                pt.as_tensor_variable(t_node),
+                np.array([o]),
+                relative=True,
+                parallax=pt.stack([plx]),
+            )
+        else:
+            if not hasattr(orbits, "a"):
+                raise ValueError(
+                    f"[{self.prefix}.{self.names[i]}] relative astrometry "
+                    f"needs the orbit scale parameters (a/masses), but the "
+                    f"orbit component's body groups did not resolve "
+                    f"against the active system."
+                )
+            dE_rel, dN_rel = orbits.get_sky_position(
+                t_node, np.array([o]), relative=True
+            )
+        dE, dN = dE_rel[:, 0] * scale, dN_rel[:, 0] * scale
 
         comp_set = set(orbits.companion_bodies[o])
         prim_set = set(orbits.primary_bodies[o])
@@ -1091,13 +2920,45 @@ class AstrometryInstrument(Instrument):
                 if beta is None:
                     continue
                 mfrac = orbits.m_companion.value[o2] / orbits.m_total.value[o2]
-                amp = orbits.a.value[o2] * RSUN_AU * plx * (beta - mfrac) * sgn
+                amp = RSUN_AU * plx * (beta - mfrac) * sgn
                 dE2, dN2 = orbits.get_sky_position(
-                    t_node, pt.stack([amp]), np.array([o2]), relative=True
+                    t_node, np.array([o2]), relative=True
                 )
-                dE = dE + dE2[:, 0]
-                dN = dN + dN2[:, 0]
+                dE = dE + dE2[:, 0] * amp
+                dN = dN + dN2[:, 0] * amp
         return dE, dN
+
+    def _lensrel_model(self, system, i, t, dev):
+        """(dE, dN) in mas of a 'lensrel' dataset: the resolved lens minus
+        its source, as one image measures them.
+
+        The lens-minus-source separation is theta_E times C9's trajectory at
+        the observer (``dev``: its Skowron deviations, as for every other
+        consumer of the trajectory), with the luminous primary placed at its
+        offset from the lens center of mass (C12, ``MulensEvent.host_offset``).
+        The source is measured through its images, so its position carries
+        the centroid shift (C30) and the difference loses it; the lens's own
+        light is not lensed.  Neither is diluted by a blend: a resolved pair
+        fit separates the two stars, which is the point of the mode.  The
+        same trajectory, so the same t_E/pi_E/xallarap; years after the
+        event it is ``theta_E u`` with ``u >> 1``, i.e. mu_rel times the
+        elapsed time plus pi_rel times the parallax factor.
+        """
+        event = system.mulensevent
+        tau, beta = event.get_trajectory(t, dev, system, 0)
+        hx, hy = event.host_offset(system)
+        sep_n, sep_e = event._shift_to_sky(
+            tau + hx, beta + hy, event.theta_E.value[0]
+        )
+        mi = system.mulensinstrument
+        # The limb darkening of the source's centroid shift is the
+        # photometry: light curve's band (as in _apply_lens).
+        k = self._lens_phot[i]  # never None: _resolve_lens_photometry raises
+        u1, u2, bandpass = mi._finite_source_limb_darkening(system, k)
+        _A, shift_n, shift_e = event.get_astrometric_terms(
+            t, dev, system, index=0, u1=u1, u2=u2, bandpass=bandpass
+        )
+        return sep_e - shift_e, sep_n - shift_n
 
     def _absolute_model(
         self, system, d, t, beta, P_E=None, P_N=None, dev=None
@@ -1116,12 +2977,42 @@ class AstrometryInstrument(Instrument):
         shift (``_lens_source[i]`` set); the caller forms them from
         ``d["xyz"]`` through ``MulensEvent.skowron_deviations``.
         """
-        star = system.star
         s = d["star_ndx"]
         if P_E is None:
             P_E, P_N = d["P_E"], d["P_N"]
-        dt_yr = (t - self.epoch) / DAYS_PER_YEAR
+        dE, dN = self._star_track(system, d, s, t, P_E, P_N)
+        if self.fithipframe[d["index"]]:
+            # The Hipparcos frame minus the Gaia frame, at the star
+            # (frametie.py): every position this dataset measures moves.
+            fE, fN = frame_offset(
+                t, *(getattr(self, p).value[d["index"]] for p in FRAME_PARAMS)
+            )
+            dE, dN = dE + fE, dN + fN
 
+        dE_orb, dN_orb = self._photocenter_offset(system, d["index"], beta, t)
+        if dE_orb is not None:
+            dE = dE + dE_orb
+            dN = dN + dN_orb
+
+        # Astrometric microlensing (C30), last: the shift and the blend
+        # drag are both referenced to the SOURCE's own track, which is what
+        # (dE, dN) is at this point.
+        i = d.get("index")
+        lens_source = getattr(self, "_lens_source", None)
+        if i is not None and lens_source and lens_source[i] is not None:
+            dE, dN = self._apply_lens(system, i, t, dev, dE, dN, P_E, P_N)
+
+        return dE, dN
+
+    def _star_track(self, system, d, s, t, P_E, P_N):
+        """Star ``s``'s own five-parameter track, (dE, dN) mas from dataset
+        ``d``'s tangent point: position at the reference epoch, proper
+        motion, parallax.  The target star's line of ``_absolute_model`` and
+        the track of every psf_stars member (review 8.10.3) -- a lens whose
+        position is derived from its source's (review 8.10.4) included,
+        which is what places it at the event's lens offset."""
+        star = system.star
+        dt_yr = (t - self.epoch) / DAYS_PER_YEAR
         dE = (
             wrap_ra_diff_pt(star.ra.value[s] - d["ra_ref"])
             * np.cos(d["dec_ref"])
@@ -1134,28 +3025,17 @@ class AstrometryInstrument(Instrument):
             + star.pm_dec.value[s] * dt_yr
             + star.parallax.value[s] * P_N
         )
-
-        a_phot, omap = self._photocenter_terms(system, s, beta)
-        if a_phot is not None:
-            dE_orb, dN_orb = system.orbit.get_sky_position(
-                pt.as_tensor_variable(t), a_phot, omap
-            )
-            dE = dE + pt.sum(dE_orb, axis=1)
-            dN = dN + pt.sum(dN_orb, axis=1)
-
-        # Astrometric microlensing (C30), last: the shift and the blend
-        # drag are both referenced to the SOURCE's own track, which is what
-        # (dE, dN) is at this point.
-        i = d.get("index")
-        lens_source = getattr(self, "_lens_source", None)
-        if i is not None and lens_source and lens_source[i] is not None:
-            dE, dN = self._apply_lens(system, i, t, dev, dE, dN)
-
         return dE, dN
 
-    def _apply_lens(self, system, i, t, dev, dE, dN):
+    def _apply_lens(self, system, i, t, dev, dE, dN, P_E=None, P_N=None):
         """Add the microlensing centroid shift to the source track (dE, dN)
         of lensed dataset ``i`` (conventions.md C30).
+
+        ``P_E``/``P_N`` are the parallax factors at ``t`` (the caller's,
+        as for the source track); the blend split needs them for its
+        members' own tracks (review 8.10.3).  With psf_stars or a
+        background (``has_split``) the weighting is the split's general
+        form (module docstring); otherwise the two-term form below.
 
         The images carry ``A f_s`` at ``x_s + delta_theta``; the blend
         carries ``f_b`` at a fixed ``x_b``.  What the instrument centroids
@@ -1173,8 +3053,8 @@ class AstrometryInstrument(Instrument):
         curve's band; a lensed dataset without a light curve raised in
         ``_resolve_lens_photometry``).  ``x_b`` is ``blend_dE``/``blend_dN`` (mas from the
         reference position, fixed on the sky -- no proper motion of its
-        own).  The lens's own flux is part of ``f_b`` and sits at
-        ``x_s + theta_E dtheta``; it is not split out (review 8.10.1).
+        own).  The lens's own flux is part of ``f_b`` there; the split puts
+        it, and everything else, on its own track instead.
 
         The shift is itself a sky angle, so it adds straight into dE/dN in
         mas with NO further cos(dec): East on those lines is already
@@ -1194,17 +3074,177 @@ class AstrometryInstrument(Instrument):
         # limb darkening is that light curve's resolver (one resolver, the
         # plotted-equals-fitted rule); it matters only on the finite-source
         # Op path, where VBM integrates the centroid over the darkened disk.
-        u1, u2, bandpass = mi._finite_source_limb_darkening(system)
+        u1, u2, bandpass = mi._finite_source_limb_darkening(system, k)
         A, sN, sE = event.get_astrometric_terms(
             t, dev, system, index=j, u1=u1, u2=u2, bandpass=bandpass
         )
-        g = mi.f_blend.value[k] / mi.f_source.value[k]  # f_b / f_s
-        w_s = A / (A + g)
-        w_b = g / (A + g)
-        return (
-            dE + w_s * sE + w_b * (self.blend_dE.value[i] - dE),
-            dN + w_s * sN + w_b * (self.blend_dN.value[i] - dN),
+        if not self.has_split(i):
+            g = mi.f_blend.value[k] / mi.f_source.value[k]  # f_b / f_s
+            w_s = A / (A + g)
+            w_b = g / (A + g)
+            return (
+                dE + w_s * sE + w_b * (self.blend_dE.value[i] - dE),
+                dN + w_s * sN + w_b * (self.blend_dN.value[i] - dN),
+            )
+
+        # The split: every modeled star in the PSF on its own track and the
+        # sightline's unresolved background at its own moving photocenter,
+        # each weighted by its flux relative to the source's baseline in
+        # this dataset's band (``_flux_ratios``).
+        if P_E is None:
+            raise ValueError(
+                f"[{self.prefix}.{self.names[i]}] the blend split needs the "
+                f"parallax factors at t for its members' tracks; the caller "
+                f"(_absolute_model) passes them."
+            )
+        r, r_bg = self._flux_ratios(system, i)
+        d = self.datasets[i]
+        num_E = A * sE
+        num_N = A * sN
+        denom = A
+        for s, rj in zip(self.psf_stars[i], r):
+            xE, xN = self._star_track(system, d, s, t, P_E, P_N)
+            num_E = num_E + rj * (xE - dE)
+            num_N = num_N + rj * (xN - dN)
+            denom = denom + rj
+        if r_bg is not None:
+            bg = system.background
+            star = system.star
+            s0 = bg.source_star
+            # the primary source's position at the reference epoch, in this
+            # dataset's tangent-plane mas: the background's anchor
+            src_E = (
+                wrap_ra_diff_pt(star.ra.value[s0] - d["ra_ref"])
+                * np.cos(d["dec_ref"])
+                * RAD2MAS
+            )
+            src_N = (star.dec.value[s0] - d["dec_ref"]) * RAD2MAS
+            dt_yr = (t - self.epoch) / DAYS_PER_YEAR
+            xE, xN = bg.track(self._background[i], src_E, src_N, dt_yr)
+            num_E = num_E + r_bg * (xE - dE)
+            num_N = num_N + r_bg * (xN - dN)
+            denom = denom + r_bg
+        return dE + num_E / denom, dN + num_N / denom
+
+    def _smeared(self, i):
+        """Whether dataset ``i`` is modeled as an exposure average."""
+        return self.ninterp[i] > 1
+
+    def _needs_dev(self, i):
+        """Whether dataset ``i``'s model reads the observer's Skowron
+        deviations (a lensed source, or a lensrel pair)."""
+        lens_source = getattr(self, "_lens_source", None)
+        return self.modes[i] == "lensrel" or bool(
+            lens_source and lens_source[i] is not None
         )
+
+    def _exposure_ephemeris(self, system, i, t):
+        """``(P_E, P_N, dev)`` at the ``(n, k)`` sub-exposure times of
+        dataset ``i``'s epochs ``t`` (numpy): the parallax factors and the
+        Skowron deviations from the observer's ephemeris AT each node, as
+        the unsmeared path computes them at each epoch (load_data,
+        _lens_ephemeris).  ``None`` for what the mode does not read (rel
+        reads neither; ``dev`` only where _needs_dev)."""
+        d = self.datasets[i]
+        offsets, _ = self.exposure_nodes(i)
+        t_sub = np.asarray(t, dtype=float)[:, None] + offsets[None, :]
+        if d["mode"] == "rel":
+            return None, None, None
+        xyz = observer_position_at_reception(
+            t_sub.ravel(),
+            d["ra_ref"],
+            d["dec_ref"],
+            observer_location=self.observers[i],
+        )
+        P_E, P_N = parallax_factors(xyz, d["ra_ref"], d["dec_ref"])
+        dev = None
+        if self._needs_dev(i):
+            dev = system.mulensevent.skowron_deviations(
+                t_sub.ravel(), xyz
+            ).reshape(t_sub.shape + (3,))
+        return P_E.reshape(t_sub.shape), P_N.reshape(t_sub.shape), dev
+
+    def _exposure_model(
+        self, system, i, t, beta=None, P_E=None, P_N=None, dev=None
+    ):
+        """(dE, dN) in mas of dataset ``i`` averaged over each exposure --
+        THE smeared expression, for the likelihood and the plots alike.
+
+        ``t`` is the epochs (numpy or a tensor of any length);
+        ``P_E``/``P_N`` (``(n, k)``) and ``dev`` (``(n, k, 3)``) the
+        ephemeris quantities at the sub-exposure nodes
+        (``_exposure_ephemeris``), as arrays or tensors.  The mode's own
+        builder (``_absolute_model``, ``_rel_model``, ``_lensrel_model``)
+        is evaluated on the flattened nodes and the POSITION is averaged:
+        dE and dN together, with one set of weights
+        (``Instrument.smear_file``).  Every observable is then formed from
+        the averaged vector by the caller -- the along-scan projection, the
+        separation and the position angle -- never averaged itself: the
+        projection is linear, so this is exact for gaia, while sep and pa
+        are not, and <pa> has no meaning across the +/-pi wrap
+        (instrument.md).  The microlensing centroid shift is part of the
+        builder, so it is averaged with the track it moves.
+        """
+        d = self.datasets[i]
+        mode = d["mode"]
+
+        def flat3(x):
+            return pt.as_tensor_variable(x).reshape((-1, 3))
+
+        def fn(t_sub):
+            t_flat = t_sub.reshape((-1,))
+            if mode == "rel":
+                dE, dN = self._rel_model(system, i, t_flat)
+            elif mode == "lensrel":
+                dE, dN = self._lensrel_model(system, i, t_flat, flat3(dev))
+            else:
+                dE, dN = self._absolute_model(
+                    system,
+                    d,
+                    t_flat,
+                    beta,
+                    P_E=pt.as_tensor_variable(P_E).reshape((-1,)),
+                    P_N=pt.as_tensor_variable(P_N).reshape((-1,)),
+                    dev=None if dev is None else flat3(dev),
+                )
+            return dE.reshape(t_sub.shape), dN.reshape(t_sub.shape)
+
+        return self.smear_file(fn, t, i)
+
+    def _exposure_linear_terms(self, system, d, t, point):
+        """The numpy pm + parallax (+ frame) terms averaged over each
+        exposure of dataset ``d`` at epochs ``t``: they are linear in time
+        and in the parallax factors, so their exposure mean is
+        ``_linear_terms`` at ``t`` with the node-averaged parallax factors
+        (the rule is symmetric, so the mean node time is the epoch)."""
+        i = d["index"]
+        P_E, P_N, _ = self._exposure_ephemeris(system, i, t)
+        _, w = self.exposure_nodes(i)
+        return self._linear_terms(
+            dict(d, P_E=P_E @ w, P_N=P_N @ w), t, point, system
+        )
+
+    def _eval_exposure(self, system, i, t, vals):
+        """Dataset ``i``'s exposure-averaged (dE, dN) at epochs ``t``, from
+        the compiled ``_exposure_model`` (``compile_plotters``)."""
+        t = np.asarray(t, dtype=np.float64)
+        k = int(self.ninterp[i])
+        P_E, P_N, dev = self._exposure_ephemeris(system, i, t)
+        if P_E is None:
+            P_E = P_N = np.zeros((len(t), k))
+        if dev is None:
+            dev = np.zeros((len(t), k, 3))
+        return self._compiled_exposure[i](t, P_E, P_N, dev, *vals)
+
+    @staticmethod
+    def _catalog_solution(d, dE, dN):
+        """Catalog dataset ``d``'s modeled solution: its projection
+        (``catalog_projection``) applied to the model track (dE, dN) at its
+        epochs.  Tensors or numpy arrays alike -- the likelihood and the
+        plots call this one function."""
+        if isinstance(dE, np.ndarray) and isinstance(dN, np.ndarray):
+            return d["proj"] @ np.concatenate([dE, dN])
+        return pt.dot(d["proj"], pt.concatenate([dE, dN]))
 
     def _lens_ephemeris(self, system, i, t):
         """``(P_E, P_N, dev)`` for dataset ``i``'s observer at times ``t``
@@ -1212,8 +3252,11 @@ class AstrometryInstrument(Instrument):
         both from the same ephemeris call, for a plot grid or the data
         times alike."""
         d = self.datasets[i]
-        xyz = get_observer_position(
-            np.asarray(t, dtype=float), observer_location=self.observers[i]
+        xyz = observer_position_at_reception(
+            np.asarray(t, dtype=float),
+            d["ra_ref"],
+            d["dec_ref"],
+            observer_location=self.observers[i],
         )
         P_E, P_N = parallax_factors(xyz, d["ra_ref"], d["dec_ref"])
         dev = system.mulensevent.skowron_deviations(t, xyz)
@@ -1249,14 +3292,18 @@ class AstrometryInstrument(Instrument):
                 f"[{self.prefix}] relative astrometry requires an orbit component."
             )
 
+        # The (dE, dN) node each dataset's observables are formed from --
+        # exposure-averaged where the dataset smears -- retained so the
+        # plotted model can be pinned to it (tests/test_astrometry_exposure.py).
+        self._data_position_nodes = [None] * self.n_elements
         for i, d in enumerate(self.datasets):
             name = d["name"]
             mode = d["mode"]
             t = d["time"]
             jv = self.jitter_variance.value[i]
 
-            if mode in ("gaia", "abs"):
-                # Only gaia/abs has a photocenter flux fraction; on a rel
+            if mode in ABSOLUTE_MODES:
+                # Only gaia/abs/catalog has a photocenter flux fraction; on a rel
                 # dataset fluxfrac is inactive and _pair_beta does the
                 # flux weighting per nested orbit instead.
                 beta = self._sed_beta_node(system, i)
@@ -1264,13 +3311,26 @@ class AstrometryInstrument(Instrument):
                     pm.Deterministic(
                         f"{self.prefix}.{name}.fluxfrac_sed", beta
                     )
-                dev = None
-                lens_source = getattr(self, "_lens_source", None)
-                if lens_source and lens_source[i] is not None:
-                    # The observer's geocentric deviations (C6) at THIS
-                    # dataset's epochs, in the frame t0_par anchors.
-                    dev = system.mulensevent.skowron_deviations(t, d["xyz"])
-                dE, dN = self._absolute_model(system, d, t, beta, dev=dev)
+                if self._smeared(i):
+                    dE, dN = self._exposure_model(
+                        system,
+                        i,
+                        t,
+                        beta,
+                        *self._exposure_ephemeris(system, i, t),
+                    )
+                else:
+                    dev = None
+                    lens_source = getattr(self, "_lens_source", None)
+                    if lens_source and lens_source[i] is not None:
+                        # The observer's geocentric deviations (C6) at
+                        # THIS dataset's epochs, in the frame t0_par
+                        # anchors.
+                        dev = system.mulensevent.skowron_deviations(
+                            t, d["xyz"]
+                        )
+                    dE, dN = self._absolute_model(system, d, t, beta, dev=dev)
+                self._data_position_nodes[i] = (dE, dN)
 
             if mode == "gaia":
                 w_model = dE * d["sin_psi"] + dN * d["cos_psi"]
@@ -1282,6 +3342,38 @@ class AstrometryInstrument(Instrument):
                     mu=w_model,
                     sigma=sigma,
                     observed=pm.Data(f"{self.prefix}.{name}_w", d["w"]),
+                )
+
+            elif mode == "lensrel":
+                if self._smeared(i):
+                    _, _, dev_sub = self._exposure_ephemeris(system, i, t)
+                    dE, dN = self._exposure_model(system, i, t, dev=dev_sub)
+                else:
+                    dev = system.mulensevent.skowron_deviations(t, d["xyz"])
+                    dE, dN = self._lensrel_model(system, i, t, dev)
+                self._data_position_nodes[i] = (dE, dN)
+                # The bivariate normal with the per-epoch correlation, as
+                # the East marginal times the North conditional -- exact,
+                # and it keeps two observed nodes like abs mode.  The
+                # isotropic jitter adds to both variances, not to the
+                # covariance; its floor keeps the matrix positive definite.
+                err_E = pm.Data(f"{self.prefix}.{name}_errE", d["err_E"])
+                err_N = pm.Data(f"{self.prefix}.{name}_errN", d["err_N"])
+                c_EE = pt.sqr(err_E) + jv
+                c_NN = pt.sqr(err_N) + jv
+                c_EN = d["corr"] * err_E * err_N
+                obs_E = pm.Data(f"{self.prefix}.{name}_dE", d["dE_obs"])
+                pm.Normal(
+                    f"{self.prefix}.model_{name}_E",
+                    mu=dE,
+                    sigma=pt.sqrt(c_EE),
+                    observed=obs_E,
+                )
+                pm.Normal(
+                    f"{self.prefix}.model_{name}_N",
+                    mu=dN + c_EN / c_EE * (obs_E - dE),
+                    sigma=pt.sqrt(c_NN - pt.sqr(c_EN) / c_EE),
+                    observed=pm.Data(f"{self.prefix}.{name}_dN", d["dN_obs"]),
                 )
 
             elif mode == "abs":
@@ -1306,8 +3398,27 @@ class AstrometryInstrument(Instrument):
                     observed=pm.Data(f"{self.prefix}.{name}_dN", d["dN_obs"]),
                 )
 
+            elif mode == "catalog":
+                # The catalog's own weighted least-squares fit, applied to
+                # the model track at its epochs (review 8.10.3): a constant
+                # (n_par, 2K) projection, so the solution is linear in the
+                # track however nonlinear the track is.
+                sol = self._catalog_solution(d, dE, dN)
+                pm.MvNormal(
+                    f"{self.prefix}.model_{name}",
+                    mu=sol,
+                    cov=d["cov"],
+                    observed=pm.Data(f"{self.prefix}.{name}_sol", d["y_obs"]),
+                )
+
             else:  # rel
-                dEj, dNj = self._rel_model(system, i, pt.as_tensor_variable(t))
+                if self._smeared(i):
+                    dEj, dNj = self._exposure_model(system, i, t)
+                else:
+                    dEj, dNj = self._rel_model(
+                        system, i, pt.as_tensor_variable(t)
+                    )
+                self._data_position_nodes[i] = (dEj, dNj)
 
                 sep_model = pt.sqrt(pt.sqr(dEj) + pt.sqr(dNj))
                 pa_model = pt.arctan2(dEj, dNj)
@@ -1338,6 +3449,8 @@ class AstrometryInstrument(Instrument):
                 )
 
         self._add_lens_prose(system)
+        self._add_catalog_prose(system)
+        add_frame_prose(self, system)
 
     def _add_lens_prose(self, system):
         """Modeling-draft sentence for the centroid shift, declared next to
@@ -1368,11 +3481,40 @@ class AstrometryInstrument(Instrument):
                 r"blend photocenter on the centroid as the source "
                 r"brightens and fades"
             )
+        split = [i for i in lensed if self.psf_stars[i]]
+        if split:
+            text += (
+                r". Inside the point-spread function of "
+                + join_names([latex_escape(self.names[i]) for i in split])
+                + r" the blended light is split into the modeled stars, "
+                r"each moving on its own track with its own flux, and an "
+                r"unmodeled remainder with its own proper motion"
+            )
         get_collector(system).add(
             text + ".",
             section="microlensing",
             key=f"{self.prefix}.centroid_shift",
             rank=30,
+        )
+
+    def _add_catalog_prose(self, system):
+        """Modeling-draft sentence for catalog solutions, only when a
+        dataset is one (outputs.md: declared next to the model)."""
+        cats = [i for i, m in enumerate(self.modes) if m == "catalog"]
+        if not cats:
+            return
+        from exozippy.outputs.prose import get_collector, join_names
+
+        names = join_names([latex_escape(self.names[i]) for i in cats])
+        get_collector(system).add(
+            rf"The catalog astrometric solutions ({names}) are modeled as "
+            r"the weighted least-squares position, parallax and "
+            r"proper-motion fit to the model's flux-weighted photocenter "
+            r"track at the catalog epochs, compared with the published "
+            r"solution through its full covariance.",
+            section="data",
+            key=f"{self.prefix}.catalog",
+            rank=40,
         )
 
     # ------------------------------------------------------------------
@@ -1388,44 +3530,58 @@ class AstrometryInstrument(Instrument):
         and plot_data() render the same charts either way; only the
         orbit-dependent pieces are skipped.
         """
+        # Keplerian elements exist (a system whose orbits are all Taylor
+        # declares none); the Taylor sky terms need only the orbit.
         has_orbit = hasattr(system, "orbit") and hasattr(system.orbit, "a")
+        has_any_orbit = hasattr(system, "orbit")
 
         param_symbols = [p.value for p in system.plot_params]
         t_input = pt.vector("t_input")
 
-        # Photocenter orbit (summed over the star's member orbits), per
-        # gaia/abs instrument (beta varies); None when nothing moves the star.
-        # The symbolic (dE, dN) node pairs are retained so plot_data can
-        # derive param_deps by walking the graph (see
-        # Component._model_trace_param_deps).
+        # Photocenter motion about the linear track (the Keplerian wobble
+        # summed over the star's member orbits, plus any sky-plane Taylor
+        # term), per gaia/abs instrument (beta varies); None when nothing
+        # moves the star.  _compiled_kepler_photo is the Keplerian part
+        # alone, for the sky plot's orbit panel.  The symbolic (dE, dN) node
+        # pairs are retained so plot_data can derive param_deps by walking
+        # the graph (see Component._model_trace_param_deps).
         self._compiled_photo = []
+        self._compiled_kepler_photo = []
         self._photo_nodes = []
+
+        def compile_pair(nodes):
+            return pytensor.function(
+                inputs=[t_input] + param_symbols,
+                outputs=list(nodes),
+                on_unused_input="ignore",
+            )
+
         for i in range(self.n_elements):
-            if self.modes[i] == "rel" or not has_orbit:
+            if self.modes[i] not in ABSOLUTE_MODES or not has_any_orbit:
                 self._compiled_photo.append(None)
+                self._compiled_kepler_photo.append(None)
                 self._photo_nodes.append(None)
                 continue
             beta = self._sed_beta_node(system, i)
-            a_phot, omap = self._photocenter_terms(
-                system, self.datasets[i]["star_ndx"], beta
+            dE_node, dN_node = self._photocenter_offset(
+                system, i, beta, t_input
             )
-            if a_phot is None:
+            if dE_node is None:
                 self._compiled_photo.append(None)
+                self._compiled_kepler_photo.append(None)
                 self._photo_nodes.append(None)
                 continue
-            dE_orb, dN_orb = system.orbit.get_sky_position(
-                t_input, a_phot, omap
-            )
-            dE_node = pt.sum(dE_orb, axis=1)
-            dN_node = pt.sum(dN_orb, axis=1)
             self._photo_nodes.append((dE_node, dN_node))
-            self._compiled_photo.append(
-                pytensor.function(
-                    inputs=[t_input] + param_symbols,
-                    outputs=[dE_node, dN_node],
-                    on_unused_input="ignore",
+            self._compiled_photo.append(compile_pair((dE_node, dN_node)))
+            if self._taylor_photocenter_terms(system, i, beta):
+                kep = self._photocenter_offset(
+                    system, i, beta, t_input, taylor=False
                 )
-            )
+                self._compiled_kepler_photo.append(
+                    None if kep[0] is None else compile_pair(kep)
+                )
+            else:
+                self._compiled_kepler_photo.append(self._compiled_photo[i])
 
         # Full absolute model -- linear terms + photocenter orbit + the
         # microlensing centroid shift -- per LENSED gaia/abs dataset, as a
@@ -1465,14 +3621,73 @@ class AstrometryInstrument(Instrument):
                 )
             )
 
+        # The resolved lens minus its source per lensrel dataset, on a time
+        # grid with the grid's own Skowron deviations (the likelihood's
+        # _lensrel_model, run on other times).
+        self._compiled_lensrel = []
+        self._lensrel_nodes = []
+        for i in range(self.n_elements):
+            if self.modes[i] != "lensrel":
+                self._compiled_lensrel.append(None)
+                self._lensrel_nodes.append(None)
+                continue
+            dE, dN = self._lensrel_model(system, i, t_input, dev_input)
+            self._lensrel_nodes.append((dE, dN))
+            self._compiled_lensrel.append(
+                pytensor.function(
+                    inputs=[t_input, dev_input] + param_symbols,
+                    outputs=[dE, dN],
+                    on_unused_input="ignore",
+                )
+            )
+
+        # The exposure-averaged model per SMEARED dataset (ninterp > 1),
+        # on a time grid with that grid's own node ephemeris: the
+        # likelihood's _exposure_model run on other times.  Every plotted
+        # model of such a dataset -- at its epochs and on a grid -- comes
+        # from here, never from the instantaneous builders below.
+        self._compiled_exposure = []
+        self._exposure_plot_nodes = []
+        pe_sub = pt.matrix("P_E_sub")
+        pn_sub = pt.matrix("P_N_sub")
+        dev_sub = pt.tensor3("dev_sub")
+        for i in range(self.n_elements):
+            mode = self.modes[i]
+            if not self._smeared(i) or (mode == "rel" and not has_any_orbit):
+                self._compiled_exposure.append(None)
+                self._exposure_plot_nodes.append(None)
+                continue
+            beta = (
+                self._sed_beta_node(system, i)
+                if mode in ABSOLUTE_MODES
+                else None
+            )
+            dE, dN = self._exposure_model(
+                system,
+                i,
+                t_input,
+                beta,
+                P_E=pe_sub,
+                P_N=pn_sub,
+                dev=dev_sub if self._needs_dev(i) else None,
+            )
+            self._exposure_plot_nodes.append((dE, dN))
+            self._compiled_exposure.append(
+                pytensor.function(
+                    inputs=[t_input, pe_sub, pn_sub, dev_sub] + param_symbols,
+                    outputs=[dE, dN],
+                    on_unused_input="ignore",
+                )
+            )
+
         # Relative model per rel instrument (nested photocenter terms
         # included; matches the likelihood graph exactly)
         self._compiled_rel = []
         self._rel_nodes = []
         for i in range(self.n_elements):
             # rel data always require an orbit (build_likelihood raises
-            # without one), so has_orbit only ever skips an empty list here.
-            if self.modes[i] != "rel" or not has_orbit:
+            # without one); a constant_velocity one has no Keplerian `a`.
+            if self.modes[i] != "rel" or not has_any_orbit:
                 self._compiled_rel.append(None)
                 self._rel_nodes.append(None)
                 continue
@@ -1514,10 +3729,16 @@ class AstrometryInstrument(Instrument):
                 vals.append(np.atleast_1d(val))
         return vals
 
-    def _eval_photo(self, i, t, vals):
-        """Photocenter orbit at times t for instrument i; zeros when no
-        orbit moves the instrument's star."""
-        fn = getattr(self, "_compiled_photo", None)
+    def _eval_photo(self, i, t, vals, keplerian_only=False):
+        """Photocenter motion about the linear track at times t for
+        instrument i (the Keplerian wobble plus any sky-plane Taylor term,
+        or the wobble alone with ``keplerian_only``); zeros when nothing
+        moves the instrument's star."""
+        fn = getattr(
+            self,
+            "_compiled_kepler_photo" if keplerian_only else "_compiled_photo",
+            None,
+        )
         fn = fn[i] if fn is not None else None
         if fn is None:
             z = np.zeros(len(t), dtype=float)
@@ -1559,7 +3780,10 @@ class AstrometryInstrument(Instrument):
             + plx * d["P_E"]
         )
         dN = (dec - d["dec_ref"]) * RAD2MAS + pm_dec * dt_yr + plx * d["P_N"]
-        return dE, dN
+        # The frame tie is linear in time too, and _absolute_model adds it
+        # to the star's track; the plotted model must carry it as well.
+        fE, fN = numpy_frame_offset(self, d, t, point)
+        return dE + fE, dN + fN
 
     def _node_pair_deps(self, nodes, system):
         """Union of param_deps over a retained (dE, dN) node pair (or None)."""
@@ -1609,6 +3833,11 @@ class AstrometryInstrument(Instrument):
             label = getattr(getattr(star, attr, None), "label", None)
             if label in known and label not in deps:
                 deps.append(label)
+        if any(self.fithipframe):
+            for attr in FRAME_PARAMS:
+                label = getattr(self, attr).label
+                if label in known and label not in deps:
+                    deps.append(label)
         return deps
 
     def plot(self, system, points, filename_prefix="debug"):
@@ -1660,6 +3889,8 @@ class AstrometryInstrument(Instrument):
         rel_fns = getattr(self, "_compiled_rel", None)
         lensed_nodes = getattr(self, "_lensed_nodes", None)
         lensed_fns = getattr(self, "_compiled_lensed", None)
+        lensrel_nodes = getattr(self, "_lensrel_nodes", None)
+        lensrel_fns = getattr(self, "_compiled_lensrel", None)
 
         specs = []
         for i, d in enumerate(self.datasets):
@@ -1691,7 +3922,17 @@ class AstrometryInstrument(Instrument):
                 )
                 if point is not None:
                     vals = self._point_values(system, point)
-                    if lensed_fns and lensed_fns[i] is not None:
+                    if self._smeared(i):
+                        # Exposure-averaged position at the epochs, then
+                        # projected: the likelihood's own order.
+                        dE_m, dN_m = self._eval_exposure(system, i, t, vals)
+                        deps = self._merge_deps(
+                            self._linear_term_deps(system),
+                            self._node_pair_deps(
+                                self._exposure_plot_nodes[i], system
+                            ),
+                        )
+                    elif lensed_fns and lensed_fns[i] is not None:
                         # Lensed source: the full compiled _absolute_model
                         # (linear + orbit + centroid shift) at the epochs.
                         dE_m, dN_m = self._eval_lensed(system, i, t, vals)
@@ -1743,7 +3984,14 @@ class AstrometryInstrument(Instrument):
                 # point supplies it; the raw offsets otherwise (a valid
                 # data-only preview).
                 if point is not None:
-                    dE_lin, dN_lin = self._linear_terms(d, t, point, system)
+                    if self._smeared(i):
+                        dE_lin, dN_lin = self._exposure_linear_terms(
+                            system, d, t, point
+                        )
+                    else:
+                        dE_lin, dN_lin = self._linear_terms(
+                            d, t, point, system
+                        )
                     x_data = d["dE_obs"] - dE_lin
                     y_data = d["dN_obs"] - dN_lin
                     data_name = "data - (pm+plx)"
@@ -1774,7 +4022,34 @@ class AstrometryInstrument(Instrument):
                             photo_nodes[i] if photo_nodes else None, system
                         ),
                     )
-                    if lensed_fns and lensed_fns[i] is not None:
+                    if self._smeared(i):
+                        # Exposure-averaged: the full smeared model minus
+                        # the same smeared linear terms, on the grid.
+                        vals = self._point_values(system, point)
+                        t_pretty = np.linspace(t.min(), t.max(), 2000)
+                        dE_f, dN_f = self._eval_exposure(
+                            system, i, t_pretty, vals
+                        )
+                        dE_l, dN_l = self._exposure_linear_terms(
+                            system, d, t_pretty, point
+                        )
+                        deps = self._merge_deps(
+                            deps,
+                            self._node_pair_deps(
+                                self._exposure_plot_nodes[i], system
+                            ),
+                        )
+                        traces.append(
+                            Trace(
+                                name="exposure-averaged model - (pm+plx)",
+                                role="model",
+                                kind="line",
+                                x=dE_f - dE_l,
+                                y=dN_f - dN_l,
+                                style={"legend": True, "lw": 1},
+                            )
+                        )
+                    elif lensed_fns and lensed_fns[i] is not None:
                         # Lensed source: what remains after the linear
                         # terms is the centroid shift (+ blend drag + any
                         # photocenter orbit), drawn from the full compiled
@@ -1833,6 +4108,180 @@ class AstrometryInstrument(Instrument):
                     r"East is to the LEFT and the axes are equal-scale."
                 )
 
+            elif mode == "catalog":
+                # The catalog solution drawn as the five-parameter line it
+                # is, at the epochs; with a point, the model photocenter
+                # track there and the model's own solution of it (what the
+                # likelihood compares), as lines.
+                K = len(t)
+                M = catalog_design_matrix(
+                    t, d["cat_epoch"], d["P_E"], d["P_N"], d["n_par"]
+                )
+                lin = M @ d["y_obs"]
+                traces.append(
+                    Trace(
+                        name="catalog solution",
+                        role="data",
+                        kind="scatter",
+                        x=lin[:K],
+                        y=lin[K:],
+                        style=self._data_trace_style(i),
+                    )
+                )
+                if point is not None:
+                    vals = self._point_values(system, point)
+                    if lensed_fns and lensed_fns[i] is not None:
+                        dE_m, dN_m = self._eval_lensed(system, i, t, vals)
+                        deps = self._merge_deps(
+                            self._linear_term_deps(system),
+                            self._node_pair_deps(lensed_nodes[i], system),
+                        )
+                    else:
+                        dE_lin, dN_lin = self._linear_terms(
+                            d, t, point, system
+                        )
+                        dE_orb, dN_orb = self._eval_photo(i, t, vals)
+                        dE_m, dN_m = dE_lin + dE_orb, dN_lin + dN_orb
+                        deps = self._merge_deps(
+                            self._linear_term_deps(system),
+                            self._node_pair_deps(
+                                photo_nodes[i] if photo_nodes else None,
+                                system,
+                            ),
+                        )
+                    dE_m, dN_m = np.asarray(dE_m), np.asarray(dN_m)
+                    sol = self._catalog_solution(d, dE_m, dN_m)
+                    fit = M @ sol
+                    traces.append(
+                        Trace(
+                            name="model photocenter",
+                            role="model",
+                            kind="line",
+                            x=dE_m,
+                            y=dN_m,
+                            style={"legend": True, "lw": 1},
+                        )
+                    )
+                    traces.append(
+                        Trace(
+                            name="model's catalog solution",
+                            role="model",
+                            kind="line",
+                            x=fit[:K],
+                            y=fit[K:],
+                            style={
+                                "legend": True,
+                                "lw": 1,
+                                "color": "tab:orange",
+                            },
+                        )
+                    )
+                x_inverted = True  # East to the left
+                xlabel = r"$\Delta\alpha^*$ [mas]"
+                ylabel = r"$\Delta\delta$ [mas]"
+                title = f"Catalog astrometry: {name} ({sysname})"
+                meta["caption"] = (
+                    r"The catalog astrometric solution of "
+                    rf"{latex_escape(sysname)} from {latex_escape(name)}, "
+                    r"drawn as its position, parallax and proper-motion "
+                    r"track at the catalog's epochs (points), with the "
+                    r"modeled photocenter track (line) and the model's "
+                    r"own weighted least-squares solution of it (orange), "
+                    r"which is what the likelihood compares with the "
+                    r"catalog. East is to the LEFT."
+                )
+
+            elif mode == "lensrel":
+                traces.append(
+                    Trace(
+                        name="data",
+                        role="data",
+                        kind="scatter",
+                        x=d["dE_obs"],
+                        y=d["dN_obs"],
+                        xerr=d["err_E"],
+                        yerr=d["err_N"],
+                        style=self._data_trace_style(i),
+                    )
+                )
+                if (
+                    point is not None
+                    and lensrel_fns
+                    and lensrel_fns[i] is not None
+                ):
+                    # The separation's track from the event to the last
+                    # epoch, so the plot shows where the lens came from.
+                    vals = self._point_values(system, point)
+                    t0 = float(
+                        np.atleast_1d(
+                            self._point_value(point, system.source.t_0, 0)
+                        )[0]
+                    )
+                    t_pretty = np.linspace(
+                        min(t.min(), t0), max(t.max(), t0), 2000
+                    )
+                    xyz = observer_position_at_reception(
+                        t_pretty,
+                        d["ra_ref"],
+                        d["dec_ref"],
+                        observer_location=self.observers[i],
+                    )
+                    if self._smeared(i):
+                        dE_m, dN_m = self._eval_exposure(
+                            system, i, t_pretty, vals
+                        )
+                        deps = self._node_pair_deps(
+                            self._exposure_plot_nodes[i], system
+                        )
+                    else:
+                        dev = system.mulensevent.skowron_deviations(
+                            t_pretty, xyz
+                        )
+                        dE_m, dN_m = lensrel_fns[i](
+                            t_pretty.astype(np.float64), dev, *vals
+                        )
+                        deps = self._node_pair_deps(
+                            lensrel_nodes[i] if lensrel_nodes else None,
+                            system,
+                        )
+                    traces.append(
+                        Trace(
+                            name="model",
+                            role="model",
+                            kind="line",
+                            x=dE_m,
+                            y=dN_m,
+                            style={"legend": True, "lw": 1},
+                        )
+                    )
+                    traces.append(
+                        Trace(
+                            name="source",
+                            role="model",
+                            kind="scatter",
+                            x=np.array([0.0]),
+                            y=np.array([0.0]),
+                            style={
+                                "color": "k",
+                                "marker": "*",
+                                "legend": False,
+                            },
+                        )
+                    )
+                x_inverted = True  # East to the left
+                meta["aspect_equal"] = True
+                xlabel = r"$\Delta\alpha^*$ [mas]"
+                ylabel = r"$\Delta\delta$ [mas]"
+                title = f"Lens relative to source: {name} ({sysname})"
+                meta["caption"] = (
+                    r"Resolved lens-minus-source astrometry of "
+                    rf"{latex_escape(sysname)} from "
+                    rf"{latex_escape(name)} (points), with the modeled "
+                    r"lens-source trajectory from the event to the last "
+                    r"epoch (line); the source sits at the origin (star). "
+                    r"East is to the LEFT and the axes are equal-scale."
+                )
+
             else:  # rel
                 traces.append(
                     Trace(
@@ -1847,10 +4296,20 @@ class AstrometryInstrument(Instrument):
                 if point is not None and rel_fns and rel_fns[i] is not None:
                     vals = self._point_values(system, point)
                     t_pretty = np.linspace(t.min(), t.max(), 2000)
-                    dE_m, dN_m = rel_fns[i](t_pretty.astype(np.float64), *vals)
-                    deps = self._node_pair_deps(
-                        rel_nodes[i] if rel_nodes else None, system
-                    )
+                    if self._smeared(i):
+                        dE_m, dN_m = self._eval_exposure(
+                            system, i, t_pretty, vals
+                        )
+                        deps = self._node_pair_deps(
+                            self._exposure_plot_nodes[i], system
+                        )
+                    else:
+                        dE_m, dN_m = rel_fns[i](
+                            t_pretty.astype(np.float64), *vals
+                        )
+                        deps = self._node_pair_deps(
+                            rel_nodes[i] if rel_nodes else None, system
+                        )
                     traces.append(
                         Trace(
                             name="model",
@@ -1933,10 +4392,15 @@ class AstrometryInstrument(Instrument):
         t = d["time"]
         vals = self._point_values(system, point)
         photo = getattr(self, "_compiled_photo", None)
+        moves = photo is not None and photo[i] is not None
+        kepler = getattr(self, "_compiled_kepler_photo", None)
+        # The orbit panel draws the KEPLERIAN wobble with its node and
+        # direction annotations; a sky-plane Taylor term has no period to
+        # draw one over, so it appears only in the left panel's path.
         has_orbit = (
             getattr(self, "_compiled_elements", None) is not None
-            and photo is not None
-            and photo[i] is not None
+            and kepler is not None
+            and kepler[i] is not None
         )
         if has_orbit:
             fig, (axL, axR) = plt.subplots(1, 2, figsize=(13, 6))
@@ -1947,8 +4411,11 @@ class AstrometryInstrument(Instrument):
         # ---------------- left: full path over the data span ----------------
         t_dense = np.linspace(t.min(), t.max(), 4000)
         # parallax factors on the dense grid (numpy, same observer)
-        xyz = get_observer_position(
-            t_dense, observer_location=self.observers[i]
+        xyz = observer_position_at_reception(
+            t_dense,
+            d["ra_ref"],
+            d["dec_ref"],
+            observer_location=self.observers[i],
         )
         P_E, P_N = parallax_factors(xyz, d["ra_ref"], d["dec_ref"])
         d_dense = dict(d, P_E=P_E, P_N=P_N)
@@ -1965,7 +4432,7 @@ class AstrometryInstrument(Instrument):
             zorder=1,
             label="pm + parallax",
         )
-        if has_orbit:
+        if moves:
             axL.plot(
                 dE_lin + dE_orb,
                 dN_lin + dN_orb,
@@ -1989,7 +4456,12 @@ class AstrometryInstrument(Instrument):
                 label="+ microlensing centroid shift",
             )
 
-        if lensed:
+        if self._smeared(i):
+            # The exposure-averaged model at the epochs (what the
+            # likelihood compares); the dense lines above are the
+            # instantaneous track it averages.
+            dE_mod_o, dN_mod_o = self._eval_exposure(system, i, t, vals)
+        elif lensed:
             dE_mod_o, dN_mod_o = self._eval_lensed(system, i, t, vals)
         else:
             dE_lin_o, dN_lin_o = self._linear_terms(d, t, point, system)
@@ -2033,11 +4505,11 @@ class AstrometryInstrument(Instrument):
             P_orb = 2.0 * np.pi / np.atleast_1d(n_arr)
             t1 = t.max()
             t_orb = np.linspace(t1 - np.max(P_orb), t1, 2000)
-            dE_o, dN_o = self._eval_photo(i, t_orb, vals)
+            dE_o, dN_o = self._eval_photo(i, t_orb, vals, keplerian_only=True)
             axR.plot(
                 dE_o, dN_o, "k-", lw=1.2, zorder=2, label="photocenter orbit"
             )
-            dE_ep, dN_ep = self._eval_photo(i, t, vals)
+            dE_ep, dN_ep = self._eval_photo(i, t, vals, keplerian_only=True)
             axR.plot(
                 dE_ep, dN_ep, "r.", ms=5, zorder=3, label="observation epochs"
             )
@@ -2076,7 +4548,10 @@ class AstrometryInstrument(Instrument):
                 # shift into the plotted window
                 t_node += np.ceil((t_orb[0] - t_node) / P) * P
                 (xn,), (yn,) = self._eval_photo(
-                    i, np.array([t_node], dtype=np.float64), vals
+                    i,
+                    np.array([t_node], dtype=np.float64),
+                    vals,
+                    keplerian_only=True,
                 )
                 axR.plot(
                     xn,
@@ -2093,7 +4568,7 @@ class AstrometryInstrument(Instrument):
                 # Direction of motion: a curved arrow tracing the orbit away
                 # from the ascending node, drawn 25% outside the orbit itself.
                 t_arc = np.linspace(t_node, t_node + 0.06 * P, 60)
-                xa, ya = self._eval_photo(i, t_arc, vals)
+                xa, ya = self._eval_photo(i, t_arc, vals, keplerian_only=True)
                 xa, ya = 1.25 * np.asarray(xa), 1.25 * np.asarray(ya)
                 axR.plot(
                     xa[:-1], ya[:-1], "-", color="tab:blue", lw=2, zorder=6

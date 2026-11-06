@@ -9,9 +9,11 @@ two bracketing tracks along whichever dimension (alpha, initfeh, or mass)
 found both neighbors present.
 
 Per-row treatment:
-  - feh_mist, radius_mist, teff_mist, delta_nu, nu_max, age_mist: linear
-    blend of the two neighbor tracks, weighted by where the target value
-    falls between them.
+  - feh_mist, radius_mist, teff_mist, delta_nu, nu_max, age_mist,
+    star_mass, final_star_mass: linear blend of the two neighbor tracks,
+    weighted by where the target value falls between them.
+  - final_EEP: the smaller of the two neighbors' (a blend of two track
+    lengths is not a track length).
   - here_be_dragons: elementwise max of the two neighbors' flags -- if
     either neighbor is past its valid range at a given EEP, the
     interpolated point should be flagged too.
@@ -88,6 +90,8 @@ BLENDED_COLUMNS = [
     "delta_nu",
     "nu_max",
     "age_mist",
+    "star_mass",
+    "final_star_mass",
 ]
 
 
@@ -187,6 +191,9 @@ def _generate_interpolated_track(row, alpha, vvcrit, processed_path):
 
     new_track["here_be_dragons"] = np.maximum(
         lo_track["here_be_dragons"].values, hi_track["here_be_dragons"].values
+    )
+    new_track["final_EEP"] = np.minimum(
+        lo_track["final_EEP"].values, hi_track["final_EEP"].values
     )
     new_track["dEEP_dage"] = np.gradient(
         new_track["EEP"].values, new_track["age_mist"].values

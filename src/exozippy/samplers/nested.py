@@ -307,7 +307,8 @@ def _new_counts():
     BEFORE the pool forks so every worker increments the same memory --
     the parent then reads the totals for the trace attrs.  A worker's log
     says only its FIRST failure; these say how many there were."""
-    return mp.Array("q", 2)
+    # A FORK-context array, matching the fork pool that shares it.
+    return mp.get_context("fork").Array("q", 2)
 
 
 def _bump(idx):
@@ -472,7 +473,14 @@ def nested_sample(
     _NB.update(bridge=bridge, logp_fn=logp_fn, pool=None, counts=_new_counts())
 
     actual = _resolve_nested_cores(cores)
-    pool = mp.Pool(actual) if actual > 1 else None
+    # Through _common.create_pool, i.e. an explicit FORK context, never
+    # mp.Pool's platform default (review 2.6.42).  The workers read the
+    # bridge, the compiled logp and the shared counters from _NB, which
+    # only a fork child inherits: under spawn (macOS) or forkserver (Linux
+    # from Python 3.14) _NB is empty in every worker and each likelihood
+    # call dies on _NB["bridge"].  `actual` is already the resolved grant,
+    # so it is passed as both the request and the proposal cap.
+    pool, actual = _common.create_pool(actual, actual, "nested", logger)
     _NB["pool"] = pool
     logger.info(
         f"nested[{backend}]: ndim={bridge.ndim} nlive={nlive} "

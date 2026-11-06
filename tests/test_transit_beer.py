@@ -25,6 +25,11 @@ import numpy as np
 import pytensor
 import pytensor.tensor as pt
 import pytest
+from test_transit_thermal import (
+    _model_values,
+    _phase_curve_times,
+    _ref_exofast_tran,
+)
 
 from conftest import _DummyConfigManager
 from exozippy.components.band.band import Band
@@ -43,10 +48,23 @@ def _make_band(config):
     return Band(config, _DummyConfigManager())
 
 
-def _make_planet(config):
+class _PlanetConfigManager(_DummyConfigManager):
+    """The stub, with the raw system config planet membership is read from
+    (orbit.bodies.planet_membership): one star, the planet(s), and -- when
+    `orbit` -- an orbit block naming the planet."""
+
+    def __init__(self, planets, orbit):
+        self.system_config = {"star": [{"name": "A"}], "planet": planets}
+        if orbit:
+            self.system_config["orbit"] = [
+                {"name": "b", "primary": ["A"], "companion": ["b"]}
+            ]
+
+
+def _make_planet(config, orbit=False):
     # Stage 2 before stage 3, as System.prepare runs them: the mass
-    # coordinate's resolution reads orbit_map.
-    planet = Planet(config, _DummyConfigManager())
+    # coordinate's resolution reads the planet's orbit membership.
+    planet = Planet(config, _PlanetConfigManager(config, orbit))
     planet.build_maps()
     return planet
 
@@ -344,6 +362,38 @@ def test_calc_beam_from_k_scales_linearly_and_is_physically_sized():
     assert beam_ppm_2x == pytest.approx(2.0 * beam_ppm, rel=1e-9)
 
 
+def test_calc_beam_from_k_is_four_k_over_c_in_ppm():
+    """
+    Given K = 1800 m/s,
+    When calc_beam_from_K is evaluated,
+    Then it is exactly 4 K / c in ppm with c from astropy -- EXOFASTv2's
+      beaming coefficient (Loeb & Gaudi 2003's (3 - alpha) K / c at
+      alpha = -1), times 1e6.
+
+    The test above only brackets the answer in [1, 100] ppm, which a wrong
+    coefficient (1, 2 or 3 instead of 4) or a percent-level unit slip passes
+    (review 7.16.1).
+    """
+    from astropy import constants as const
+    from astropy import units as u
+
+    from exozippy.constants import SOLRAD_PER_DAY_TO_MPS
+
+    # Arrange
+    k_mps = 1800.0
+    k_sym = pt.dscalar("K")
+
+    # Act
+    beam_ppm = pytensor.function(
+        [k_sym], planet_physics.calc_beam_from_K(k_sym)
+    )(k_mps / SOLRAD_PER_DAY_TO_MPS)
+
+    # Assert
+    expected = 4.0 * k_mps / const.c.to(u.m / u.s).value * 1e6
+    assert beam_ppm == pytest.approx(expected, rel=1e-12)
+    assert expected == pytest.approx(24.017, abs=1e-3)
+
+
 # ---------------------------------------------------------------------------
 # Band manifest wiring: fitreflect / fitellip
 # ---------------------------------------------------------------------------
@@ -397,7 +447,9 @@ def test_planet_fitbeam_with_fitbeam():
 
 
 def test_planet_beam_uses_expression_with_beam_constrains_mass():
-    planet = _make_planet([{"name": "b", "beam_constrains_mass": True}])
+    planet = _make_planet(
+        [{"name": "b", "beam_constrains_mass": True}], orbit=True
+    )
     planet.register_parameters(system=_FakeSystemWithOrbit())
     assert planet.manifest["beam"] == "default"
 
@@ -412,7 +464,8 @@ def test_planet_fitbeam_and_beam_constrains_mass_together_derives():
     beam is computed whenever either is set.
     """
     planet = _make_planet(
-        [{"name": "b", "fitbeam": True, "beam_constrains_mass": True}]
+        [{"name": "b", "fitbeam": True, "beam_constrains_mass": True}],
+        orbit=True,
     )
     planet.register_parameters(system=_FakeSystemWithOrbit())
     assert planet.manifest["beam"] == "default"
@@ -501,7 +554,7 @@ def _beer_config(lc_file):
     return {
         "star": [{"name": "A", "mist": False}],
         "planet": [{"name": "b"}],
-        "orbit": [{"name": "b"}],
+        "orbit": [{"name": "b", "primary": ["A"], "companion": ["b"]}],
         "band": [
             {
                 "name": "TESS",
@@ -512,7 +565,19 @@ def _beer_config(lc_file):
                 "fitellip": True,
             }
         ],
-        "transit": [{"name": "inst0", "file": lc_file, "band": "TESS"}],
+        # Light-travel time off: with no file retarding the orbit,
+        # tc_target == tc exactly, so the closed-form reference in
+        # test_beer_light_curve_matches_the_closed_form_exofast_tran_model
+        # phases the geometry and every phase term from tc (the LTT role
+        # factors per term are pinned in tests/test_transit_ltt.py).
+        "transit": [
+            {
+                "name": "inst0",
+                "file": lc_file,
+                "band": "TESS",
+                "light_travel_time": False,
+            }
+        ],
     }
 
 
@@ -610,6 +675,73 @@ def test_ellipsoidal_survives_secondary_eclipse_thermal_and_reflect_dont(
     assert mu_far - mu_secondary > 0.5 * ((_THERMAL_PPM + _REFLECT_PPM) * 1e-6)
 
 
+def _flux_at(system, point, times):
+    """The plotting light curve at arbitrary times (same evaluator as
+    tests/test_transit_thermal.py's helper)."""
+    transit = system.transit
+    param_values = transit._point_to_plot_params(point, system)
+    full, _ = transit._lc_at_times(
+        param_values, 0, np.asarray(times, dtype=float)
+    )
+    return full
+
+
+def test_beer_light_curve_matches_the_closed_form_exofast_tran_model(
+    beer_system,
+):
+    """
+    Given thermal (5000 ppm), reflection (2000 ppm) and ellipsoidal
+    (300 ppm) all on one band, on a circular orbit with light-travel time
+    off,
+    When the likelihood mu (at the data) and the plotting light curve (on a
+    dense grid through both conjunctions and their contact points) are
+    evaluated,
+    Then both equal exofast_tran.pro's model in its own order -- transit
+    flux, + thermal planetvisible, - reflect/2 (cos(phase) - 1)
+    planetvisible, then times (1 - ellipsoidal cos(2 phase)), then times
+    the baseline -- with the transit flux and planetvisible integrated
+    independently of exoplanet-core, to 1e-10.
+
+    The margin test above checks signs and a > 0.5x drop only: a reflect
+    term on the wrong phase origin, ellipsoidal ADDED instead of
+    multiplied (off by 300 ppm x the transit depth, ~1e-6, in transit),
+    ellipsoidal gated by planetvisible, or thermal/reflect left un-gated
+    during a PARTIAL eclipse all pass it.
+    """
+    # Arrange
+    system, model, point, _centers = beer_system
+    v = _model_values(system, model, point)
+    assert v["ecc"] == 0.0  # the closed form is the circular one
+    times = _phase_curve_times(v["tc"], v["period"], v["ar"], v["p"])
+    ref_kwargs = {
+        k: v[k]
+        for k in ("tc", "period", "ar", "cosi", "p", "u1", "u2", "baseline")
+    }
+    amplitudes = {
+        "thermal": _THERMAL_PPM,
+        "reflect": _REFLECT_PPM,
+        "ellipsoidal": _ELLIP_PPM,
+    }
+
+    # Act
+    mu = _likelihood_mu(system, model, point)
+    curve = _flux_at(system, point, times)
+
+    # Assert
+    np.testing.assert_allclose(
+        mu,
+        _ref_exofast_tran(system.transit.time, **amplitudes, **ref_kwargs),
+        rtol=0,
+        atol=1e-10,
+    )
+    np.testing.assert_allclose(
+        curve,
+        _ref_exofast_tran(times, **amplitudes, **ref_kwargs),
+        rtol=0,
+        atol=1e-10,
+    )
+
+
 def test_reflect_ellip_beam_are_exactly_zero_by_default(tmp_path_factory):
     """
     Given a band with no fitreflect/fitellip and a planet with no
@@ -623,7 +755,7 @@ def test_reflect_ellip_beam_are_exactly_zero_by_default(tmp_path_factory):
     config = {
         "star": [{"name": "A", "mist": False}],
         "planet": [{"name": "b"}],
-        "orbit": [{"name": "b"}],
+        "orbit": [{"name": "b", "primary": ["A"], "companion": ["b"]}],
         "band": [{"name": "TESS", "filter": "TESS"}],
         "transit": [{"name": "inst0", "file": lc, "band": "TESS"}],
     }
@@ -679,7 +811,7 @@ def test_beam_diluted_when_sed_dilution_active(tmp_path_factory):
     config = {
         "star": [{"name": "A", "mist": False}, {"name": "B", "mist": False}],
         "planet": [{"name": "b", "fitbeam": True}],
-        "orbit": [{"name": "b"}],
+        "orbit": [{"name": "b", "primary": ["A"], "companion": ["b"]}],
         "band": [
             {"name": "V", "filter": "V", "ld_law": "quadratic", "star_ndx": 0}
         ],
@@ -759,7 +891,7 @@ def test_ellipsoidal_diluted_when_sed_dilution_active(tmp_path_factory):
     config = {
         "star": [{"name": "A", "mist": False}, {"name": "B", "mist": False}],
         "planet": [{"name": "b"}],
-        "orbit": [{"name": "b"}],
+        "orbit": [{"name": "b", "primary": ["A"], "companion": ["b"]}],
         "band": [
             {
                 "name": "V",

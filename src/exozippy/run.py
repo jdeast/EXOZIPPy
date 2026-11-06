@@ -16,16 +16,31 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pymc as pm
 import pytensor
+import xarray as xr
 from matplotlib.backends.backend_pdf import PdfPages
 
 from exozippy.config import user_entry
 from exozippy.samplers import convergence, de_metropolis
-from exozippy.samplers._common import default_cores
+from exozippy.samplers._common import (
+    DEFAULT_TUNE_FORECAST,
+    DEFAULT_TUNE_FORECAST_AFTER,
+    default_cores,
+)
 from exozippy.samplers.ptde import ptde_sample
 from exozippy.samplers.ptde_async import ptde_async_sample
 from exozippy.system import KNOWN_BLOCK_KEYS, System
 
 from . import reporting
+from .angles import (
+    adopt_direct_angles,
+    choose_direct_angles,
+)
+from .angles import (
+    has_auto_slots as has_auto_angle_slots,
+)
+from .angles import (
+    restore_from_trace as restore_direct_angles,
+)
 from .branches import (
     branch_summary_lines,
     is_branch_resolved,
@@ -36,10 +51,23 @@ from .corner_utils import (
     histogram_grid_degenerate,
     save_corner_plot,
 )
-from .diagnostics import ModelAuditor, cap_alarm_findings, log_cap_alarms
+from .diagnostics import (
+    ModelAuditor,
+    bound_pileup_findings,
+    cap_alarm_findings,
+    log_bound_pileups,
+    log_cap_alarms,
+)
 from .logger import fmt_duration, setup_logging
 from .mkparam import write_param_file
-from .outputs.ledger import ledger_from_json, ledger_to_json
+from .outputs.ledger import (
+    HOT_FAILED,
+    HOT_NOT_SEARCHED,
+    hot_search_from_json,
+    hot_search_to_json,
+    ledger_from_json,
+    ledger_to_json,
+)
 from .outputs.modeling import build_modeling_output, compile_modeling_pdf
 from .outputs.modes import DEFAULT_MAX_INVALID_FRAC, mode_suffix
 from .outputs.report_pipeline import build_mode_reports
@@ -50,6 +78,7 @@ from .polish import (
     resolve_polish_timeout,
 )
 from .trace_meta import (
+    HOT_SEARCH_ATTR,
     POSTERIOR_UNITS,
     POSTERIOR_UNITS_UNFINISHED,
     SEED_LEDGER_ATTR,
@@ -57,11 +86,40 @@ from .trace_meta import (
     apply_metadata,
     check_trace_coordinates,
     check_trace_freshness,
+    stamp_trace_attr,
     structural_metadata,
 )
 from .whitening import prepare_whitening
 
 logger = logging.getLogger(__name__)
+
+
+def _blackjax_chain_method(chain_method, chains, n_devices):
+    """
+    The chain method blackjax can actually run with ``n_devices`` JAX devices.
+
+    pymc's blackjax path maps ``chain_method: parallel`` onto ``jax.pmap``,
+    one chain per device, with no check that the devices exist.  Importing
+    ``pymc.sampling.jax`` forces 100 host devices through ``XLA_FLAGS``, but
+    that only takes effect if the JAX backend has not started yet; once
+    anything in the process has touched JAX (a notebook, a second fit, an
+    earlier test on the same xdist worker) there is one CPU device and two
+    chains crash inside ``pmap`` with an opaque "cannot select an axis to
+    squeeze out" (#506).  Vectorized chains run the same NUTS kernel under
+    ``jax.vmap`` on one device, so warn and switch.  numpyro is not routed
+    through here: its MCMC already warns and runs the chains sequentially.
+    """
+    if chain_method != "parallel" or chains <= n_devices:
+        return chain_method
+    logger.warning(
+        f"sampler.chain_method: parallel needs one JAX device per chain, but "
+        f"{chains} chains were requested and JAX has {n_devices} device(s) "
+        f"(the JAX backend started before pymc could raise the host device "
+        f"count). Running the blackjax chains vectorized on one device "
+        f"instead; set 'chain_method: vectorized' to silence this."
+    )
+    return "vectorized"
+
 
 # Every key `_run_fit` reads off the `sampler:` block. Anything else is
 # warned about and ignored, so this set must stay a superset of the keys the
@@ -109,6 +167,8 @@ KNOWN_SAMPLER_KEYS = {
     "store_hot_chains",
     "de_partner_snapshot",
     "start_dispersion",
+    "tune_forecast",
+    "tune_forecast_after",
 }
 
 
@@ -419,12 +479,20 @@ METHOD_ONLY_SAMPLER_KEYS = {
     "n_chains": _PTDE_METHODS,
     "adapt_ladder": _PTDE_METHODS,
     "de_mode_hop": _PTDE_METHODS,
+    # The SAMPLER half only: the seed polish (DE engine) and the startup
+    # whitening probe honor it on every method (reviews 2.6.35, 2.6.41),
+    # which is what METHOD_ONLY_KEYS_HONORED_ELSEWHERE says in the warning.
     "eval_timeout": _PTDE_METHODS,
     "swap_schedule": _PTDE_METHODS,
     "collect_rung_timing": _PTDE_METHODS,
     # Per-RUNG start dispersion (8.4.7): meaningless without a ladder, so it
     # is PTDE-only rather than an all-method key.
     "start_dispersion": _PTDE_METHODS,
+    # The tune-phase finish forecast (samplers._common.TuneForecast): both
+    # PTDE loops honor it; no other sampler has a tune it could shorten
+    # under maxtime.
+    "tune_forecast": _PTDE_METHODS,
+    "tune_forecast_after": _PTDE_METHODS,
     # store_hot_chains USED to read ("ptde_async",) here; it is now honored
     # by BOTH PTDE loops, because retaining a thinned copy of the hot rungs
     # has nothing to do with how proposals are scheduled
@@ -468,6 +536,20 @@ ALL_METHOD_SAMPLER_KEYS = {
 }
 
 
+# Method-only keys that a stage OUTSIDE the sampler also reads on every
+# method.  The warning for these says the SAMPLER ignores the key and what
+# still honors it -- "IGNORED ... Remove it" would be false (review 2.6.35's
+# config-vocabulary ruling: `eval_timeout` reaches the seed polish and the
+# whitening probe whatever `method:` is, because a slow or hung logp call can
+# stall either of them on any method).
+METHOD_ONLY_KEYS_HONORED_ELSEWHERE = {
+    "eval_timeout": (
+        "the seed polish's DE engine and the startup whitening probe still "
+        "bound every logp call by it"
+    ),
+}
+
+
 def warn_method_only_sampler_keys(sampler_cfg, method):
     """Warn about keys the CHOSEN method does not consume.
 
@@ -501,6 +583,14 @@ def warn_method_only_sampler_keys(sampler_cfg, method):
         else:
             detail = f"every method except {' / '.join(ignored_by)} reads it"
             remedy = f"switch method away from: {', '.join(ignored_by)}"
+        elsewhere = METHOD_ONLY_KEYS_HONORED_ELSEWHERE.get(key)
+        if elsewhere is not None:
+            logger.warning(
+                f"{method}: sampler key '{key}' is IGNORED by the sampler -- "
+                f"{detail} while sampling -- but {elsewhere}, so it is not "
+                f"inert.  For the sampler to honor it too, {remedy}."
+            )
+            continue
         logger.warning(
             f"{method}: sampler key '{key}' is IGNORED -- {detail}. "
             f"Remove it, or {remedy}."
@@ -844,6 +934,12 @@ def _run_fit(config, gui, user_params=None):
     # known here, so _common.resolve_start_dispersion validates it against
     # the rung count and raises there (review 8.4.7).
     start_dispersion = sampler_cfg.get("start_dispersion", None)
+    # What the PTDE loops do when the measured step rate puts the end of
+    # TUNE past maxtime (samplers.md): "shorten" (default), "abort", "off".
+    tune_forecast = sampler_cfg.get("tune_forecast", DEFAULT_TUNE_FORECAST)
+    tune_forecast_after = int(
+        sampler_cfg.get("tune_forecast_after", DEFAULT_TUNE_FORECAST_AFTER)
+    )
     # Thinned hot-rung retention (ptde_async only): detector data for
     # post-hoc discovery of posterior-suppressed modes; see
     # outputs.ledger.discover_hot_modes.  "auto" | False | True (thin 20) |
@@ -884,6 +980,13 @@ def _run_fit(config, gui, user_params=None):
     # 3. Build the stellar system into a PyMC Graph
     system = System(config, user_params=user_params)
     system.prepare()  # this triggers I/O
+    # A trace about to be REUSED was sampled in whatever coordinates its run
+    # chose for each angle (exozippy.angles: the automatic direct-angle switch
+    # is decided from the polished start, which this path never computes), and
+    # its raw draws decode only through those -- so they are restored from the
+    # trace BEFORE the build, the way the whitening is restored after it.
+    if os.path.exists(str(prefix) + "_trace.nc") and not recompute_trace:
+        restore_direct_angles(system, str(prefix) + "_trace.nc")
     gui.phase("compiling")  # build_model + get_mcmc_init compile the graph
     model = system.build_model()
 
@@ -941,7 +1044,14 @@ def _run_fit(config, gui, user_params=None):
     # than sitting on a mean.  The start is built below instead -- explicitly,
     # in raw coordinates -- and handed to each sampler by its own spelling
     # (review 5.3.3a; which branches consume it is review 1.3.6).
-    with model:
+    #
+    # An ExitStack rather than a bare `with model:`, so the automatic
+    # direct-angle switch below can LEAVE this model's context before it
+    # rebuilds: a pm.Model constructed inside another one's context becomes
+    # its sub-model, sharing its variable containers.
+    model_context = contextlib.ExitStack()
+    with model_context:
+        model_context.enter_context(model)
         # Build the raw starting point explicitly: 0 for logit params,
         # (initval - mu)/sigma for Gaussian-path params, so the physical
         # start is always our initval.
@@ -970,6 +1080,37 @@ def _run_fit(config, gui, user_params=None):
         # its own `_polished` plots below, so the two can be compared.
         build_internal_start = system.get_internal_point(model, raw_start)
         polished_start = False
+
+        # Every component's plot at the BUILD start (`_start`: the model at
+        # the seeds the user wrote, plus what the relaxation engine derived
+        # from them), written NOW -- before the seed polish, the whitening
+        # probe and the startup table, which can take tens of minutes.  The
+        # `_start` plots are the quick look ("is my start in the ball
+        # park?") a user iterates the params file against; written after
+        # the polish (as they were until 2026-11), a bad seed cost a whole
+        # polish to discover (JDE, 2026-11-05).  `build_internal_start` is
+        # plain numbers, so nothing after this (polish, whitening rescale,
+        # angle switch) can change what it plots.
+        #
+        # Two sets on purpose: when the seed polish runs, the model is
+        # plotted again at the POLISHED start (`_polished`, below).  The
+        # `_start` plots used to be drawn at the polished point, so a polish
+        # that had walked into another basin -- examples/ob09020's DE polish
+        # dropped the lens companion and inflated every err_scale -- was
+        # invisible, since the only picture of "the start" was the picture
+        # of where the polish ended (JDE, 2026-09-25).  With both, the seeds
+        # and what the polish made of them can be compared by eye.
+        for comp in system.active_components.values():
+            comp.plot(
+                system,
+                [build_internal_start],
+                filename_prefix=str(prefix) + "_start",
+            )
+        logger.info(
+            f"Start plots written: {prefix}_start_* -- the model at your "
+            f"starting values, before the seed polish.  Check them now; if "
+            f"the start is far off, stop the fit and adjust the params file."
+        )
 
         # Data-driven whitening: measure every raw element's true local
         # scale from the relaxation-engine start and rescale the model's
@@ -1014,6 +1155,7 @@ def _run_fit(config, gui, user_params=None):
         # the same driver for L-BFGS).  `polish_timeout` (seconds, default
         # polish.DEFAULT_POLISH_TIMEOUT_S, null = none) bounds the whole
         # polish's wall clock and stops it when spent.
+        angle_logp_fn = None
         if not reusing_trace:
             raw_starts_pre, _seed_indices_pre = system.get_raw_starts(model)
             polish_steps = resolve_polish_steps(
@@ -1040,9 +1182,20 @@ def _run_fit(config, gui, user_params=None):
                     # restarts instead.
                     rewhiten=measure_scales,
                     timeout_s=polish_timeout,
+                    # Per-call budget for the DE engine and the between-round
+                    # probe (reviews 2.6.35, 2.6.41): polish_timeout only ends
+                    # seeds and cannot write off a call already inside the
+                    # model.
+                    eval_timeout=eval_timeout,
                 )
                 raw_start = system.get_raw_start(model)
                 polished_start = True
+
+            # The automatic direct-angle switch needs a compiled logp; it is
+            # compiled ONCE here and shared with the probe below, so a model
+            # with latent angles pays no extra compile.
+            if has_auto_angle_slots(system):
+                angle_logp_fn = model.compile_logp()
 
             # Re-center the whitening anchor on the (now polished) start, so
             # raw = 0 IS the start and `model.initial_point()` is correct BY
@@ -1090,12 +1243,57 @@ def _run_fit(config, gui, user_params=None):
                 whitening_path,
                 trace_path,
                 reusing_trace=reusing_trace,
+                # The probe runs on the sampler's grant, every call under
+                # eval_timeout (review 2.6.41): serial it held a 112-core
+                # OGLE-2013-BLG-0341 job on one core for 12.85 h.
+                cores=cores,
+                eval_timeout=eval_timeout,
+                logp_fn=angle_logp_fn,
             )
             if whiten_report is not None:
                 # The rescale re-expressed a polished (nonzero) start in
                 # the new raw coordinates; re-read it for every consumer
                 # below (a no-op for an unpolished all-zeros start).
                 raw_start = system.get_raw_start(model)
+
+        # The automatic DIRECT-ANGLE switch (exozippy.angles; JDE
+        # 2026-11-04/05): an angle sampled through direction latents that the
+        # data measure to better than DIRECT_ANGLE_MAX_SIGMA at this polished
+        # start -- conditionally (a probe along the circle) AND marginally
+        # (the Laplace covariance) -- is sampled directly instead, on a
+        # window centered here.  AFTER the probe, so the Hessian is taken in
+        # whitened coordinates; when nothing switches (two logp calls per
+        # angle) the model, the start and the whitening are untouched.  When
+        # something does, the model is rebuilt outside the old context, the
+        # polished point carried over, and the whitening measured again on
+        # the new model (that file supersedes the first).
+        if not reusing_trace:
+            angle_choices, _ = choose_direct_angles(
+                system, model, raw_start, angle_logp_fn
+            )
+            if angle_choices != (system.direct_angles or {}):
+                model_context.close()
+                model = adopt_direct_angles(
+                    system, model, raw_start, angle_choices
+                )
+                model_context.enter_context(model)
+                raw_start = system.get_raw_start(model)
+                # The same guard as the first call (reusing_trace is False on
+                # this path, so it reduces to measure_scales), kept in that
+                # spelling so the restore can never be gated on
+                # measure_scales alone (tests/test_run_whitening_reuse.py).
+                if reusing_trace or measure_scales:
+                    whiten_report = prepare_whitening(
+                        system,
+                        model,
+                        raw_start,
+                        whitening_path,
+                        trace_path,
+                        reusing_trace=reusing_trace,
+                        cores=cores,
+                        eval_timeout=eval_timeout,
+                    )
+                    raw_start = system.get_raw_start(model)
 
         # 1. Get your starting dictionaries (after the rescale, so the
         # diagnostic table reports the measured scales)
@@ -1142,7 +1340,16 @@ def _run_fit(config, gui, user_params=None):
 
             try:
                 seed_ledger = build_seed_ledger(
-                    system, model, raw_starts, seed_indices
+                    system,
+                    model,
+                    raw_starts,
+                    seed_indices,
+                    # The sampler's grant and per-call budget (review
+                    # 2.6.43): serial in this process, the ledger held
+                    # OGLE-2013-BLG-0341's 112-core jobs 19.5 h at ~225 s
+                    # per logp, silent and untimed.
+                    cores=cores,
+                    eval_timeout=eval_timeout,
                 )
             except Exception:
                 logger.warning(
@@ -1154,22 +1361,9 @@ def _run_fit(config, gui, user_params=None):
         # convert raw starting point to the internal starting point
         internal_start = system.get_internal_point(model, raw_start)
 
-        # Every component's plot at the BUILD start (`_start`: the model at
-        # the seeds the user wrote) and, when the seed polish ran, at the
-        # POLISHED start the sampler will begin from (`_polished`).  Two
-        # sets on purpose: the `_start` plots used to be drawn at the
-        # polished point, so a polish that had walked into another basin
-        # -- examples/ob09020's DE polish dropped the lens companion and
-        # inflated every err_scale -- was invisible, since the only picture
-        # of "the start" was the picture of where the polish ended (JDE,
-        # 2026-09-25).  With both, the seeds and what the polish made of
-        # them can be compared by eye.
-        for comp in system.active_components.values():
-            comp.plot(
-                system,
-                [build_internal_start],
-                filename_prefix=str(prefix) + "_start",
-            )
+        # The plots at the POLISHED start the sampler will begin from
+        # (`_polished`), the second of the two sets; the `_start` set was
+        # written right after the build start was taken (above).
         if polished_start:
             for comp in system.active_components.values():
                 comp.plot(
@@ -1184,7 +1378,7 @@ def _run_fit(config, gui, user_params=None):
 
         if reusing_trace:
             # if we've already done the sampling and don't want to redo it, load it
-            idata = az.from_netcdf(trace_path)
+            idata = _load_trace(trace_path)
             # ...but only if it was sampled from THIS model. The raw draws
             # decode through this build's bounds/links/whitening, so a trace
             # from an edited config would be relabeled and reported as if it
@@ -1291,6 +1485,8 @@ def _run_fit(config, gui, user_params=None):
                     adapt_ladder=adapt_ladder,
                     de_mode_hop=de_mode_hop,
                     progress_callback=gui.progress_callback,
+                    tune_forecast=tune_forecast,
+                    tune_forecast_after=tune_forecast_after,
                 )
             elif method == "ptde_async":
                 # The non-blocking PTDE dispatch loop (see samplers.md)
@@ -1328,6 +1524,8 @@ def _run_fit(config, gui, user_params=None):
                     adapt_ladder=adapt_ladder,
                     de_mode_hop=de_mode_hop,
                     progress_callback=gui.progress_callback,
+                    tune_forecast=tune_forecast,
+                    tune_forecast_after=tune_forecast_after,
                 )
             elif method == "nested":
                 # Nested sampling on the full model (samplers/nested.py):
@@ -1379,6 +1577,10 @@ def _run_fit(config, gui, user_params=None):
                 from pymc.sampling.jax import sample_jax_nuts
 
                 chain_method = sampler_cfg.get("chain_method", "parallel")
+                if method == "blackjax":
+                    chain_method = _blackjax_chain_method(
+                        chain_method, chains, jax.local_device_count()
+                    )
                 # No `initvals=`: the start is `Model.initial_point()` and
                 # `System.recenter_whitening_anchor` made that the polished
                 # start by construction (review 4.3.1).  VERIFIED against
@@ -1487,8 +1689,9 @@ def _run_fit(config, gui, user_params=None):
                 # chains begin at `Model.initial_point()`, and
                 # `System.recenter_whitening_anchor` above made that the
                 # POLISHED start by construction: the logit anchor was
-                # re-centered onto it (free -- section C's correction cancels
-                # the raw N(0,1), so the anchor is pure parameterization) and
+                # re-centered onto it (free -- a logit raw coordinate is flat
+                # and its prior is section C's Jacobian, so the anchor is pure
+                # parameterization) and
                 # the Gaussian-path elements, whose center IS their prior
                 # mean and so may not move, were pushed through
                 # `Model.set_initval`.  1.3.6 proposed `initvals=` here
@@ -1578,6 +1781,7 @@ def _run_fit(config, gui, user_params=None):
             seed_ledger,
             wrapup,
             cores=cores,
+            eval_timeout=eval_timeout,
             modes_cfg=modes_cfg,
             min_ess=min_ess,
             max_rhat=max_rhat,
@@ -1599,6 +1803,7 @@ def _wrap_up(
     wrapup,
     *,
     cores,
+    eval_timeout,
     modes_cfg,
     min_ess,
     max_rhat,
@@ -1679,24 +1884,41 @@ def _wrap_up(
     # predates review 2.14.12's three-phase ruling (post-save failures
     # raise) and is retired separately; meanwhile the exception type and
     # message reach the report.
+    # The search reads only the saved hot draws, so on a REUSED trace it
+    # would recompute what the run that wrote the trace already found -- and
+    # it is the most expensive wrap-up stage by far (the candidate polish:
+    # 41 of 47 minutes of a replot of examples/KMT-2021-BLG-1122L).  A
+    # completed search is therefore stamped on the trace in place
+    # (trace_meta.HOT_SEARCH_ATTR) and read back here; `modes:
+    # {rerun_hot_search: true}` asks for a fresh one (a code fix to the
+    # search itself is the case).  A FAILED search is never stamped.
     from .outputs.ledger import run_hot_mode_discovery
 
-    wrapup.stage(
-        "hot-chain suppressed-mode search (cluster, then polish each "
-        "candidate to its basin optimum)"
-    )
-    seed_ledger, hot_status = run_hot_mode_discovery(
-        system,
-        model,
-        idata,
-        seed_ledger,
-        # The core grant the sampler just used.  Without it the candidate
-        # polish ran serial on one core -- the same omission run.py's own
-        # polish call above already carries a comment about, missed at this
-        # second call site (review 6.11.3).  Measured on examples/ob09020:
-        # 1 core of 36 busy for 38+ minutes on a single candidate.
-        cores=cores,
-    )
+    persisted = _hot_search_from_trace(idata, modes_cfg)
+    if persisted is not None:
+        seed_ledger, hot_status = persisted
+    else:
+        wrapup.stage(
+            "hot-chain suppressed-mode search (cluster, then polish each "
+            "candidate to its basin optimum)"
+        )
+        seed_ledger, hot_status = run_hot_mode_discovery(
+            system,
+            model,
+            idata,
+            seed_ledger,
+            # The core grant the sampler just used.  Without it the
+            # candidate polish ran serial on one core -- the same omission
+            # run.py's own polish call above already carries a comment
+            # about, missed at this second call site (review 6.11.3).
+            # Measured on examples/ob09020: 1 core of 36 busy for 38+
+            # minutes on a single candidate.
+            cores=cores,
+            # ...and the per-call budget, so one stuck candidate proposal
+            # cannot hang a finished fit's report (review 2.6.35).
+            eval_timeout=eval_timeout,
+        )
+        _persist_hot_search(trace_path, idata, seed_ledger, hot_status)
 
     wrapup.stage("burn-in + stuck-chain analysis")
     # The REPORT-ONLY Deterministics (review 2.6.14) are in the trace so a
@@ -1733,6 +1955,8 @@ def _wrap_up(
         == "evidence",
         seed_ledger=seed_ledger,
         hot_status=hot_status,
+        # The bridge's logp pool takes the sampler's grant (2.6.43 audit).
+        cores=cores,
     )
 
     # A posterior piled against a component's modelling cap (the hogg
@@ -1744,12 +1968,32 @@ def _wrap_up(
     wrapup.stage("pile-at-cap check on data-capped parameters")
     cap_findings = cap_alarm_findings(system)
     log_cap_alarms(cap_findings, logger)
+    # Raw-z outliers the mode pass kept as a BOUND PILEUP (their lp is inside
+    # the bulk's range; outputs.modes.DEFAULT_PILEUP_LP_QUANTILE): name the
+    # parameter and the bound each one is against.
+    log_bound_pileups(bound_pileup_findings(system, mode_report), logger)
+
+    # The robust-likelihood audit (outputs/outliers.py): per hogg file, the
+    # nats the mixture forgives against a Gaussian, the outlier count and
+    # how concentrated those points are in the signal's event window, at
+    # the highest-lp and the median draw.  Writes <prefix>_outliers.txt
+    # only when some file uses the mixture; WARNs per flagged file.
+    from .outputs.outliers import has_robust_audit, write_robust_audit
+
+    if has_robust_audit(system):
+        wrapup.stage("robust-likelihood audit (outlier enrichment)")
+        write_robust_audit(system, idata, prefix, log=logger)
 
     # Announced like every other wrap-up step (review 2.3.12).
     wrapup.stage("convergence summary")
+    # The summary, the global corner and the detailed trace plots enumerate
+    # the trace, so they read it with every INACTIVE element left out -- by
+    # the same Parameter.element_is_active the tables and CSV use (review
+    # 2.11.26).  A view: `idata` keeps the full vectors for what follows.
+    reported = without_inactive(idata, system.inactive_element_masks())
     summary_path = Path(str(prefix) + "_summary.txt")
     summary_path.write_text(
-        _format_summary(idata, burn_diag, system, exclude=report_only),
+        _format_summary(reported, burn_diag, system, exclude=report_only),
         encoding="utf-8",
     )
 
@@ -1758,7 +2002,7 @@ def _wrap_up(
         f"corner plots (1 global + up to {len(system.active_components)} "
         f"per-component)"
     )
-    make_corner(idata, str(prefix) + "_corner.png", exclude=report_only)
+    make_corner(reported, str(prefix) + "_corner.png", exclude=report_only)
 
     # Component-specific corner plots (e.g. mulensing geometry). Unlike
     # comp.plot(), which also runs pre-flight on a single point, this only
@@ -1772,10 +2016,10 @@ def _wrap_up(
     plot_vars = [
         p.label
         for p in all_params
-        if p.label in idata["posterior"] and p.label not in report_only
+        if p.label in reported["posterior"] and p.label not in report_only
     ]
     save_multipage_trace(
-        idata, plot_vars, str(prefix) + "_trace_detailed.pdf", model=model
+        reported, plot_vars, str(prefix) + "_trace_detailed.pdf", model=model
     )
 
     # Generate final plots.  The modeling draft below reads draws[0] for its
@@ -1783,11 +2027,7 @@ def _wrap_up(
     wrapup.stage(
         f"posterior plots for {len(system.active_components)} component(s)"
     )
-    draws = get_draws(
-        idata,
-        param_lookup=system.get_parameter_lookup(),
-        exclude=report_only,
-    )
+    draws = _plot_points(system, idata, idata, exclude=report_only)
     for comp in system.active_components.values():
         comp.plot(system, draws, filename_prefix=str(prefix) + "_mcmc")
 
@@ -1808,7 +2048,9 @@ def _wrap_up(
         idata,
         f"{prefix}_mcmc_summary.pdf",
         title=(config.get("run") or {}).get("name"),
-        draws=draws,
+        # the random draws only: the figure draws its own median-draw point,
+        # which _plot_points put first in `draws` for the component PDFs
+        draws=draws[1:],
     )
 
     # Multimodal posteriors: re-emit the same corner + component plots once
@@ -2620,6 +2862,30 @@ def _add_wrapup_prose(system, diag, mode_report, cap_findings=None):
             key="run.convergence",
             rank=20,
         )
+        drift = diag.get("drift")
+        if drift is not None and drift["n_tests"]:
+            # Rhat compares chains, so it cannot see a population that moves
+            # as one body (review 1.4.4); say that the ensemble mean was
+            # tested too, and what the test found.
+            prose.add(
+                "Because the chains of a population sampler can drift "
+                "together, which leaves the Gelman--Rubin statistic near "
+                "unity, we also tested the chain-averaged value of each of "
+                f"the {drift['n_tests']} sampled quantities, the "
+                "log-posterior included, for a linear trend across the "
+                "retained draws, against its autocorrelation-corrected "
+                "error at a family-wise false-alarm rate of "
+                f"{100 * convergence.DRIFT_FAMILY_ALPHA:g}\\%; "
+                + (
+                    "none drifted."
+                    if drift["stationary"]
+                    else "the test FAILED, so the reported values may "
+                    "still be moving with the population."
+                ),
+                section="convergence",
+                key="run.drift",
+                rank=25,
+            )
     if cap_findings:
         # Instance names are data: escape them.  Idempotent by key, so a
         # re-report with no finding leaves the sentence out (regenerate,
@@ -2713,6 +2979,10 @@ def _format_summary(idata, diag, system=None, exclude=()):
             f"[{hit['lower']:.4g}, {hit['upper']:.4g}] -- {what}; the "
             f"reported interval is cut off there, not measured"
         )
+    drift = diag.get("drift")
+    if drift is not None:
+        flag = "" if drift["stationary"] else "WARNING: "
+        header.append(f"# {flag}{convergence.format_drift(drift)}")
     if not diag.get("converged", False):
         header.append(
             f"# WARNING: convergence NOT reached -- max Rhat={diag['max_rhat']:.3f} "
@@ -2727,6 +2997,50 @@ def _format_summary(idata, diag, system=None, exclude=()):
     # the columns downstream tooling (e.g. examples/DC2018's collector)
     # parses from this file.
     return "\n".join(header) + "\n" + df.to_string() + "\n"
+
+
+def without_inactive(idata, inactive_masks):
+    """``idata`` with every INACTIVE element left out of its posterior.
+
+    ``inactive_masks`` is ``System.inactive_element_masks()`` -- the same
+    ``Parameter.element_is_active`` answer the LaTeX table and the results
+    CSV filter on -- so the consumers that enumerate the trace (the
+    summary, the global and per-mode corners, the detailed trace plots)
+    report exactly the elements the tables do.  An inactive element is a
+    bookkeeping pin, so each one used to reach those as a "constant at 0"
+    row and a no-density warning (review 2.11.26).
+
+    A shallow copy: the posterior group is rebuilt from the surviving
+    elements (a variable with none left is dropped), every other group is
+    shared, and ``idata`` itself is untouched -- the mode pass, the
+    distributed posterior and the restart file need the full vectors.
+    Element coordinates are kept, so a surviving element keeps its index in
+    every label.  Returns ``idata`` itself when nothing is inactive.
+    """
+    post = idata["posterior"]
+    hit = [v for v in post.data_vars if v in inactive_masks]
+    if not hit:
+        return idata
+    data = {}
+    for v in post.data_vars:
+        da = post[v]
+        if v in inactive_masks:
+            mask = inactive_masks[v]
+            extra = [d for d in da.dims if d not in ("chain", "draw")]
+            if len(extra) != 1 or da.sizes[extra[0]] != mask.size:
+                raise ValueError(
+                    f"without_inactive: {v} has element dims "
+                    f"{[(d, da.sizes[d]) for d in extra]}, but its Parameter "
+                    f"has {mask.size} elements; a Parameter's trace variable "
+                    f"is (chain, draw, element)"
+                )
+            if not mask.any():
+                continue
+            da = da.isel({extra[0]: np.flatnonzero(mask)})
+        data[v] = da
+    view = idata.copy()
+    view["posterior"] = xr.DataTree(xr.Dataset(data, attrs=dict(post.attrs)))
+    return view
 
 
 def make_corner(idata, filename, max_samples=1000, exclude=()):
@@ -2752,9 +3066,32 @@ def make_corner(idata, filename, max_samples=1000, exclude=()):
         and v != "mode"
         and v not in exclude
     ]
-    var_specs = [(v, None) for v in physical_vars]
+    var_specs = [
+        (v, _element_coord_labels(idata["posterior"][v]))
+        for v in physical_vars
+    ]
     samples, labels = collect_corner_samples(idata, var_specs)
     save_corner_plot(samples, labels, filename, max_samples=max_samples)
+
+
+def _element_coord_labels(da):
+    """``["v[i]", ...]`` from a vector variable's element COORDINATE, or
+    None for a scalar.
+
+    Positional labels (corner_utils' default) would renumber a vector that
+    ``without_inactive`` thinned -- the surviving `orbit.gammadot[1]` of a
+    planet-plus-trend fit would be drawn as `orbit.gammadot[0]`, the
+    inactive one -- so the label is the element's own index, as the
+    summary's and the trace plots' are.  Identical to the positional label
+    for an unthinned vector.
+    """
+    extra = [d for d in da.dims if d not in ("chain", "draw")]
+    if len(extra) != 1:
+        return None
+    dim = extra[0]
+    if dim not in da.coords:
+        return None
+    return [f"{da.name}[{c}]" for c in da.coords[dim].values]
 
 
 # Module-level globals for fork-based parallel lp evaluation.
@@ -2850,6 +3187,85 @@ def _finish_saved_trace(idata, model, system, trace_path, cores=None):
     idata.attrs[UNITS_ATTR] = POSTERIOR_UNITS
     _write_trace_atomic(idata, trace_path)
     return True
+
+
+def _load_trace(trace_path):
+    """Read a saved trace fully into memory and release the file.
+
+    ``az.from_netcdf`` hands back a LAZY DataTree that keeps its HDF5 handle
+    open for the life of the process, and HDF5 refuses to open a file for
+    writing while this process holds it read-only -- which is what the
+    wrap-up's in-place stamp (trace_meta.stamp_trace_attr, after the
+    hot-chain search) does to this very file.  Every consumer below reads
+    the whole trace anyway, so load it and close the handle here, once.
+    """
+    idata = az.from_netcdf(trace_path)
+    idata.load()
+    idata.close()
+    return idata
+
+
+def _hot_search_from_trace(idata, modes_cfg):
+    """The hot-chain search a REUSED trace already carries, or None.
+
+    Returns ``(seed_ledger, hot_status)`` from trace_meta.HOT_SEARCH_ATTR
+    when the trace was stamped with a completed search and the user did not
+    ask for a fresh one (``modes: {rerun_hot_search: true}``); None means
+    "search now" -- the stamp is absent (a fresh fit, a trace whose wrap-up
+    never reached the search, or one written before the stamp existed).
+    Only completed searches are ever stamped (_persist_hot_search), so a
+    stamp carrying a FAILED state is not this code's output and raises.
+    """
+    if modes_cfg.get("rerun_hot_search", False):
+        if HOT_SEARCH_ATTR in idata.attrs:
+            logger.info(
+                "hot-chain suppressed-mode search: the trace carries a "
+                "completed search, but modes: {rerun_hot_search: true} asks "
+                "for a fresh one; searching again."
+            )
+        return None
+    blob = idata.attrs.get(HOT_SEARCH_ATTR)
+    if blob is None:
+        return None
+    seed_ledger, hot_status = hot_search_from_json(blob)
+    if hot_status["state"] in (HOT_FAILED, HOT_NOT_SEARCHED):
+        raise RuntimeError(
+            f"the trace's {HOT_SEARCH_ATTR} stamp records a "
+            f"'{hot_status['state']}' search; only completed searches are "
+            "stamped, so this stamp was not written by exozippy"
+        )
+    n_hot = sum(1 for rec in (seed_ledger or []) if rec.source == "hot-chain")
+    logger.info(
+        "hot-chain suppressed-mode search: reusing the completed search "
+        "stamped on the trace (state '%s', %d hot-chain record(s)) instead "
+        "of clustering and polishing the hot draws again; set modes: "
+        "{rerun_hot_search: true} to search afresh.",
+        hot_status["state"],
+        n_hot,
+    )
+    return seed_ledger, hot_status
+
+
+def _persist_hot_search(trace_path, idata, seed_ledger, hot_status):
+    """Stamp a COMPLETED hot-chain search on the trace, in place.
+
+    A search that did not run (no hot draws) costs nothing to repeat, and a
+    FAILED one must be repeated, so neither is stamped.  The in-memory
+    ``idata.attrs`` gets the same stamp, so everything downstream in this
+    process (mkparam reloads the file; the summary reads attrs) sees one
+    trace.
+    """
+    if hot_status["state"] in (HOT_FAILED, HOT_NOT_SEARCHED):
+        return
+    blob = hot_search_to_json(seed_ledger, hot_status)
+    stamp_trace_attr(trace_path, HOT_SEARCH_ATTR, blob)
+    idata.attrs[HOT_SEARCH_ATTR] = blob
+    logger.info(
+        "hot-chain suppressed-mode search stamped on %s (%s); a "
+        "recompute_trace: false rerun reuses it.",
+        trace_path,
+        HOT_SEARCH_ATTR,
+    )
 
 
 def _seed_ledger_from_trace(idata, trace_path):
@@ -3576,6 +3992,38 @@ def _convert_posterior_to_user_units(idata, param_lookup, only=None):
         idata.posterior[var_name] = idata.posterior[var_name] * factor
 
 
+def _plot_points(system, idata, idata_ref, mode=None, exclude=()):
+    """The points a posterior plot is drawn at: the REFERENCE point first,
+    then ``get_draws``' random spaghetti draws.
+
+    Every plotter treats ``points[0]`` as the reference -- the phased
+    panels fold the data on its period and conjunction and label the axis
+    with them, the per-observation "isolated" data subtract its other
+    signals, and the modeling draft takes its model-bearing figures from it
+    (plotrender.render_spec_groups, dopptom, the mulens zooms).  It used to
+    be simply the first of the random draws, so a phased RV panel was folded
+    on whatever period one random draw had -- examples/gaia4's joint fit was
+    labelled P = 574.38 d against a posterior median of 575.8 +/- 1.3, and
+    an RV-only fit with a period prior 578.6 +/- 3.5 was folded at 568.87,
+    2.8 sigma out -- and the fold changed from one rendering to the next.
+    The reference is now ``summary_plot.median_draw_point``: the valid joint
+    draw nearest the posterior median in the sampled coordinates, the same
+    point the one-page summary figure is drawn at (outputs.md, "The point is
+    the median draw of the REPORTED posterior").  ``idata_ref`` is the trace
+    the median is taken over -- the full posterior, or one mode's -- and
+    ``mode`` restricts the spaghetti draws to that mode.
+    """
+    from .outputs.summary_plot import median_draw_point
+
+    reference = median_draw_point(system, idata_ref)[0]
+    return [reference] + get_draws(
+        idata,
+        param_lookup=system.get_parameter_lookup(),
+        mode=mode,
+        exclude=exclude,
+    )
+
+
 def get_draws(idata, n_draws=50, param_lookup=None, mode=None, exclude=()):
     """
     Extracts a random subset of draws from the posterior for plotting.
@@ -3694,22 +4142,24 @@ def _emit_per_mode_outputs(system, idata, mode_report, prefix):
     per-mode loop should be visible in logs, not silent.
     """
     prefix = str(prefix)
-    param_lookup = system.get_parameter_lookup()
     report_only = set(system.report_only_labels())
+    inactive = system.inactive_element_masks()
     for k, m in enumerate(mode_report.modes):
         suffix = mode_suffix(k)
         t0 = time.time()
 
         idata_k = _idata_for_mode(idata, k)
         make_corner(
-            idata_k, f"{prefix}_corner_{suffix}.png", exclude=report_only
+            without_inactive(idata_k, inactive),
+            f"{prefix}_corner_{suffix}.png",
+            exclude=report_only,
         )
 
         # Same draw-count knob as the combined-posterior plots (get_draws'
         # n_draws default) -- no extra stratification needed here since each
         # mode draws from its own full, already-labeled set of samples.
-        draws_k = get_draws(
-            idata, param_lookup=param_lookup, mode=k, exclude=report_only
+        draws_k = _plot_points(
+            system, idata, idata_k, mode=k, exclude=report_only
         )
         for comp in system.active_components.values():
             comp.plot(

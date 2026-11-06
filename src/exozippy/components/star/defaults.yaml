@@ -12,10 +12,8 @@ star:
     # may only ever be TIGHTENED -- raise it here and FFP lenses become
     # unmodelable with no user-side recourse.  What makes such a body plausible
     # is the mass PRIOR, not the bound: give that star 'mass_function: ffp'
-    # (galacticmodel.ffp_logmass_logp).  Note the deliberate asymmetry --
-    # IMF: Salpeter raises this floor to the hydrogen-burning limit because a
-    # STELLAR IMF has no claim below it, while the FFP mass function leaves it
-    # alone because sub-stellar masses are exactly its domain.
+    # (galacticmodel.ffp_logmass_logp), which leaves this floor alone because
+    # sub-stellar masses are exactly its domain.
     lower: -9.0
     upper: 2.5
     initval: 0.0
@@ -328,6 +326,17 @@ star:
     internal_unit: "rad"
     latex: "\\alpha_{ICRS}"
     description: "Right Ascension"
+    expressions:
+      # Selected per element by Star.register_parameters for a
+      # microlensing LENS star that carries absolute astrometry (review
+      # 8.10.4): its position at the astrometric reference epoch is the
+      # source's plus the offset the event geometry fixes
+      # (mulensevent.lens_offset_e/n; mulensing.md "The lens's position is
+      # derived").  Same-parameter element dep, as from_mulens_murel.
+      from_mulens_track:
+        func_name: "calc_ra_from_lens_offset"
+        deps: [ "star.ra[track_source_map]", "star.dec[track_source_map]",
+                "mulensevent.lens_offset_e[track_event_map]" ]
   dec:
     initval: 0.0
     init_scale: 20e-6
@@ -337,6 +346,12 @@ star:
     internal_unit: "rad"
     latex: "\\delta_{ICRS}"
     description: "Declination"
+    expressions:
+      # ra's from_mulens_track twin; see the note there.
+      from_mulens_track:
+        func_name: "calc_dec_from_lens_offset"
+        deps: [ "star.dec[track_source_map]",
+                "mulensevent.lens_offset_n[track_event_map]" ]
   rv:
     initval: 0.0
     init_scale: 100

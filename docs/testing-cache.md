@@ -753,7 +753,10 @@ A change to the *structure* of a commonly built graph misses every cached
 entry, not a few.  Measured 2026-08-18: turning `_RAW_CANCELLATION_CLIP` into a
 `pytensor.shared` (review 1.2.1) altered the graph of every logit-transformed
 element, so the first suite run after it took **14:40 instead of 8:26**, almost
-all of it in `cc1plus`.
+all of it in `cc1plus`.  Review 1.2.9 did it again in the other direction
+(the clip and the cancellation deleted, the raw vector of every parameter
+with a logit element a `pm.CustomDist`), so expect the same one cold run
+after it.
 
 This is a one-time cost per such change, and it is expected -- but it looks
 exactly like "the compile cache stopped working", including on CI, where every

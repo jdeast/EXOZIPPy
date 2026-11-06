@@ -1,7 +1,7 @@
 """
 Parity of the transit module against EXOFASTv2's exofast_tran.pro, both
-unsmeared (2-minute cadence, no exptime/ninterp keys) and exposure-smeared
-(30-minute cadence, exptime=30 / ninterp=10).
+unsmeared (2-minute cadence, no exptime_s/ninterp keys) and exposure-smeared
+(30-minute cadence, exptime_s=1800 / ninterp=10).
 
 The reference fixture (tests/fixtures/exofast_tran_parity.json, generated
 once by scripts/make_exofast_tran_reference.py under IDL) holds a typical
@@ -176,7 +176,7 @@ def test_derived_inputs_match_reference(parity):
 
 def test_unsmeared_matches_exofast_tran(parity_no_ltt):
     """
-    Given the 2-minute-cadence instrument with no exptime/ninterp keys
+    Given the 2-minute-cadence instrument with no exptime_s/ninterp keys
     (the default, instantaneous model), and light-travel-time correction
     DISABLED (see parity_no_ltt: the IDL fixture is pre-LTT by
     construction, so this test compares EXOZIPPy and exofast_tran on the
@@ -194,7 +194,7 @@ def test_unsmeared_matches_exofast_tran(parity_no_ltt):
 
 def test_smeared_matches_exofast_tran(parity_no_ltt):
     """
-    Given the 30-minute-cadence instrument with exptime=30 / ninterp=10,
+    Given the 30-minute-cadence instrument with exptime_s=1800 / ninterp=10,
     and light-travel-time correction DISABLED (see parity_no_ltt),
     When the per-observation model flux is evaluated at the initial point,
     Then it matches EXOFASTv2's exposure-smeared light curve

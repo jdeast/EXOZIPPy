@@ -46,24 +46,25 @@ not the true mass).
 
 Output: HIP1349.Hipparcos.astrom with columns
   BJD_TDB  w[mas]  err[mas]  scan_PA[deg]
+-- the file `exozippy-getdata "HIP 1349" --hipparcos-iad` writes, which
+this script now calls for the download and reconstruction.
 """
 
 import os
-import re
-import urllib.request
 
 import numpy as np
+
+from exozippy.utilities.getastrometry import (
+    check_hipparcos_parallax_factors,
+    fetch_hipparcos_iad,
+    parse_hipparcos_iad,
+    reconstruct_hipparcos_abscissae,
+    write_hipparcos_astrom,
+)
 
 HIP = 1349
 IAD_CACHE = "HIP1349.iad.txt"
 OUTFILE = "HIP1349.Hipparcos.astrom"
-
-# Catalog reference solution (IAD header, J1991.25)
-RA0 = 4.22329974  # deg
-DEC0 = -52.65159230  # deg
-PLX = 43.45  # mas
-PMRA = 314.94  # mas/yr
-PMDEC = 182.50  # mas/yr
 
 # DMSA/O photocenter orbit (ESA 1997)
 PORB = 411.449  # d
@@ -73,39 +74,6 @@ ECC = 0.5671
 OMEGA = np.radians(4.68)
 INC = np.radians(80.48)
 BIGOMEGA = np.radians(352.57)
-
-EPOCH_JD = 2448349.0625  # J1991.25
-RAD2MAS = 180.0 / np.pi * 3600e3
-
-
-def fetch_iad():
-    url = (
-        "https://hipparcos-tools.cosmos.esa.int/cgi-bin/"
-        f"HIPcatalogueSearch.pl?hipiId={HIP}"
-    )
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    body = (
-        urllib.request.urlopen(req, timeout=60).read().decode(errors="replace")
-    )
-    with open(IAD_CACHE, "w") as f:
-        f.write(body)
-    return body
-
-
-def parse_iad(body):
-    rows = []
-    for line in body.splitlines():
-        m = re.match(
-            r"^\s*(\d+)\|([FN])\|"
-            r"([-\d. ]+)\|([-\d. ]+)\|([-\d. ]+)\|([-\d. ]+)\|"
-            r"([-\d. ]+)\|([-\d. ]+)\|([-\d. ]+)\|",
-            line,
-        )
-        if m:
-            orbit, cons = int(m.group(1)), m.group(2)
-            vals = [float(v) for v in m.groups()[2:9]]
-            rows.append((orbit, cons, *vals))
-    return rows
 
 
 def kepler_E(M, e):
@@ -134,57 +102,28 @@ def orbit_EN(t):
 
 
 def main():
+    # The download, the reconstruction and the epoch / parallax-factor
+    # checks are exozippy-getdata --hipparcos-iad's
+    # (exozippy.utilities.getastrometry); this script adds the DMSA/O
+    # convention check that is specific to this star.
     if os.path.exists(IAD_CACHE):
         body = open(IAD_CACHE).read()
     else:
         print("Fetching IAD from ESA...")
-        body = fetch_iad()
-    rows = parse_iad(body)
-    print(f"{len(rows)} abscissa records (FAST + NDAC)")
-
-    orbitno = np.array([r[0] for r in rows])
-    sinpsi = np.array([r[2] for r in rows])  # IA3
-    cospsi = np.array([r[3] for r in rows])  # IA4
-    pfal = np.array([r[4] for r in rows])  # IA5
-    dmu_a = np.array([r[5] for r in rows])  # IA6
-    dmu_d = np.array([r[6] for r in rows])  # IA7
-    resid = np.array([r[7] for r in rows])  # IA8 [mas]
-    err = np.array([r[8] for r in rows])  # IA9 [mas]
-
-    # Epoch from the proper-motion partials; use the better-conditioned ratio
-    dt_a = np.where(np.abs(sinpsi) > 1e-3, dmu_a / sinpsi, np.nan)
-    dt_d = np.where(np.abs(cospsi) > 1e-3, dmu_d / cospsi, np.nan)
-    dt_yr = np.where(np.abs(sinpsi) > np.abs(cospsi), dt_a, dt_d)
-    both = ~np.isnan(dt_a) & ~np.isnan(dt_d)
-    max_incon = np.nanmax(np.abs(dt_a[both] - dt_d[both]))
-    print(f"epoch consistency IA6/IA3 vs IA7/IA4: max {max_incon:.4f} yr")
-    assert max_incon < 0.02, "inconsistent epochs -- check IAD parsing"
-
-    t = EPOCH_JD + dt_yr * 365.25
-
-    # Validate our parallax factors against the consortium's IA5
-    # (Hipparcos is within ~3e-4 AU of the geocenter: 'earth' is fine)
-    from exozippy.ephemeris import get_observer_position
-
-    xyz = get_observer_position(t, "earth")
-    ra_r, dec_r = np.radians(RA0), np.radians(DEC0)
-    P_E = xyz[:, 0] * np.sin(ra_r) - xyz[:, 1] * np.cos(ra_r)
-    P_N = (
-        xyz[:, 0] * np.cos(ra_r) * np.sin(dec_r)
-        + xyz[:, 1] * np.sin(ra_r) * np.sin(dec_r)
-        - xyz[:, 2] * np.cos(dec_r)
-    )
-    pfal_ours = P_E * sinpsi + P_N * cospsi
-    max_diff = np.max(np.abs(pfal_ours - pfal))
-    print(f"AL parallax factor: max |ours - IAD| = {max_diff:.4f}")
-    if max_diff > 0.02:
-        raise SystemExit(
-            "Parallax factor mismatch with the IAD -- check conventions!"
-        )
+        body = fetch_hipparcos_iad(HIP)
+        with open(IAD_CACHE, "w") as f:
+            f.write(body)
+    header, rec = parse_hipparcos_iad(body)
+    print(f"{len(rec['orbit'])} abscissa records (FAST + NDAC)")
+    ab = reconstruct_hipparcos_abscissae(header, rec)
+    diff = check_hipparcos_parallax_factors(ab)
+    print(f"AL parallax factor: max |ours - IAD| = {diff:.4f}")
 
     # Convention check: the raw residuals (wrt the 5-parameter reference
     # solution) must be explained by the published DMSA/O orbit projected
     # along scan with OUR Thiele-Innes conventions.
+    t = ab["time"]
+    sinpsi, cospsi, resid, err = rec["IA3"], rec["IA4"], rec["IA8"], rec["IA9"]
     dE_orb, dN_orb = orbit_EN(t)
     orb_al = dE_orb * sinpsi + dN_orb * cospsi
     chi2_raw = np.mean((resid / err) ** 2)
@@ -198,22 +137,7 @@ def main():
             "DMSA/O orbit does not explain the residuals -- check conventions!"
         )
 
-    # Reconstruct the full abscissa relative to the J1991.25 catalog
-    # position (5-parameter model + residual; the orbit stays in the data)
-    w = resid + PLX * pfal + (PMRA * dt_yr) * sinpsi + (PMDEC * dt_yr) * cospsi
-
-    psi_deg = np.degrees(np.arctan2(sinpsi, cospsi))
-    np.savetxt(
-        OUTFILE,
-        np.column_stack([t, w, err, psi_deg]),
-        header=(
-            "Hipparcos epoch astrometry of HIP 1349, "
-            "reconstructed from the 1997 IAD "
-            "(see get_hipparcos_iad.py)\n"
-            "BJD_TDB  w[mas]  err[mas]  scan_PA[deg]"
-        ),
-        fmt="%.6f %.4f %.3f %.6f",
-    )
+    write_hipparcos_astrom(OUTFILE, ab)
     print(f"wrote {OUTFILE}")
 
     # convenience values for the params file

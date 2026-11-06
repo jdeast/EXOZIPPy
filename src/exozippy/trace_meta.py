@@ -129,6 +129,33 @@ POSTERIOR_UNITS_UNFINISHED = "internal-unfinished"
 # the trace predates the persistence.
 SEED_LEDGER_ATTR = "exozippy_seed_ledger"
 
+# The hot-chain suppressed-mode search (outputs/ledger.py
+# run_hot_mode_discovery) -- the ledger it extended plus its status dict --
+# as JSON, stamped IN PLACE on the trace the moment the search completes.
+# The search clusters the retained hot-rung draws and polishes every
+# candidate basin, which on a gradient-free (VBM) microlensing fit is the
+# single most expensive wrap-up stage: 41 of the 47 minutes of a
+# `recompute_trace: false` replot of examples/KMT-2021-BLG-1122L on 16
+# cores (2026-10-20).  It reads only the saved hot draws, so a rerun on the
+# same trace would recompute the same answer; the reuse path reads this
+# stamp instead and skips the search (`modes: {rerun_hot_search: true}`
+# asks for a fresh one).  Only a COMPLETED search is stamped: a failed one
+# (HOT_FAILED) is not, so the next rerun tries again.  Absent on a trace
+# whose wrap-up never reached the search, and on every trace written before
+# the stamp existed.
+HOT_SEARCH_ATTR = "exozippy_hot_search"
+
+# Which angle elements were sampled DIRECTLY instead of through their
+# direction latents, and each one's window (src/exozippy/angles.py): JSON
+# {"<prefix>.<angle>": {"elements", "center", "halfwidth", "scale", "sigma",
+# "forced"}}, internal units.  The automatic switch is decided from the
+# polished start, so a rebuild from the same config cannot re-derive it, and a
+# raw draw decodes only through the window it was sampled in -- the same
+# reason whitening.json carries the anchor.  The reuse path applies it BEFORE
+# building (angles.restore_from_trace).  Absent when nothing was direct, which
+# is every trace written before the switch existed: those sampled latents.
+ANGLES_ATTR = "exozippy_direct_angles"
+
 # The payload is a debugging aid, not the check itself; a pathological
 # config (thousands of per-parameter entries) should not bloat the trace
 # file.  Past this many characters only the hash is stored, and a mismatch
@@ -447,6 +474,8 @@ def structural_metadata(source) -> Dict[str, Any]:
         out[RESTART_AS_ATTR] = (
             json.dumps(aliases, sort_keys=True) if aliases else None
         )
+    direct = getattr(source, "direct_angles", None)
+    out[ANGLES_ATTR] = json.dumps(direct, sort_keys=True) if direct else None
     blob = json.dumps(payload, sort_keys=True, default=str)
     out[PAYLOAD_ATTR] = blob if len(blob) <= _MAX_PAYLOAD_CHARS else None
 
@@ -717,3 +746,51 @@ def check_trace_coordinates(idata, model, trace_path) -> None:
             f"REMEDY: re-sample with 'sampler: {{recompute_trace: true}}'."
             f"\n{_BANNER}"
         )
+
+
+def read_trace_root_attr(trace_path, name: str) -> Optional[str]:
+    """ONE root attribute of a saved trace, or None when it is absent.
+
+    The reader twin of :func:`stamp_trace_attr`, for a stamp a caller needs
+    BEFORE it can build the model that would decode the trace (the direct-
+    angle choices, ANGLES_ATTR): opening the whole InferenceData for one
+    string is a lazy DataTree with an HDF5 handle to manage, and h5py reads
+    the attribute in O(1).  A file h5py cannot open propagates, as there.
+    """
+    import h5py
+
+    with h5py.File(str(trace_path), "r") as f:
+        if name not in f.attrs:
+            return None
+        value = f.attrs[name]
+    if isinstance(value, bytes):
+        value = value.decode("utf-8")
+    return str(value)
+
+
+def stamp_trace_attr(trace_path, name: str, value: str) -> None:
+    """Set ONE root attribute of a saved trace in place, without rewriting it.
+
+    ``<prefix>_trace.nc`` is HDF5 (arviz writes it through h5netcdf, the
+    declared netCDF engine), and an HDF5 root attribute can be added to a
+    closed file in O(1) through h5py -- where ``idata.to_netcdf`` would copy
+    every draw again (the KMT-2021-BLG-1122L trace is 1.3 GB, two minutes).
+    Used for the stamps a wrap-up learns AFTER the trace is on disk and a
+    reuse run must find there (HOT_SEARCH_ATTR today).  ``value`` is a
+    string (JSON), like every other exozippy stamp, so a reload sees it
+    exactly as ``idata.attrs[name]``.
+
+    A file h5py cannot open is a file this code did not write (the save
+    path is HDF5 by construction), so the OSError propagates: the wrap-up
+    runs after the save and raises on what it cannot do (run.md, the
+    three-phase ruling).
+    """
+    import h5py
+
+    if not isinstance(value, str):
+        raise TypeError(
+            f"trace attribute {name!r} must be a str (JSON), got "
+            f"{type(value).__name__}"
+        )
+    with h5py.File(str(trace_path), "a") as handle:
+        handle.attrs[name] = value

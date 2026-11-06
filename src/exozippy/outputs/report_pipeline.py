@@ -110,6 +110,7 @@ def build_mode_reports(
     seed_ledger=None,
     hot_status=None,
     mode_status=None,
+    cores=None,
 ):
     """Identify posterior modes, distribute the posterior, write tables.
 
@@ -159,6 +160,8 @@ def build_mode_reports(
         the occupancy weights and provenance on ``mode_report`` in place, so
         the LaTeX/CSV output below picks the new weights up automatically.
         Self-diagnosing: a single refused mode falls back to occupancy.
+        Its logp evaluations run on a pool of at most ``cores`` workers
+        (the sampler's grant; None is the AUTO grant).
     seed_ledger : list of outputs.ledger.SeedRecord, optional
         The multi-seed "considered and rejected" ledger built by run.py
         after the seed polish (outputs.ledger.build_seed_ledger). When
@@ -309,7 +312,19 @@ def build_mode_reports(
                 estimate_mode_evidences,
             )
 
-            evidences = estimate_mode_evidences(model, idata, mode_report)
+            # The normalization constant is read at the whitening now in
+            # place, which is the one the trace was sampled (or restored)
+            # under -- see evidence.py, "Normalization".
+            log_norm, norm_rows = system.evidence_log_norm(breakdown=True)
+            logger.info(
+                "Evidence normalization: %+.3f nat over %d prior term(s) "
+                "added to every mode's bridge lnZ",
+                log_norm,
+                len(norm_rows),
+            )
+            evidences = estimate_mode_evidences(
+                model, idata, mode_report, log_norm=log_norm, cores=cores
+            )
             # idata= keeps posterior['mode'].attrs in step with the rewritten
             # weights/provenance instead of leaving the occupancy values
             # attached to the trace that ships to disk.

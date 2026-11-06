@@ -44,12 +44,13 @@ EVENT_KEYS = frozenset(
         "fitmurel",
         "fitpirel",
         "fitthetae",
-        "source_orbit",
+        "vbm_tol",
+        "vbm_reltol",
     }
 )
-LENS_ENTRY_KEYS = frozenset({"body", "name", "orbit"})
+LENS_ENTRY_KEYS = frozenset({"body", "name", "orbit", "fitalpha"})
 SOURCE_ENTRY_KEYS = frozenset(
-    {"body", "name", "fitu0te", "star_constrains_rho"}
+    {"body", "name", "fitu0te", "star_constrains_rho", "orbit"}
 )
 
 # Where a recognizably misplaced key lives now.  Keys in none of these maps
@@ -100,22 +101,32 @@ _ORBITAL_MOTION_REMOVED = (
     "'orbital_motion:' was removed: a lens companion's motion is set by the "
     "orbit it moves on.  Put 'orbit: <orbit name>' on the COMPANION's lens "
     "entry and give that orbit block 'type: keplerian' (the default) or "
-    "'type: linear', with 'primary:' the lens primary's body and "
+    "'type: uniform_rotation', with 'primary:' the lens primary's body and "
     "'companion:' the companion's.  The linear rates are now "
     "orbit.<name>.ds_dt and orbit.<name>.dalpha_dt in the params file "
     "(they were lens.<name>.ds_dt / .dalpha_dt)."
 )
 _SOURCE_ORBITAL_MOTION_REMOVED = (
-    "'source_orbital_motion:' was removed: the source's motion is set by "
-    "the orbit it moves on.  Keep 'source_orbit: <orbit name>' on the "
-    "mulensevent block and delete this key; that orbit must be "
-    "'type: keplerian' (the default)."
+    "'source_orbital_motion:' was removed: a source's motion is set by "
+    "the orbit it moves on.  Put 'orbit: <orbit name>' on that SOURCE's "
+    "entry and delete this key; that orbit must be 'type: keplerian' (the "
+    "default)."
+)
+# Source orbital motion is per source (review 8.6.9 / 8.6.33's source twin,
+# 2026-10-25): each source entry names its own orbit, exactly as a lens
+# companion does, so the one event-level key is gone.
+_SOURCE_ORBIT_REMOVED = (
+    "'source_orbit:' on the mulensevent block was removed: each source "
+    "names its own orbit.  Put 'orbit: <orbit name>' on the SOURCE's entry "
+    "in the source: block (the orbit stays 'type: keplerian'); a binary "
+    "source puts both sources on one orbit, one per side."
 )
 REMOVED_KEYS = {
     "mmexofast": _MMEXOFAST_REMOVED,
     "mmexofast_options": _MMEXOFAST_REMOVED,
     "orbital_motion": _ORBITAL_MOTION_REMOVED,
     "source_orbital_motion": _SOURCE_ORBITAL_MOTION_REMOVED,
+    "source_orbit": _SOURCE_ORBIT_REMOVED,
 }
 
 
@@ -236,8 +247,8 @@ def body_entries(block, comp_key, system_config):
                 f"  {comp_key}:\n"
                 f"    - body: star.Lens\n"
                 f"Event-level options (finite_source, t0_par, backend, "
-                f"mag_method, use_op, peak_find, fit* flags, "
-                f"source_orbit) live on the `mulensevent:` block."
+                f"mag_method, use_op, peak_find, fit* flags) live on the "
+                f"`mulensevent:` block."
                 f"{hint}"
             )
         reject_unknown_keys(entry, allowed, where)
@@ -248,9 +259,9 @@ def body_entries(block, comp_key, system_config):
 def resolve_orbit_ref(config_manager, ref, where):
     """Resolve an orbit reference (instance name or index) -- the same
     vocabulary astrometryinstrument's rel mode uses.  Shared by the lens
-    (companion ``orbit:``, keplerian orbital motion) and the event
-    (``source_orbit:``, xallarap), which resolve against the same orbit
-    component."""
+    (companion ``orbit:``, keplerian orbital motion) and the sources (each
+    source entry's ``orbit:``, xallarap), which resolve against the same
+    orbit component."""
     from exozippy.components.orbit.bodies import component_instance_names
 
     sys_cfg = getattr(config_manager, "system_config", None) or {}

@@ -22,8 +22,8 @@ from exozippy.config import ConfigManager
 # named-instance translation and a real unit conversion are exercised.
 SYSTEM = {
     "star": [{"name": "A"}, {"name": "B"}],
-    "planet": [{"name": "b", "star_ndx": 0, "orbit_ndx": 0}],
-    "orbit": [{"name": "b"}],
+    "planet": [{"name": "b"}],
+    "orbit": [{"name": "b", "primary": ["A"], "companion": ["b"]}],
 }
 
 

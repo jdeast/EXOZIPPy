@@ -1,0 +1,10 @@
+# Ground-based radial velocities of Gaia BH3, Gaia Collaboration, Panuzzo et al. (2024),
+# A&A 686, L2, the ground-based RV table: UVES (2020-11-05), HERMES (2023-07-17, 2023-09-07), SOPHIE (2023-09-04).
+# NOT used in the paper's orbit; fit here as one instrument with one offset (the
+# instrument zero points differ by far less than the orbit's tens of km/s).
+# Times are BJD in UTC (time_scale: utc in the config), RVs and errors in m/s.
+# BJD_UTC  RV[m/s]  err[m/s]
+2459158.5333 -383200.0 300.0
+2460143.4948 -364050.0 200.0
+2460192.4359 -363150.0 20.0
+2460193.4833 -363240.0 200.0

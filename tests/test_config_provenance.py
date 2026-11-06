@@ -26,9 +26,10 @@ from exozippy.config import (
     PRECEDENCE_DERIVED_MIXED,
     PRECEDENCE_USER,
     ConfigManager,
+    unit_conversion,
 )
 
-MJUP_PER_MSUN = 1047.348644  # solMass -> jupiterMass
+MJUP_PER_MSUN = unit_conversion("solMass", "jupiterMass", "test")
 
 # Post-split microlensing topology: `mulensevent:` carries the event, `lens:`
 # one entry per lens BODY (element 0 is the primary) and `source:` one entry

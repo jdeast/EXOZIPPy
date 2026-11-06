@@ -1,0 +1,49 @@
+run:
+  name: "HD114762"
+
+prefix: "fitresults/HD114762"
+logger_level: INFO
+
+# HD 114762 (HIP 64426; Gaia DR3 3937211745905473024): Hipparcos epoch
+# astrometry (the 1997 IAD) and Gaia DR4 epoch astrometry (the June 2026
+# pre-release) of ONE star, fit jointly, with the Hipparcos-to-Gaia frame
+# tie as parameters (fithipframe, on by default).  The 84-day companion (HD 114762 b,
+# Latham et al. 1989) is modeled as dark.  See README.md.
+
+star:
+  - name: "A"
+    mist: False
+
+planet:
+  - name: "b"
+    # A stellar-mass companion with its radius pinned (astrometry does not
+    # measure it): the Chen & Kipping relation would then act on the mass.
+    chen: false
+
+orbit:
+  - name: "b"
+
+astrometryinstrument:
+  - name: "Hipparcos"
+    file: "HIP64426.Hipparcos.astrom"
+    mode: "gaia"                 # 1-D along-scan epoch astrometry
+    observer_location: "earth"   # Hipparcos: geocentric to ~3e-4 AU
+    reference_point: [198.08374652, 17.51712793]  # w's origin: the J1991.25 catalog position
+    # fithipframe defaults to true here (Hipparcos epochs fit with Gaia):
+    # the Hipparcos frame minus the Gaia frame is fit.
+    epoch: 2457936.87477064      # J2017.5 TCB (the DR4 reference epoch) in BJD_TDB
+  - name: "GaiaDR4"
+    file: "Gaia3937211745905473024.DR4prerelease.epoch_astrometry.xml"
+    mode: "gaia"
+    data_format: "gaia_epoch"    # the archive table itself, CCD by CCD
+    source_id: 3937211745905473024
+    epoch: 2457936.87477064
+
+parameter_file: "hd114762.params.yaml"
+
+sampler:
+  method: numpyro
+  tune: 1000
+  draws: 3000
+  target_accept: 0.95
+  recompute_trace: True

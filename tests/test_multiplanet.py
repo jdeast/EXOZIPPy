@@ -79,7 +79,7 @@ def two_planet_system(rv_file):
     return _build(
         planets=[
             {"name": "b", "fitmsini": False},
-            {"name": "c", "orbit_ndx": 1, "fitmsini": False},
+            {"name": "c", "fitmsini": False},
         ],
         orbits=[
             {"name": "b", "primary": ["A"], "companion": ["b"]},

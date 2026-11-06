@@ -114,6 +114,139 @@ def log_cap_alarms(findings, log, top_frac=CAP_TOP_FRAC):
         )
 
 
+# A bound-pileup draw's physical value counts as AT a bound when it lies
+# within this fraction of the element's [lower, upper] span of it.
+BOUND_PILE_TOL_FRAC = 0.01
+
+
+def _split_feature_dim(name):
+    """``'a.b_raw[3]'`` -> ``('a.b_raw', 3)``; ``'a.b_raw'`` -> ``(.., 0)``."""
+    if name.endswith("]") and "[" in name:
+        base, _, j = name[:-1].rpartition("[")
+        try:
+            return base, int(j)
+        except ValueError:
+            pass
+    return name, 0
+
+
+def bound_pileup_findings(system, mode_report, tol_frac=BOUND_PILE_TOL_FRAC):
+    """Resolve a mode report's bound-pileup dimensions to Parameters.
+
+    ``identify_modes`` keeps a raw-z outlier whose lp is inside the bulk's
+    lp range as VALID and records, per feature dimension, how many such
+    draws were beyond raw-z there (``ModeReport.pileup_dims``).  It works
+    from the trace alone, so it cannot name a bound; this does, from the
+    System.  For each dimension it maps the ``<label>_raw[j]`` feature to
+    its Parameter and element (through the build's ``sampled_idx``, since a
+    raw vector holds only the FREE elements) and measures the fraction of
+    the distributed posterior within ``tol_frac`` of the span of the lower
+    and of the upper bound, in USER units (``from_internal``).  Call after
+    ``System.distribute_posterior``.  Component-agnostic, like
+    ``cap_alarm_findings``.  Returns a list of dicts -- ``dim``,
+    ``display``, ``n_draws`` (pileup draws beyond raw-z there), ``lower``,
+    ``upper``, ``unit``, ``frac_lower``, ``frac_upper`` (None when not
+    measurable: no Parameter, no posterior, or an unbounded side).
+    """
+    dims = dict(getattr(mode_report, "pileup_dims", None) or {})
+    if not dims:
+        return []
+    lookup = system.get_parameter_lookup()
+    findings = []
+    for dim, n in sorted(dims.items(), key=lambda kv: (-kv[1], kv[0])):
+        raw_name, j = _split_feature_dim(dim)
+        label = raw_name[: -len("_raw")] if raw_name.endswith("_raw") else None
+        p = lookup.get(label) if label else None
+        f = {
+            "dim": dim,
+            "display": dim,
+            "n_draws": int(n),
+            "lower": None,
+            "upper": None,
+            "unit": "",
+            "frac_lower": None,
+            "frac_upper": None,
+        }
+        if p is not None:
+            transform = getattr(p, "_raw_transform", None) or {}
+            sampled = transform.get("sampled_idx")
+            i = (
+                int(sampled[j])
+                if sampled is not None and j < len(sampled)
+                else j
+            )
+            f["display"] = p.get_display_label(i)
+            f["unit"] = str(p.unit) if p.unit is not None else ""
+            post = p.posterior
+            if post is not None:
+                arr = np.asarray(getattr(post, "values", post), dtype=float)
+                draws = arr[i] if arr.ndim > 1 else arr
+                draws = draws[np.isfinite(draws)]
+            else:
+                draws = np.array([])
+            lo = hi = None
+            if p.lower is not None:
+                lo = float(p.from_internal(np.atleast_1d(p.lower)[i], index=i))
+            if p.upper is not None:
+                hi = float(p.from_internal(np.atleast_1d(p.upper)[i], index=i))
+            f["lower"] = lo if lo is not None and np.isfinite(lo) else None
+            f["upper"] = hi if hi is not None and np.isfinite(hi) else None
+            if (
+                draws.size
+                and f["lower"] is not None
+                and f["upper"] is not None
+            ):
+                tol = tol_frac * (f["upper"] - f["lower"])
+                f["frac_lower"] = float(np.mean(draws <= f["lower"] + tol))
+                f["frac_upper"] = float(np.mean(draws >= f["upper"] - tol))
+        findings.append(f)
+    return findings
+
+
+def log_bound_pileups(findings, log, tol_frac=BOUND_PILE_TOL_FRAC):
+    """One WARNING per bound-pileup dimension, naming the bound if known.
+
+    An element whose posterior is measurably NOT at either bound (both
+    fractions zero) is said so in its own words rather than as "PILED AT
+    BOUND": on DC2018 event 217 the star proper motions (bounds +/-1e5
+    mas/yr) were raw-z outliers with an ordinary lp but nowhere near a wall.
+    """
+    for f in findings:
+        unit = f" {f['unit']}" if f.get("unit") else ""
+        measured = f["frac_lower"] is not None and f["frac_upper"] is not None
+        if not measured:
+            head = "FAR IN THE SAMPLED COORDINATE"
+            where = (
+                "no finite [lower, upper] to compare against, so the "
+                "excursion is in the sampled coordinate only"
+            )
+        else:
+            at_bound = max(f["frac_lower"], f["frac_upper"]) > 0
+            head = (
+                "PILED AT BOUND"
+                if at_bound
+                else "FAR IN THE SAMPLED COORDINATE"
+            )
+            where = (
+                f"{100 * f['frac_lower']:.1f}% of its posterior draws lie "
+                f"within {100 * tol_frac:g}% of the span of its lower bound "
+                f"{f['lower']:.4g}{unit} and {100 * f['frac_upper']:.1f}% "
+                f"of its upper bound {f['upper']:.4g}{unit}"
+            )
+        log.warning(
+            "%s: %s carried %d draws beyond the raw-z threshold with an "
+            "ordinary lp, kept as valid posterior draws; %s.  A posterior "
+            "against a bound is real mass there: if the bound is a "
+            "modelling choice rather than a physical limit, widen it in the "
+            "params file; if the run is short, these may be chains that "
+            "have not yet equilibrated.",
+            head,
+            f["display"],
+            f["n_draws"],
+            where,
+        )
+
+
 class ModelAuditor:
     def __init__(self, model, system, transformed_inits):
         self.model = model
@@ -764,24 +897,44 @@ class ModelAuditor:
 # Posterior against a wall (review 8.2.2)
 # ---------------------------------------------------------------------------
 
-# How close to a bound, as a fraction of the bound-to-bound distance, counts
-# as "against the wall".  Measured in LOG space when both bounds are positive
-# -- err_scale on [0.01, 100] is four decades, and 2% of that is a factor 1.2
-# from either end -- and linearly otherwise.  A linear rule on a positive
-# scale would call err_scale = 1 "near the lower bound 0.01" on a span of
-# 100, which is the wrong reading of every scale-like parameter.
-NEAR_BOUND_MARGIN = 0.02
+# "Against the wall" is measured in units of the POSTERIOR's own width, not
+# of the bound-to-bound range.  The range rule (a median within 2% of the
+# span) was meaningless wherever one bound is effectively unbounded: every
+# signed jitter variance -- [-0.95 min(err)^2, 1e8] -- sat "0.00000002% of the
+# way across" and was reported against its floor on every fit (examples/
+# GaiaBH3's astrometric jitter, 0.0138 mas^2 with a 0.0013 spread, twelve
+# widths clear of a -0.0015 floor).  Positions are still measured in LOG
+# space when both bounds are positive (a scale: err_scale on [0.01, 100]) and
+# linearly otherwise; the widths below are ratios in that same space, so the
+# normalization of the range cancels.
+#
+# The MEDIAN trigger: the median is closer to a bound than NEAR_BOUND_WIDTHS
+# times the posterior's NARROWER half-width (the smaller of median - 16th
+# and 84th - median percentile).  Either half-width alone can be stretched
+# by mass piled on a wall on its own side -- 20% of the draws on the lower
+# wall pulls the 16th percentile onto it -- and the stretched one would make
+# a median well clear of the OTHER wall read as against it; the narrower one
+# is the posterior's own scale.  A posterior the wall has shaped sits inside
+# the threshold -- a half-normal hugging the wall gives 1.43, an exponential
+# 1.34, a uniform starting at the wall 1.47 -- while a Gaussian whose centre
+# is k sigma clear gives k.
+NEAR_BOUND_WIDTHS = 2.0
 
-# The MEDIAN test above misses a posterior that is sculpted by a wall without
+# The MASS trigger catches a posterior that is sculpted by a wall without
 # being centred on it: DC2018 event 152's source teffsed had its whole lower
 # tail on the 2600 K edge of the bolometric-correction grid with a median at
-# 3163 K, so nothing warned, and the reported temperature was a distribution
-# the grid had cut in half.  An element is therefore ALSO reported when this
-# fraction of its draws lies within NEAR_BOUND_MARGIN of either bound.  It is
-# looser than the cap rule's 50% (CAP_PILE_FRAC) on purpose: that rule asks
-# "would this parameter leave if it could", which wants a majority, while
-# this one asks "is the answer shaped by the edge", which a tenth of the mass
-# already does.
+# 3163 K, so the median rule alone said nothing, and the reported temperature
+# was a distribution the grid had cut in half.  An element is therefore ALSO
+# reported when EDGE_MASS_FRAC of its draws lie within EDGE_WIDTH_FRAC of the
+# posterior's 68% width (84th - 16th percentile) of either bound.  The
+# fraction is looser than the cap rule's 50% (CAP_PILE_FRAC) on purpose: that
+# rule asks "would this parameter leave if it could", which wants a
+# majority, while this one asks "is the answer shaped by the edge", which a
+# tenth of the mass already does.
+#
+# A posterior with NO width (every draw equal) has no scale to measure a
+# distance in; it is reported only when it sits exactly on a bound.
+EDGE_WIDTH_FRAC = 0.1
 EDGE_MASS_FRAC = 0.10
 
 
@@ -868,11 +1021,23 @@ def grid_bounded_paths(system):
     return out
 
 
+def _widths_from_wall(distance, half_width):
+    """``distance`` to a bound in units of the posterior's narrower
+    ``half_width`` (both in the same position space).  A posterior with no
+    width is infinitely far unless it sits on the bound."""
+    if distance <= 0.0:
+        return 0.0
+    if half_width <= 0.0:
+        return np.inf
+    return distance / half_width
+
+
 def warn_posterior_near_bounds(
     system,
-    margin=NEAR_BOUND_MARGIN,
+    widths=NEAR_BOUND_WIDTHS,
     log=None,
     mass_frac=EDGE_MASS_FRAC,
+    edge_width=EDGE_WIDTH_FRAC,
 ):
     """Warn, per sampled element, when the posterior median sits against a
     hard bound -- and say what the component thinks that means.
@@ -892,10 +1057,12 @@ def warn_posterior_near_bounds(
     remedy is the errors or the starting model, not a wider bound (review
     8.2.2, measured on DC2018-226 where both bands sat at 300-460x).
 
-    Two triggers, because a wall shapes an answer in two different ways:
-    the posterior MEDIAN against the bound (the original rule, review
-    8.2.2), or more than ``mass_frac`` of the DRAWS within ``margin`` of
-    either bound (``EDGE_MASS_FRAC``).  A bound that is a model grid's
+    Two triggers, because a wall shapes an answer in two different ways,
+    both measured in units of the posterior's own width (NEAR_BOUND_WIDTHS,
+    above): the posterior MEDIAN closer to a bound than ``widths`` of its
+    narrower half-width (review 8.2.2), or at least ``mass_frac`` of the
+    DRAWS within ``edge_width`` of the 68% width of either bound
+    (``EDGE_MASS_FRAC``, review 2.9.16).  A bound that is a model grid's
     extent (``grid_bounded_paths``) says so in the message, because there
     the values on the wall are extrapolation rather than measurement.
 
@@ -919,12 +1086,6 @@ def warn_posterior_near_bounds(
                 continue
             lower, upper = tf["lowers"][i], tf["uppers"][i]
             try:
-                v_int = float(par.to_internal(med[i], index=i))
-            except Exception:  # noqa: BLE001 -- a conversion that fails is not a wall
-                continue
-            pos = near_bound_position(v_int, lower, upper)
-            # Every draw, not just the median: the mass criterion.
-            try:
                 # `med` is taken over the LAST axis, so the element axis
                 # is the first one -- and a scalar parameter's posterior is
                 # 1-D, where arr[i] would be one draw rather than the
@@ -934,22 +1095,30 @@ def warn_posterior_near_bounds(
                     par.to_internal(np.asarray(draws_u, dtype=float), index=i),
                     dtype=float,
                 )
-            except Exception:  # noqa: BLE001 -- as above, a failed conversion is not a wall
-                draws_int = np.array([])
+            except Exception:  # noqa: BLE001 -- a conversion that fails is not a wall
+                continue
             dpos = _positions(draws_int, lower, upper)
-            n_ok = int(np.isfinite(dpos).sum())
-            frac_low = float(np.nansum(dpos <= margin) / n_ok) if n_ok else 0.0
-            frac_high = (
-                float(np.nansum(dpos >= 1.0 - margin) / n_ok) if n_ok else 0.0
-            )
-            med_hit = np.isfinite(pos) and not (margin < pos < 1.0 - margin)
+            dpos = dpos[np.isfinite(dpos)]
+            if dpos.size == 0:
+                continue
+            pos = float(np.median(dpos))
+            p16, p84 = (float(x) for x in np.percentile(dpos, [16.0, 84.0]))
+            # each distance over the NARROWER half-width (above)
+            half = min(pos - p16, p84 - pos)
+            w_lo = _widths_from_wall(pos, half)
+            w_hi = _widths_from_wall(1.0 - pos, half)
+            delta = edge_width * (p84 - p16)
+            frac_low = float(np.mean(dpos <= delta))
+            frac_high = float(np.mean(dpos >= 1.0 - delta))
+            med_hit = min(w_lo, w_hi) < widths
             mass_hit = max(frac_low, frac_high) >= mass_frac
             if not (med_hit or mass_hit):
                 continue
             if med_hit:
-                side = "lower" if pos <= margin else "upper"
+                side = "lower" if w_lo <= w_hi else "upper"
             else:
                 side = "lower" if frac_low >= frac_high else "upper"
+            n_widths = w_lo if side == "lower" else w_hi
             lo_u = float(np.atleast_1d(par.from_internal(lower, index=i))[0])
             hi_u = float(np.atleast_1d(par.from_internal(upper, index=i))[0])
             # `unit` is an astropy Unit (or a per-element list of them) after
@@ -978,6 +1147,7 @@ def warn_posterior_near_bounds(
                 "median": float(med[i]),
                 "side": side,
                 "position": float(pos),
+                "widths": float(n_widths),
                 "lower": lo_u,
                 "upper": hi_u,
                 "frac": frac,
@@ -986,18 +1156,24 @@ def warn_posterior_near_bounds(
             }
             hits.append(hit)
             if med_hit:
+                how_far = (
+                    "on it"
+                    if n_widths == 0.0
+                    else f"{n_widths:.2f} posterior half-widths from it"
+                )
                 where = (
                     f"posterior median {med[i]:.4g}"
                     f"{(' ' + unit) if unit else ''} sits against its {side} "
-                    f"bound [{lo_u:.4g}, {hi_u:.4g}] ({pos:.1%} of the way "
-                    f"across, within the {margin:.0%} margin)"
+                    f"bound [{lo_u:.4g}, {hi_u:.4g}] ({how_far}; a posterior "
+                    f"the bound does not shape sits more than {widths:g})"
                 )
             else:
                 where = (
-                    f"{frac:.0%} of its posterior draws sit within the "
-                    f"{margin:.0%} margin of its {side} bound "
-                    f"[{lo_u:.4g}, {hi_u:.4g}], though the median "
-                    f"({med[i]:.4g}{(' ' + unit) if unit else ''}) does not"
+                    f"{frac:.0%} of its posterior draws sit within "
+                    f"{edge_width:g} of the posterior's 68% width of its "
+                    f"{side} bound [{lo_u:.4g}, {hi_u:.4g}], though the "
+                    f"median ({med[i]:.4g}{(' ' + unit) if unit else ''}) "
+                    f"does not"
                 )
             if hit["grid"]:
                 why = (

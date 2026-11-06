@@ -1354,7 +1354,20 @@ class ConfigManager:
 
                     for raw_map in raw_maps:
                         instance_map = {}
+                        # A symbol mapped to None names a quantity THIS
+                        # instance does not have (a planet with no Keplerian
+                        # orbit has no orbital period): every relation that
+                        # reads it is left out of this instance, rather than
+                        # bound to some other instance's path or left as a
+                        # bare symbol shared across instances.
+                        absent = {
+                            sym_name
+                            for sym_name, path in raw_map.items()
+                            if path is None
+                        }
                         for sym_name, path in raw_map.items():
+                            if path is None:
+                                continue
                             if "." in str(path):
                                 instance_map[sym_name] = path
                             else:
@@ -1384,12 +1397,40 @@ class ConfigManager:
                                 subs[sym] = sp.Symbol(instance_map[sym.name])
 
                         for rel in getattr(module, "RELATIONS", []):
+                            if any(
+                                sym.name in absent for sym in rel.free_symbols
+                            ):
+                                continue
                             rel_inst = rel.subs(subs)
                             # Maps sharing symbols (e.g. per-source maps with a
                             # common lens mass) produce identical instances of
                             # the shared relations; keep one copy.
                             if rel_inst not in self.all_relations:
                                 self.all_relations.append(rel_inst)
+
+                    # Relations whose SHAPE depends on the config (a sum over
+                    # however many bodies a lens has, review 8.6.13) cannot
+                    # live in the fixed RELATIONS list, so a module may also
+                    # define get_extra_relations(entry_cfg, system_config):
+                    # equations already written in FULL-PATH symbols, no
+                    # renaming.  A bare (pathless) symbol there is a bug in
+                    # that module, not a spelling, so it raises.
+                    extra = getattr(module, "get_extra_relations", None)
+                    if extra is not None:
+                        for rel in extra(entry_cfg, self.system_config):
+                            for sym in sorted(rel.free_symbols, key=str):
+                                if "." not in sym.name:
+                                    raise ValueError(
+                                        f"{yaml_key} get_extra_relations: "
+                                        f"symbol '{sym.name}' in {rel} is not "
+                                        f"a full parameter path."
+                                    )
+                                self.master_symbol_map[sym.name] = sp.Symbol(
+                                    sym.name
+                                )
+                                self.relation_symbol_paths.add(sym.name)
+                            if rel not in self.all_relations:
+                                self.all_relations.append(rel)
 
         # Sorted for the same reason as the symbolic_physics walk above.  No
         # root-level key is currently defined by two components (a test pins
@@ -1476,6 +1517,48 @@ class ConfigManager:
         expr = plink.expr.subs(subs) if subs else plink.expr
         return tf * expr if tf != 1.0 else expr
 
+    def add_link(self, target_path, expr_str, origin):
+        """A COMPONENT's hard link: ``target_path.initval = expr_str``.
+
+        The component channel for a tie the topology implies (a star in an
+        orbit group shares its anchor's distance, proper motion, rv,
+        initfeh, age and av -- ``Star._link_orbit_members``).  It lands in
+        ``self.links`` beside the user's, so the engine, the build graph and
+        ``Component._wire_user_links`` treat it exactly as they treat a
+        params-file link, but it is NEVER a ``user_params`` entry
+        (CLAUDE.md), and its ``origin`` keeps it out of the user's column of
+        the provenance ledger: the engine ranks its target as a propagated
+        value, not a USER one.  The link is hard only where the target's
+        resolved ``sigma`` is 0, which the caller supplies through its
+        manifest ``"overrides"`` channel.  Stage 3 only: the engine reads
+        the links at stage 4.
+
+        Both paths in the index form.  A target that already carries an
+        ``initval`` or ``mu`` link raises -- the caller decides precedence
+        against the user's links before calling, so reaching here with one
+        is a bookkeeping bug.
+        """
+        from .linking import ParamLink, parse_link_expression
+
+        existing = self.links.get(target_path, {})
+        if "initval" in existing or "mu" in existing:
+            raise ValueError(
+                f"add_link({target_path!r}, {expr_str!r}, origin={origin!r}): "
+                f"the target already carries a link "
+                f"({sorted(existing)}); the caller must not add a second one."
+            )
+        expr, deps = parse_link_expression(
+            expr_str, self.system_config, f" (on {target_path}.initval)"
+        )
+        self.links.setdefault(target_path, {})["initval"] = ParamLink(
+            target_path=target_path,
+            field="initval",
+            expr_str=expr_str,
+            expr=expr,
+            dep_paths=list(deps),
+            origin=origin,
+        )
+
     def get_element_links(self, comp_type, param_name):
         """
         Return the user-defined links targeting elements of one parameter:
@@ -1534,9 +1617,15 @@ class ConfigManager:
             f"the value could be read in."
         )
 
-    def _translate_and_scale(self, path, value):
+    def _translate_and_scale(self, path, value, unit=None):
         """Standardize a human-readable path to internal-index form and convert
         its value to internal units.  Returns (translated_path, internal_value).
+
+        ``unit=None`` reads ``value`` in the parameter's resolved USER unit
+        (a user ``unit:`` override, else the defaults.yaml ``unit``).  A
+        ``unit`` string states the unit the number is actually in, and the
+        value is converted straight to the parameter's ``internal_unit`` --
+        the user's display unit plays no part (see ``add_hint``).
 
         The ONE implementation shared by add_hint / add_scale_hint /
         add_seed_hints / seed_start_value, so they cannot drift apart on
@@ -1586,6 +1675,10 @@ class ConfigManager:
         self._reject_broadcast_hint_path(path, translated_path)
 
         final_parts = translated_path.split(".")
+        if unit is not None:
+            return translated_path, float(value) * self._stated_unit_factor(
+                translated_path, unit
+            )
         if len(final_parts) >= 2:
             c_type, p_name = final_parts[0], final_parts[-1]
             factor = self.get_conversion_factor(
@@ -1597,7 +1690,33 @@ class ConfigManager:
 
         return translated_path, internal_value
 
-    def add_hint(self, path, value, rank=PRECEDENCE_DERIVED_DATA):
+    def _stated_unit_factor(self, translated_path, unit):
+        """user -> internal multiplier for a value a COMPONENT computed in
+        the stated ``unit`` (review 1.5.10).
+
+        The parameter must declare an ``internal_unit`` in its defaults.yaml:
+        a component stating a unit for a parameter that has none is a
+        bookkeeping bug in that component, and is raised, naming both.
+        """
+        parts = translated_path.split(".")
+        if len(parts) < 2:
+            raise ValueError(
+                f"[{translated_path}] a hint with unit={unit!r} needs a "
+                f"<component>.<param> path."
+            )
+        c_type, p_name = parts[0], parts[-1]
+        i_str = (self.base_defaults.get(c_type, {}).get(p_name, {}) or {}).get(
+            "internal_unit"
+        )
+        if not i_str:
+            raise ValueError(
+                f"[{translated_path}] a hint was pushed with unit={unit!r}, "
+                f"but {c_type}.{p_name} declares no internal_unit in its "
+                f"defaults.yaml, so the stated unit cannot be converted."
+            )
+        return unit_conversion(unit, i_str, translated_path)
+
+    def add_hint(self, path, value, rank=PRECEDENCE_DERIVED_DATA, unit=None):
         """Register a component's ranked, data-driven START VALUE.
 
         This is the one correct channel for a start value a component
@@ -1617,7 +1736,18 @@ class ConfigManager:
 
         Converts human-readable paths to strict indices and scales to
         internal units (``_translate_and_scale``, shared with every other
-        hint channel).  A hint is one scalar feeding ``initval`` and nothing
+        hint channel).
+
+        STATE THE UNIT OF A NUMBER YOU COMPUTED (``unit=``).  Without it the
+        value is read in the parameter's resolved USER unit, which honors a
+        user ``unit:`` override -- right for a value that came out of the
+        user's own params (or out of ``resolve()``), wrong for one a
+        component computed in a fixed unit.  RVInstrument's gamma start, the
+        mean RV in m/s, used to be pushed bare, so ``rvinstrument.0.gamma:
+        {unit: km/s}`` read 12002 m/s as 12002 km/s and started gamma 1000x
+        off (review 1.5.10); Planet's K start did the same.  With ``unit=``
+        the value goes straight from that unit to ``internal_unit`` through
+        ``unit_conversion`` and the user's display unit plays no part.  A hint is one scalar feeding ``initval`` and nothing
         else: a bound, a prior or a structural pin goes through
         ``add_override``, a preliminary whitening scale through
         ``add_scale_hint``.
@@ -1631,7 +1761,7 @@ class ConfigManager:
         by hand).
         """
         translated_path, internal_value = self._translate_and_scale(
-            path, value
+            path, value, unit=unit
         )
 
         # Store the fully processed, ready-to-use hint
@@ -1767,7 +1897,7 @@ class ConfigManager:
         val = float(sets[seed][tpath])
         return val / factor if factor else val
 
-    def add_scale_hint(self, path, scale):
+    def add_scale_hint(self, path, scale, unit=None):
         """
         Register a context-appropriate PRELIMINARY init_scale for a parameter.
 
@@ -1783,9 +1913,12 @@ class ConfigManager:
         The most specific spelling wins: a 3-part path here beats a 2-part
         broadcast one for the element it names, exactly as it does for every
         other field ``resolve()`` layers.
+
+        ``unit=`` states the unit a COMPUTED scale is in, exactly as for
+        ``add_hint``; without it the scale is read in the user's unit.
         """
         translated_path, internal_scale = self._translate_and_scale(
-            path, scale
+            path, scale, unit=unit
         )
         self.scale_hints[translated_path] = internal_scale
 
@@ -3605,10 +3738,12 @@ class ConfigManager:
             entry = user_entry(self.user_params, path)
             if entry is not None and entry.get("initval") is not None:
                 return "user"
-            if path in (self.links or {}) and (
-                "initval" in self.links[path] or "mu" in self.links[path]
-            ):
-                return "user"
+            linked = (self.links or {}).get(path, {})
+            for fld in ("initval", "mu"):
+                if fld in linked:
+                    # A component link (``add_link``) is a tie the topology
+                    # implies, not a value the user wrote.
+                    return "user" if linked[fld].origin == "user" else "solved"
         return "default"
 
     def export_solution(
@@ -4006,6 +4141,48 @@ class ConfigManager:
             )
         return out
 
+    def solved_start(self, paths):
+        """The seed-0 start the LAST ``finalize_user_params`` solved for each
+        of `paths`, with its provenance -- ``probe_start``'s answer after
+        stage 4, in the same ``{path: ProbedStart}`` shape.
+
+        For a reader that had to read a start early (``probe_start``) and
+        must check it against the one the model starts at
+        (``Component.reread_after_starts``).  Seed 0 is solved last, so the
+        engine's last-solve record is seed 0's.  A path the solve did not
+        reach comes back ``"not derivable"``, as from ``probe_start``.
+
+        Raises:
+            RuntimeError: no solve has run yet.
+            ValueError: a path is not canonical index form.
+        """
+        if not self._last_resolved:
+            raise RuntimeError(
+                "solved_start: finalize_user_params has not run; use "
+                "probe_start before stage 4."
+            )
+        out = {}
+        for p in paths:
+            parts = p.split(".")
+            if len(parts) != 3 or not parts[1].isdigit():
+                raise ValueError(
+                    f"solved_start: '{p}' is not a canonical index-form path "
+                    f"(<component>.<index>.<param>)."
+                )
+            if p not in self._last_resolved:
+                out[p] = ProbedStart(p, None, None, None, "not derivable")
+                continue
+            val = float(self._last_resolved[p])
+            rank = self._last_provenance[p]
+            out[p] = ProbedStart(
+                p,
+                val,
+                self.from_internal(p, val),
+                rank,
+                self._provenance_label(rank),
+            )
+        return out
+
     def from_internal(self, path, value):
         """Convert an INTERNAL-unit value of `path` to its USER unit.
 
@@ -4020,6 +4197,18 @@ class ConfigManager:
             parts[0], parts[-1], full_path=path
         )
         return float(value) / factor
+
+    def to_internal(self, path, value):
+        """Convert a USER-unit value of `path` to its INTERNAL unit.
+
+        The inverse of ``from_internal``: ``get_conversion_factor`` is the
+        user -> internal multiplier, so this multiplies by it.
+        """
+        parts = path.split(".")
+        factor = self.get_conversion_factor(
+            parts[0], parts[-1], full_path=path
+        )
+        return float(value) * factor
 
     def _probe_solve(self, paths, seed_hints=None):
         """Run the engine on a snapshot and roll every mutation back.

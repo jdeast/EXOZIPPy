@@ -21,10 +21,12 @@ astrometryinstrument:
         func_name: "calc_jitter"
         deps: [ "jitter_variance" ]
   fluxfrac:
-    # Fractional flux of the companion(s) in this instrument's band,
-    # beta = F_2 / (F_1 + F_2).  The photocenter semimajor axis is
-    # a_phot = a_rel * (M_2/M_tot - beta); beta = 0 (default, fixed)
-    # corresponds to a dark companion (photocenter = primary).
+    # The OTHER star's share of the light in this dataset's PSF, in its
+    # band: b = F_other / (F_target + F_other) -- the companion side's for
+    # a primary-group target, the primary side's for a companion-group one.
+    # The photocenter wobbles as x_rel (b - M_c/M) or x_rel (M_p/M - b)
+    # (astrometryinstrument.py, "The photocenter"); b = 0 (default, fixed)
+    # is a dark companion (photocenter = the target star).
     lower: 0.0
     upper: 1.0
     initval: 0.0
@@ -64,3 +66,80 @@ astrometryinstrument:
     internal_unit: "mas"
     latex: "\\Delta\\delta_{b}"
     description: "Blend photocenter offset, North"
+  # A star named in `psf_stars:` relative to the source's baseline flux in
+  # this dataset's band, F_star / F_S, SAMPLED only where the dataset sets
+  # `fitpsfflux: true` (the SED cannot predict the band).  One element per
+  # (dataset, member), spelled astrometryinstrument.<dataset>.psf_fluxratio_<k>
+  # with k the member's position in psf_stars.  Uniform on these bounds
+  # unless the params file states a prior.
+  psf_fluxratio:
+    lower: 0.0
+    upper: 1000.0
+    initval: 0.1
+    init_scale: 0.01
+    unit: ""
+    internal_unit: ""
+    latex: "F_{\\star}/F_{S}"
+    description: "PSF star flux / source flux"
+  # The Hipparcos-to-Gaia frame tie of a dataset with `fithipframe: true`
+  # (frametie.py): the Hipparcos frame minus the frame of the other datasets
+  # (Gaia), projected at the star -- a position offset at J1991.25 (East true
+  # arc, North) and a proper-motion offset.  INACTIVE elsewhere; declared only
+  # when some dataset sets the flag.  The priors are zero-mean Gaussians:
+  #   position, 0.3 mas: Gaia EDR3's bright frame was aligned to the Hipparcos
+  #     positions at J1991.25 (Lindegren et al. 2021b, Sect. 4.5) and Brandt
+  #     (2021, Sect. 6) needs no positional inflation of Hipparcos, an extra
+  #     0.3 mas being indistinguishable from none.  The Hipparcos frame's own
+  #     alignment to the ICRS is +/-0.6 mas per axis (Kovalevsky et al. 1997):
+  #     the width to use if a Gaia release is not aligned to Hipparcos.
+  #   proper motion, 0.28 mas/yr: the local corrections Brandt (2021, Fig. 3)
+  #     applies to the Hipparcos proper motions to bring them into the Gaia
+  #     frame (std 0.2 mas/yr per coordinate) in quadrature with the 0.2
+  #     mas/yr additive Hipparcos error inflation of Brandt (2018, Sect. 6;
+  #     2021, Sect. 4.3) -- for one star an additive pm error IS a pm offset.
+  # The bounds are a box far outside any measured frame difference, there
+  # only so a runaway is visible; the priors do the constraining.
+  frame_dE:
+    lower: -100.0
+    upper: 100.0
+    initval: 0.0
+    init_scale: 0.1
+    mu: 0.0
+    sigma: 0.3
+    unit: "mas"
+    internal_unit: "mas"
+    latex: "\\Delta\\alpha^*_{\\rm frame}"
+    description: "Frame offset at J1991.25, East"
+  frame_dN:
+    lower: -100.0
+    upper: 100.0
+    initval: 0.0
+    init_scale: 0.1
+    mu: 0.0
+    sigma: 0.3
+    unit: "mas"
+    internal_unit: "mas"
+    latex: "\\Delta\\delta_{\\rm frame}"
+    description: "Frame offset at J1991.25, North"
+  frame_dpmE:
+    lower: -10.0
+    upper: 10.0
+    initval: 0.0
+    init_scale: 0.05
+    mu: 0.0
+    sigma: 0.28
+    unit: "mas/yr"
+    internal_unit: "mas/yr"
+    latex: "\\Delta\\mu_{\\alpha^*,{\\rm frame}}"
+    description: "Frame proper-motion offset, East"
+  frame_dpmN:
+    lower: -10.0
+    upper: 10.0
+    initval: 0.0
+    init_scale: 0.05
+    mu: 0.0
+    sigma: 0.28
+    unit: "mas/yr"
+    internal_unit: "mas/yr"
+    latex: "\\Delta\\mu_{\\delta,{\\rm frame}}"
+    description: "Frame proper-motion offset, North"

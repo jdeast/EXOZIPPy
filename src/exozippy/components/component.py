@@ -1,3 +1,4 @@
+import logging
 import weakref
 from abc import ABC, abstractmethod
 
@@ -8,6 +9,8 @@ from ..config import NUMERIC_KEYS, user_entry
 from ..manifest import interpret_manifest_entry
 from ..physics_registry import PHYSICS_REGISTRY
 from .parameter import ElementExpression, OwnPrePatchRef, Parameter
+
+logger = logging.getLogger(__name__)
 
 
 def layer_options(cfg, options):
@@ -53,7 +56,8 @@ def in_topology(system, name):
       both but whose ``config`` lacked the key never consulted the second.
     * ``Orbit._topology`` and ``Orbit.register_parameters``' inline check
       consulted ``config_manager.system_config`` not at all.
-    * Only ``Star._galactic_imf`` looked at ``active_components`` first, which
+    * Only ``Star._galactic_imf`` (now ``_has_galacticmodel``) looked at
+      ``active_components`` first, which
       is the sole holder that carries the BUILT instance.
 
     The chain here is the union, in the order of decreasing authority:
@@ -70,12 +74,12 @@ def in_topology(system, name):
 
     Returns the first hit, or ``None``.  Truthiness is the common use
     (``if in_topology(system, "sed")``), and the value is there for the
-    caller that wants the instance (``Star._galactic_imf`` reads its
-    ``IMF:``).  **An empty config block is a real answer** -- ``sed: {}`` is
+    caller that wants the instance.  **An empty config block is a real answer** -- ``sed: {}`` is
     a system WITH an SED -- so this returns the block itself and callers must
     test ``is not None``, not truthiness, when an empty block matters.  The
-    two shipped callers that care (``_galactic_imf``, ``structure_consumers``)
-    read a key off it or only need the boolean, so both are safe with either.
+    two shipped callers that care (``_has_galacticmodel``,
+    ``structure_consumers``) only need the boolean or read a key off it, so
+    both are safe with either.
 
     A module function rather than only a ``System`` method because every
     caller is a component holding a ``system`` that may be a test double;
@@ -305,6 +309,40 @@ class Component(ABC):
                 wrote[i] = True
         return wrote
 
+    def direct_angle_requests(self, angle):
+        """``(flag, per-element request)`` for an angle with direction latents.
+
+        The user's override of the automatic coordinate choice in
+        ``exozippy.angles``: ``fit<angle>: true`` on an instance's block
+        samples the angle directly, ``false`` keeps its latents, absent lets
+        the code decide.  One boolean, tri-state at the config layer exactly
+        as ``fitvcve`` is (components.md, "Config flag vocabulary": a
+        coordinate choice is ``fit<coord>``).  Read here, once, from the
+        per-instance config blocks; a component whose elements are not one
+        per block overrides this.  A non-boolean value raises.
+        """
+        flag = f"fit{angle}"
+        requests = []
+        for i, block in enumerate(self.config):
+            value = (block or {}).get(flag)
+            if value is not None and not isinstance(value, bool):
+                raise ValueError(
+                    f"[{self.prefix}.{self.names[i]}] '{flag}' must be true "
+                    f"or false (absent lets the code choose); got {value!r}."
+                )
+            requests.append(value)
+        return flag, requests
+
+    def direct_angle_halfwidth(self, angle):
+        """Per element: the half-width (rad) of a DIRECT angle's window.
+
+        A full turn by default (pi), so the only seam is opposite the start.
+        A component whose angle is exactly degenerate with angle + pi on some
+        elements returns pi/2 there (``Orbit``: an ascending node no radial
+        datum identifies), so the window holds one label.
+        """
+        return np.full(self.n_elements, np.pi)
+
     @classmethod
     def config_schema(cls):
         """Describe component-LEVEL config keys that are not parameters.
@@ -407,6 +445,26 @@ class Component(ABC):
         """
         return []
 
+    def reread_after_starts(self, system):
+        """After stage 4: redo an estimate that read a start too early.
+
+        A data-derived estimate that needs a START (MulensInstrument's flux
+        bootstrap needs the event geometry) runs at stage 1 on
+        ``ConfigManager.probe_start``, which sees only the hints pushed so
+        far; a stage-3 hint can still move the start.  Such a component
+        overrides this to compare what it read with
+        ``ConfigManager.solved_start``, recompute the estimate at the solved
+        start where they differ, and return one ``(message, param_paths)``
+        per recomputation.  ``System.prepare`` then runs stages 3 and 4 once
+        more (shared with ``revise_after_starts``), logs each message at
+        INFO and records it as a solve diagnostic -- and asks AGAIN: a
+        component that still finds its reading moved raises there, because
+        its estimate and the start depend on each other.  It must return
+        ``[]`` when what it read agrees with the solved start.  The default
+        reads nothing.
+        """
+        return []
+
     def epochs_constraining(self, system, orbit):
         """Stage 3: the observation epochs this component's data put on an
         orbit, and how much each tells about its conjunction time.
@@ -437,6 +495,45 @@ class Component(ABC):
         ``orbit.amplitude_constrained_orbits`` uses.  The default -- a
         component with no time-stamped data on any orbit -- returns ``{}``.
         """
+        return {}
+
+    def initial_logmass(self, system):
+        """Stage 7: the BIRTH mass of each star whose mass loss this
+        component models, ``{star index: log10(M_ini / solMass) tensor}``.
+
+        ``star.logmass`` is the mass a star has NOW -- every consumer (an RV
+        semi-amplitude, a transit density, a lens mass) wants that one. A
+        mass FUNCTION is a density in the mass at birth, so the component
+        applying one (galacticmodel's IMF) evaluates it at the initial mass
+        wherever a component supplies one here. A component that does must
+        also add the Jacobian ``log |d log M_ini / d log M|`` of that change
+        of coordinate itself, so the prior is a density in the initial mass
+        whether or not anything applies a mass function. Callable any time
+        after stage 6 (every Parameter exists by then), in any component
+        order. The evolutionary model is the one implementation
+        (``components/evolutionarymodel/evolutionarymodel.md``); the default
+        models no mass loss and returns ``{}``.
+        """
+        return {}
+
+    def selected_sources(self, system):
+        """Stage 7: the indices of the stars this component OBSERVED
+        through a flux-limited selection (a survey's source stars), as a
+        list.  A population prior that models the selection (galacticmodel's
+        genulens port weights a source by its main-sequence count and the
+        survey's detection fraction, as genulens does) applies it to these
+        stars only; every other star is a field object.  The default
+        selects nothing; the microlensing event returns its source."""
+        return []
+
+    def unresolved_binary_lenses(self, system):
+        """Stage 7: ``{lens star index: source star index}`` for each star
+        this component treats as ONE lens whose mass may be an unresolved
+        binary's (a single-lens microlensing event).  A population prior
+        that models binaries (galacticmodel's genulens port, ``binaries:
+        true``: genulens's BINARY 1) replaces that star's luminous mass
+        function by the effective lens mass a binary system presents at
+        the event's Einstein-radius scale.  The default names none."""
         return {}
 
     # Attribute names holding something that BELONGS TO ONE BUILD: a
@@ -728,7 +825,71 @@ class Component(ABC):
             if not hasattr(self, "_built_for_model"):
                 self._built_for_model = {}
             self._built_for_model[param_name] = weakref.ref(model)
-        return param_obj.build_pymc()
+        node = param_obj.build_pymc()
+        self._inherit_inactivity(param_obj, entry, selections, n_elements)
+        return node
+
+    def _inherit_inactivity(self, param_obj, entry, selections, n_elements):
+        """A derived element built from an INACTIVE local dependency is
+        inactive too: a function of a bookkeeping value is a bookkeeping
+        value, not a result.
+
+        The structural inactive tier holds an element nothing reads at a
+        bookkeeping pin (``star.radius`` on a lens nobody photometers), and
+        the reporting layer suppresses it -- but ``star.logg``, ``density``,
+        ``luminosity`` and ``fbol`` kept computing from that pin and
+        reaching every table as if measured (a 0.11 Msun lens at logg 3.48
+        and one solar luminosity, examples/KMT-2021-BLG-1122L).  The manifest
+        cannot say it: a derived element is never masked out (the mask
+        means "not built", and the value is still needed by whatever reads
+        it), so the role is inherited HERE, after the build, by clearing
+        ``is_active`` on the elements whose dependency element is inactive.
+        The Deterministic is built as before; only the reports change.
+
+        Inheritance runs only through dependencies whose alignment is
+        provable the way ``_element_expression``'s slicing requires: a bare
+        LOCAL parameter name with the same element count.  A
+        cross-component path, a mapped dependency and a context node are
+        skipped -- "entry i belongs to element i" is not known there, and
+        guessing would hide live rows.  Dependencies are built before their
+        dependents (``graph.py``), so a chain (radius -> luminosity -> fbol)
+        inherits level by level.
+        """
+        if not selections or not param_obj._built_roles():
+            return
+        active = np.array(param_obj.is_active, dtype=bool).reshape(-1)
+        if active.size != n_elements:
+            return
+        every = np.ones(n_elements, dtype=bool)
+        inherited = []
+        for sel in selections:
+            if sel.output_only:
+                continue
+            covered = (
+                every
+                if sel.mask is None
+                else np.asarray(sel.mask, dtype=bool).reshape(-1)
+            )
+            for d in entry.dep_names(sel.config):
+                if "." in d or "[" in d:
+                    continue  # cross-component or mapped: not provably aligned
+                dep = getattr(self, d, None)
+                if not isinstance(dep, Parameter) or not dep._built_roles():
+                    continue
+                dep_active = np.array(dep.is_active, dtype=bool).reshape(-1)
+                if dep_active.size != n_elements:
+                    continue
+                off = covered & ~dep_active & active
+                if off.any():
+                    active &= ~off
+                    inherited.append((d, np.nonzero(off)[0].tolist()))
+        if inherited:
+            param_obj.is_active = active
+            logger.debug(
+                "%s: element(s) inactive because a dependency is: %s",
+                param_obj.label,
+                "; ".join(f"{d} -> {idx}" for d, idx in inherited),
+            )
 
     def _element_expression(
         self, model, system, context_nodes, entry, sel, where
@@ -1083,6 +1244,12 @@ class Component(ABC):
                 out.setdefault(key, {})[idx] = {
                     "fn": make_fn(),
                     "intra_deps": {j for (j, _) in self_refs.values()},
+                    # Every path the expression reads (standardized index
+                    # form), so a consumer can tell "tied to exactly one
+                    # other element of this parameter" from a link that
+                    # also reads something else -- galacticmodel's
+                    # linked-star rule (star.md) keys on that.
+                    "dep_paths": tuple(plink.dep_paths),
                 }
 
         return out or None

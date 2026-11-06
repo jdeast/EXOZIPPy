@@ -18,7 +18,7 @@ What is pinned here, and why each pin is the one that matters:
     a sign for dalpha_dt is only meaningful jointly with sign(u_0).
   - The t0_par anchor: at t = t0_par the moving geometry IS (s_0, alpha_0),
     so the magnification there matches the static model exactly.
-  - System level: a lens companion on a `type: linear` orbit gets the
+  - System level: a lens companion on a `type: uniform_rotation` orbit gets the
     orbit's ds_dt/dalpha_dt and the lens's beta,
     beta evaluates to the A19 formula, and the model builds with a finite
     logp.  Also the mulensmodel backend passes the rates through natively.
@@ -110,13 +110,28 @@ def _series(times, p):
     return p["s"] + p["ds_dt"] * dt_yr, p["alpha"] + p["dalpha_dt"] * dt_yr
 
 
+def _mulensmodel_kernel(op):
+    """The direct Op with VBM's default minannuli = 1, which is what
+    MulensModel's own VBM instance runs: these are plumbing-parity tests
+    against an identical kernel.  The direct Op forces a second LD annulus
+    (mulensing.md, "VBM's limb-darkened finite source never stops after one
+    annulus"), which moves A at the ~1e-5 level, inside Tol."""
+    op._vbm.minannuli = 1
+    return op
+
+
 def _compile_om(op):
     p = pt.dvector("p")
     t = pt.dvector("t")
     o = pt.dmatrix("o")
     s_t = pt.dvector("s_t")
     a_t = pt.dvector("a_t")
-    return pytensor.function([p, t, o, s_t, a_t], op(p, t, o, s_t, a_t))
+    # The Op takes (n_companions, n_epochs) matrices (review 8.6.33); one
+    # companion is one row.
+    return pytensor.function(
+        [p, t, o, s_t, a_t],
+        op(p, t, o, s_t.dimshuffle("x", 0), a_t.dimshuffle("x", 0)),
+    )
 
 
 def _compile(op):
@@ -157,12 +172,14 @@ def test_vbm_per_epoch_matches_mulensmodel_linear_motion():
     """
     times, obs = _times_and_obs()
     vbm_fn = _compile_om(
-        VBMDirectMagOp(
-            coords=_COORDS,
-            n_companions=1,
-            use_rho=True,
-            bandpass="I",
-            orbital_motion=True,
+        _mulensmodel_kernel(
+            VBMDirectMagOp(
+                coords=_COORDS,
+                n_companions=1,
+                use_rho=True,
+                bandpass="I",
+                orbital_motion=True,
+            )
         )
     )
     mm_fn = _compile(
@@ -353,7 +370,7 @@ def _write_binary_lc(path, n=120):
     return str(path)
 
 
-def _om_system(tmp_path, backend="vbm_direct"):
+def _om_system(tmp_path, backend="vbm_direct", otype="uniform_rotation"):
     from exozippy.system import System
 
     tmp_path.mkdir(parents=True, exist_ok=True)
@@ -371,13 +388,13 @@ def _om_system(tmp_path, backend="vbm_direct"):
         "lens": [
             {"body": "star.L1"},
             # Orbital motion is the COMPANION's geometry (design 1.4), and
-            # the orbit it moves on says how: a `type: linear` orbit's rates.
+            # the orbit it moves on says how: a `type: uniform_rotation` orbit's rates.
             {"body": "star.L2", "orbit": "L"},
         ],
         "orbit": [
             {
                 "name": "L",
-                "type": "linear",
+                "type": otype,
                 "primary": ["L1"],
                 "companion": ["L2"],
             }
@@ -420,7 +437,7 @@ def linear_om_system(tmp_path_factory):
 
 def test_linear_mode_declares_rates_and_beta(linear_om_system):
     """
-    Given: a lens companion on a `type: linear` orbit,
+    Given: a lens companion on a `type: uniform_rotation` orbit,
     When: parameters register,
     Then: ds_dt and dalpha_dt are the ORBIT's, beta is the lens's, the
       linear orbit has no Keplerian element left to sample, and the user's
@@ -584,15 +601,17 @@ def test_the_removed_orbital_motion_key_names_its_replacement(motion):
             ],
             cm,
         )
-    assert "type: linear" in str(exc.value).replace("'", "")
+    assert "type: uniform_rotation" in str(exc.value).replace("'", "")
 
 
-def test_a_quadratic_lens_orbit_is_refused():
+@pytest.mark.parametrize("otype", ["constant_acceleration", "constant_jerk"])
+def test_an_accelerating_lens_orbit_is_refused(otype):
     """
-    Given: a lens companion on a `type: quadratic` orbit,
+    Given: a lens companion on an accelerating Cartesian Taylor orbit,
     When: the Lens component is constructed,
-    Then: it raises NotImplementedError -- the magnification backends take
-      first derivatives only.
+    Then: it raises NotImplementedError naming the lens types
+      (uniform_rotation, constant_velocity) -- the backends take no
+      relative acceleration.
     """
     from exozippy.components.mulensing.lens import Lens
     from exozippy.config import ConfigManager
@@ -605,13 +624,13 @@ def test_a_quadratic_lens_orbit_is_refused():
         "orbit": [
             {
                 "name": "L",
-                "type": "quadratic",
+                "type": otype,
                 "primary": ["L1"],
                 "companion": ["L2"],
             }
         ],
     }
-    with pytest.raises(NotImplementedError, match="first derivatives"):
+    with pytest.raises(NotImplementedError, match="uniform_rotation"):
         Lens([{"body": "star.L1"}, {"body": "star.L2", "orbit": "L"}], cm)
 
 
@@ -641,8 +660,10 @@ def test_mulensmodel_backend_applies_finite_source_at_stellar_q():
         )
     )
     vbm_fn = _compile(
-        VBMDirectMagOp(
-            coords=_COORDS, n_companions=1, use_rho=True, bandpass="I"
+        _mulensmodel_kernel(
+            VBMDirectMagOp(
+                coords=_COORDS, n_companions=1, use_rho=True, bandpass="I"
+            )
         )
     )
     a_mm = mm_fn(pv, times, obs)

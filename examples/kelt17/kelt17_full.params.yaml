@@ -18,7 +18,9 @@ star.A.vbeta:    {initval: 4000, sigma: 0, citation: EXOFASTv2 RM example}
 star.A.vmicro:   {initval: 1000, sigma: 0, citation: EXOFASTv2 RM example}
 
 # ---- Planet (from mpsun / p / rstar) ----
-planet.b.radius: {initval: 1.499}
+# p is the published quantity; planet.b.radius is NOT given, because
+# radius = p * star.A.radius and a third start would over-specify the
+# triple (the rounded 1.499 RJ disagreed with p x 1.645624 Rsun = 1.4994).
 planet.b.mass:   {initval: 1.898}
 planet.b.p:      {initval: 0.093633}
 

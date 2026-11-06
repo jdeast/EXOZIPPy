@@ -61,8 +61,8 @@ from exozippy.config import ConfigManager, _reject_duplicate_spellings
 
 SYSTEM = {
     "star": [{"name": "A"}, {"name": "B"}],
-    "planet": [{"name": "b", "star_ndx": 0, "orbit_ndx": 0}],
-    "orbit": [{"name": "b"}],
+    "planet": [{"name": "b"}],
+    "orbit": [{"name": "b", "primary": ["A"], "companion": ["b"]}],
 }
 
 

@@ -140,12 +140,9 @@ def make_rv(rng, snr, n_epochs, workdir):
 
     config = {
         "star": [{"name": "Host"}],
-        "planet": [
-            {"name": "b", "star_ndx": 0, "fitlogq": False, "fitmsini": False}
-        ],
-        "orbit": [
-            {"name": "b", "planet_ndx": 0, "star_ndx": 0, "circular": True}
-        ],
+        "planet": [{"name": "b", "fitlogq": False, "fitmsini": False}],
+        # One star, one planet, one orbit: the orbit pairs them implicitly.
+        "orbit": [{"name": "b", "circular": True}],
         "rvinstrument": [{"name": "SYNTH", "file": "synth.rv"}],
     }
     params = {

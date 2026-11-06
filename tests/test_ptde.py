@@ -433,7 +433,8 @@ def test_probe_scale_measures_curvature_when_start_is_off_mode():
     so the probe returns sigma from any start.  The old nearer-contour rule
     returned sqrt(10)-3 ~ 0.16 here (and ~1e-3 sigma on ob140939's start
     5900 nats below the posterior, whose mass matrix then re-widened the
-    raw posterior into parameter.py's _RAW_CANCELLATION_CLIP wall).
+    raw posterior into the raw-cancellation clip's wall at |raw| = 1e4,
+    since removed by review 1.2.9).
     """
     # ARRANGE: mode at 3.0, unit width, start 3 sigma away at 0.0
     start = {"x": np.zeros(1)}
@@ -810,6 +811,10 @@ def test_sync_maxtime_during_tune_aborts_rather_than_saving_nothing(caplog):
     When ptde_sample runs,
     Then it raises KeyboardInterrupt -- there is nothing to save, and
       returning an empty InferenceData would look like a completed fit.
+
+    The finish forecast is switched off here: by default it would shorten
+    this tune once the measured rate showed it cannot fit, which is the
+    point of it (tests/test_tune_forecast.py) and not this path.
     """
     with caplog.at_level(logging.WARNING, logger="exozippy.samplers.ptde"):
         with pytest.raises(KeyboardInterrupt):
@@ -827,6 +832,7 @@ def test_sync_maxtime_during_tune_aborts_rather_than_saving_nothing(caplog):
                 maxtime=0.3,
                 min_ess=None,
                 max_rhat=None,
+                tune_forecast="off",
             )
     assert "no draws to save" in caplog.text
 

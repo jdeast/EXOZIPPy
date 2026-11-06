@@ -54,6 +54,9 @@ BASE_COLUMNS = [
     "age_mist",
     "dEEP_dage",
     "here_be_dragons",
+    "star_mass",
+    "final_star_mass",
+    "final_EEP",
 ]
 PROVENANCE_COLUMNS = [
     "interpolated",

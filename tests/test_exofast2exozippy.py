@@ -326,7 +326,8 @@ def test_fitspline_length_mismatch_raises(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "flag, otype", [("/fitslope", "linear"), ("/fitquad", "quadratic")]
+    "flag, otype",
+    [("/fitslope", "constant_acceleration"), ("/fitquad", "constant_jerk")],
 )
 def test_an_rv_trend_becomes_a_taylor_orbit(
     tmp_path, monkeypatch, flag, otype
@@ -577,17 +578,19 @@ def test_multi_planet_conversions_point_each_planet_at_its_orbit(
 ):
     """
     Given nplanets=2,
-    Then each planet block carries its own orbit_ndx -- without it every
-      planet would read orbit 0's geometry.
+    Then each planet is named by its own orbit block's companion group --
+      the one spelling of membership; the planet blocks carry no index.
     """
     driver = _DRIVER.replace("nplanets=1", "nplanets=2").replace(
         "circular=[1]", "circular=[1,0]"
     )
     config, _, _, _ = _convert(tmp_path, monkeypatch, driver)
-    assert config["planet"] == [
-        {"name": "b", "orbit_ndx": 0},
-        {"name": "c", "orbit_ndx": 1},
+    assert config["planet"] == [{"name": "b"}, {"name": "c"}]
+    groups = [
+        (o["name"], o["primary"], o["companion"]) for o in config["orbit"]
     ]
+    host = config["star"][0]["name"]
+    assert groups == [("b", [host], ["b"]), ("c", [host], ["c"])]
 
 
 # --------------------------------------------------------------------------
@@ -766,3 +769,55 @@ def test_a_band_name_fitdilute_fits_only_that_band(tmp_path, monkeypatch):
     assert fit.pop("TESS") is True
     assert fit and not any(fit.values())
     assert any("TESS transits only" in i for i in infos)
+
+
+def test_exptime_in_minutes_becomes_exptime_s_in_seconds(
+    tmp_path, monkeypatch
+):
+    """
+    Given exptime=[30,2,1] and ninterp=[10,1,1] (EXOFASTv2: MINUTES, one
+    entry per transit in sorted-filename order),
+    When the driver is converted,
+    Then each transit gets exptime_s in SECONDS (1800, 120, 60) beside its
+    ninterp, and no transit carries the retired minutes key exptime: --
+    the unit is converted at the boundary, so no minutes value can reach a
+    config that reads seconds.
+    """
+    config, _, _, _ = _convert(
+        tmp_path,
+        monkeypatch,
+        _driver_with("exptime=[30,2,1], ninterp=[10,1,1]"),
+    )
+
+    by_file = {t["file"]: t for t in config["transit"]}
+    # sorted-filename order: Sloang, Sloanz, TESS
+    assert by_file["n20190101.Sloang.FLWO.dat"]["exptime_s"] == 1800.0
+    assert by_file["n20190101.Sloanz.FLWO.dat"]["exptime_s"] == 120.0
+    assert by_file["n20200101.TESS.TESS.dat"]["exptime_s"] == 60.0
+    assert by_file["n20190101.Sloang.FLWO.dat"]["ninterp"] == 10
+    assert not any("exptime" in t for t in config["transit"])
+
+
+def test_longcadence_is_thirty_minutes_in_seconds(tmp_path, monkeypatch):
+    """
+    Given /longcadence (EXOFASTv2: exptime 30 min, ninterp 10 everywhere),
+    When the driver is converted,
+    Then every transit gets exptime_s: 1800 and ninterp: 10.
+    """
+    config, _, _, _ = _convert(
+        tmp_path, monkeypatch, _driver_with("/longcadence")
+    )
+
+    assert [t["exptime_s"] for t in config["transit"]] == [1800.0] * 3
+    assert [t["ninterp"] for t in config["transit"]] == [10] * 3
+
+
+def test_an_unevaluable_exptime_raises(tmp_path, monkeypatch):
+    """
+    Given exptime=myexp, a driver variable the converter cannot evaluate,
+    When the driver is converted,
+    Then it raises naming exptime, rather than writing a value whose unit
+    and size are unknown.
+    """
+    with pytest.raises(ValueError, match="exptime"):
+        _convert(tmp_path, monkeypatch, _driver_with("exptime=myexp"))

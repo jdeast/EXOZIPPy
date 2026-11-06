@@ -1,12 +1,14 @@
 # Everything in DC2018_128.params.yaml, PLUS the photometric zeropoint.
 star.Lens.ra: {initval: 267.595, sigma: 0}
 star.Lens.dec: {initval: -28.982, sigma: 0}
-star.Lens.teff: {sigma: 0.0}
+# mann (on the Lens) reads the lens's feh and radius, so the feh pin holds
+# a real quantity (radius is freed below); star.Lens.teff is read by
+# nothing here (the SED does not see the lens) and is inactive unpinned.
 star.Lens.feh: {sigma: 0.0}
 # star.Lens.radius: UNPINNED for v4 (was {sigma: 0.0}).
 # The pin was INHERITED from DC2018_128.params.yaml, the no-SED config, where
-# it is correct bookkeeping: without an SED nothing constrains the lens
-# radius, so it is held at a value nobody chose (review 3.8.1's tier logic).
+# nothing reads the lens radius at all (it is inactive there, so that file
+# no longer pins it).
 # Carried into an SED config it is wrong, and not harmlessly so: radiussed
 # defaults to radius through a symbolic relation, so pinning radius puts a
 # systematic floor under the lens's derived SED luminosity -- the SED and the

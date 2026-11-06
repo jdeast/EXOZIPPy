@@ -15,7 +15,9 @@ def get_ephemeris(target_id, start_time, stop_time, step="1h", outfile=None):
     Parameters:
     -----------
     target_id : str
-        JPL ID (e.g., '-79' for Spitzer, '-163' for K2, 'Swift')
+        JPL ID (e.g., '-79' for Spitzer, '-227' for Kepler/K2, 'Swift').
+        Check the returned target name: '-163' is WISE, not K2 (k2.eph
+        was once generated from it).
     start_time : str
         Start date (e.g., '2014-05-01')
     stop_time : str
@@ -44,25 +46,28 @@ def get_ephemeris(target_id, start_time, stop_time, step="1h", outfile=None):
     # coordinates, rotated 23.4 deg from what the projection math assumes.
     vecs = obj.vectors(refplane="earth")
 
-    # Keep the dates as full (unoffset) BJD_TDB: that is what
-    # ephemeris.interpolate_ephemeris expects in column 0, and what the
-    # data times are converted to.
-    # vecs['datetime_jd'] is the Julian Date
+    # Column 0 is Horizons' datetime_jd: the TDB COORDINATE time at which
+    # the spacecraft occupies (x, y, z) -- the observer's own JD_TDB, not a
+    # BJD_TDB tag (the two differ by the Roemer delay, up to 8.3 min, which
+    # ephemeris.observer_position_at_reception removes from the data's
+    # BJD_TDB tags before looking the position up).  Kept as a full,
+    # unoffset JD.
     t_tdb = Time(vecs["datetime_jd"], format="jd", scale="tdb")
-    bjd_tdb = t_tdb.value
+    jd_tdb = t_tdb.value
 
     # Extract coordinates
     x, y, z = vecs["x"], vecs["y"], vecs["z"]
 
     # Combine into a table
-    data = np.column_stack((bjd_tdb, x, y, z))
+    data = np.column_stack((jd_tdb, x, y, z))
 
     if outfile is None:
         outfile = f"ephemeris_{target_id.replace('-', 'm')}.txt"
 
     header = (
         f"Target: {target_id} (Center: 500@0, frame: ICRF/J2000 equatorial)\n"
-        f"Source: JPL Horizons\nColumns: BJD_TDB, X [AU], Y [AU], Z [AU]"
+        f"Source: JPL Horizons\nColumns: JD_TDB (coordinate time of the "
+        f"state), X [AU], Y [AU], Z [AU]"
     )
 
     np.savetxt(

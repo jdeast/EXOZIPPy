@@ -346,6 +346,10 @@ orbit:
     # "Periodic parameters").  Every angle and epoch below carries the same
     # declaration; the epochs take the orbital period from `period`.
     periodic: {value: 360.0, unit: "deg"}
+    # Only the V_c/V_e orbits (`from_xy`) derive omega from direction
+    # latents, so only they are eligible for the direct coordinate
+    # (src/exozippy/angles.py); `fitomega:` on the orbit block overrides.
+    direction_latents: {pair: [xomega, yomega], expression: from_xy}
     expressions:
       default:
         func_name: "calc_omega"
@@ -394,6 +398,12 @@ orbit:
     latex: "\\Omega"
     description: "Longitude of Ascending Node"
     periodic: {value: 360.0, unit: "deg"}
+    # Derived from its direction latents, unless the data measure it well
+    # enough that the latent posterior is a narrow ray: then it is sampled
+    # directly on a window centered on the start (src/exozippy/angles.py;
+    # parameter.md, "Structural priors").  `fitbigomega:` on the orbit block
+    # overrides the automatic choice.
+    direction_latents: {pair: [xbigomega, ybigomega], expression: default}
     expressions:
       default:
         func_name: "calc_bigomega"
@@ -605,17 +615,19 @@ orbit:
         func_name: "calc_lam_from_sv"
         deps: ["svcoslam", "svsinlam"]
 
-  # --- Taylor orbits (type: linear | quadratic) ---
+  # --- Taylor orbits (type: constant_velocity | constant_acceleration |
+  #     constant_jerk | uniform_rotation) ---
   # A Taylor orbit is an orbit too long for the data to resolve, written as
-  # the low-order time derivatives of what each consumer measures, about the
-  # orbit's reference epoch (Orbit.taylor_epoch; orbit.md "Taylor orbits").
+  # a low-order polynomial state about the orbit's reference epoch
+  # (Orbit.taylor_epoch, Orbit._taylor_state; orbit.md "Taylor orbits").
   # Every Keplerian element above is INACTIVE on such an orbit -- it has no
   # period, mass or K to report -- and each parameter below is active only
   # where some consumer actually reads it.
   gammadot:
-    # The primary group's radial ACCELERATION: the first derivative of its
-    # line-of-sight velocity at the epoch, added to the RV model as
-    # gammadot * (t - epoch).  EXOFASTv2's SLOPE.  Read by rvinstrument for
+    # The primary group's radial ACCELERATION, the line-of-sight component
+    # of the Taylor state's acceleration vector at the epoch (type:
+    # constant_acceleration and constant_jerk).  EXOFASTv2's SLOPE when the
+    # epoch is its RVEPOCH (every RV-only orbit).  Read by rvinstrument for
     # a star in this orbit's PRIMARY group.  Bounds are rope, not gates:
     # +/-1e5 m/s/d is EXOFASTv2's own sanity limit.
     initval: 0.0
@@ -627,10 +639,10 @@ orbit:
     latex: "\\dot{\\gamma}"
     description: "RV slope"
   gammaddot:
-    # The SECOND derivative of the primary's line-of-sight velocity at the
-    # epoch, added as 0.5 * gammaddot * (t - epoch)**2 (type: quadratic
-    # only).  A derivative, NOT EXOFASTv2's QUAD, which is the coefficient
-    # of (t - epoch)**2 and so is gammaddot / 2.
+    # The primary's line-of-sight JERK: the second derivative of its
+    # line-of-sight velocity, added as 0.5 * gammaddot * (t - epoch)**2
+    # (type: constant_jerk only).  A derivative, NOT EXOFASTv2's QUAD, which
+    # is the coefficient of (t - epoch)**2 and so is gammaddot / 2.
     initval: 0.0
     lower: -100000.0
     upper: 100000.0
@@ -642,7 +654,9 @@ orbit:
   ds_dt:
     # Rate of change of the projected separation of a microlensing lens
     # binary, Einstein radii (of the TOTAL mass, C13) per Julian year, at
-    # t0_par.  gamma_par = ds_dt / s_0.  Read by a lens companion whose
+    # t0_par (type: uniform_rotation; for type: constant_velocity the
+    # straight line's radial rate AT t0_par, so gamma_par = ds_dt / s_0
+    # holds at first order either way).  gamma_par = ds_dt / s_0.  Read by a lens companion whose
     # `orbit:` names this orbit (conventions.md C24; it lived on the lens
     # until the orbit types were unified).
     # Bounds are rope, not gates: |gamma| ~ 0.25-0.6 /yr is typical for a
@@ -676,10 +690,149 @@ orbit:
     latex: "\\dot{\\alpha}"
     description: "Trajectory angle rate of change"
     debug_print: true
+  accel_ra:
+    # The primary group's SKY-PLANE acceleration at the epoch, East (true
+    # arc, the direction of pm_ra), in mas/yr^2 -- the sky components of the
+    # same acceleration vector gammadot is the line-of-sight component of
+    # (type: constant_acceleration and constant_jerk).  Read by gaia/abs/
+    # catalog astrometry of a star in this orbit's PRIMARY group (and, as
+    # the relative vector -(M/M_c) times it, by a rel dataset), as
+    # 0.5 * accel_ra * ((t - epoch)/365.25 d)**2.  Sampled ANGULAR -- what
+    # the photocenter does, decoupled from the parallax -- and made
+    # physical through the anchor star's parallax only where a physical
+    # quantity is needed (Orbit._taylor_state, accel_total).  Gaia DR3's
+    # acceleration-solution convention (Halbwachs et al. 2023, A&A 674, A9:
+    # g_alpha*, archive column accel_ra, entering as g t^2 / 2).
+    # Bounds are rope, not gates: +/-1e5 mas/yr^2 (pm_ra's +/-1e5 mas/yr,
+    # per year) is far beyond any companion a Taylor orbit can describe,
+    # ~0.01-10 mas/yr^2 for the long-period companions it is for.
+    initval: 0.0
+    lower: -100000.0
+    upper: 100000.0
+    init_scale: 0.05
+    unit: "mas/yr2"
+    internal_unit: "mas/yr2"
+    latex: "g_{\\alpha*}"
+    description: "Sky acceleration (RA)"
+  accel_dec:
+    # North twin of accel_ra; see the note there.
+    initval: 0.0
+    lower: -100000.0
+    upper: 100000.0
+    init_scale: 0.05
+    unit: "mas/yr2"
+    internal_unit: "mas/yr2"
+    latex: "g_\\delta"
+    description: "Sky acceleration (Dec)"
+  jerk_ra:
+    # The sky JERK, East, mas/yr^3 (type: constant_jerk): the photocenter
+    # adds jerk_ra * ((t - epoch)/365.25 d)**3 / 6, so the acceleration is
+    # accel_ra + jerk_ra (t - epoch).  Gaia's 9-parameter convention
+    # (Halbwachs et al. 2023: gdot_alpha*, archive column deriv_accel_ra,
+    # entering as gdot t^3 / 6; their solution also carries a
+    # -gdot DeltaT^2 t / 6 term that our proper motion absorbs, so a Gaia
+    # 9-parameter pm differs from ours by gdot DeltaT^2 / 6).  Bounds: rope.
+    initval: 0.0
+    lower: -100000.0
+    upper: 100000.0
+    init_scale: 0.05
+    unit: "mas/yr3"
+    internal_unit: "mas/yr3"
+    latex: "\\dot{g}_{\\alpha*}"
+    description: "Sky jerk (RA)"
+  jerk_dec:
+    # North twin of jerk_ra; see the note there.
+    initval: 0.0
+    lower: -100000.0
+    upper: 100000.0
+    init_scale: 0.05
+    unit: "mas/yr3"
+    internal_unit: "mas/yr3"
+    latex: "\\dot{g}_\\delta"
+    description: "Sky jerk (Dec)"
+  rel_dE:
+    # A Cartesian Taylor orbit read by a `rel` dataset (constant_velocity,
+    # and the relative position/velocity terms of constant_acceleration /
+    # constant_jerk, whose curvature rel reads from the shared accel_*/
+    # jerk_* through the group masses -- orbit.md "Taylor orbits"): the
+    # COMPANION group's sky offset from the PRIMARY group at the orbit's
+    # epoch (the astrometric reference epoch by default), East (true arc),
+    # mas -- the rel-mode convention (sep/PA East of North of the companion
+    # relative to the primary: dE = sep sin PA, dN = sep cos PA).  Sampled
+    # Cartesian, not sep/PA, so the line has no angle to wrap.  Seeded from
+    # the data (Orbit._hint_rel_lines).  Bounds are rope, not gates:
+    # +/-1e7 mas (~3 deg) holds any pair a relative dataset resolves.
+    initval: 0.0
+    lower: -10000000.0
+    upper: 10000000.0
+    init_scale: 1.0
+    unit: "mas"
+    internal_unit: "mas"
+    latex: "\\Delta\\alpha^*_0"
+    description: "Relative offset at epoch (RA)"
+  rel_dN:
+    # North twin of rel_dE; see the note there.
+    initval: 0.0
+    lower: -10000000.0
+    upper: 10000000.0
+    init_scale: 1.0
+    unit: "mas"
+    internal_unit: "mas"
+    latex: "\\Delta\\delta_0"
+    description: "Relative offset at epoch (Dec)"
+  rel_vE:
+    # The constant relative sky velocity, East, mas/yr (type:
+    # constant_velocity, read by `rel`): dE(t) = rel_dE + rel_vE (t - epoch).
+    # Bounds: rope, +/-1e5 mas/yr as pm_ra's.
+    initval: 0.0
+    lower: -100000.0
+    upper: 100000.0
+    init_scale: 0.1
+    unit: "mas/yr"
+    internal_unit: "mas/yr"
+    latex: "\\dot{\\Delta\\alpha}^*"
+    description: "Relative velocity (RA)"
+  rel_vN:
+    # North twin of rel_vE; see the note there.
+    initval: 0.0
+    lower: -100000.0
+    upper: 100000.0
+    init_scale: 0.1
+    unit: "mas/yr"
+    internal_unit: "mas/yr"
+    latex: "\\dot{\\Delta\\delta}"
+    description: "Relative velocity (Dec)"
+  accel_total:
+    # |A|, the magnitude of the primary's acceleration vector at the epoch,
+    # where the RVs AND the absolute astrometry read the orbit: gammadot in
+    # quadrature with the sky components made physical by the anchor
+    # star's parallax (physics.calc_accel_total).  Derived, reported.
+    unit: "m/(s d)"
+    internal_unit: "solRad/d2"
+    latex: "|A|"
+    description: "Total acceleration"
+    expressions:
+      default:
+        func_name: "calc_accel_total"
+        deps: [ "gammadot", "accel_ra", "accel_dec", "star.parallax[taylor_anchor_map]" ]
+  mc_over_r2:
+    # M_companion / r^2 = |A| / G, an EQUALITY where the whole acceleration
+    # vector is measured (physics.calc_mc_over_r2); mc_over_r2_min below is
+    # the bound the RV slope alone gives.  Reported, never a potential.
+    unit: "jupiterMass/AU2"
+    internal_unit: "jupiterMass/AU2"
+    latex: "M_c/r^2"
+    description: "Companion mass/separation$^2$"
+    expressions:
+      default:
+        func_name: "calc_mc_over_r2"
+        deps: [ "accel_total" ]
   mc_over_r2_min:
     # LOWER bound on M_companion / r^2 implied by an RV slope:
     # |gammadot| = G M_c cos(theta) / r^2 <= G M_c / r^2 (physics.
-    # calc_mc_over_r2_min).  Reported on every RV-read Taylor orbit, never a
+    # calc_mc_over_r2_min).  Reported on every Taylor orbit whose slope the
+    # RVs read and the absolute astrometry does not (where both do,
+    # mc_over_r2 is the equality instead), never a
     # potential (review 8.8.14: "report them; a potential on a consequence
     # double-counts").  1 M_J at 1 AU is 0.489 m/s/day.
     unit: "jupiterMass/AU2"

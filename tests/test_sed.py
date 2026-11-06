@@ -865,6 +865,34 @@ def test_calc_absbolmag_solar_luminosity_matches_known_value():
     np.testing.assert_allclose(result, 4.74, atol=0.01)
 
 
+def test_calc_absbolmag_matches_the_iau_zero_point_off_one_solar_luminosity():
+    """
+    Given luminosities of 0.01, 1 and 100 L_sun,
+    When calc_absbolmag is evaluated,
+    Then each equals -2.5 log10(L / L_bol0) with astropy's IAU 2015 B2 zero
+      point L_bol0 = 3.0128e28 W, to 1e-10 mag.
+
+    The check above runs only at L = 1, where the log term vanishes, so ln in
+    place of log10 or a wrong coefficient on the log passes it (review
+    7.16.1).
+    """
+    from astropy import constants as const
+
+    # ARRANGE
+    calc_absbolmag = PHYSICS_REGISTRY["calc_absbolmag"]
+    lum = np.array([0.01, 1.0, 100.0])
+    lum_var = pt.dvector("lum")
+
+    # ACT
+    got = pytensor.function([lum_var], calc_absbolmag(lum_var))(lum)
+
+    # ASSERT
+    expected = -2.5 * np.log10(
+        (lum * const.L_sun / const.L_bol0).decompose().value
+    )
+    np.testing.assert_allclose(got, expected, rtol=0, atol=1e-10)
+
+
 def test_calc_appmag_at_10pc_equals_absolute_magnitude():
     """
     Given an absolute magnitude M and a distance of exactly 10 pc,

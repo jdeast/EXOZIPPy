@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import logging
 import math
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import (
     Any,
@@ -82,71 +81,85 @@ def derived_constraint_message(field, sources=None):
     return f"{field} has no effect on a derived parameter. {remedy}."
 
 
-# Section C of build_pymc adds +0.5*raw**2 to exactly cancel the -0.5*raw**2
-# the built-in pm.Normal(0,1) prior contributes for every logit-transformed
-# raw element.  Both are real (not symbolically fused) floating-point terms,
-# so the cancellation is only exact to ~machine epsilon of the LARGER term:
-# once a runaway proposal pushes |raw| past this bound, squaring it loses so
-# many bits that the residual grows like raw**2 * 2**-52 -- and because
-# PTDE only accepts logp increases, that residual (positive by chance about
-# half the time) gets selected and reinforced, driving |raw| to 1e17+ and
-# the stored lp to 1e15..1e39 (observed in examples/DC2018_128 runaway PTDE
-# chains). Clipping keeps the cancellation exact within float64 precision
-# for any legitimate raw excursion and lets pm.Normal's own, unclipped
-# -0.5*raw**2 dominate beyond it -- an ordinary restoring force instead of a
-# numerical time bomb.
-_RAW_CANCELLATION_CLIP = 1.0e4
+# THE RAW COORDINATE OF A LOGIT ELEMENT IS FLAT, AND THAT IS THE FIX FOR THE
+# PTDE RUNAWAY, NOT A LOOSENING OF IT (review 1.2.9).  Do not give it back an
+# N(0, 1) density, and do not re-add a clip.
+#
+# Every sampled element has a raw coordinate in ONE vector RV per parameter
+# (`<label>_raw`, a name that trace reuse, restart files, the polish and the
+# persisted whitening all key on).  What that raw coordinate's density is
+# depends on the element's path:
+#
+#   * NON-LOGIT elements (fewer than two finite bounds, admitted only with a
+#     sigma -- review 1.2.10): x = mu + sigma*raw, and raw ~ N(0, 1) IS the
+#     prior N(mu, sigma).  They keep exactly that density.
+#   * LOGIT elements (two finite bounds): the prior is U(lower, upper), and
+#     section C's `logit_uniform_prior.<label>` potential supplies all of it:
+#     the Jacobian log(q(1-q)) of the sigmoid (plus the saturation guard past
+#     _LOGIT_SATURATION_LQ).  The raw density contributes NOTHING but the
+#     constant -ln sqrt(2 pi).
+#
+# Until 2026-10 the raw vector was a plain pm.Normal(0, 1) for both kinds and
+# section C added +0.5*raw**2 back on the logit elements to cancel it.  That
+# pair was bookkeeping that summed to zero, and it was not harmless: the two
+# terms are separate float64 graphs summed among dozens of others, so their
+# "zero" was a residual of ~raw**2 * 2**-52 nats.  PTDE accepts logp
+# increases, so on examples/DC2018_128 it selected that residual whenever it
+# came out positive and ratcheted |raw| to 1e17 and the stored lp to 1e39
+# (tests/test_runaway_logp_regression.py).  The 2026-07 fix CLIPPED raw at
+# 1e4 inside the cancellation, which bounded the residual by putting a
+# -0.5*(raw**2 - 1e8) wall in the "uniform" prior at 1e4 whitened widths from
+# SEED 0's anchor.  That wall then had to be raised during the whitening
+# probe (review 1.2.1, the ob140939 divergences) and was still in force
+# while sampling, where it cost a multi-seed microlensing start -1.5e8 nats
+# (OGLE-2013-BLG-0341: the close seeds' t_0 sat 2e4 widths from the wides').
+#
+# Declaring the raw density flat on the logit elements deletes both terms
+# instead of balancing them: there is no large quantity left to cancel, so
+# there is no residual for PTDE to ratchet, and nothing to clip.  Far from
+# the anchor the logit element's logp is log_jac ~ -|lq| plus the quadratic
+# saturation guard, both computed directly and both MONOTONE in |raw| past
+# the logistic peak, and never above the prior's own maximum, so a runaway
+# proposal only ever sees logp fall (tests/test_flat_logit_raw.py).  The
+# uniform prior is now uniform out to the bounds wherever the anchor sits.
+#
+# The constant -ln sqrt(2 pi) per logit element is kept deliberately: it is
+# what pm.Normal's own normalization contributed, so every start logp, every
+# logged lp, every pinned per-term value (RV:<label>_raw at raw = 0) and the
+# evidence normalization (parameter.md, "The model logp is a prior density
+# only up to a constant"; samplers/nested.py's u-space likelihood) are
+# unchanged.  Like that section's constants it moves nothing a sampler does.
+#
+# The density is one function on the WHOLE vector with a CONSTANT 0/1 mask
+# (1 on the non-logit elements), never a pt.where -- the where-trap
+# (CLAUDE.md).  mask * value**2 still propagates a NaN on every element,
+# which mulensing/physics.py's NaN-reject argument relies on.
 
-# ...and it lives in a pytensor.shared, not in the graph as a literal,
-# because the clip is a SAMPLER safety device that also lands on a
-# MEASUREMENT path.  Past |raw| = clip the correction stops tracking
-# pm.Normal's -0.5*raw**2, so logp there acquires a genuine -- and
-# near-vertical: the drop reaches 0.5 nats within 0.5/clip of it -- quadratic
-# wall.  The startup whitening probe walks outward from the start looking for
-# the 0.5-nat contour, so for an element whose preliminary scale is too tight
-# by more than ~4 orders it finds THIS wall instead of the posterior's own
-# contour, reports a multiplier of exactly the clip, and leaves the model
-# under-whitened with nothing anomalous to report (review 1.2.1).
-# whitening.py therefore RAISES the clip for the duration of the probe (see
-# _PROBE_RAW_CLIP there for the float64 argument bounding how far it may
-# honestly be raised) and restores it before anything samples.  Do not fold
-# it back into a literal: the sampler-time value and the probe-time value
-# answer two different questions -- how far may a runaway chain wander, vs
-# how far may a measurement look -- and only a shared variable can hold both
-# without rebuilding the model.
-_raw_cancellation_clip_sv = pytensor.shared(
-    np.asarray(_RAW_CANCELLATION_CLIP, dtype="float64"),
-    name="raw_cancellation_clip",
-)
 
+def _raw_logp(value, gaussian_mask):
+    """Elementwise log density of a ``<label>_raw`` vector (see above).
 
-def get_raw_cancellation_clip():
-    """The clip on |raw| currently in force in every built model's section C."""
-    return float(_raw_cancellation_clip_sv.get_value())
-
-
-def set_raw_cancellation_clip(value):
-    """Set that clip in place (shared variable: no rebuild, no recompile).
-
-    Returns the previous value so a caller can restore it.  The whitening
-    probe is the only caller; sampling always runs at
-    ``_RAW_CANCELLATION_CLIP``.
+    ``-0.5*raw**2`` on the non-logit elements (``gaussian_mask == 1``), flat
+    on the logit ones, ``-ln sqrt(2 pi)`` on every element.  Module-level so
+    a model carrying it pickles like one built from ``pm.Normal``.
     """
-    previous = get_raw_cancellation_clip()
-    _raw_cancellation_clip_sv.set_value(
-        np.asarray(float(value), dtype="float64")
+    return gaussian_mask * (-0.5 * pt.pow(value, 2)) - pt.log(
+        pt.sqrt(2.0 * np.pi)
     )
-    return previous
 
 
-@contextmanager
-def raised_raw_cancellation_clip(value):
-    """Temporarily raise the raw-cancellation clip; restore it on exit."""
-    previous = set_raw_cancellation_clip(value)
-    try:
-        yield previous
-    finally:
-        set_raw_cancellation_clip(previous)
+def _raw_random(gaussian_mask, rng=None, size=None):
+    """Forward draws for a ``<label>_raw`` vector: N(0, 1) on EVERY element.
+
+    This is NOT the prior of a logit element -- its raw density is flat and
+    improper on its own (the uniform comes from the logit_uniform_prior
+    potential, which no forward draw sees), exactly as for pm.Flat.  It
+    exists only so a graph evaluated with its RVs left in (``.eval()`` on a
+    value that depends on them, the "Parameter.value draws from the prior"
+    trap) behaves as it did under pm.Normal.  Nothing in exozippy samples a
+    prior predictive; a fit never calls this.
+    """
+    return rng.normal(0.0, 1.0, size=size)
 
 
 # phys_logit clips the sigmoid's argument to +/-30: sigmoid(30) = 1 - 9.4e-14,
@@ -225,6 +238,24 @@ def _log_normal_mass(alpha, beta):
         pt.switch(pt.le(beta, 0.0), lower_tail, straddling),
     )
     return pt.log(pt.maximum(mass, np.finfo(float).tiny))
+
+
+def _log_normal_mass_np(alpha, beta):
+    """Float twin of ``_log_normal_mass``: same per-side branches, same floor.
+
+    Used where the bounds are constants (the evidence normalization), so no
+    graph is needed.  Kept beside the symbolic one so the two cannot drift
+    about which branch is safe where.
+    """
+    root2 = math.sqrt(2.0)
+    a, b = alpha / root2, beta / root2
+    if alpha >= 0.0:
+        mass = 0.5 * (math.erfc(a) - math.erfc(b))
+    elif beta <= 0.0:
+        mass = 0.5 * (math.erfc(-b) - math.erfc(-a))
+    else:
+        mass = 0.5 * (math.erf(b) - math.erf(a))
+    return math.log(max(mass, np.finfo(float).tiny))
 
 
 def _tighten_bounds(
@@ -979,6 +1010,14 @@ class Parameter:
     # resolved to; set it where the other parameterization DEFINES the value
     # (u2 == 0 exactly under a linear limb-darkening law).
     inactive_value: Optional[Number] = None
+    # Per element, the SAMPLED coordinate whose pin holds this DERIVED
+    # element constant, where a component applied the user's `sigma: 0` on
+    # the derived element to that coordinate (an unambiguous translation,
+    # JDE 2026-10-31; today only Planet's planet.mass -> log_q, review
+    # 2.1.26(e)).  None, or None on an element, means no such translation:
+    # a `sigma: 0` there is the no-op build_pymc warns about.  The user's
+    # own entry is never rewritten; this only says the pin is honored.
+    pin_held_by: Optional[list] = None
 
     # If expression is provided, parameter becomes deterministic (pm.Deterministic).
     # You can pass expression at build time too.
@@ -1040,6 +1079,12 @@ class Parameter:
     # created until finalize_deferred has patched the value.  See build_pymc
     # section A.
     _deferred_potentials: Optional[dict] = field(default=None, init=False)
+    # Numpy-only record of the prior terms build_pymc added, from which
+    # evidence_log_norm_terms computes the constant that turns the model's
+    # raw-space logp into a NORMALIZED prior density (the logit branch's
+    # 1/(sqrt(2 pi) * scale_logit) and the unnormalized Gaussians).  Reset
+    # on every build.  See evidence_log_norm_terms and parameter.md.
+    _evidence_spec: Optional[dict] = field(default=None, init=False)
     # True when build_pymc made this parameter's Deterministic ONLY so the
     # early-saved trace carries a reported derived quantity (review 2.6.14),
     # as opposed to a node the parameter always had (something sampled, a
@@ -1166,6 +1211,17 @@ class Parameter:
     # start value as (mkparam; `orbit.tc_sampled` -> `tc`).  Declared in
     # defaults.yaml, never by a user.  See run.md.
     restart_as: Optional[str] = None
+    # The elements of an ANGLE sampled directly instead of through its
+    # direction latents (src/exozippy/angles.py; parameter.md, "Structural
+    # priors"): {"center": [...], "halfwidth": [...], "scale": [...]}, one
+    # entry per element in INTERNAL units, NaN on every element that keeps
+    # its latents.  On the others the element is a logit-uniform angle on
+    # [center - halfwidth, center + halfwidth], started at the center with
+    # `scale` as its preliminary whitening scale.  Internal units on purpose:
+    # the window is computed from an internal-unit start, and a user-unit
+    # spelling would need a conversion factor outside this class.  A
+    # manifest option set by the generic angle layer, never a user's.
+    direct_window: Any = None
     # The resolved per-element period in USER units, set by
     # recenter_posterior for the summaries to reuse on any SUBSET of the
     # draws (a mode split by the cut needs its own recentering).  Dropped by
@@ -1291,6 +1347,54 @@ class Parameter:
         self.upper = convert(self.upper)
         self.mu = convert(self.mu)
         self.sigma = convert(self.sigma)
+        self._apply_direct_window()
+
+    def _apply_direct_window(self):
+        """Put the DIRECT elements of an angle on their window (internal units).
+
+        After the unit conversion, so the window -- computed by
+        ``exozippy.angles`` from an internal-unit start -- is written in the
+        unit the transform uses and nothing outside this class needs a
+        conversion factor (CLAUDE.md).  An element with a NaN center keeps
+        whatever it resolved to: it is still derived from its latents.
+        """
+        if self.direct_window is None:
+            return
+        n = self._n_elements()
+        win = self.direct_window
+        center = np.asarray(win["center"], dtype=float).reshape(-1)
+        half = np.asarray(win["halfwidth"], dtype=float).reshape(-1)
+        scale = np.asarray(win["scale"], dtype=float).reshape(-1)
+        if not (center.size == half.size == scale.size == n):
+            raise ValueError(
+                f"[{self.label}] direct_window has {center.size}/{half.size}/"
+                f"{scale.size} center/halfwidth/scale entries for {n} "
+                f"element(s); the angle layer sizes it per element."
+            )
+        direct = np.isfinite(center)
+        if not np.all(np.isfinite(half[direct]) & (half[direct] > 0)) or (
+            not np.all(np.isfinite(scale[direct]) & (scale[direct] > 0))
+        ):
+            raise ValueError(
+                f"[{self.label}] direct_window needs a positive halfwidth and "
+                f"scale on every direct element; got halfwidth "
+                f"{half[direct].tolist()}, scale {scale[direct].tolist()}."
+            )
+
+        def put(field_value, values):
+            vec = np.array(
+                to_vec(
+                    field_value, n, fill=np.nan, where=f"{self.label}.window"
+                ),
+                dtype=float,
+            ).reshape(-1)
+            vec[direct] = values[direct]
+            return vec
+
+        self.initval = put(self.initval, center)
+        self.lower = put(self.lower, center - half)
+        self.upper = put(self.upper, center + half)
+        self.init_scale = put(self.init_scale, scale)
 
     def element_is_sampled(self, index=0):
         """True if element ``index`` is a FREE sampled element of this vector.
@@ -1778,6 +1882,60 @@ class Parameter:
             "refuses.\n" + advice
         )
 
+    def _no_prior_message(self, offenders, inits, lowers, uppers):
+        """Render the fatal 'sampled element with no stated prior' error.
+
+        A sampled element needs two finite bounds (uniform prior, logit
+        path) or a ``sigma > 0`` (explicit Gaussian).  Anything else used to
+        fall through to a linear path whose raw N(0,1) made the prior
+        N(initval, init_scale) -- centered on a start value, with a width
+        from defaults.yaml: a prior nobody stated (review 1.2.10).  Values
+        are reported in the USER unit; the missing side(s) are named.
+        """
+
+        def user_units(val, i):
+            return self.from_internal(val, index=i)
+
+        def bound(val, i):
+            return f"{user_units(val, i):.10g}" if np.isfinite(val) else "none"
+
+        unit = self._unit_suffix()
+        lines = []
+        for i in offenders:
+            src = self._element_initval_source(i)
+            missing = [
+                f
+                for f, b in (("lower", lowers[i]), ("upper", uppers[i]))
+                if not np.isfinite(b)
+            ]
+            lines.append(
+                f"  {self.get_display_label(int(i))}: start "
+                f"{user_units(inits[i], i):.10g}{unit}, lower "
+                f"{bound(lowers[i], i)}, upper {bound(uppers[i], i)}{unit}, "
+                f"no sigma (start value from: {src}; missing: "
+                f"{' and '.join(missing)})"
+            )
+        where = (
+            f" (params file: {self.source_file})" if self.source_file else ""
+        )
+        return (
+            f"Sampled parameter with no stated prior{where}:\n"
+            + "\n".join(lines)
+            + "\n"
+            + "Every sampled element needs either two finite bounds (a "
+            "uniform prior on [lower, upper]) or a 'sigma' > 0 (an explicit "
+            "Gaussian prior). Without either, the only prior left would be "
+            "one nobody stated -- EXOZIPPy used to center a Gaussian on the "
+            "START value with the defaults.yaml init_scale as its width, "
+            "which silently biased the fit toward wherever it began; it now "
+            "refuses.\n"
+            "Fix: add the missing 'lower'/'upper' for this element to your "
+            "params file, or give it a 'sigma' (with a 'mu') to state a "
+            "Gaussian prior. If every fit of this parameter needs the bound, "
+            "the parameter's entry in the component's defaults.yaml should "
+            "carry it at its physical or code-validity limit."
+        )
+
     def _element_expression_specs(self, expr_raw, n_elements):
         """``(per-element specs, whole-vector expression)`` for this build.
 
@@ -1898,27 +2056,31 @@ class Parameter:
 
         Sampling cases:
           - Bounded (lower+upper finite): logit transform — hard bounds.
-            raw ~ N(0,1), val = lower + (upper-lower)*sigmoid(logit_init + scale_logit*raw).
-            raw=0 maps exactly to initval; no soft barriers. The N(0,1) raw
-            density is cancelled by a correction potential, so the implied
-            prior is exactly U(lower, upper); with sigma > 0 a Gaussian
+            raw flat, val = lower + (upper-lower)*sigmoid(logit_init + scale_logit*raw).
+            raw=0 maps exactly to initval; no soft barriers. The raw
+            coordinate has no density of its own (_raw_logp) and section C's
+            potential is the sigmoid's Jacobian, so the implied prior is
+            exactly U(lower, upper); with sigma > 0 a Gaussian
             potential on the physical value makes it a truncated normal, and
             sigma sets the whitening scale.
           - Unbounded with sigma > 0: raw ~ N(0,1), val = mu + sigma * raw.
             The raw prior IS the Gaussian; no separate potential needed.
-          - Unbounded with NO sigma: linear, val = initval + init_scale * raw.
-            Nothing cancels the raw N(0,1) here either, so this element's
-            prior IS N(initval, init_scale).  build_pymc warns about it (see
-            implicit_prior_idx below), because it is the one case where
-            init_scale is a modeling statement rather than conditioning.
+          - Not two finite bounds and NO sigma: RAISES (no_prior_idx below,
+            review 1.2.10).  The linear path's raw N(0,1) would make the
+            prior N(initval, init_scale) -- centered on a start value, a
+            prior nobody stated.  A single finite bound WITH a sigma takes
+            the Gaussian path above, its bound enforced by section B's soft
+            barrier.
 
-        All raw variables are N(0,1). init_scale is always in physical units;
+        Raw variables are N(0,1) on the linear path and flat on the
+        logit one. init_scale is always in physical units;
         for logit params it is converted to logit-space internally via the
         Jacobian and affects only tuning/conditioning, never the posterior --
-        that is section C cancelling the raw N(0,1) for ANY scale, and it is
+        that is the flat raw coordinate plus section C's Jacobian giving
+        U(lower, upper) for ANY scale, and it is
         why the startup whitening rescale is provably posterior-preserving
         THERE.  The claim is scoped to that branch and does not extend to the
-        two linear ones above, where the raw N(0,1) is the prior itself; so
+        linear (sigma) one above, where the raw N(0,1) is the prior itself; so
         on a logit element init_scale is only PRELIMINARY (the whitening
         scales live in pytensor.shared variables, and set_whitening()
         replaces them in place with the probe-measured posterior scales
@@ -2135,7 +2297,28 @@ class Parameter:
         # effect on derived params.  The sentence lives in
         # `derived_constraint_message` because check_user_starts says the
         # same thing about `initval` (review 2.3.17).
-        if np.any(is_derived & (sigmas == 0)):
+        if (
+            self.pin_held_by is not None
+            and len(self.pin_held_by) != n_elements
+        ):
+            raise ValueError(
+                f"Parameter '{self.label}': pin_held_by has "
+                f"{len(self.pin_held_by)} entries for {n_elements} elements."
+            )
+        held = np.array(
+            [
+                bool(self.pin_held_by is not None and self.pin_held_by[i])
+                for i in range(n_elements)
+            ],
+            dtype=bool,
+        )
+        if np.any(held & ~(is_derived & (sigmas == 0))):
+            raise ValueError(
+                f"Parameter '{self.label}': pin_held_by names elements "
+                f"{np.nonzero(held & ~(is_derived & (sigmas == 0)))[0].tolist()}"
+                " that are not derived elements with sigma: 0."
+            )
+        if np.any(is_derived & (sigmas == 0) & ~held):
             logger.warning(
                 f"Parameter '{self.label}': "
                 + derived_constraint_message("sigma=0")
@@ -2317,9 +2500,9 @@ class Parameter:
         gaussian_mus = np.copy(inits)
         gaussian_scales = np.copy(scales)
 
-        # Sampled elements with neither two finite bounds nor a sigma: their
-        # prior is the uncancelled raw N(0,1), i.e. N(initval, init_scale).
-        implicit_prior_idx = []
+        # Sampled elements with neither two finite bounds nor a sigma: fatal
+        # (no stated prior), collected so the error lists every one.
+        no_prior_idx = []
 
         for i in range(n_elements):
             if not is_sampled[i]:
@@ -2340,8 +2523,8 @@ class Parameter:
                     )
                 q_raw = (inits[i] - lowers[i]) / span
                 # Use the tighter of sigma and init_scale as the whitening scale.
-                # Section C cancels the raw N(0,1) prior (leaving a flat prior in
-                # physical space), so the prior shape is determined solely by the
+                # The raw coordinate is flat and section C supplies the
+                # Jacobian (leaving a flat prior in physical space), so the prior shape is determined solely by the
                 # Gaussian potential in section A — always N(mu, sigma) regardless
                 # of whiten.  Using min(sigma, init_scale) makes chain initialization
                 # spread by init_scale in physical space when init_scale < sigma
@@ -2407,26 +2590,15 @@ class Parameter:
                 gaussian_mus[i] = mus[i] if has_mu else inits[i]
                 gaussian_scales[i] = sigmas[i]
             else:
-                # No two finite bounds and no sigma: fall back to linear with
-                # N(0,1).  Nothing cancels that raw prior, so this element's
-                # prior IS N(initval, init_scale) -- the one place where
-                # init_scale is a posterior term rather than pure
-                # conditioning.  set_whitening therefore refuses to rescale
-                # it (a data-measured multiplier would make the prior width
-                # data-dependent), so say so once per parameter.
-                gaussian_mus[i] = inits[i]
-                gaussian_scales[i] = scales[i]
-                implicit_prior_idx.append(i)
+                # No two finite bounds and no sigma: no stated prior.  The
+                # linear path's raw N(0,1) would make it N(initval,
+                # init_scale) -- a stealth prior centered on the start
+                # (review 1.2.10, JDE 2026-11-01: raise).
+                no_prior_idx.append(i)
 
-        if implicit_prior_idx:
-            logger.warning(
-                f"Parameter '{self.label}': element(s) {implicit_prior_idx} "
-                f"are sampled with no finite lower/upper pair and no sigma, "
-                f"so their prior is N(initval, init_scale) from defaults -- "
-                f"init_scale is a real prior width here, and the whitening "
-                f"probe deliberately leaves it alone. Give the element two "
-                f"finite bounds (uniform prior) or a sigma (explicit "
-                f"Gaussian prior) to state the prior yourself."
+        if no_prior_idx:
+            raise ValueError(
+                self._no_prior_message(no_prior_idx, inits, lowers, uppers)
             )
 
         # 4. BUILD RAW VARIABLES
@@ -2471,13 +2643,30 @@ class Parameter:
                 "gaussian_mus": gaussian_mus.copy(),
                 "gaussian_scales": gaussian_scales.copy(),
             }
-            par_raw = pm.Normal(
-                f"{self.label}_raw",
-                mu=0,
-                sigma=1.0,
-                shape=len(idx),
-                initval=raw_initvals,
-            )
+            # The raw density: N(0, 1) on the non-logit elements, flat on the
+            # logit ones (see _raw_logp at the top of this module for why the
+            # old N(0, 1)-then-cancel pair must not come back).  A vector
+            # with no logit element keeps the plain pm.Normal it always had.
+            logit_raw = use_logit[idx]
+            if np.any(logit_raw):
+                par_raw = pm.CustomDist(
+                    f"{self.label}_raw",
+                    pt.as_tensor_variable(
+                        np.where(logit_raw, 0.0, 1.0).astype("float64")
+                    ),
+                    logp=_raw_logp,
+                    random=_raw_random,
+                    shape=len(idx),
+                    initval=raw_initvals,
+                )
+            else:
+                par_raw = pm.Normal(
+                    f"{self.label}_raw",
+                    mu=0,
+                    sigma=1.0,
+                    shape=len(idx),
+                    initval=raw_initvals,
+                )
             for j, actual_idx in enumerate(idx):
                 raw_elements[actual_idx] = par_raw[j]
 
@@ -2492,9 +2681,9 @@ class Parameter:
             # set_whitening can replace the preliminary scales with the
             # measured ones in place -- every function compiled from this
             # model picks up the new values without a rebuild.  The posterior
-            # is invariant to these values by construction: section C cancels
-            # the raw N(0,1) prior symbolically for ANY scale, so they affect
-            # conditioning only.
+            # is invariant to these values by construction: the logit raw
+            # coordinate is flat and section C's Jacobian makes the prior
+            # U(lower, upper) for ANY scale, so they affect conditioning only.
             if np.any(is_sampled):
                 sv_logit_q_inits = pytensor.shared(
                     logit_q_inits.astype(float),
@@ -2709,7 +2898,7 @@ class Parameter:
                 dyn_bounds[i] = (lo_t, up_t, span_t)
                 # NO -log(span) normalization term here, deliberately.  The
                 # reparameterization already supplies it: with lq = c + s*raw
-                # and section C cancelling the raw N(0,1), the raw-space
+                # and the raw coordinate flat (_raw_logp), the raw-space
                 # density is q(1-q), and dval/draw = span*q*(1-q)*s, so
                 # p(val) = 1/(sqrt(2pi)*s*span) -- exactly U(lo, up), whose
                 # integral over the interval is independent of span for ANY
@@ -2827,7 +3016,8 @@ class Parameter:
         # A. Gaussian potential on the physical value for:
         #    - derived parameters with sigma, and
         #    - bounded (logit-transformed) sampled parameters with sigma, whose
-        #      raw N(0,1) is cancelled by section C → uniform × this Gaussian
+        #      raw coordinate is flat and section C makes them uniform ->
+        #      uniform x this Gaussian
         #      = truncated normal.
         #    Unbounded sampled Gaussian params encode their prior in raw ~
         #    N(0,1); no double-count.
@@ -2978,6 +3168,35 @@ class Parameter:
                 pt.log(span_t) - _log_normal_mass(alpha, beta),
             )
 
+        # A4. EVIDENCE NORMALIZATION RECORD (no logp term).  What sections A,
+        #     A2, A3 and C add is a prior density correct only UP TO A
+        #     CONSTANT -- harmless for sampling, wrong for an evidence.  The
+        #     constant depends on the whitening scale, which moves after this
+        #     build, so only its INPUTS are recorded here and
+        #     evidence_log_norm_terms evaluates it on demand.  See that method
+        #     and parameter.md, "The model logp is a prior density only up to
+        #     a constant".
+        logit_now = (
+            is_sampled & use_logit
+            if (np.any(use_logit) and expr_raw is None)
+            else np.zeros(n_elements, dtype=bool)
+        )
+        self._evidence_spec = {
+            "logit": logit_now.copy(),
+            "lowers": lowers.copy(),
+            "uppers": uppers.copy(),
+            "sigmas": sigmas.copy(),
+            "prior_mus": prior_mus.copy(),
+            # static-centre Gaussians (section A, both phases)
+            "gauss": gaussian_prior_mask.copy(),
+            "mu_link": np.array(
+                [i in mu_links for i in range(n_elements)], dtype=bool
+            ),
+            "dyn": np.array(
+                [i in dyn_bounds for i in range(n_elements)], dtype=bool
+            ),
+        }
+
         # B. Soft bounds for derived params (and the rare half-bounded sampled
         #    param, where only one bound is finite so the logit transform does
         #    not apply). Fully-bounded sampled params: sigmoid is a hard
@@ -3113,14 +3332,15 @@ class Parameter:
                     pm.math.sum(pt.where(mask, penalty, 0.0)),
                 )
 
-        # C. Flat-prior correction for logit-transformed sampled parameters.
-        #    raw ~ N(0,1) through the sigmoid gives a logit-normal prior in
-        #    physical space. Adding log(q*(1-q)) + raw²/2 cancels both the
-        #    sigmoid distortion AND the N(0,1) raw density, leaving an exactly
-        #    uniform prior on [lower, upper] — the same logp PyMC's Interval
-        #    transform gives pm.Uniform, but in our initval-centered,
-        #    init_scale-whitened raw coordinate. init_scale then only affects
-        #    tuning/conditioning, not the posterior.
+        # C. Uniform prior for logit-transformed sampled parameters.
+        #    The raw coordinate of a logit element is FLAT (_raw_logp), so
+        #    the whole prior is the sigmoid's Jacobian log(q*(1-q)): with it,
+        #    the prior is exactly uniform on [lower, upper] -- the same logp
+        #    PyMC's Interval transform gives pm.Uniform, but in our
+        #    initval-centered, init_scale-whitened raw coordinate.
+        #    init_scale then only affects tuning/conditioning, not the
+        #    posterior.  Nothing here cancels a raw N(0, 1) any more, and
+        #    nothing may: see _raw_logp for the runaway that pair caused.
         if np.any(use_logit) and expr_raw is None:
             logit_mask = pt.as_tensor_variable(use_logit)
             # log(q*(1-q)) from the *unclipped* logit: smooth, and decays ~ -|lq|
@@ -3136,13 +3356,6 @@ class Parameter:
                 -pt.softplus(lq_safe)
                 - pt.softplus(-lq_safe)
                 - pt.maximum(pt.abs(lq) - 700.0, 0.0)
-            )
-            # raw_vector is clipped before squaring: see _RAW_CANCELLATION_CLIP
-            # (a shared variable -- the whitening probe raises it in place).
-            raw_cancel_safe = pt.clip(
-                raw_vector,
-                -_raw_cancellation_clip_sv,
-                _raw_cancellation_clip_sv,
             )
             # Saturation guard: log_jac's restoring slope approaches a
             # constant (not a growing one) as |lq| -> infinity, so a
@@ -3166,7 +3379,7 @@ class Parameter:
             )
             correction = pt.where(
                 logit_mask,
-                log_jac + 0.5 * pt.sqr(raw_cancel_safe) + saturation_penalty,
+                log_jac + saturation_penalty,
                 pt.zeros_like(raw_vector),
             )
             pm.Potential(
@@ -3609,8 +3822,8 @@ class Parameter:
         the anchor half belongs to ``recenter_on_start``, which runs once
         BEFORE the probe.  Both are legal to move for the same reason, and
         it is a statement about the DENSITY rather than about invariance:
-        section C's correction cancels the raw N(0,1) symbolically, so on a
-        logit element ``sv_logit_q_inits`` and ``sv_scale_logits`` are BOTH
+        a logit element's raw coordinate is flat and section C's Jacobian
+        makes its prior uniform, so ``sv_logit_q_inits`` and ``sv_scale_logits`` are BOTH
         pure parameterization and neither enters the posterior.
 
         What the rescale has to preserve is therefore not the density but
@@ -3627,11 +3840,11 @@ class Parameter:
         first, which is what a tool or a test may legitimately do -- but it
         is no longer what carries the production path.)
         Elements whose raw N(0,1) IS the prior -- every NON-LOGIT element,
-        i.e. anything without two finite bounds -- are never touched.  Their
-        scale is the prior width (sigma when one was given, init_scale when
-        the bounds are infinite and none was), not a whitening choice; only
-        the logit branch's correction potential cancels the raw N(0,1), and
-        only there is the rescale provably posterior-preserving.  Non-finite
+        i.e. anything without two finite bounds, which build_pymc admits
+        only with a sigma -- are never touched.  Their scale is the prior
+        width sigma, not a whitening choice; only
+        the logit branch's raw coordinate is flat (its prior is section C's
+        Jacobian), and only there is the rescale provably posterior-preserving.  Non-finite
         or non-positive entries (a failed probe) leave that element's scale
         unchanged.
 
@@ -3675,11 +3888,11 @@ class Parameter:
                 scale_logits[i] *= m
                 rescaled[j] = True
             else:
-                # NON-LOGIT elements are never rescaled.  Nothing cancels
-                # their raw N(0,1) (section C fires only for use_logit), so
-                # the raw prior IS this element's prior: N(mu, sigma) when a
-                # sigma was given, N(initval, init_scale) when the bounds are
-                # infinite and no sigma was.  The multiplier is measured from
+                # NON-LOGIT elements are never rescaled.  Their raw N(0,1)
+                # is kept (only logit raws are flat, _raw_logp), so
+                # the raw prior IS this element's prior, N(mu, sigma) (a
+                # sampled element with neither two finite bounds nor a sigma
+                # is refused by build_pymc, review 1.2.10).  The multiplier is measured from
                 # the data, so rescaling would make the prior WIDTH
                 # data-dependent -- circular, and a violation of the
                 # "posterior provably unchanged" invariant that only holds
@@ -3716,8 +3929,8 @@ class Parameter:
         anchor, which is also the polished point.
 
         WHY THIS IS FREE, and why it is done here rather than by adding an
-        offset: on a LOGIT element section C's correction potential cancels
-        the raw N(0,1) prior symbolically, so ``lq = anchor + scale*raw`` is
+        offset: on a LOGIT element the raw coordinate is flat and section C's
+        Jacobian alone makes the prior uniform, so ``lq = anchor + scale*raw`` is
         PURE PARAMETERIZATION -- the anchor is no more a posterior term than
         the scale is, and moving it changes no density.  ``raw = 0`` then maps
         to the polished physical value by construction, and every consumer of
@@ -3988,6 +4201,114 @@ class Parameter:
             bs["sv"].set_value(b)
         return True
 
+    def evidence_log_norm_terms(self):
+        """The constants that normalize this parameter's prior terms.
+
+        Returns a list of ``(element, kind, value)``: ``value`` (nats) is
+        what must be ADDED to the model's raw-space logp so that the prior
+        terms this parameter put in it integrate to one.  The model's
+        sampled logp is deliberately left unnormalized -- these are
+        constants, so the posterior, the start logp and every sampler step
+        are untouched -- and ``outputs.evidence`` adds the sum to each
+        mode's bridge lnZ instead.  Recomputed on every call, because the
+        whitening scale it reads moves after the build (the probe, a
+        restored ``_whitening.json``).
+
+        Kinds, per element (s = the CURRENT ``scale_logit``, span = upper -
+        lower, ``z`` the standardized bounds):
+
+        - ``uniform`` (every sampled logit element): ``ln s + ln sqrt(2 pi)``.
+          Section C leaves the raw density at ``q(1-q)/sqrt(2 pi)``, which
+          integrates to ``1/(sqrt(2 pi) s)``; a normalized U(lower, upper)
+          pulled back to raw is ``q(1-q) s``.  This is the term that made
+          lnZ move run to run with the probe-measured scale.
+        - ``truncated_normal`` (a static-centre ``sigma`` on a sampled logit
+          element, the xalpha/yalpha pair included):
+          ``ln span - ln(sigma sqrt(2 pi)) - ln Z``, Z = Phi(beta) -
+          Phi(alpha).  Section A multiplies the uniform's 1/span by an
+          UNNORMALIZED exp(-z^2/2); the normalized prior is the truncated
+          normal.  For xalpha/yalpha (N(0, 1) inside U(-100, 100), Z = 1)
+          the pair is then an exactly normalized 2-D standard normal, whose
+          angle marginal is U(0, 2 pi) -- so no extra Jacobian is owed for
+          the circular embedding.
+        - ``gaussian`` (a sigma on an element with a LINKED bound): section
+          A3 already supplies ``ln span - ln Z`` at every step, so only
+          ``-ln(sigma sqrt(2 pi))`` is missing.
+        - ``gaussian_link`` (a soft ``mu`` link on a sampled logit element
+          with static bounds): as ``truncated_normal`` with Z taken as 1.
+          Z here depends on the link's centre, so it is not a constant;
+          exact when the linked Gaussian lies well inside the bounds.
+        - ``gaussian_constraint`` (a sigma, static or linked, on a DERIVED
+          or reported element, or a link on an unbounded one): treated as an
+          independent measurement, normalized as a Gaussian density,
+          ``-ln(sigma sqrt(2 pi))``.  The prior it implies on the sampled
+          coordinates has no closed-form normalization; this is the
+          convention that makes it a fixed, run-independent constant.
+
+        Terms NOT covered (component potentials, soft barriers, the
+        half-bounded linear path) are listed in parameter.md.
+        """
+        spec = self._evidence_spec
+        if not spec:
+            return []
+        ln_sqrt_2pi = 0.5 * math.log(2.0 * math.pi)
+        logit = spec["logit"]
+        gauss = spec["gauss"]
+        mu_link = spec["mu_link"]
+        dyn = spec["dyn"]
+        lowers, uppers = spec["lowers"], spec["uppers"]
+        sigmas, mus = spec["sigmas"], spec["prior_mus"]
+        scale_logits = None
+        if np.any(logit):
+            ws = self._whiten_state
+            if ws is None:
+                raise RuntimeError(
+                    f"Parameter '{self.label}': logit elements are sampled "
+                    f"but no whitening state exists; cannot normalize."
+                )
+            scale_logits = np.asarray(
+                ws["sv_scale_logits"].get_value(), dtype=float
+            )
+        terms = []
+        for i in range(logit.size):
+            has_gauss = bool(gauss[i] or mu_link[i])
+            if logit[i]:
+                s = abs(float(scale_logits[i]))
+                terms.append((i, "uniform", math.log(s) + ln_sqrt_2pi))
+                if not has_gauss:
+                    continue
+                sig = float(sigmas[i])
+                if dyn[i]:
+                    terms.append((i, "gaussian", -math.log(sig) - ln_sqrt_2pi))
+                    continue
+                lo, up = float(lowers[i]), float(uppers[i])
+                if gauss[i]:
+                    mu = float(mus[i])
+                    kind = "truncated_normal"
+                    ln_z = _log_normal_mass_np(
+                        (lo - mu) / sig, (up - mu) / sig
+                    )
+                else:
+                    kind = "gaussian_link"
+                    ln_z = 0.0
+                terms.append(
+                    (
+                        i,
+                        kind,
+                        math.log(up - lo) - math.log(sig) - ln_sqrt_2pi - ln_z,
+                    )
+                )
+            elif has_gauss:
+                sig = float(sigmas[i])
+                terms.append(
+                    (i, "gaussian_constraint", -math.log(sig) - ln_sqrt_2pi)
+                )
+        return terms
+
+    def evidence_log_norm(self):
+        """Sum of ``evidence_log_norm_terms`` (nats); 0.0 when there are none."""
+        return float(sum(v for _i, _k, v in self.evidence_log_norm_terms()))
+
     def element_phys_from_raw(self, index, raw):
         """Physical value(s) for element ``index`` from raw coordinate(s).
 
@@ -4090,7 +4411,7 @@ class Parameter:
         return tf
 
     def raw_from_initval(self, initval_internal):
-        """Map an alternate physical initval (internal units) to the raw N(0,1)
+        """Map an alternate physical initval (internal units) to the raw
         start for this parameter's sampled elements, using the frozen forward
         transform from build_pymc.
 
@@ -4158,7 +4479,7 @@ class Parameter:
         return raw
 
     def phys_from_raw(self, raw_vec):
-        """Map raw N(0,1) coordinates to physical values (internal units).
+        """Map raw coordinates to physical values (internal units).
 
         The inverse of raw_from_initval, using the same frozen forward
         transform from build_pymc (including the +/-30 sigmoid clip), so a

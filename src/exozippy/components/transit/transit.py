@@ -15,6 +15,7 @@ from exozippy.outputs.texutils import latex_escape
 
 from .. import ltt
 from ..orbit import physics as orbit_physics
+from ..orbit.bodies import planet_membership
 from . import physics, ramp, spline
 
 
@@ -22,6 +23,14 @@ class Transit(Instrument):
     prose_noun = "transit photometry"
     # The fitted trend is ADDED to the model (Instrument.DETREND_SPACE).
     DETREND_SPACE = "additive"
+    # Exposure smearing through the base's smear() (instrument.md,
+    # "Exposure smearing").  The rule is EXOFASTv2's midpoint Riemann grid,
+    # kept for parity and for a bit-identical start logp on every shipped
+    # example when the machinery moved into the base; a Gauss rule
+    # converges far faster on smooth stretches, and switching transit to it
+    # is a separate, measured change.
+    supports_exposure = True
+    EXPOSURE_RULE = "midpoint"
 
     def __init__(self, config, config_manager):
         super().__init__(config, config_manager)
@@ -401,6 +410,8 @@ class Transit(Instrument):
             cls._label_config_schema(),
             cls._gp_config_schema(),
             cls._likelihood_config_schema(),
+            cls._out_frac_prior_config_schema(),
+            *cls._exposure_config_schema(),
             {
                 "key": "fitdilute",
                 "kind": "option",
@@ -491,57 +502,8 @@ class Transit(Instrument):
         self.ramp_span = [np.nan] * self.n_elements
         self.ramp_seed = [None] * self.n_elements
 
-        # Fixed instrument properties (not fitted parameters), read straight
-        # off the config like self.files/self.band_names: exptime is the
-        # exposure duration in minutes, ninterp the number of sub-samples
-        # used to smear the model over that exposure (EXOFASTv2 parity).
-        # Invalid combinations (ninterp < 1, a non-positive exptime, or
-        # ninterp > 1 without an exptime to smear over) warn and fall back
-        # to the inert defaults (ninterp=1, exptime=1: no smearing) rather
-        # than crashing in the grid builder or silently smearing over a
-        # made-up exposure time.
-        self.exptime_min = [1.0] * self.n_elements
-        self.ninterp = [1] * self.n_elements
-        # Whether exptime_min is the file's own exposure time: stated in
-        # the config AND accepted.  False for the inert 1-minute default,
-        # whether the key was absent or rejected below.
-        self.exptime_stated = [False] * self.n_elements
-        for i, c in enumerate(self.config):
-            # A non-numeric value is a hard error (unlike the RANGE checks
-            # below, which warn and fall back): `exptime: "abc"` is a typo
-            # with no sensible fallback, and the bare `float()` used to
-            # surface it as "could not convert string to float" naming no
-            # instrument and no key (review 2.14.3).
-            try:
-                exptime = float(c.get("exptime", 1.0))
-                ninterp = int(c.get("ninterp", 1))
-            except (TypeError, ValueError) as e:
-                raise ValueError(
-                    f"[{self.prefix}[{self.names[i]}]] exptime/ninterp must "
-                    f"be numeric (exposure duration in minutes and the "
-                    f"number of sub-samples); got "
-                    f"exptime={c.get('exptime', '<unset>')!r}, "
-                    f"ninterp={c.get('ninterp', '<unset>')!r}: {e}"
-                ) from e
-            if (
-                ninterp < 1
-                or exptime <= 0
-                or (ninterp > 1 and "exptime" not in c)
-            ):
-                logger.warning(
-                    f"transit {self.names[i]}: invalid exposure smearing "
-                    f"config (exptime={c.get('exptime', '<unset>')} min, "
-                    f"ninterp={c.get('ninterp', '<unset>')}): needs "
-                    f"ninterp >= 1 and, when ninterp > 1, an explicit "
-                    f"exptime > 0. Ignoring -- defaulting to ninterp=1, "
-                    f"exptime=1 (no smearing)."
-                )
-                exptime, ninterp = 1.0, 1
-            else:
-                self.exptime_stated[i] = "exptime" in c
-            self.exptime_min[i] = exptime
-            self.ninterp[i] = ninterp
-
+        # The exposure description (exptime_s / ninterp) is the base's,
+        # parsed at construction (Instrument._load_exposure_config).
         blocks = self._concat_blocks()
         for i in range(self.n_elements):
             # Shared reader: columns:, mask:, time_* conversion, then one
@@ -577,7 +539,7 @@ class Transit(Instrument):
         # are already in the amplitude parameters' unit (relative flux).
         blocks.finalize("flux")
 
-        self._build_oversample_grid()
+        self._record_exposure_groups(self.time, self.inst_map)
 
         # Blind seeding: measure the period and conjunction epoch from the
         # photometry when nothing else supplies them.  Stage 1a, not stage 2
@@ -709,7 +671,6 @@ class Transit(Instrument):
                 )
                 / self.baseline_init[i]
             )
-            exptime = self.exptime_min[i] / 1440.0
             per_orbit = {}
             for o, depth, T, tau in shapes:
                 w = timing.transit_information(
@@ -720,7 +681,7 @@ class Transit(Instrument):
                     depth,
                     T,
                     tau,
-                    exptime=exptime,
+                    exptime_s=self.exptime_s[i],
                 )
                 per_orbit[o] = per_orbit.get(o, 0.0) + w
             for o, w in per_orbit.items():
@@ -849,94 +810,16 @@ class Transit(Instrument):
     def _sole_planet_index(self, system, orbit_ndx):
         """The one planet on this orbit, or None if there is not exactly one.
 
-        Read off the raw config rather than ``planet.orbit_map``: this runs
-        at stage 1a, where the maps may not have been built yet.
+        Read off the raw config (``orbit.bodies.planet_membership``, the one
+        reader of planet membership) rather than ``planet.orbit_map``: this
+        runs at stage 1a, where the maps may not have been built yet.
         """
         planets = getattr(system, "planet", None)
         if planets is None:
             return None
-        on_orbit = [
-            j
-            for j, entry in enumerate(planets.config)
-            if int((entry or {}).get("orbit_ndx", 0)) == orbit_ndx
-        ]
+        membership = planet_membership(self.config_manager.system_config)
+        on_orbit = [j for j, (o, _) in enumerate(membership) if o == orbit_ndx]
         return on_orbit[0] if len(on_orbit) == 1 else None
-
-    def _oversample_partition(self, inst_map):
-        """Partition rows into per-ninterp groups for exposure smearing.
-
-        ``inst_map`` is the per-row instrument index of whatever time
-        vector is being modeled (the data's own ``self.inst_map``, or a
-        plot layout's).  Returns a list of ``(rows, offsets, weights)``:
-        ``rows`` the row indices in the group, ``offsets`` an
-        ``(len(rows), kk)`` array of sub-exposure time offsets in days
-        (``None`` for the ninterp=1 group, whose lone sample sits at the
-        timestamp itself), ``weights`` the ``(kk,)`` averaging weights.
-
-        EXOFASTv2 parity (exofast_chi2v2.pro): a sub-exposure time grid
-        collapsed with a weighted mean per observation.  exptime/ninterp
-        are per-instrument, but the time vector is concatenated across
-        instruments, so instruments may disagree on both.  Rather than
-        padding every observation out to the largest ninterp among the
-        active instruments (which would evaluate the transit model at that
-        many sub-samples even for observations whose own instrument needs
-        only 1), observations are partitioned by their own instrument's
-        ninterp value: each group's sub-exposure grid is exactly as wide as
-        that group's own ninterp, so an evaluation costs exactly the
-        sub-samples each observation's instrument needs.
-
-        The sub-times are midpoint Riemann cells: kk equal-width cells
-        across [-exptime/2, +exptime/2], sampled at each cell's center
-        (offsets (j + 0.5)/kk - 0.5, never the exposure edges) -- exactly
-        EXOFASTv2's grid (dindgen(ninterp)/ninterp - (ninterp-1)/
-        (2*ninterp)), chosen there over trapezoid/Simpson: with uniform
-        1/kk weights, edge samples would overweight the exposure boundaries
-        and systematically over-smear.
-
-        Groups come out in np.unique(ninterp) order, not row order; the
-        caller gathers per-group results back into row order with the
-        argsort of the concatenated group rows (see ``_lc_model``).
-        """
-        inst_map = np.asarray(inst_map, dtype=int)
-        exptime_days = np.asarray(self.exptime_min, dtype=float) / 1440.0
-        ninterp_per_inst = np.asarray(self.ninterp, dtype=int)
-
-        ninterp_obs = ninterp_per_inst[inst_map]  # (N,)
-        exptime_obs = exptime_days[inst_map]  # (N,)
-
-        groups = []
-        for kk in np.unique(ninterp_obs):
-            rows = np.nonzero(ninterp_obs == kk)[0]
-            if kk == 1:
-                groups.append((rows, None, np.ones(1)))
-            else:
-                j = np.arange(kk)
-                frac = (j + 0.5) / kk - 0.5
-                offsets = frac[None, :] * exptime_obs[rows][:, None]
-                groups.append((rows, offsets, np.full(kk, 1.0 / kk)))
-        return groups
-
-    def _build_oversample_grid(self):
-        """
-        Record the data's per-ninterp observation groups
-        (``self._oversample_groups``, a list of ``(rows, grid, weights)``
-        with ``grid`` the concrete ``(n_g, k_g)`` sub-exposure times) --
-        the partition ``_oversample_partition`` makes of ``self.inst_map``,
-        materialized on ``self.time``.  ``_lc_model`` rebuilds the same
-        partition symbolically on whatever time vector it is handed (the
-        likelihood's ``pm.Data`` or a plot grid); this concrete copy is the
-        inspectable record of what the likelihood smears over (see
-        tests/test_transit_exptime_ninterp.py).
-        """
-        self._oversample_groups = []
-        for rows, offsets, weights in self._oversample_partition(
-            self.inst_map
-        ):
-            if offsets is None:
-                grid = self.time[rows][:, None]
-            else:
-                grid = self.time[rows][:, None] + offsets
-            self._oversample_groups.append((rows, grid, weights))
 
     def register_parameters(self, system):
         """Stage 3: Embed data-driven hints into the PyMC manifest."""
@@ -1176,10 +1059,7 @@ class Transit(Instrument):
         # it) and its int32 tensor twin for indexing per-instrument
         # parameter vectors (the same construction as stage 5's
         # ``*_map_tensor``).
-        n_rows = int(sum(len(rows) for _, rows in blocks))
-        inst_map = np.empty(n_rows, dtype=int)
-        for inst_idx, rows in blocks:
-            inst_map[np.asarray(rows, dtype=int)] = int(inst_idx)
+        inst_map = self._blocks_inst_map(blocks)
         inst_map_t = pt.as_tensor_variable(inst_map).astype("int32")
         obs_band_map = self.band_map[inst_map]
         obs_band_map_t = pt.as_tensor_variable(obs_band_map).astype("int32")
@@ -1210,7 +1090,7 @@ class Transit(Instrument):
 
         # 2. Orbital elements per planet. These don't depend on the
         # observation/sub-exposure grid, so they're computed once and
-        # reused by every ninterp group below (see 4.).
+        # reused by every node group below (see 4.).
         tp = orbits.tp_target.value[planets.orbit_map][
             None, None, :
         ]  # (1, 1, N_planets)
@@ -1264,10 +1144,14 @@ class Transit(Instrument):
             ltt_reflect_factor = (m_primary / m_total)[None, None, :]
             # Doppler beaming and ellipsoidal variation are the STAR's own
             # flux (its radial motion and its tidal shape), so they ride
-            # the star's delay -- a factor ~q, not ~1. Flat (N_planets,):
-            # these terms are evaluated per observation, not on the
-            # sub-exposure grid.
-            ltt_star_factor = m_companion / m_total
+            # the star's delay -- a factor ~q, not ~1. ltt.py's z is the
+            # companion-minus-primary separation TOWARD the observer, and
+            # the star sits at -(M_c/M) of it: the factor is NEGATIVE (it
+            # was +M_c/M, a sign error, until review 1.5.11; the RV path,
+            # RVInstrument._emission_time, has the same -M_c/M). Flat
+            # (N_planets,): these terms are evaluated per observation, not
+            # on the sub-exposure grid.
+            ltt_star_factor = -m_companion / m_total
 
         # 3. Limb Darkening Setup (per observation, mapped from each
         # instrument's Band). When every band uses the linear law, Band's
@@ -1313,30 +1197,22 @@ class Transit(Instrument):
         if dil_inst is not None:
             dil_obs_flat = dil_inst[inst_map_t]  # (N,)
 
-        # 4. Exoplanet-core Transit Model, evaluated once per distinct
-        # ninterp group (see _oversample_partition) instead of once for
-        # the whole component at the largest ninterp: each group's
-        # sub-exposure axis is exactly that group's own ninterp wide, so a
-        # short-cadence (ninterp=1) observation is never evaluated at
-        # another instrument's larger ninterp. With ninterp==1 everywhere
-        # there is exactly one group of width 1, identical to the
-        # original (pre-oversampling) computation.
-        groups = self._oversample_partition(inst_map)
-        inverse_order = np.argsort(np.concatenate([g[0] for g in groups]))
-        planet_group_decrement = [[] for _ in range(planets.n_elements)]
-        for rows, offsets_np, weights_np in groups:
-            # This group's sub-exposure time grid, built ON the time tensor
-            # so the same code serves the data and a plot grid.  ninterp=1:
-            # the lone sample sits at the timestamp itself and exptime is
-            # irrelevant (the original instantaneous model).
-            t_rows = t[rows][:, None]  # (n_g, 1)
-            if offsets_np is None:
-                t_grid = t_rows[:, :, None]  # (n_g, 1, 1)
-            else:
-                t_grid = (t_rows + pt.constant(offsets_np))[
-                    :, :, None
-                ]  # (n_g, k_g, 1)
-            w_g = pt.constant(weights_np)  # (k_g,)
+        # 4. Exoplanet-core Transit Model, evaluated on each exposure's
+        # sub-exposure nodes by the base's smear (instrument.md, "Exposure
+        # smearing"): once per distinct ninterp group, each group's node
+        # axis exactly that group's own ninterp wide, so a short-cadence
+        # (ninterp=1) observation is never evaluated at another
+        # instrument's larger ninterp.  With ninterp==1 everywhere there is
+        # exactly one group of width 1, identical to the original
+        # (pre-oversampling) computation.  _planet_dips returns one
+        # (n_g, k_g) perturbation per planet; smear averages each over the
+        # nodes and returns them (N,) in row order.
+        def _planet_dips(t_sub, rows):
+            """Every planet's instantaneous perturbation on one node group:
+            ``t_sub`` the group's ``(n_g, k_g)`` sub-exposure times, ``rows``
+            its row indices (numpy).  A tuple of ``(n_g, k_g)`` tensors."""
+            t_grid = t_sub[:, :, None]  # (n_g, k_g, 1)
+            nets = []
 
             # Light-travel-time correction. The factor depends on WHICH
             # observable is being retarded, not on the timestamps, so one
@@ -1521,22 +1397,17 @@ class Transit(Instrument):
                     # and the planet's extra flux by the same factor.
                     net = net * dil_obs[:, None]
 
-                # Weighted mean over this group's own ninterp sub-samples
-                # (weights sum to 1). With ninterp==1 this is a no-op
-                # identity (single column, weight 1).
-                net_avg_g = pt.sum(net * w_g[None, :], axis=1)  # (n_g,)
-                planet_group_decrement[p_idx].append(net_avg_g)
+                nets.append(net)  # (n_g, k_g), averaged by smear
+            return tuple(nets)
+
+        planet_decrement = self.smear(_planet_dips, t, blocks)
 
         planet_terms = []
         for p_idx in range(planets.n_elements):
-            # Groups were visited in np.unique(ninterp) order, not row
-            # order; inverse_order restores the original per-observation
-            # order after concatenation. This decrement already includes
+            # This planet's exposure-averaged decrement, (N,) in row order:
             # the transit, thermal, and (BEER, PR 1.b) reflection terms,
-            # all computed and exposure-smeared in the group loop above.
-            net_avg = pt.concatenate(planet_group_decrement[p_idx])[
-                inverse_order
-            ]
+            # all computed and exposure-smeared by _planet_dips above.
+            net_avg = planet_decrement[p_idx]
             lc_before = lc_model
             lc_model = lc_model - net_avg
             # This planet's own change to the running RELATIVE model,
@@ -2166,7 +2037,7 @@ class Transit(Instrument):
         one row.
 
         The TESS files (band filter ``SUMMARY_TESS_FILTER``) share a row per
-        exposure time (``exptime:``, rounded to the second): the sectors of
+        exposure time (``exptime_s:``, rounded to the second): the sectors of
         one cadence are one instrument setup with one model curve.  Every
         other file keeps its own row (key and label its name and
         ``display_label``): ground-based follow-up from different
@@ -2174,9 +2045,9 @@ class Transit(Instrument):
         agree.  A TESS row is labelled with its members' common ``label:``
         when they share one that no other cadence uses, and otherwise
         ``"<label or TESS> <seconds> s"``, e.g. ``"TESS 120 s"`` -- the
-        cadence only when every member states an ``exptime:`` this
+        cadence only when every member states an ``exptime_s:`` this
         component accepted (``exptime_stated``).  Without one, or with one
-        it rejected, the fit uses the inert 1-minute default (no
+        it rejected, the fit uses the inert 60 s default (no
         smearing), which is not the data's cadence, so such a row is just
         ``"TESS"``.  Two rows with one label are the renderer's to refuse
         (``summary_plot``), since only a figure needs them distinct.
@@ -2189,7 +2060,7 @@ class Transit(Instrument):
             if band.filter_names[b] != self.SUMMARY_TESS_FILTER:
                 rows[name] = (name, self.display_label(i))
                 continue
-            seconds = int(round(60.0 * float(self.exptime_min[i])))
+            seconds = int(round(float(self.exptime_s[i])))
             by_cadence.setdefault(seconds, []).append(i)
 
         common = {}

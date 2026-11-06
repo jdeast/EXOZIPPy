@@ -19,15 +19,14 @@ Parameter.set_whitening(), which updates the pytensor.shared whitening scales
 in place -- no model rebuild, and the posterior is provably unchanged.
 
 That proof covers the LOGIT branch only -- an element with two finite bounds,
-where section C of Parameter.build_pymc cancels the raw N(0,1) prior
-symbolically for any scale, so the scale affects conditioning alone.  It is
+whose raw coordinate is flat (Parameter.build_pymc's _raw_logp) and whose
+uniform prior is section C's Jacobian for any scale, so the scale affects
+conditioning alone.  It is
 exactly the set set_whitening rescales.  Every NON-logit element (anything
 without two finite bounds) is left untouched, because there the raw N(0,1) IS
-the prior: N(mu, sigma) when a sigma was given, and N(initval, init_scale)
-when the bounds are infinite and no sigma was -- the one place init_scale is
-a posterior term rather than conditioning, and one a data-measured multiplier
-would turn into a data-dependent prior width.  build_pymc warns when it builds
-such an element.  So the invariant holds for the pass as a whole, but only
+the prior N(mu, sigma) (build_pymc refuses a sampled element with neither two
+finite bounds nor a sigma, review 1.2.10), and a data-measured multiplier
+would turn it into a data-dependent prior width.  So the invariant holds for the pass as a whole, but only
 because the branch it does not hold for is never rescaled.
 
 After the rescale, every raw direction costs ~0.5 nats per unit step: the
@@ -44,10 +43,11 @@ is ~1.
 import json
 import logging
 import os
+import queue
+import time
+from collections import deque
 
 import numpy as np
-
-from exozippy.components.parameter import raised_raw_cancellation_clip
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +59,7 @@ _PROBE_MIN_STEP = 1.0e-8  # raw units; floor on a returned step
 _PROBE_RTOL = 0.05  # accept a step whose drop is within 5% of target
 _PROBE_MAX_BISECT = 40
 _PROBE_FLAT_SCALE = 1.0  # fallback when neither direction reaches target;
-# raw variables are N(0,1) by construction, so 1.0
+# one raw unit is one preliminary scale by construction, so 1.0
 # is the natural unit for a direction logp ignores.
 
 # An element whose gradient contributes more than this many nats over one
@@ -83,6 +83,34 @@ _WHITEN_MAX_STEP = 1.0e9
 _WHITEN_MIN_STEP = 1.0e-14
 _WHITEN_MAX_BISECT = 90
 
+# THE PROBE RUNS ON A WORKER POOL WHEN THE LOGP IS EXPENSIVE (review
+# 2.6.41).  It used to call logp one element at a time in the main process:
+# untimed, silent, one core.  OGLE-2013-BLG-0341 (three lenses, ~225 s per
+# logp, 112 cores) sat 12.85 h in it with 111 cores idle and no line in the
+# log, and 62 elements x tens of evaluations each cannot fit a 3-day wall
+# serially at all.  The elements are independent given the start, so each
+# element's bracket+bisect search runs as its own coroutine and every
+# evaluation any of them asks for goes to the pool at once (_probe_on_pool),
+# each under the sampler's `eval_timeout`.  The serial path stays for
+# `cores: 1` and for a CHEAP logp: below this many seconds per call (timed
+# on the start's own evaluation) forking a pool and shipping every probe
+# point through IPC costs more than it saves, and nothing here can hang
+# long enough to need a timeout -- unless the user set one, which always
+# takes the pool, since a timeout cannot be enforced in-process.  The two
+# paths return bit-identical scales (see _need).
+PROBE_POOL_MIN_LOGP_S = 0.05
+
+# Wall-clock interval between the probe's progress lines (elements done /
+# total, logp evaluations, in flight, ETA).  A probe that finishes inside
+# one interval logs nothing, which keeps a fast model's log (and the test
+# suite) quiet; a slow one says it is alive every interval, so "computing"
+# and "hung" are distinguishable from the log alone.
+PROBE_PROGRESS_S = 60.0
+
+# A probe element abandoned because one of its logp calls exceeded
+# eval_timeout (see _probe_on_pool).
+_TIMED_OUT = "timed out"
+
 _BANNER = "!" * 70
 
 
@@ -92,6 +120,79 @@ class StaleWhiteningError(RuntimeError):
     Raised only on the REUSE path (``recompute_trace: false`` with an
     existing trace).  See :func:`restore_whitening_for_trace`.
     """
+
+
+def _need(cache, steps):
+    """Generator: the deltas at ``steps``, asking the DRIVER for the ones not
+    yet in ``cache``.
+
+    The probe's step search is written as a coroutine so that one search
+    can be driven either in-process (``_drive``: each requested step is
+    evaluated on the spot, in order) or by the pool scheduler
+    (``_probe_on_pool``: the requested steps of every element in flight at
+    once, each under ``eval_timeout``).  A request is the list of uncached
+    steps, in the order the old serial code evaluated them (the curvature
+    probe asks for +s then -s); the driver sends back their deltas in the
+    same order.  logp is a pure function of the point, so the two drivers
+    see the same numbers and take the same branches -- the serial and the
+    pooled probe are bit-identical by construction, which
+    tests/test_whitening_pool.py checks on a shipped example.
+    """
+    missing = list(dict.fromkeys(s for s in steps if s not in cache))
+    if missing:
+        vals = yield missing
+        for s, v in zip(missing, vals):
+            cache[s] = v
+    return [cache[s] for s in steps]
+
+
+def _drive(gen, eval_delta):
+    """Run a probe coroutine in-process: evaluate each request in order."""
+    try:
+        steps = next(gen)
+        while True:
+            steps = gen.send([eval_delta(s) for s in steps])
+    except StopIteration as stop:
+        return stop.value
+
+
+def _probe_step_1d_gen(
+    cache,
+    sign,
+    target=PROBE_TARGET_DELTA,
+    max_step=_PROBE_MAX_STEP,
+    min_step=_PROBE_MIN_STEP,
+    rtol=_PROBE_RTOL,
+    max_bisect=_PROBE_MAX_BISECT,
+):
+    """probe_step_1d as a coroutine over ``cache`` (see _need)."""
+    # BRACKET: lo always has delta < target (delta(0) == 0); hi is the first
+    # step at/above target, or non-finite (a hard prior wall counts as "past").
+    lo, hi = 0.0, None
+    step = 1.0
+    while step <= max_step:
+        (d,) = yield from _need(cache, (sign * step,))
+        if (not np.isfinite(d)) or d >= target:
+            hi = step
+            break
+        lo = step
+        step *= 2.0
+    if hi is None:
+        return None
+
+    # BISECT.
+    for _ in range(max_bisect):
+        mid = 0.5 * (lo + hi)
+        (d,) = yield from _need(cache, (sign * mid,))
+        if np.isfinite(d) and abs(d - target) <= rtol * target:
+            return mid
+        if (not np.isfinite(d)) or d > target:
+            hi = mid
+        else:
+            lo = mid
+        if (hi - lo) < min_step:
+            break
+    return max(0.5 * (lo + hi), min_step)
 
 
 def probe_step_1d(
@@ -114,33 +215,90 @@ def probe_step_1d(
     and growing through the turnover still lands on the step where logp has
     fallen `target` below the START, which is the quantity being asked for.
     """
-    # BRACKET: lo always has delta < target (delta(0) == 0); hi is the first
-    # step at/above target, or non-finite (a hard prior wall counts as "past").
+    return _drive(
+        _probe_step_1d_gen(
+            {},
+            sign,
+            target=target,
+            max_step=max_step,
+            min_step=min_step,
+            rtol=rtol,
+            max_bisect=max_bisect,
+        ),
+        eval_delta,
+    )
+
+
+def _probe_element_gen(
+    target=PROBE_TARGET_DELTA,
+    max_step=_PROBE_MAX_STEP,
+    min_step=_PROBE_MIN_STEP,
+    rtol=_PROBE_RTOL,
+    max_bisect=_PROBE_MAX_BISECT,
+):
+    """_probe_element as a coroutine (see _need); same return value."""
+    cache = {}
+
+    def curv(s):
+        dp, dm = yield from _need(cache, (s, -s))
+        if not (np.isfinite(dp) and np.isfinite(dm)):
+            return np.inf  # a wall inside +/-s: treat as past-target (tight)
+        return dp + dm
+
+    target_c = 2.0 * target
+    # BRACKET on the symmetric drop; same geometry as probe_step_1d.
     lo, hi = 0.0, None
     step = 1.0
     while step <= max_step:
-        d = eval_delta(sign * step)
-        if (not np.isfinite(d)) or d >= target:
+        c = yield from curv(step)
+        if c >= target_c:
             hi = step
             break
         lo = step
         step *= 2.0
-    if hi is None:
-        return None
 
-    # BISECT.
-    for _ in range(max_bisect):
-        mid = 0.5 * (lo + hi)
-        d = eval_delta(sign * mid)
-        if np.isfinite(d) and abs(d - target) <= rtol * target:
-            return mid
-        if (not np.isfinite(d)) or d > target:
-            hi = mid
-        else:
-            lo = mid
-        if (hi - lo) < min_step:
-            break
-    return max(0.5 * (lo + hi), min_step)
+    if hi is not None:
+        s_h = None
+        for _ in range(max_bisect):
+            mid = 0.5 * (lo + hi)
+            c = yield from curv(mid)
+            if np.isfinite(c) and abs(c - target_c) <= rtol * target_c:
+                s_h = mid
+                break
+            if c > target_c:
+                hi = mid
+            else:
+                lo = mid
+            if (hi - lo) < min_step:
+                break
+        if s_h is None:
+            s_h = max(0.5 * (lo + hi), min_step)
+        dp, dm = yield from _need(cache, (s_h, -s_h))
+        grad_nats = (
+            0.5 * abs(dp - dm)
+            if np.isfinite(dp) and np.isfinite(dm)
+            else np.nan
+        )
+        return min(s_h, max_step), "curvature", grad_nats
+
+    # FALLBACK: no measurable positive curvature out to max_step.  The
+    # one-sided searches reuse the cached evaluations from the bracket above.
+    steps = []
+    for sign in (1.0, -1.0):
+        x = yield from _probe_step_1d_gen(
+            cache,
+            sign,
+            target=target,
+            max_step=max_step,
+            min_step=min_step,
+            rtol=rtol,
+            max_bisect=max_bisect,
+        )
+        steps.append(x)
+    steps = [x for x in steps if x is not None]
+    if steps:
+        return min(float(np.min(steps)), max_step), "linear", np.nan
+    return None, "flat", np.nan
 
 
 def _probe_element(
@@ -174,73 +332,371 @@ def _probe_element(
     at the accepted curvature scale (nan otherwise): the gradient's nats over
     one scale unit, i.e. the start's displacement from its conditional
     optimum in sigmas for a locally quadratic logp.
+
+    This is the in-process driver of _probe_element_gen; the whitening pass
+    can also drive the same coroutine on a worker pool (_probe_on_pool).
     """
-    cache = {}
-
-    def d(step):
-        if step not in cache:
-            cache[step] = eval_delta(step)
-        return cache[step]
-
-    def curv(s):
-        dp, dm = d(s), d(-s)
-        if not (np.isfinite(dp) and np.isfinite(dm)):
-            return np.inf  # a wall inside +/-s: treat as past-target (tight)
-        return dp + dm
-
-    target_c = 2.0 * target
-    # BRACKET on the symmetric drop; same geometry as probe_step_1d.
-    lo, hi = 0.0, None
-    step = 1.0
-    while step <= max_step:
-        if curv(step) >= target_c:
-            hi = step
-            break
-        lo = step
-        step *= 2.0
-
-    if hi is not None:
-        s_h = None
-        for _ in range(max_bisect):
-            mid = 0.5 * (lo + hi)
-            c = curv(mid)
-            if np.isfinite(c) and abs(c - target_c) <= rtol * target_c:
-                s_h = mid
-                break
-            if c > target_c:
-                hi = mid
-            else:
-                lo = mid
-            if (hi - lo) < min_step:
-                break
-        if s_h is None:
-            s_h = max(0.5 * (lo + hi), min_step)
-        dp, dm = d(s_h), d(-s_h)
-        grad_nats = (
-            0.5 * abs(dp - dm)
-            if np.isfinite(dp) and np.isfinite(dm)
-            else np.nan
-        )
-        return min(s_h, max_step), "curvature", grad_nats
-
-    # FALLBACK: no measurable positive curvature out to max_step.  The
-    # one-sided searches reuse the cached evaluations from the bracket above.
-    steps = [
-        probe_step_1d(
-            d,
-            sign,
+    return _drive(
+        _probe_element_gen(
             target=target,
             max_step=max_step,
             min_step=min_step,
             rtol=rtol,
             max_bisect=max_bisect,
+        ),
+        eval_delta,
+    )
+
+
+class _ProbeProgress:
+    """The probe's progress line, rate-limited on one wall clock.
+
+    One line per PROBE_PROGRESS_S of wall clock: elements done / total,
+    logp evaluations so far, evaluations in flight (pool path), elapsed and
+    an ETA at the element rate so far.  Nothing is logged by a probe that
+    finishes inside the first interval; one that logged at least once also
+    logs its closing total, so the last line of a slow probe is never a
+    stale "in progress".  ``label`` names the caller ("Whitening probe",
+    "Seed ledger").
+    """
+
+    def __init__(self, total, where, label="Whitening probe"):
+        self.total = int(total)
+        self.where = where
+        self.label = label
+        self.t0 = time.monotonic()
+        self.last = self.t0
+        self.n_lines = 0
+
+    def beat(self, n_done, n_evals, n_in_flight=None, force=False):
+        now = time.monotonic()
+        if not force and now - self.last < PROBE_PROGRESS_S:
+            return
+        self.last = now
+        self.n_lines += 1
+        elapsed = now - self.t0
+        if n_done >= self.total:
+            eta = "done"
+        elif n_done > 0:
+            eta = (
+                f"ETA ~{elapsed / n_done * (self.total - n_done):.0f} s at "
+                f"the element rate so far"
+            )
+        else:
+            eta = "ETA unknown (no element finished yet)"
+        flight = "" if n_in_flight is None else f", {n_in_flight} in flight"
+        logger.info(
+            f"{self.label}: {n_done}/{self.total} element(s) done, "
+            f"{n_evals} logp evaluation(s){flight} ({self.where}), "
+            f"elapsed {elapsed:.0f} s, {eta}."
         )
-        for sign in (1.0, -1.0)
-    ]
-    steps = [x for x in steps if x is not None]
-    if steps:
-        return min(float(np.min(steps)), max_step), "linear", np.nan
-    return None, "flat", np.nan
+
+    def finish(self, n_evals):
+        if self.n_lines:
+            self.beat(self.total, n_evals, force=True)
+
+
+# What the whitening pass does with an element whose probe timed out; the
+# seed ledger passes its own sentence (probe_points' ``timeout_note``).
+_WHITEN_TIMEOUT_NOTE = (
+    "it keeps its preliminary (declared or propagated) scale."
+)
+
+
+def _probe_elements(
+    raw_start,
+    logp_fn,
+    elems,
+    map_lp,
+    t_logp,
+    probe_kw,
+    *,
+    cores=1,
+    eval_timeout=None,
+):
+    """Probe every (key, flat_index) in ``elems`` around ``raw_start``.
+
+    Returns {(key, i): (scale_or_None, method, grad_nats)} -- _probe_element's
+    triple -- or _TIMED_OUT for an element abandoned on `eval_timeout`.
+    The one-center case of probe_points, which holds the serial/pool rule.
+    """
+    res = probe_points(
+        [raw_start],
+        [map_lp],
+        logp_fn,
+        [(0, key, i) for key, i in elems],
+        t_logp,
+        probe_kw,
+        cores=cores,
+        eval_timeout=eval_timeout,
+    )
+    return {(key, i): r for (_c, key, i), r in res.items()}
+
+
+def probe_points(
+    centers,
+    center_lps,
+    logp_fn,
+    elems,
+    t_logp,
+    probe_kw,
+    *,
+    cores=1,
+    eval_timeout=None,
+    label="Whitening probe",
+    name_of=None,
+    timeout_note=_WHITEN_TIMEOUT_NOTE,
+):
+    """Probe every (center, key, flat_index) in ``elems``.
+
+    ``centers`` is a list of raw-point dicts and ``center_lps`` their logp;
+    element (c, key, i) is the curvature probe of ``centers[c][key].flat[i]``
+    around ``centers[c]`` (the whitening pass has one center, the seed
+    ledger one per seed: review 2.6.43).  Returns {(c, key, i):
+    (scale_or_None, method, grad_nats)} -- _probe_element's triple -- or
+    _TIMED_OUT for an element abandoned on `eval_timeout`.
+
+    Serial (in this process) when the resolved grant is one core, or when
+    the logp is cheap (``t_logp``, a center's own evaluation, below
+    PROBE_POOL_MIN_LOGP_S) and no `eval_timeout` asks for enforcement;
+    otherwise on a pool (_probe_on_pool).  Both drive the same coroutine per
+    element, so their results are bit-identical.  ``label`` heads the log
+    lines, ``name_of(e)`` names an element in them (default "key[i]") and
+    ``timeout_note`` says what the caller does with a timed-out element.
+    """
+    from .samplers import _common
+
+    if name_of is None:
+
+        def name_of(e):
+            return f"{e[1]}[{e[2]}]"
+
+    if cores is None or cores <= 0:
+        cores = _common.default_cores()
+    want_pool = (
+        int(cores) > 1
+        and len(elems) > 0
+        and (eval_timeout is not None or t_logp >= PROBE_POOL_MIN_LOGP_S)
+    )
+    if want_pool:
+        return _probe_on_pool(
+            centers,
+            center_lps,
+            logp_fn,
+            elems,
+            probe_kw,
+            cores=int(cores),
+            eval_timeout=eval_timeout,
+            label=label,
+            name_of=name_of,
+            timeout_note=timeout_note,
+        )
+
+    progress = _ProbeProgress(len(elems), "serial, 1 core", label)
+    n_evals = [0]
+    results = {}
+    # ONE scratch copy per center, reused for every probe of it: the slot is
+    # perturbed, evaluated and restored (in a finally, so a raising logp
+    # cannot leave it dirty for the next element) -- the same float the
+    # pool path's fresh copy holds (center + step), at a fraction of the
+    # copying.
+    scratch = {}
+    for n_done, e in enumerate(elems):
+        c, key, i = e
+        if c not in scratch:
+            scratch[c] = {k: v.copy() for k, v in centers[c].items()}
+        probe = scratch[c]
+        lp_c = center_lps[c]
+
+        def eval_delta(step, probe=probe, key=key, i=i, lp_c=lp_c):
+            saved = probe[key].flat[i]
+            probe[key].flat[i] = saved + step
+            n_evals[0] += 1
+            try:
+                return lp_c - float(logp_fn(probe))
+            finally:
+                probe[key].flat[i] = saved
+
+        results[e] = _probe_element(eval_delta, **probe_kw)
+        progress.beat(n_done + 1, n_evals[0])
+    progress.finish(n_evals[0])
+    return results
+
+
+def _probe_on_pool(
+    centers,
+    center_lps,
+    logp_fn,
+    elems,
+    probe_kw,
+    *,
+    cores,
+    eval_timeout,
+    label,
+    name_of,
+    timeout_note,
+):
+    """The pooled probe: every element's search in flight at once.
+
+    Each element's _probe_element_gen asks for its next one or two steps;
+    those evaluations go to a worker pool forked here (so the workers see
+    the model's CURRENT whitening -- the shared variables are copied at
+    fork, which is also why the pool lives for one probe pass and is never
+    reused across a rescale), and an element whose request comes back
+    asks for the next.  At most one evaluation per worker is in flight, so
+    the `eval_timeout` clock, which starts at submit, measures the call and
+    not a queue wait (the ptde_async livelock in samplers.md cannot happen
+    here).
+
+    A call older than `eval_timeout` abandons ITS ELEMENT: the element is
+    _TIMED_OUT, which the whitening pass treats exactly like a failed probe
+    -- the element keeps its preliminary (declared or propagated) scale --
+    and a WARNING names it.  A hung worker cannot be killed alone, so the
+    pool is recycled and every other in-flight evaluation is resubmitted
+    unchanged; evaluations are pure, so the other elements' results are
+    unaffected.  A result from the old pool that arrives late finds its
+    submission id gone and is dropped.
+    """
+    from .samplers import _common
+
+    _common.set_worker_globals(logp_fn)
+    pool, n_workers = _common.create_pool(cores, 2 * len(elems), label, logger)
+    if pool is None:  # pragma: no cover - create_pool returns None only
+        # for one worker, which probe_points already routed serially.
+        raise RuntimeError(
+            f"{label}: create_pool gave no pool for cores={cores} "
+            f"and {len(elems)} element(s)"
+        )
+    timeout_msg = (
+        f", each logp call under eval_timeout={float(eval_timeout):g}s"
+        if eval_timeout is not None
+        else " (no eval_timeout: a hung call is not written off)"
+    )
+    logger.info(
+        f"{label}: {len(elems)} element(s) on {n_workers} worker "
+        f"process(es){timeout_msg}."
+    )
+    progress = _ProbeProgress(len(elems), f"{n_workers} workers", label)
+
+    results = {}
+    gens = {}
+    waiting = {}  # elem -> (requested steps, {step: delta})
+    ready = deque()  # (elem, step) not yet submitted
+    in_flight = {}  # sub_id -> (elem, step, t_submit)
+    result_q = queue.Queue()
+    seq = [0]
+    n_evals = [0]
+
+    def _advance(e, vals):
+        try:
+            steps = next(gens[e]) if vals is None else gens[e].send(vals)
+        except StopIteration as stop:
+            results[e] = stop.value
+            del gens[e]
+            return
+        waiting[e] = (steps, {})
+        ready.extend((e, st) for st in steps)
+
+    def _submit(e, st):
+        c, key, i = e
+        probe = {k: v.copy() for k, v in centers[c].items()}
+        probe[key].flat[i] += st
+        seq[0] += 1
+        sid = seq[0]
+        in_flight[sid] = (e, st, time.monotonic())
+
+        def _cb(lp, sid=sid):
+            result_q.put((sid, lp, None))
+
+        def _ecb(exc, sid=sid):
+            result_q.put((sid, None, exc))
+
+        pool.apply_async(
+            _common._eval_logp, (probe,), callback=_cb, error_callback=_ecb
+        )
+
+    def _fill():
+        while ready and len(in_flight) < n_workers:
+            _submit(*ready.popleft())
+
+    def _enforce_timeout():
+        nonlocal pool
+        if eval_timeout is None or not in_flight:
+            return
+        now = time.monotonic()
+        stale = {
+            e: st
+            for e, st, t0 in in_flight.values()
+            if now - t0 > float(eval_timeout)
+        }
+        if not stale:
+            return
+        for e, st in stale.items():
+            logger.warning(
+                f"{label}: a logp call for {name_of(e)} exceeded "
+                f"eval_timeout={float(eval_timeout):g}s (raw step "
+                f"{st:+.6g} from the start); abandoning that element's "
+                f"probe -- {timeout_note}"
+            )
+            results[e] = _TIMED_OUT
+            gens.pop(e).close()
+            waiting.pop(e, None)
+        # The pool goes down whole (no single worker can be killed), so
+        # everything else in flight is resubmitted unchanged, ahead of the
+        # queue it was already ahead of.
+        survivors = [
+            (e, st) for e, st, _t0 in in_flight.values() if e not in stale
+        ]
+        in_flight.clear()
+        rest = [(e, st) for e, st in ready if e not in stale]
+        ready.clear()
+        ready.extend(survivors + rest)
+        logger.warning(
+            f"{label}: recycling the worker pool -- a hung worker never "
+            f"rejoins it on its own."
+        )
+        pool = _common.recycle_pool(pool, n_workers)
+
+    wait_s = 1.0
+    if eval_timeout is not None:
+        wait_s = min(wait_s, max(0.05, float(eval_timeout) / 4.0))
+    try:
+        for e in elems:
+            gens[e] = _probe_element_gen(**probe_kw)
+            _advance(e, None)
+        _fill()
+        while in_flight or ready:
+            try:
+                sid, lp, exc = result_q.get(timeout=wait_s)
+            except queue.Empty:
+                sid = None
+            if sid is not None:
+                meta = in_flight.pop(sid, None)
+                if meta is not None:
+                    if exc is not None:
+                        # _eval_logp catches the model's own exceptions; an
+                        # error here is the pool's plumbing failing, which
+                        # nothing downstream can repair.
+                        raise RuntimeError(
+                            f"{label}: the worker pool failed on "
+                            f"{name_of(meta[0])}: "
+                            f"{type(exc).__name__}: {exc}"
+                        ) from exc
+                    e, st, _t0 = meta
+                    n_evals[0] += 1
+                    if e in waiting:
+                        steps, got = waiting[e]
+                        got[st] = center_lps[e[0]] - float(lp)
+                        if len(got) == len(steps):
+                            del waiting[e]
+                            _advance(e, [got[x] for x in steps])
+            _enforce_timeout()
+            _fill()
+            progress.beat(len(results), n_evals[0], len(in_flight))
+    finally:
+        _common._shutdown_pool(pool)
+    progress.finish(n_evals[0])
+    return results
 
 
 def probe_scales(
@@ -251,6 +707,9 @@ def probe_scales(
     max_bisect=_PROBE_MAX_BISECT,
     flat_scale=_PROBE_FLAT_SCALE,
     diagnostics=None,
+    *,
+    cores=1,
+    eval_timeout=None,
 ):
     """Adaptive probe: per-element scale whose raw step costs ~0.5 nats.
 
@@ -264,7 +723,8 @@ def probe_scales(
        sigma: on examples/ob140939 a start ~5900 nats below the posterior
        returned scales ~1000x too small, the mass matrix re-widened the raw
        posterior to sd ~5e3, and the sampler diverged on 86% of draws
-       against parameter.py's _RAW_CANCELLATION_CLIP wall at |raw|=1e4.
+       against the raw-cancellation clip's wall at |raw|=1e4 (since
+       removed: review 1.2.9, parameter.py's _raw_logp).
     2. When C never reaches the target (h <= 0: locally linear directions,
        ridges, saddles), fall back to EXOFASTv2's exofast_getmcmcscale
        convention of searching each sign for the one-sided 0.5-nat drop,
@@ -292,36 +752,58 @@ def probe_scales(
       "gradient_nats"   -- {"key[i]": g} rung-1 elements' |gradient| in nats
                            per measured scale unit (the start's displacement
                            from its conditional optimum in sigmas, locally)
+      "timed_out"       -- ["key[i]", ...] elements whose probe was abandoned
+                           because one logp call exceeded `eval_timeout`;
+                           they get `flat_scale`, like a flat direction, but
+                           are NOT listed under "flat"
+
+    `cores` / `eval_timeout` choose where the evaluations run (see
+    PROBE_POOL_MIN_LOGP_S and _probe_elements): serial in this process with
+    the default `cores=1`, otherwise on a forked worker pool, every call
+    under `eval_timeout` seconds.  `cores=None` (or <= 0) is the AUTO grant,
+    as everywhere else (samplers._common.default_cores).  The scales are
+    bit-identical either way.
 
     Returns (map_lp, scales) where scales maps each raw-start key to an array
     shaped like its entry.
     """
+    t0 = time.monotonic()
     map_lp = float(logp_fn(raw_start))
+    t_logp = time.monotonic() - t0
 
-    def _delta_at(key, i, step):
-        probe = {k: v.copy() for k, v in raw_start.items()}
-        probe[key].flat[i] += step
-        return map_lp - float(logp_fn(probe))
+    elems = [
+        (key, i) for key, val in raw_start.items() for i in range(val.size)
+    ]
+    results = _probe_elements(
+        raw_start,
+        logp_fn,
+        elems,
+        map_lp,
+        t_logp,
+        dict(max_step=max_step, min_step=min_step, max_bisect=max_bisect),
+        cores=cores,
+        eval_timeout=eval_timeout,
+    )
 
     scales = {}
     tight = []
     flat = []
     linear_fallback = []
     gradient_nats = {}
+    timed_out = []
     for key, val in raw_start.items():
         n = val.size
         s = np.full(n, flat_scale)
         for i in range(n):
-
-            def eval_delta(step, key=key, i=i):
-                return _delta_at(key, i, step)
-
-            scale, method, g_nats = _probe_element(
-                eval_delta,
-                max_step=max_step,
-                min_step=min_step,
-                max_bisect=max_bisect,
-            )
+            res = results[(key, i)]
+            if res is _TIMED_OUT:
+                # The failed-probe contract: no measurement, so the caller's
+                # flat_scale (NaN on the whitening pass: keep the preliminary
+                # scale) -- but booked separately, because "timed out" is not
+                # "flat" and must be neither escalated nor reported as one.
+                timed_out.append(f"{key}[{i}]")
+                continue
+            scale, method, g_nats = res
             if scale is not None:
                 s.flat[i] = scale
             if method == "flat":
@@ -338,6 +820,7 @@ def probe_scales(
         diagnostics["linear_fallback"] = linear_fallback
         diagnostics["flat"] = flat
         diagnostics["gradient_nats"] = gradient_nats
+        diagnostics["timed_out"] = timed_out
 
     if tight:
         logger.debug(
@@ -360,47 +843,69 @@ def probe_scales(
     return map_lp, scales
 
 
-# The probe's reach upward is NOT _WHITEN_MAX_STEP.  parameter.py's
-# _RAW_CANCELLATION_CLIP puts a near-vertical wall in logp at |raw| = the
-# clip (past it the +0.5*raw**2 correction stops tracking pm.Normal's
-# -0.5*raw**2, so the drop reaches 0.5 nats within 0.5/clip of the wall).
-# The probe cannot see any real contour beyond it, so at the sampler's clip
-# of 1e4 an element whose preliminary scale was too tight by more than ~4
-# orders measured exactly 1e4 -- inside the old escalation window, hence no
-# re-probe and no warning, and the model stayed silently under-whitened
-# (review 1.2.1: the ob140939 divergence family).  The wall is a sampler
-# safety device, not a property of the posterior, so the probe RAISES it for
-# its own duration.
-#
-# How far may it honestly be raised?  The clip exists because the two
-# -0.5*raw**2 terms cancel only to float64 precision of the larger one, a
-# residual of ~0.5*raw**2 * 2**-52 nats.  That reaches the probe's own 0.5-nat
-# target near |raw| = sqrt(2**53) ~ 7e7, which is the hard ceiling.  At 1e6
-# the residual is 0.5*1e12*2.2e-16 ~ 1.1e-4 nats against a 0.5-nat target
-# (2e-4 relative, well inside _PROBE_RTOL = 5%), and it buys 6 orders of
-# magnitude of reach per round.  Do not raise it toward 7e7 to buy the last
-# order: the noise there is the measurement.
-_PROBE_RAW_CLIP = 1.0e6
-
 # A measured multiplier at/beyond these marks was CLIPPED by one of the
-# probe's three limits -- the step floor, the max step, or the wall above --
-# so the true scale was only bounded, not resolved.  Each mark is half the
-# corresponding limit, i.e. one bracketing step inside it.  Escalation applies
-# the clipped value (already a huge improvement) and re-probes just those
-# elements in the new raw coordinates, where the residual error is within
-# range again; it repeats until nothing is clipped, so the reach is not a
-# hardcoded number of orders of magnitude on either side.  Per round that is
-# ~14 orders down (_WHITEN_MIN_STEP) and ~6 up (_PROBE_RAW_CLIP, the binding
-# limit -- _WHITEN_MAX_STEP is far beyond it); the cap below only stops a
+# probe's two limits -- the step floor or the max step -- so the true scale
+# was only bounded, not resolved.  Each mark is half the corresponding limit,
+# i.e. one bracketing step inside it.  Escalation applies the clipped value
+# (already a huge improvement) and re-probes just those elements in the new
+# raw coordinates, where the residual error is within range again; it repeats
+# until nothing is clipped, so the reach is not a hardcoded number of orders
+# of magnitude on either side.  Per round that is ~14 orders down
+# (_WHITEN_MIN_STEP) and ~9 up (_WHITEN_MAX_STEP); the cap below only stops a
 # pathological non-converging case, and reaching it warns.
+#
+# There used to be a THIRD limit on the up side, and it is gone for good
+# (review 1.2.9).  parameter.py cancelled a raw N(0, 1) on every logit
+# element with a +0.5*raw**2 term clipped at |raw| = 1e4, which put a
+# near-vertical wall in logp there; the probe found THAT wall instead of the
+# posterior's contour (review 1.2.1, the ob140939 divergences) and so raised
+# the clip to 1e6 for its own duration, and this mark was
+# 0.5 * min(_WHITEN_MAX_STEP, 1e6).  The raw coordinate of a logit element
+# is now flat (parameter.py, _raw_logp), so there is no cancellation, no
+# clip and no wall: the marks derive from the probe's own step limits only.
+# If a wall ever reappears in raw space it must be added here too, or the
+# probe will again report it as a measured scale.
+#
+# What the wall did that WAS needed, and what replaces it: it guaranteed
+# every logit element a contour within reach, so an element too tight by
+# more than the probe's reach measured "the wall", was clipped, and
+# escalated.  Without it such an element measures FLAT, which on its own
+# would keep the preliminary scale and stop.  But a logit element is never
+# genuinely flat: its prior alone, the Jacobian log(q(1-q)), costs 0.5 nats
+# within |delta lq| ~ 1.5 of any start (whitening.md, "What flat means"),
+# so a flat probe of one proves only that the scale is beyond the reach.
+# _flat_logit_is_clipped therefore books it AT the reach (_WHITEN_MAX_STEP),
+# which _CLIP_HI reads as clipped, and escalation proceeds exactly as the
+# wall used to make it -- but now from a statement about the measurement,
+# not from a term in the density.  A NON-logit element that measures flat
+# keeps NaN: there flat can be real.
 _CLIP_LO = 2.0 * _WHITEN_MIN_STEP
-_CLIP_HI = 0.5 * min(_WHITEN_MAX_STEP, _PROBE_RAW_CLIP)
+_CLIP_HI = 0.5 * _WHITEN_MAX_STEP
 _MAX_ESCALATION_ROUNDS = 8
 
 
 def _param_for_raw(lookup, key):
     name = key[: -len("_raw")] if key.endswith("_raw") else key
     return lookup.get(name)
+
+
+def _logit_raw_mask(par):
+    """Per raw-vector element: is it on the logit path?  (Raw order is the
+    parameter's sampled_idx order.)"""
+    tf = par._raw_transform
+    return np.asarray(tf["use_logit"], dtype=bool)[tf["sampled_idx"]]
+
+
+def _flat_logit_is_clipped(mult, logit_mask):
+    """Book a FLAT (NaN) probe of a logit element at the probe's reach.
+
+    See the note above _CLIP_LO: a logit element cannot be flat, so a flat
+    probe means its scale lies beyond _WHITEN_MAX_STEP, and the escalation
+    must be told so.  Returns a new array; non-logit NaNs are left alone.
+    """
+    out = np.asarray(mult, dtype=float).reshape(-1).copy()
+    out[logit_mask & ~np.isfinite(out)] = _WHITEN_MAX_STEP
+    return out
 
 
 def _refetch_raw_start(system, model, fallback):
@@ -435,28 +940,43 @@ def _clipped_elements(latest, applied):
     ]
 
 
-def _probe_selected(raw_start, logp_fn, elems):
-    """Re-probe only the given (raw_name, flat_index) elements."""
+def _probe_selected(raw_start, logp_fn, elems, *, cores=1, eval_timeout=None):
+    """Re-probe only the given (raw_name, flat_index) elements.
+
+    Returns {(key, i): measured multiplier}: NaN for a flat direction,
+    _TIMED_OUT for an element whose probe hit `eval_timeout`.
+    """
+    t0 = time.monotonic()
     map_lp = float(logp_fn(raw_start))
-    out = {}
-    for key, i in elems:
-
-        def eval_delta(step, key=key, i=i):
-            probe = {k: v.copy() for k, v in raw_start.items()}
-            probe[key].flat[i] += step
-            return map_lp - float(logp_fn(probe))
-
-        scale, _method, _g = _probe_element(
-            eval_delta,
+    t_logp = time.monotonic() - t0
+    results = _probe_elements(
+        raw_start,
+        logp_fn,
+        list(elems),
+        map_lp,
+        t_logp,
+        dict(
             max_step=_WHITEN_MAX_STEP,
             min_step=_WHITEN_MIN_STEP,
             max_bisect=_WHITEN_MAX_BISECT,
-        )
-        out[(key, i)] = scale if scale is not None else np.nan
+        ),
+        cores=cores,
+        eval_timeout=eval_timeout,
+    )
+    out = {}
+    for e in elems:
+        res = results[e]
+        if res is _TIMED_OUT:
+            out[e] = _TIMED_OUT
+            continue
+        scale, _method, _g = res
+        out[e] = scale if scale is not None else np.nan
     return out
 
 
-def apply_measured_whitening(system, model, raw_start=None, logp_fn=None):
+def apply_measured_whitening(
+    system, model, raw_start=None, logp_fn=None, *, cores=1, eval_timeout=None
+):
     """Measure every sampled element's true raw-space scale and rescale the
     model's whitening in place.
 
@@ -469,20 +989,24 @@ def apply_measured_whitening(system, model, raw_start=None, logp_fn=None):
     bounds, whether its width came from a sigma or from init_scale -- are
     never rescaled.
 
-    The whole measurement runs with parameter.py's raw-cancellation clip
-    raised to _PROBE_RAW_CLIP: at its sampling value that wall, not the
-    posterior, is what a badly-too-tight element's 0.5-nat contour would be
-    (see _PROBE_RAW_CLIP).  It is restored before this returns.
-
     Elements whose measured multiplier hit the probe's dynamic-range limits
-    (a preliminary scale off by more than ~6 orders of magnitude too tight or
+    (a preliminary scale off by more than ~9 orders of magnitude too tight or
     ~14 too loose, e.g. a period constrained to nanoseconds against day-scale
-    bounds) are escalated: the clipped correction is applied, then just those
+    bounds; a logit element that probes FLAT counts as too tight, see
+    _flat_logit_is_clipped) are escalated: the clipped correction is applied, then just those
     elements are re-probed in the new raw coordinates, where the residual
     error is resolvable.  That repeats until nothing is clipped, so the reach
     is a product of rounds rather than a fixed number of orders of magnitude;
     an element still clipped at _MAX_ESCALATION_ROUNDS gets a warning naming
     it (fix its defaults.yaml init_scale).
+
+    ``cores`` / ``eval_timeout`` are probe_scales' (where the evaluations
+    run, and the per-call wall-clock budget there).  An element whose probe
+    TIMED OUT is a failed probe: it keeps its preliminary scale (the
+    declared or propagated one build_pymc used), is never escalated, and a
+    WARNING names it.  Its multiplier is reported as 1.0 -- the scale it
+    kept -- not NaN, so the startup table does not call a slow direction
+    "flat"; ``probe_diagnostics["timed_out"]`` lists it.
 
     Returns a report dict:
       map_lp       -- logp at the start
@@ -501,18 +1025,6 @@ def apply_measured_whitening(system, model, raw_start=None, logp_fn=None):
     if logp_fn is None:
         logp_fn = model.compile_logp()
 
-    # The clip is raised for the WHOLE pass, not just around each probe call:
-    # the escalation loop below alternates probing with set_whitening, and a
-    # measurement taken under a different wall than the one it is compared
-    # against is exactly the confusion this fixes.  Restored on exit, by the
-    # context manager, on the error path too -- sampling must never see the
-    # raised value.
-    with raised_raw_cancellation_clip(_PROBE_RAW_CLIP):
-        return _measure_and_apply(system, model, raw_start, logp_fn)
-
-
-def _measure_and_apply(system, model, raw_start, logp_fn):
-    """apply_measured_whitening's body, under the raised probe-time clip."""
     n_elements = sum(v.size for v in raw_start.values())
     logger.debug(
         f"Whitening: probing {n_elements} raw element(s) for their "
@@ -530,7 +1042,19 @@ def _measure_and_apply(system, model, raw_start, logp_fn):
         max_bisect=_WHITEN_MAX_BISECT,
         flat_scale=np.nan,
         diagnostics=probe_diag,
+        cores=cores,
+        eval_timeout=eval_timeout,
     )
+    timed_out = set(probe_diag.get("timed_out", []))
+    if timed_out:
+        logger.warning(
+            f"Whitening: {len(timed_out)} element(s) kept their preliminary "
+            f"(declared or propagated) scale because a probe call exceeded "
+            f"eval_timeout={float(eval_timeout):g}s: "
+            + "; ".join(sorted(timed_out))
+            + " -- the run continues in those units; a logp that slow at "
+            "the start is worth a look (or a larger eval_timeout)."
+        )
 
     # Loud diagnostics: neither condition invalidates the measured scales
     # (curvature is gradient-immune, and the linear fallback errs tight),
@@ -577,6 +1101,18 @@ def _measure_and_apply(system, model, raw_start, logp_fn):
             raw_scales[key] = np.ones_like(flat_mult).reshape(mult.shape)
             applied[key] = np.zeros(flat_mult.size, dtype=bool)
             continue
+        timed = np.array(
+            [f"{key}[{i}]" in timed_out for i in range(flat_mult.size)],
+            dtype=bool,
+        )
+        # A timed-out element is NOT a flat logit direction: nothing was
+        # measured, so it is neither booked at the reach nor escalated.
+        flat_mult = _flat_logit_is_clipped(
+            flat_mult, _logit_raw_mask(par) & ~timed
+        )
+        multipliers[key] = np.where(timed, 1.0, flat_mult).reshape(
+            multipliers[key].shape
+        )
         post = par.set_whitening(flat_mult)
         raw_scales[key] = np.asarray(post, dtype=float).reshape(mult.shape)
         # applied: finite multiplier that landed as 1.0 in the new raw units
@@ -608,21 +1144,44 @@ def _measure_and_apply(system, model, raw_start, logp_fn):
         round_i += 1
         logger.warning(
             f"Whitening: {len(clipped)} element(s) hit the probe's dynamic "
-            f"range (preliminary scale off by >6 orders of magnitude too "
+            f"range (preliminary scale off by >9 orders of magnitude too "
             f"tight, or >14 too loose); escalation round {round_i}: "
             + "; ".join(f"{k}[{i}]" for k, i in clipped)
         )
-        res = _probe_selected(raw_start, logp_fn, clipped)
+        res = _probe_selected(
+            raw_start,
+            logp_fn,
+            clipped,
+            cores=cores,
+            eval_timeout=eval_timeout,
+        )
         by_param = {}
         for (key, i), m in res.items():
+            if m is _TIMED_OUT:
+                # A failed re-probe: the clipped correction already applied
+                # stands, and the element leaves the loop (a NaN latest is
+                # never "clipped").  Said by name, like the first pass.
+                logger.warning(
+                    f"Whitening: escalation re-probe of {key}[{i}] exceeded "
+                    f"eval_timeout={float(eval_timeout):g}s; it keeps the "
+                    f"correction applied so far."
+                )
+                latest[key].flat[i] = np.nan
+                continue
             by_param.setdefault(key, {})[i] = m
         for key, elems in by_param.items():
             par = _param_for_raw(lookup, key)
             n = multipliers[key].size
             mult2 = np.ones(n)
+            logit_mask = _logit_raw_mask(par)
             for i, m in elems.items():
-                # A flat (NaN) re-probe leaves the cumulative alone and drops
-                # the element from the loop: nothing more can be measured.
+                # A flat re-probe of a LOGIT element is still "beyond the
+                # reach" (see _flat_logit_is_clipped) and escalates again.
+                # A flat (NaN) re-probe of anything else leaves the
+                # cumulative alone and drops the element from the loop:
+                # nothing more can be measured.
+                if logit_mask[i] and not np.isfinite(m):
+                    m = _WHITEN_MAX_STEP
                 latest[key].flat[i] = m
                 if np.isfinite(m) and m > 0:
                     mult2[i] = m
@@ -722,7 +1281,9 @@ def measure_barrier_scales(system, model, raw_start):
 _BARRIER_FEEDBACK_NATS = 0.1
 
 
-def measure_and_whiten(system, model, raw_start=None, logp_fn=None):
+def measure_and_whiten(
+    system, model, raw_start=None, logp_fn=None, *, cores=1, eval_timeout=None
+):
     """Full startup whitening: probe + rescale, then measured barrier
     steepness, with one correction round if the two interact.
 
@@ -736,13 +1297,25 @@ def measure_and_whiten(system, model, raw_start=None, logp_fn=None):
     (cheap: the model is already ~whitened, so every bracket lands within a
     few evaluations) and the barriers are re-measured with the corrected
     unit steps.
+
+    ``cores`` / ``eval_timeout``: where the probe's logp evaluations run and
+    their per-call budget (probe_scales).  ``cores=1`` (the default) is the
+    serial in-process probe; run.py and the seed polish pass the sampler's
+    grant and ``sampler: eval_timeout:`` (review 2.6.41).
     """
     if raw_start is None:
         raw_start = system.get_raw_start(model)
     if logp_fn is None:
         logp_fn = model.compile_logp()
 
-    report = apply_measured_whitening(system, model, raw_start, logp_fn)
+    report = apply_measured_whitening(
+        system,
+        model,
+        raw_start,
+        logp_fn,
+        cores=cores,
+        eval_timeout=eval_timeout,
+    )
     # Each rescale re-expresses a polished (nonzero) start in the new raw
     # coordinates -- re-read it before evaluating or probing there again
     # (a no-op for the historical all-zeros start).
@@ -757,7 +1330,14 @@ def measure_and_whiten(system, model, raw_start=None, logp_fn=None):
             f"{lp_after - lp_before:+.2f} nats (a soft bound is active at "
             f"the start); re-measuring scales against the final barriers."
         )
-        report2 = apply_measured_whitening(system, model, raw_start, logp_fn)
+        report2 = apply_measured_whitening(
+            system,
+            model,
+            raw_start,
+            logp_fn,
+            cores=cores,
+            eval_timeout=eval_timeout,
+        )
         raw_start = _refetch_raw_start(system, model, raw_start)
         # Fold the correction into the cumulative multipliers for reporting.
         for key, m2 in report2["multipliers"].items():
@@ -1055,7 +1635,16 @@ def restore_whitening_for_trace(system, path, trace_path):
 
 
 def prepare_whitening(
-    system, model, raw_start, path, trace_path, *, reusing_trace
+    system,
+    model,
+    raw_start,
+    path,
+    trace_path,
+    *,
+    reusing_trace,
+    cores=1,
+    eval_timeout=None,
+    logp_fn=None,
 ):
     """Put the model into the whitened coordinates this run must use.
 
@@ -1072,10 +1661,22 @@ def prepare_whitening(
       is restored and never re-measured or rewritten (see
       :func:`restore_whitening_for_trace`; a mismatch raises).  Returns
       ``None`` -- there is no probe and the raw start did not move.
+
+    ``cores`` / ``eval_timeout`` reach the probe (measure_and_whiten): run.py
+    passes the sampler's core grant and ``sampler: eval_timeout:``.
+    ``logp_fn`` is an already-compiled ``model.compile_logp()`` to reuse (the
+    direct-angle decision compiles one for the same model just before).
     """
     if reusing_trace:
         restore_whitening_for_trace(system, path, trace_path)
         return None
-    report = measure_and_whiten(system, model, raw_start)
+    report = measure_and_whiten(
+        system,
+        model,
+        raw_start,
+        logp_fn=logp_fn,
+        cores=cores,
+        eval_timeout=eval_timeout,
+    )
     save_whitening(system, path, map_lp=report["map_lp"])
     return report

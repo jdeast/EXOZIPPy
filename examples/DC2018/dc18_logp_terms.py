@@ -158,10 +158,11 @@ def main():
             + "".join(f"{x:+16.2f}" for x in deltas)
         )
     # GROUPED, because the per-term table is dominated by bookkeeping: each
-    # sampled element contributes a `prior X_raw` (the whitened N(0,1)) and
-    # a `logit_uniform_prior.X` potential that CANCELS it -- that pair is
-    # the change of variables, not physics, and the two halves individually
-    # reach thousands of nats while their sum is a rounding error.
+    # sampled element contributes a `prior X_raw` and a
+    # `logit_uniform_prior.X` potential -- that pair is the change of
+    # variables, not physics.  (Until review 1.2.9 the raw half was a
+    # whitened N(0,1) the potential cancelled, so the halves individually
+    # reached thousands of nats; a logit element's raw half is now flat.)
     groups = {
         "whitening bookkeeping": [],
         "data likelihood": [],

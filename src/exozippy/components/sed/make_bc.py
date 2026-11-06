@@ -438,13 +438,17 @@ def make_bc_tables(
 
         new_cols = [c for _, c in items]
         recs = []
+        # The grid is a rectangle the spectra set is not: BT-NextGen's logg
+        # 5.5 plane stops at 5000 K and the published tables are PADDED
+        # there (models/NextGen/README.md, "Padding").  A node with no
+        # spectrum is left uncomputed (NaN, which the merge never writes
+        # over an existing value) and counted, not raised on.
+        no_spectrum = []
         for (feh, teff, logg), node in todo.groupby(["feh", "teff", "logg"]):
             found = _select_spectrum(df_spec, teff, logg, feh)
             if found is None:
-                raise ValueError(
-                    f"No {model} spectrum for teff={teff}, "
-                    f"logg={logg}, feh={feh} (any alpha)."
-                )
+                no_spectrum.append((float(teff), float(logg), float(feh)))
+                continue
             alpha, spec = found
             av = node["Av"].values
             # (n_av, n_wave) attenuation factors, for the missing Av only
@@ -475,6 +479,16 @@ def make_bc_tables(
                         *row,
                     )
                 )
+        if no_spectrum:
+            logger.warning(
+                "%s: %d grid node(s) have no %s spectrum at any alpha and "
+                "were left uncomputed (e.g. teff=%g, logg=%g, feh=%g); the "
+                "published tables pad such nodes from the plane below.",
+                fac,
+                len(no_spectrum),
+                model,
+                *no_spectrum[0],
+            )
         df_new = pd.DataFrame(
             recs,
             columns=["teff", "logg", "feh", "alpha", "Av", "Rv"] + new_cols,

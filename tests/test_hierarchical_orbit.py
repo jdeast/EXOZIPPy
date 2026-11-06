@@ -106,24 +106,37 @@ def test_parse_orbit_bodies_explicit_groups():
     assert comp[2] == [("star", 1), ("star", 2)]
 
 
-def test_parse_orbit_bodies_implicit_legacy_topology():
+def test_parse_orbit_bodies_implicit_single_pairing():
     """
-    Given orbits without primary/companion keys,
+    Given one orbit without primary/companion keys, one star and one planet,
     When the groups are parsed,
-    Then each orbit pairs the planets whose orbit_ndx points at it with
-    those planets' host stars (the historical implicit topology).
+    Then the orbit pairs them -- the one unambiguous implicit pairing.
+    """
+    cfg = {
+        "star": [{"name": "S1"}],
+        "planet": [{"name": "p1"}],
+        "orbit": [{"name": "o1"}],
+    }
+    prim, comp = parse_orbit_bodies(cfg["orbit"], cfg)
+    assert prim == [[("star", 0)]] and comp == [[("planet", 0)]]
+
+
+def test_parse_orbit_bodies_refuses_an_ambiguous_implicit_pairing():
+    """
+    Given two orbits without primary/companion keys (two stars, two
+      planets),
+    When the groups are parsed,
+    Then it RAISES asking for the groups: membership has one spelling, the
+      orbit block, and the old implicit topology read it off the planets'
+      orbit_ndx/star_ndx -- a second spelling, now removed.
     """
     cfg = {
         "star": [{"name": "S1"}, {"name": "S2"}],
-        "planet": [
-            {"name": "p1", "orbit_ndx": 0},
-            {"name": "p2", "orbit_ndx": 1, "star_ndx": 1},
-        ],
+        "planet": [{"name": "p1"}, {"name": "p2"}],
         "orbit": [{"name": "o1"}, {"name": "o2"}],
     }
-    prim, comp = parse_orbit_bodies(cfg["orbit"], cfg)
-    assert prim[0] == [("star", 0)] and comp[0] == [("planet", 0)]
-    assert prim[1] == [("star", 1)] and comp[1] == [("planet", 1)]
+    with pytest.raises(ValueError, match="primary:' and 'companion:'"):
+        parse_orbit_bodies(cfg["orbit"], cfg)
 
 
 def test_parse_orbit_bodies_rejects_bad_groups():

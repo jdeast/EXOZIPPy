@@ -1,6 +1,6 @@
 {
  "config": "examples/ob161003/ob161003.yaml",
- "n_terms": 69,
+ "n_terms": 72,
  "params": "examples/ob161003/ob161003.params.yaml",
  "platform": {
   "blas": "scipy-openblas",
@@ -72,7 +72,11 @@
    0.0,
    0.0
   ],
+  "star.feh_raw": [
+   0.0
+  ],
   "star.logmass_raw": [
+   0.0,
    0.0,
    0.0
   ],
@@ -97,11 +101,15 @@
    0.0,
    0.0,
    0.0
+  ],
+  "star.teff_raw": [
+   0.0
   ]
  },
  "terms": {
-  "POT:galacticmodel.imf_prior": -1.6132544682510501,
-  "POT:galacticmodel.kinematic_prior": 32.78552756951499,
+  "POT:galacticmodel.imf_prior": 0.0,
+  "POT:galacticmodel.kinematic_prior": 2.553194075898416,
+  "POT:gaussian_prior.band.du1": -7.346071752976169,
   "POT:gaussian_prior.lens.xalpha": -0.22175989125310563,
   "POT:gaussian_prior.lens.yalpha": -0.27824010874690136,
   "POT:logit_uniform_prior.band.u1": -4.681943244794005,
@@ -114,12 +122,14 @@
   "POT:logit_uniform_prior.mulensinstrument.q_source": -10.817579505150393,
   "POT:logit_uniform_prior.source.t_0": -4.890163302351077,
   "POT:logit_uniform_prior.source.u_0": -2.7726557177067477,
-  "POT:logit_uniform_prior.star.distance": -11.73764692239105,
-  "POT:logit_uniform_prior.star.logmass": -3.308522868778539,
+  "POT:logit_uniform_prior.star.distance": -11.737647395155552,
+  "POT:logit_uniform_prior.star.feh": -1.504077396776274,
+  "POT:logit_uniform_prior.star.logmass": -4.954538487352567,
   "POT:logit_uniform_prior.star.pm_dec": -5.545177465663256,
   "POT:logit_uniform_prior.star.pm_ra": -5.545177448079563,
-  "POT:logit_uniform_prior.star.radius": -15.229449641121604,
+  "POT:logit_uniform_prior.star.radius": -15.22944853771127,
   "POT:logit_uniform_prior.star.rv": -5.545177444479562,
+  "POT:logit_uniform_prior.star.teff": -1.479997539352064,
   "POT:low_bound.lens.q": -9.85967654375977e-305,
   "POT:low_bound.lens.s": -9.85967654375977e-305,
   "POT:low_bound.mulensevent.mlens_total": -9.85967654375977e-305,
@@ -132,9 +142,8 @@
   "POT:low_bound.mulensevent.pi_rel": -9.85967654375977e-305,
   "POT:low_bound.mulensevent.t_E": -9.85967654375977e-305,
   "POT:low_bound.mulensevent.theta_E": -9.85967654375977e-305,
-  "POT:low_bound.mulensinstrument.f_blend": -6.90177358063184e-304,
-  "POT:low_bound.mulensinstrument.f_source": -4.852030122180452,
-  "POT:mulensevent.event_rate_prior": 2.1852484366852685,
+  "POT:low_bound.star.logg": -9.85967654375977e-305,
+  "POT:mulensevent.event_rate_prior": 2.185249423276753,
   "POT:mulensevent.mu_rel_singularity": -9.85967654375977e-305,
   "POT:mulensevent.source_behind_lens": -1.971935308751954e-304,
   "POT:mulensevent.theta_E_singularity": -9.85967654375977e-305,
@@ -149,26 +158,27 @@
   "POT:up_bound.mulensevent.mu_rel_mag": -9.85967654375977e-305,
   "POT:up_bound.mulensevent.pi_rel": -9.85967654375977e-305,
   "POT:up_bound.mulensevent.theta_E": -9.85967654375977e-305,
-  "POT:up_bound.mulensinstrument.f_blend": -6.90177358063184e-304,
-  "POT:up_bound.mulensinstrument.f_source": -6.90177358063184e-304,
   "POT:up_bound.source.rho": -1.971935308751954e-304,
+  "POT:up_bound.star.logg": -9.85967654375977e-305,
   "RV:band.u1_raw": -2.756815599614018,
   "RV:lens.log_s_raw": -0.9189385332046727,
   "RV:lens.xalpha_raw": -0.9189385332046727,
   "RV:lens.yalpha_raw": -0.9189385332046727,
   "RV:mulensinstrument.err_scale_raw": -6.432569732432707,
   "RV:mulensinstrument.log_f_total_raw": -6.432569732432707,
-  "RV:mulensinstrument.model": 79591.76529246892,
+  "RV:mulensinstrument.model": 79591.64436118095,
   "RV:mulensinstrument.q_flux_raw": -6.432569732432707,
   "RV:mulensinstrument.q_source_raw": -6.432569732432707,
   "RV:source.t_0_raw": -1.8378770664093453,
   "RV:source.u_0_raw": -1.8378770664093453,
   "RV:star.distance_raw": -3.6757541328186907,
-  "RV:star.logmass_raw": -1.8378770664093453,
+  "RV:star.feh_raw": -0.9189385332046727,
+  "RV:star.logmass_raw": -2.756815599614018,
   "RV:star.pm_dec_raw": -3.6757541328186907,
   "RV:star.pm_ra_raw": -3.6757541328186907,
   "RV:star.radius_raw": -1.8378770664093453,
-  "RV:star.rv_raw": -3.6757541328186907
+  "RV:star.rv_raw": -3.6757541328186907,
+  "RV:star.teff_raw": -0.9189385332046727
  },
- "total_logp": 79400.79145374824
+ "total_logp": 79362.17049726707
 }

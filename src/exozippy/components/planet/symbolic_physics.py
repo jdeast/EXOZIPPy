@@ -2,6 +2,7 @@ import numpy as np
 import sympy as sp
 
 from ...constants import KEPLER_CONST, G
+from ..orbit.bodies import orbit_types, planet_membership
 
 # ---------------------------------------------------------
 # 1. Define Symbols
@@ -37,10 +38,55 @@ a, ar, m_total = sp.symbols("a ar m_total", real=True)
 comp_key = "planet"
 
 
+def _planet_index(config, system_config):
+    """This planet entry's index in the system config's planet block.
+
+    By identity: ConfigManager hands each entry of that very list to
+    get_symbol_map, so the entry IS one of them.  Not finding it is a
+    bookkeeping bug, and raises."""
+    section = (system_config or {}).get("planet") or []
+    if not isinstance(section, list):
+        section = [section]
+    for i, entry in enumerate(section):
+        if entry is config:
+            return i
+    raise RuntimeError(
+        f"planet symbol map: the entry {config!r} is not an entry of the "
+        f"system config's planet block."
+    )
+
+
+def keplerian_membership(system_config, index):
+    """``(orbit index or None, host star index)`` of planet ``index``, with
+    the orbit index None unless the planet is on a KEPLERIAN orbit.
+
+    Only a Keplerian orbit has the period, sin i and eccentricity the K,
+    Kepler and m sin i relations bridge to; a planet on a Taylor or static
+    orbit, or on none (orbit.bodies.planet_membership), has no orbit to
+    bridge to, and its relations that would read one are left out."""
+    orbit_idx, star_idx = planet_membership(system_config)[index]
+    if (
+        orbit_idx is not None
+        and orbit_types(system_config)[orbit_idx] != "keplerian"
+    ):
+        orbit_idx = None
+    return orbit_idx, star_idx
+
+
 def get_symbol_map(config, system_config):
-    # Grab the indices to know WHICH star and orbit this planet belongs to
-    star_idx = config.get("star_ndx", 0)
-    orbit_idx = config.get("orbit_ndx", 0)
+    # WHICH star and orbit this planet belongs to: derived from the orbit
+    # blocks' groups (planet_membership), never a key on the planet.  A
+    # planet with no Keplerian orbit maps its orbit bridges to None, which
+    # leaves out every relation reading them (the K, Kepler and m sin i
+    # relations) for this planet -- rather than bridging them to an orbit it
+    # is not on, which is what the old orbit_ndx default of 0 did to a lens
+    # planet beside a source's xallarap orbit.
+    orbit_idx, star_idx = keplerian_membership(
+        system_config, _planet_index(config, system_config)
+    )
+
+    def orbit_path(name):
+        return None if orbit_idx is None else f"orbit.{orbit_idx}.{name}"
 
     return {
         "mass": "mass",
@@ -55,9 +101,9 @@ def get_symbol_map(config, system_config):
         "a": "a",
         "m_total": "m_total",
         # Cross-Component Bridges:
-        "sini": f"orbit.{orbit_idx}.sini",
-        "period": f"orbit.{orbit_idx}.period",
-        "ecc": f"orbit.{orbit_idx}.ecc",
+        "sini": orbit_path("sini"),
+        "period": orbit_path("period"),
+        "ecc": orbit_path("ecc"),
         "star_mass": f"star.{star_idx}.mass",
         "star_radius": f"star.{star_idx}.radius",
     }
@@ -140,12 +186,12 @@ RELATIONS = [
 
 def register_solvers(config_manager):
     def solver_wrapper(resolved, system_config, index):
-        # 1. Look up the logical mappings directly from the YAML dictionary
-        planet_cfgs = system_config.get("planet", [{}])
-        p_cfg = planet_cfgs[index] if index < len(planet_cfgs) else {}
-
-        o_idx = p_cfg.get("orbit_ndx", 0)
-        s_idx = p_cfg.get("star_ndx", 0)
+        # 1. The planet's orbit and host, from the orbit blocks' groups.  A
+        # planet with no Keplerian orbit has no K to solve a mass from
+        # (KeyError is the engine's "cannot solve" signal).
+        o_idx, s_idx = keplerian_membership(system_config, index)
+        if o_idx is None:
+            raise KeyError(f"planet.{index} has no Keplerian orbit")
 
         # 2. Fetch the required float values using the exact absolute paths
         deps = {
@@ -175,9 +221,7 @@ def register_solvers(config_manager):
         where the value is unused -- a log_q-mode planet with a negative mass
         was already rejected by Planet._reconcile_mass_user_params.
         """
-        planet_cfgs = system_config.get("planet", [{}])
-        p_cfg = planet_cfgs[index] if index < len(planet_cfgs) else {}
-        s_idx = p_cfg.get("star_ndx", 0)
+        _, s_idx = planet_membership(system_config)[index]
 
         mass = resolved.get(f"planet.{index}.mass")
         star_mass = resolved.get(f"star.{s_idx}.mass")

@@ -178,6 +178,73 @@ def test_wired_rm_ltt_delay_matches_a_over_c_through_real_accessors(tmp_path):
     )
 
 
+@pytest.mark.slow
+def test_wired_rm_delay_carries_the_mass_difference_factor(tmp_path):
+    """
+    Given the RM wiring system above with a 0.3 Msun companion (planet.mass
+      pinned at 0.3 M_star) instead of a 1e-6 Mjup one,
+    When compute_rm_rv's retarded_time call is captured and evaluated at
+      the rows at tc and tc + P/2,
+    Then each delay equals, SIGNED, the exact solution of
+      c d = -[(M1 - M2)/M] z_rel(t - d) with a from Kepler's third law
+      (astropy; test_transit_ltt._exact_massive_companion_delays) -- the RM
+      seam takes the occultation factor 0.538, not M1/M = 0.769 or 1 --,
+      and the observed tc maps onto the orbit's tc_target.
+
+    Tolerances as in test_transit_ltt's massive-companion test: 1e-7
+    relative on the delays (ltt.solve_delay's root cancels to ~3e-8; see
+    test_transit_ltt.py::test_solve_delay_root_is_free_of_cancellation), 2e-9 d (float64 resolution at t ~ 2.46e6 d) on
+    tc_target.
+    """
+    import astropy.units as au
+    from test_transit_ltt import (
+        _MASSIVE_Q,
+        _exact_massive_companion_delays,
+    )
+
+    # Arrange
+    rv_file = _write_two_row_rv(tmp_path / "rv.dat")
+    params = _rm_wiring_params()
+    m_comp_mjup = (_MASSIVE_Q * au.M_sun).to(au.M_jup).value
+    params["planet.0.mass"] = {"initval": m_comp_mjup, "sigma": 0.0}
+    real_retarded_time = rm.ltt.retarded_time
+    delay_calls = []
+
+    def _ltt_spy(*args, **kwargs):
+        result = real_retarded_time(*args, **kwargs)
+        delay_calls.append(result[1])
+        return result
+
+    # Act
+    with mock.patch.object(rm.ltt, "retarded_time", side_effect=_ltt_spy):
+        system = System(_rm_wiring_config(rv_file), user_params=params)
+        system.prepare()
+        model = system.build_model()
+    with model:
+        point = system.get_internal_point(model, system.get_raw_start(model))
+    delay = _eval_at_point(delay_calls[0], model, point)
+    d_primary, d_secondary = float(delay[0]), float(delay[1])
+    m_star = float(_eval_at_point(system.star.mass.value[0], model, point))
+    m_comp = float(_eval_at_point(system.planet.mass.value[0], model, point))
+    period = float(_eval_at_point(system.orbit.period.value[0], model, point))
+    tc = float(_eval_at_point(system.orbit.tc.value[0], model, point))
+    tc_target = float(
+        _eval_at_point(system.orbit.tc_target.value[0], model, point)
+    )
+
+    # Assert
+    # non-vacuity: the companion really is stellar mass at this start
+    assert m_comp / m_star > 0.25
+    a, _, c, d_p_ref, d_s_ref = _exact_massive_companion_delays(
+        m_star, m_comp, period, tc, tc_target
+    )
+    assert d_primary == pytest.approx(d_p_ref, rel=1e-7)
+    assert d_secondary == pytest.approx(d_s_ref, rel=1e-7)
+    assert tc - d_primary == pytest.approx(tc_target, abs=2e-9)
+    for wrong in (m_star / (m_star + m_comp), 1.0):
+        assert abs(d_primary + wrong * a / c) * 86400.0 > 100.0
+
+
 def test_rm_ltt_off_reproduces_pre_ltt_output(tmp_path):
     """
     Given a STORED golden fixture (tests/fixtures/rm_ltt_off_reference.json)

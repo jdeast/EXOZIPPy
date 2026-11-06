@@ -32,7 +32,7 @@
    {
     "name": "TESS30min",
     "band": "TESS",
-    "exptime": 30.0,
+    "exptime_s": 1800.0,
     "ninterp": 10
    }
   ]
@@ -289,7 +289,7 @@
    0.9999186312001953,
    1.0
   ],
-  "exptime": 30.0,
+  "exptime_s": 1800.0,
   "ninterp": 10
  }
 }

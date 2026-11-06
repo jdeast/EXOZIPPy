@@ -200,10 +200,20 @@ def test_the_live_surface_refuses_a_bound_link_on_a_vcve_orbits_ecc(tmp_path):
     )
     config = {
         "star": [{"name": "A", "mist": False}],
-        "planet": [{"name": "b"}, {"name": "c", "orbit_ndx": 1}],
+        "planet": [{"name": "b"}, {"name": "c"}],
         "orbit": [
-            {"name": "b", "fitvcve": True},
-            {"name": "c", "fitvcve": False},
+            {
+                "name": "b",
+                "primary": ["A"],
+                "companion": ["b"],
+                "fitvcve": True,
+            },
+            {
+                "name": "c",
+                "primary": ["A"],
+                "companion": ["c"],
+                "fitvcve": False,
+            },
         ],
         "rvinstrument": [{"name": "inst0", "file": str(rv)}],
     }

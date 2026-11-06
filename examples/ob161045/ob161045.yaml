@@ -57,7 +57,9 @@ source:
 
 mulensevent:
   - finite_source: True
-    # mag_method defaults to auto_vbbl whenever finite_source is on.
+    # The default backend (vbm_direct) evaluates the finite source with
+    # VBMicrolensing's ESPL at every epoch; mag_method is read only by the
+    # backend: mulensmodel reference.
     t0_par: 2457559.201
 
 galacticmodel:

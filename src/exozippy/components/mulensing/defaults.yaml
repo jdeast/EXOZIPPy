@@ -164,9 +164,9 @@ mulensevent:
     # defaults.yaml initval is registered by the relaxation engine's
     # default-armor for EVERY config, and a mu_rel = 0 seed broke the
     # t_E = theta_E/mu_rel derivation chain everywhere (six-test suite
-    # regression, ezsuite 15362719).  The fitmurel start arrives through
-    # the manifest's overrides channel instead, which only exists when
-    # the mode is selected.
+    # regression, ezsuite 15362719).  The fitmurel start (0) arrives as a
+    # ranked add_hint at PRECEDENCE_DEFAULT instead, pushed by MulensEvent
+    # only when the mode is selected (review 2.1.26(d)).
     lower: -10000.0
     upper: 10000.0
     unit: "mas/yr"
@@ -238,6 +238,63 @@ mulensevent:
       default:
         func_name: "calc_mu_rel_mag"
         deps: ["mu_ra_rel_geo", "mu_dec_rel_geo"]
+  # The barycentric LENS-minus-SOURCE offset at the astrometric reference
+  # epoch (review 8.10.4; mulensing.md "The lens's position is derived"),
+  # declared only when the lens star carries absolute astrometry, where it
+  # places the lens: star.<lens>.ra/dec = the source's + this offset.  The
+  # primary SOURCE's (t_0, u_0); `binary` adds the primary's offset from the
+  # lens center of mass (C12).  track_epoch / track_t0_par /
+  # track_earth_pe / track_earth_pn are context constants
+  # (MulensEvent.add_parameter).  No bounds on purpose: on a derived
+  # parameter they would become live potentials.
+  lens_offset_e:
+    unit: "mas"
+    internal_unit: "mas"
+    latex: "\\Delta\\alpha^*_{LS}"
+    description: "lens - source offset (East) at the astrometric epoch"
+    expressions:
+      default:
+        func_name: "calc_lens_offset_e"
+        deps: [ "source.t_0[primary_source_element_map]",
+                "source.u_0[primary_source_element_map]",
+                "t_E", "theta_E", "mu_ra_rel_geo", "mu_dec_rel_geo",
+                "mu_rel_geo_mag", "mu_ra_rel", "mu_dec_rel", "pi_rel",
+                "track_epoch", "track_t0_par", "track_earth_pe",
+                "track_earth_pn" ]
+      binary:
+        func_name: "calc_lens_offset_e_binary"
+        deps: [ "source.t_0[primary_source_element_map]",
+                "source.u_0[primary_source_element_map]",
+                "t_E", "theta_E", "mu_ra_rel_geo", "mu_dec_rel_geo",
+                "mu_rel_geo_mag", "mu_ra_rel", "mu_dec_rel", "pi_rel",
+                "track_epoch", "track_t0_par", "track_earth_pe",
+                "track_earth_pn", "lens.s[first_companion_map]",
+                "lens.alpha[first_companion_map]",
+                "lens.q[first_companion_map]" ]
+  lens_offset_n:
+    unit: "mas"
+    internal_unit: "mas"
+    latex: "\\Delta\\delta_{LS}"
+    description: "lens - source offset (North) at the astrometric epoch"
+    expressions:
+      default:
+        func_name: "calc_lens_offset_n"
+        deps: [ "source.t_0[primary_source_element_map]",
+                "source.u_0[primary_source_element_map]",
+                "t_E", "theta_E", "mu_ra_rel_geo", "mu_dec_rel_geo",
+                "mu_rel_geo_mag", "mu_ra_rel", "mu_dec_rel", "pi_rel",
+                "track_epoch", "track_t0_par", "track_earth_pe",
+                "track_earth_pn" ]
+      binary:
+        func_name: "calc_lens_offset_n_binary"
+        deps: [ "source.t_0[primary_source_element_map]",
+                "source.u_0[primary_source_element_map]",
+                "t_E", "theta_E", "mu_ra_rel_geo", "mu_dec_rel_geo",
+                "mu_rel_geo_mag", "mu_ra_rel", "mu_dec_rel", "pi_rel",
+                "track_epoch", "track_t0_par", "track_earth_pe",
+                "track_earth_pn", "lens.s[first_companion_map]",
+                "lens.alpha[first_companion_map]",
+                "lens.q[first_companion_map]" ]
   mlens_total:
     lower: 0.0
     upper: 500.0
@@ -422,6 +479,11 @@ lens:
     # (-180, 180] cut; recentered about its mode before reporting
     # (components/parameter.md, "Periodic parameters").
     periodic: {value: 360.0, unit: "deg"}
+    # Sampled directly on a window centered on the start, instead of through
+    # xalpha/yalpha, where the light curve measures it well enough that the
+    # latent posterior is a narrow ray (src/exozippy/angles.py).  `fitalpha:`
+    # on the companion's lens block overrides the automatic choice.
+    direction_latents: {pair: [xalpha, yalpha], expression: default}
     debug_print: true
     expressions:
       default:
@@ -441,9 +503,9 @@ lens:
                 "orbit.a[lens_kep_orbit_map]", "mulensevent.theta_E[event_map]",
                 "star.distance[primary_lens_map]",
                 "mulensevent.pi_E_N[event_map]", "mulensevent.pi_E_E[event_map]" ]
-  # Lens orbital motion, linear mode (conventions.md C24; review 8.6.8):
+  # Lens orbital motion, uniform_rotation mode (conventions.md C24; review 8.6.8):
   # the RATES ds_dt / dalpha_dt are parameters of the companion's
-  # `type: linear` ORBIT (orbit/defaults.yaml), anchored at t0_par.  Only
+  # `type: uniform_rotation` ORBIT (orbit/defaults.yaml), anchored at t0_par.  Only
   # the bound-orbit diagnostic beta below stays here, because it needs the
   # event's Einstein-radius scale.
   beta:
@@ -473,7 +535,7 @@ lens:
     # LOWER bound on the lens binary's period from its projected separation:
     # r_sky <= a(1 + e) < 2a, so P > sqrt((r_sky/2)^3 / M_total)
     # (physics.calc_period_min).  Reported on a companion moving on a
-    # `type: linear` orbit, where no period is fitted; never a potential
+    # `type: uniform_rotation` orbit, where no period is fitted; never a potential
     # (review 8.8.14).  Reported only, no truncation warning: see
     # physics.calc_period_min for why.
     unit: "d"
@@ -637,6 +699,11 @@ mulensinstrument:
     description: >-
       Outlier-component scatter, in FLUX in the data file's own system
       (was magnitudes before the flux-likelihood change)
+  # log10 of the baseline flux in the file's own units.  [-100, 10] covers
+  # every sane flux system with decades to spare -- a magnitude file sits
+  # near -8 (F = 10**(-0.4 m); m = 30 is -12), counts up to ~1e9 near +9 --
+  # and uniform-in-log is scale-invariant, so this, not a bound on
+  # f_source/f_blend, is where the flux scale's prior lives (review 1.6.18).
   log_f_total:
     initval: -6
     init_scale: 3e-4
@@ -656,6 +723,9 @@ mulensinstrument:
     latex: "q_s"
     description: "source flux fraction ($q_s$)"
   q_flux:
+    # Uniform on [0, 1000] when sampled (the default).  A light curve with
+    # `fitlogqflux: true` samples log_q_flux instead and derives q_flux from
+    # it, so these bounds then act as soft barriers on the derived value.
     initval: 1.0
     init_scale: 0.1
     lower: 0.0
@@ -664,9 +734,39 @@ mulensinstrument:
     internal_unit: ""
     latex: "q_F"
     description: "binary source flux ratio"
+    expressions:
+      from_log_q_flux:
+        func_name: "calc_q_flux_from_log"
+        deps: [ "log_q_flux" ]
+  log_q_flux:
+    # Sampled ONLY on a light curve with `fitlogqflux: true` (binary source);
+    # absent otherwise.  log10(f_s2/f_s1), uniform: the scale-free prior on a
+    # flux ratio, where a uniform q_flux on [0, 1000] puts 99.9% of its mass
+    # on the second source being the BRIGHTER one.  [-3, 3] is the same
+    # 1000x either way the linear upper bound allows, symmetric so that
+    # relabelling the two sources maps the domain onto itself.
+    lower: -3.0
+    upper: 3.0
+    initval: 0.0
+    init_scale: 0.05
+    unit: ""
+    internal_unit: ""
+    latex: "\\log{q_F}"
+    description: "log10 binary source flux ratio"
+  # f_source and f_blend carry NO bounds (review 1.6.18, JDE 2026-10-28).
+  # They are derived, so a bound here would become a soft barrier, and it
+  # would be measured in the light curve's ARBITRARY flux units: ~1e-8 for a
+  # magnitude file (the f_source >= 0 barrier's turn-on width then dwarfed
+  # the source flux -- examples/ob140939 paid -1.386 nats for it), O(1e4)
+  # counts for difference imaging (an upper cap of 1000 then pushed the
+  # baseline down -- -10,995 nats on one MOA file).  Every physical limit
+  # they could express is already a unit-free limit on what IS sampled:
+  # f_source >= 0 is q_source >= 0, "the blend is no more negative than the
+  # total" is q_source <= 2, and log_f_total's uniform-in-log prior is
+  # scale-invariant.  Do not restore them; a user who wants a bound can
+  # still write one in the params file.  Absolute flux units (the SED
+  # zeropoint) are a separate question.
   f_source:
-    lower: 0.0
-    upper: 1000.0
     unit: ""
     internal_unit: ""
     latex: "f_s"
@@ -676,8 +776,6 @@ mulensinstrument:
         func_name: "calc_f_source"
         deps: [ "log_f_total", "q_source" ]
   f_blend:
-    lower: -1000.0
-    upper: 1000.0
     unit: ""
     internal_unit: ""
     latex: "f_b"
@@ -731,6 +829,31 @@ mulensinstrument:
   # facility -- unit conversion, the LaTeX table, links, bound_scale -- works
   # on it.  Override per light curve in params.yaml; sigma must be nonzero
   # (an exact zeropoint would make f_source deterministic given the SED).
+  neighbor_fraction:
+    # Third light as a FRACTION of the blend: neighbor_flux (below) =
+    # neighbor_fraction * max(f_blend, 0).  Sampled ONLY on light curves with
+    # `sed_constrains_blend: true` -- with the tie off, f_blend is already
+    # free and a neighbor term is exactly degenerate with it in ANY light
+    # curve, finite-source or not (the light curve measures only the sum).
+    # [0, 1] is the PHYSICAL support, not a modelling choice: the neighbor
+    # light is part of the blend and every other contributor (the lens, a
+    # companion, any modeled star) is non-negative, so 0 <= neighbor_flux <=
+    # f_blend exactly.  Uniform on it is the conditional prior with no number
+    # in it; it replaced a uniform on [0, 2 x median flux] in flux units,
+    # whose width was arbitrary and which, integrated against the tie,
+    # weighted the blend by its own size (mulensing.md, "neighbor_flux").
+    # Both bounds are also validity limits through the manifest "overrides"
+    # channel: a params-file bound may tighten them, and a looser one is
+    # clipped back with a warning.  Unselected light curves are pinned at 0
+    # (no third light).  0.5 is only a start: the middle of the support.
+    lower: 0.0
+    upper: 1.0
+    initval: 0.5
+    init_scale: 0.1
+    unit: ""
+    internal_unit: ""
+    description: "Neighbor fraction of the blend flux"
+    latex: f_{\rm nb}/f_b
   neighbor_flux:
     # Third light: blend flux NOT supplied by any modeled star, in the data
     # file's own flux system.  Exists because the blend-tie assumption
@@ -738,21 +861,22 @@ mulensinstrument:
     # resolution: across the 44 Roman-fidelity DC2018 events the lens star
     # supplies a median 15% of the blend, and unrelated line-of-sight stars
     # dominate it in 80% of events.  With this term the tie becomes the
-    # physically correct inequality f_blend >= f_lens (positivity does the
-    # work).  Sampled ONLY on light curves with `sed_constrains_blend: true`
-    # -- with the tie off, f_blend is already free and a neighbor term is
-    # exactly degenerate with it in ANY light curve, finite-source or not
-    # (the light curve measures only the sum).  upper/initval are installed
-    # per light curve from the bootstrapped baseline flux, like the other
-    # flux amplitudes: the file's flux zeropoint is arbitrary.
-    lower: 0.0
-    upper: 1.0e+30
-    initval: 0.0
-    init_scale: 0.1
+    # physically correct inequality f_blend >= f_lens.  DERIVED from
+    # neighbor_fraction (above), so its support is exactly [0, f_blend]
+    # (0 where f_blend <= 0, i.e. q_source > 1: no room for third light).
+    # The max() enters linearly (f_lens + neighbor_flux, with f_lens > 0),
+    # never under a sqrt or log, so its zero gradient on the clamped side is
+    # harmless.  A params-file lower/upper here is a soft barrier on the
+    # derived value (a user prior, in flux units); a start seeds nothing --
+    # seed neighbor_fraction instead.
     unit: ""
     internal_unit: ""
     description: "Neighbor blend flux"
     latex: f_{\rm nb}
+    expressions:
+      default:
+        func_name: "calc_neighbor_flux"
+        deps: [ "neighbor_fraction", "f_blend" ]
 
   zeropoint:
     # No `initval:` key, like every other DERIVED parameter in this file
@@ -780,8 +904,9 @@ mulensinstrument:
     description: "photometric zeropoint"
     expressions:
       default:
-        # m_source_pred is a context node injected by
+        # m_source_pred and flux_zp are context nodes injected by
         # MulensInstrument.add_parameter (see context_dep_names); only
-        # f_source is a manifest dependency.
+        # f_source is a manifest dependency.  flux_zp is the magnitude of
+        # unit flux in the file's flux system (0, or a dia file's zp_ref).
         func_name: "calc_zeropoint"
-        deps: ["m_source_pred", "f_source"]
+        deps: ["m_source_pred", "f_source", "flux_zp"]

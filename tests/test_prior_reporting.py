@@ -8,8 +8,9 @@ prior they replace:
 
 * ``star.distance``'s d^2 volume prior (or the galactic density/kinematic
   mixture where a galacticmodel block exists);
-* ``star.logmass``'s stellar IMF (Chabrier or Salpeter);
-* the free-floating-planet mass function, which swaps ONE star off that IMF.
+* ``star.logmass``'s stellar mass function (then a selectable IMF; now
+  genulens's present-day mass function);
+* the free-floating-planet mass function, which swaps ONE star off it.
 
 Components now declare each contribution against the parameter it acts on
 (``Parameter.add_prior_contribution``), and both report paths compose it
@@ -78,7 +79,9 @@ def _run_galacticmodel(star_config, gm_config=None):
 
     gm = GalacticModel(config["galacticmodel"], star.config_manager)
     with pm.Model() as model:
-        gm.build_likelihood(model, types.SimpleNamespace(star=star))
+        gm.build_likelihood(
+            model, types.SimpleNamespace(star=star, active_components={})
+        )
     return star
 
 
@@ -205,55 +208,67 @@ def test_star_component_stands_down_and_declares_nothing_under_a_galacticmodel()
 
 
 # ----------------------------------------------------------------------
-# star.logmass: the IMF and the FFP mass function
+# star.logmass: the stellar mass function and the FFP mass function
 # ----------------------------------------------------------------------
+
+_K21_LABEL = (
+    "Koshimoto+2021 present-day mass function (genulens: K21 IMF, PARSEC "
+    "turnoff"
+)
 
 
 @pytest.mark.parametrize(
-    "imf,expected",
-    [(None, "Chabrier"), ("chabrier", "Chabrier"), ("Salpeter", "Salpeter")],
+    "gm_block,remnants",
+    [({}, True), ({"remnants": True}, True), ({"remnants": False}, False)],
 )
-def test_logmass_reports_the_imf_actually_applied(imf, expected):
+def test_logmass_reports_the_mass_function_actually_applied(
+    gm_block, remnants
+):
     """
-    Given a galacticmodel whose IMF: key selects a stellar mass function,
-    When its imf_prior potential is built,
-    Then star.logmass is reported as that IMF, by name, and not as Uniform.
+    Given a galacticmodel (genulens's present-day mass function, with or
+      without its dark remnants),
+    When its potentials are built,
+    Then star.logmass is reported as that mass function, by name, with the
+      remnants named exactly when they are applied, and not as Uniform.
     """
-    # Arrange
-    gm_config = [{"name": "gm"} if imf is None else {"name": "gm", "IMF": imf}]
-
     # Act
-    star = _run_galacticmodel([{"name": "A"}], gm_config=gm_config)
+    star = _run_galacticmodel(
+        [{"name": "A"}], gm_config=[{"name": "gm", **gm_block}]
+    )
 
     # Assert
     text, latex = _both(star.logmass)
-    assert expected in text and expected in latex
+    assert _K21_LABEL in text
+    assert "Koshimoto et al. (2021) present-day mass function" in latex
+    assert ("WD/NS/BH remnants" in text) is remnants
+    assert ("WD/NS/BH remnants" in latex) is remnants
     assert "U(" not in text
     assert r"\mathcal{U}" not in latex
 
 
-def test_ffp_star_reports_the_ffp_mass_function_and_its_neighbour_the_imf():
+def test_ffp_star_reports_the_ffp_mass_function_and_its_neighbour_the_pdmf():
     """
     Given two stars, one with `mass_function: ffp`,
-    When the imf_prior potential is built,
+    When the galacticmodel potentials are built,
     Then the FFP star's logmass element reports the FFP mass function and
-      the other reports the stellar IMF.
+      the other reports the stellar present-day mass function.
 
-    The contribution is per ELEMENT because the choice is: one pt.sum over
-    the whole logmass vector carries two different densities.
+    The contribution is per ELEMENT because the choice is: two different
+    densities cover the one logmass vector.
     """
     # Arrange / Act
     star = _run_galacticmodel(
-        [{"name": "Source"}, {"name": "Lens", "mass_function": "ffp"}]
+        [{"name": "Source"}, {"name": "Lens", "mass_function": "ffp"}],
+        gm_config=[{"name": "gm"}],
     )
 
     # Assert
     imf_text, imf_latex = _both(star.logmass, index=0)
     ffp_text, ffp_latex = _both(star.logmass, index=1)
-    assert "Chabrier" in imf_text and "Chabrier" in imf_latex
+    assert "Koshimoto" in imf_text and "Koshimoto" in imf_latex
     assert "FFP" in ffp_text and "FFP" in ffp_latex
     assert "FFP" not in imf_text
-    assert "Chabrier" not in ffp_text
+    assert "Koshimoto" not in ffp_text
 
 
 def test_ffp_contribution_quotes_the_slope_actually_used():

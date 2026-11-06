@@ -46,7 +46,7 @@ def _two_star(d, transit_extra=None, ntransit=1):
     config = {
         "star": [{"name": "A", "mist": False}, {"name": "B", "mist": False}],
         "planet": [{"name": "b"}],
-        "orbit": [{"name": "b"}],
+        "orbit": [{"name": "b", "primary": ["A"], "companion": ["b"]}],
         "band": [
             {"name": "V", "filter": "V", "ld_law": "quadratic", "star_ndx": 0}
         ],
@@ -73,7 +73,7 @@ def _one_star(d, transit_extra=None):
     config = {
         "star": [{"name": "A", "mist": False}],
         "planet": [{"name": "b"}],
-        "orbit": [{"name": "b"}],
+        "orbit": [{"name": "b", "primary": ["A"], "companion": ["b"]}],
         "band": [{"name": "TESS", "filter": "TESS", "ld_law": "quadratic"}],
         "transit": [t],
     }

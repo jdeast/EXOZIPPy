@@ -74,7 +74,7 @@ import time
 
 import numpy as np
 
-from exozippy.samplers import _common
+from exozippy.samplers import _common, convergence
 from exozippy.samplers._common import (
     DE_JITTER,
     LpPlausibilityGuard,
@@ -127,6 +127,8 @@ def ptde_async_sample(
     progress_callback=None,
     store_hot_chains="auto",
     de_partner_snapshot=True,
+    tune_forecast=_common.DEFAULT_TUNE_FORECAST,
+    tune_forecast_after=_common.DEFAULT_TUNE_FORECAST_AFTER,
 ):
     """
     Asynchronous Parallel Tempering + Differential Evolution sampler.
@@ -227,6 +229,19 @@ def ptde_async_sample(
     -------
     arviz.InferenceData with posterior and sample_stats["lp"] from T=1 chains.
     """
+    # The finish forecast (_common.TuneForecast, shared with ptde.py),
+    # validated before the expensive prologue; its clock starts with
+    # maxtime's, below.  Progress here is the SLOWEST T=1 chain's iteration
+    # count: tune is over for the run only when it is over for that chain.
+    forecast = _common.TuneForecast(
+        tune,
+        draws,
+        maxtime,
+        mode=tune_forecast,
+        after=tune_forecast_after,
+        label="PTDE-async",
+        log=logger,
+    )
     # ONE shared prologue for both PTDE loops (_common.prepare_ptde_run).
     # Identical to ptde.py's call but for the label: nothing in resolving a
     # ladder, compiling a logp or dispersing a start population depends on
@@ -254,6 +269,8 @@ def ptde_async_sample(
         lp_plausibility_ceiling=lp_plausibility_ceiling,
         collect_rung_timing=collect_rung_timing,
         store_hot_chains=store_hot_chains,
+        cores=cores,
+        eval_timeout=eval_timeout,
     )
     lp_guard, rng, de_mode_hop = run.lp_guard, run.rng, run.de_mode_hop
     if swap_schedule == "deo":
@@ -333,9 +350,9 @@ def ptde_async_sample(
     slot_list = [(k, i) for k in range(n_temps) for i in range(n_chains)]
     n_slots = len(slot_list)
 
-    pool, actual_cores = _common.create_pool(
-        cores, n_slots, "PTDE-async", logger
-    )
+    # Forked by prepare_ptde_run, which scored the start populations on it
+    # (review 2.6.45).
+    pool, actual_cores = run.pool, run.actual_cores
     logger.info(
         f"PTDE-async: {n_temps} rungs x {n_chains} chains = {n_slots} slots, "
         f"{actual_cores} cores  "
@@ -447,6 +464,7 @@ def ptde_async_sample(
 
     stop_requested = [False]
     start_time = time.time()
+    forecast.t0 = start_time  # the clock maxtime is measured on
 
     def _stop_handler(sig, frame):
         if stop_requested[0]:
@@ -581,8 +599,14 @@ def ptde_async_sample(
     # just fall through to the "no draws" RuntimeError.
 
     def _maybe_stop():
+        # Rebinding `tune` here moves every closure's tune -> draw boundary
+        # at once (they share the cell); it only ever shrinks, and never
+        # below the slowest T=1 chain's progress.
+        nonlocal tune
         if stopping[0]:
             return
+        if forecast.active:
+            tune = forecast.check(min(iter_count[0]), time.time())
         if stop_requested[0]:
             stopping[0] = True
             stop_reason[0] = "user interrupt"
@@ -601,12 +625,13 @@ def ptde_async_sample(
             and int(per_chain_draws.min()) >= _next_check[0]
         ):
             n_check = int(per_chain_draws.min())
-            converged, rhat_val, ess_val = _common._check_convergence(
+            converged, rhat_val, ess_val, drift = _common._check_convergence(
                 stored_raw, n_check, min_ess, max_rhat, stored_lp
             )
             logger.info(
                 f"PTDE-async convergence @ min {n_check} draws/chain: "
-                f"max_rhat={rhat_val:.4f}  min_ess={ess_val:.1f}"
+                f"max_rhat={rhat_val:.4f}  min_ess={ess_val:.1f}  "
+                f"{convergence.format_drift(drift)}"
             )
             # GUI progress hook (bounded: fires once per geometric check).
             # Passes the live T=1 draw buffers by reference for snapshotting.
@@ -1182,4 +1207,5 @@ def ptde_async_sample(
         rung_times=rung_times if collect_rung_timing else None,
         notes=_notes,
     )
+    forecast.stamp(idata)
     return idata

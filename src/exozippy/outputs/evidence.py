@@ -55,6 +55,36 @@ outputs.modes already clusters on):
   5. Weights.  Accepted lnZ_k -> softmax weights w_k; lnZ error bars propagate
      to softmax weight uncertainties dw_k by linearization.
 
+Normalization: lnZ is the normalized log evidence
+-------------------------------------------------
+The bridge integrates ``model.compile_logp(jacobian=True)`` over raw space,
+and an EXOZIPPy model's logp is a prior density only UP TO A CONSTANT.  Two
+terms are missing, both by design of the sampled logp (Parameter.build_pymc):
+
+  - On every bounded (logit-path) element section C leaves the raw density
+    at ``q(1-q)/sqrt(2 pi)``, which integrates to ``1/(sqrt(2 pi) s)`` with
+    ``s`` the element's whitening scale (``scale_logit``).  ``s`` is measured
+    from the data at every startup, so the raw lnZ moved run to run by
+    ``-sum(ln s_i) - n ln sqrt(2 pi)`` (of order +150 nats on a DC2018 binary-lens fit).
+  - A ``sigma`` prior on a bounded element is an UNNORMALIZED exp(-z^2/2)
+    on the uniform: ``ln span - ln(sigma sqrt(2 pi)) - ln Z_trunc`` is owed.
+    The xalpha/yalpha N(0, 1) pair inside U(-100, 100), present only for a
+    binary lens, was worth a spurious -8.8 nats against a point lens.
+
+Neither is fixed in the model, deliberately: they are constants, so adding
+them to the sampled logp would change nothing a sampler does -- but it WOULD
+shift every start logp, every logged lp and every bit-identical-logp test,
+and a constant that depends on the whitening would have to be rebuilt
+whenever the whitening moves.  Instead ``Parameter.evidence_log_norm_terms``
+computes the constant from the CURRENT whitening scales and the prior
+parameters, ``System.evidence_log_norm`` sums it, and
+``estimate_mode_evidences(log_norm=...)`` adds it to every mode's lnZ.  It is
+the same for every mode, so the softmax weights, re2 and every refusal are
+unchanged; what changes is that lnZ itself can now be compared across runs
+and across model architectures.  The terms it does NOT cover (component
+potentials such as the galactic and IMF priors, soft barriers, the
+half-bounded linear path) are listed in components/parameter.md.
+
 Unsupported proposal draws
 --------------------------
 The fitted Gaussian is unbounded, so some of its draws can land where the
@@ -159,9 +189,12 @@ EV_RE2 = "re2-too-large"
 class EvidenceResult:
     """Bridge-sampling result for one mode.
 
-    lnZ / lnZ_err are the mode's local log-evidence relative to its proposal
-    and its (relative-MSE-derived) error bar.  ``refused`` is True when the
-    diagnostics could not support a confident answer; ``reason`` says why.
+    lnZ / lnZ_err are the mode's local log-evidence and its
+    (relative-MSE-derived) error bar.  lnZ is NORMALIZED when the caller
+    passed ``log_norm`` (the report pipeline always does):
+    ``lnZ = status["lnZ_bridge"] + status["log_norm"]``.  ``refused`` is
+    True when the diagnostics could not support a confident answer;
+    ``reason`` says why.
 
     ``n_post`` / ``n_prop`` are the draw counts the estimate was actually
     computed FROM, so the provenance line describes what was used and not
@@ -538,7 +571,7 @@ def _posterior_matrix(idata, layout, D):
     return X
 
 
-def _batch_logp(model, layout, points):
+def _batch_logp(model, layout, points, cores=None):
     """logp (jacobian=True) at each row of points (M, D) via fork pool.
 
     jacobian=True gives the density over the unconstrained raw space -- the
@@ -561,7 +594,15 @@ def _batch_logp(model, layout, points):
     _EV_LP_FN = logp_fn
     _EV_LAYOUT = eval_layout
 
-    n_workers = max(1, min(mp.cpu_count(), M))
+    # The sampler's core grant, never mp.cpu_count(): on a shared node that
+    # is the node's CPUs, not the job's, and every worker forks AFTER the
+    # trace is loaded -- the multi-GB-per-worker wrap-up blowup run.py's
+    # _compute_lp_from_model documents (review 2.3.9; this pool was missed,
+    # found by the 2.6.43 wrap-up audit).  cores=None is the AUTO grant.
+    from ..samplers._common import default_cores
+
+    grant = default_cores() if cores is None else max(1, int(cores))
+    n_workers = max(1, min(grant, M))
     if n_workers == 1 or M < 64:
         _off, vals = _ev_eval_block((points, 0))
         return vals
@@ -640,6 +681,8 @@ def estimate_mode_evidences(
     re2_max=DEFAULT_RE2_MAX,
     unsupported_max=DEFAULT_UNSUPPORTED_MAX,
     seed=20260712,
+    log_norm=None,
+    cores=None,
 ):
     """Estimate each mode's local evidence by bridge sampling.
 
@@ -663,6 +706,17 @@ def estimate_mode_evidences(
         DEFAULT_UNSUPPORTED_MAX).  Those draws are counted and kept as
         zero-density draws either way -- they are never dropped.
     seed : RNG seed for reproducible proposal draws.
+    cores : the worker grant for the logp pool (None: the AUTO grant,
+        samplers._common.default_cores); never the node's CPU count.
+    log_norm : float, optional -- the constant (nats) that normalizes the
+        model logp's prior terms, ``System.evidence_log_norm()``.  Added to
+        every mode's bridge lnZ, so the reported lnZ is the NORMALIZED log
+        evidence (see "Normalization" in the module docstring).  None means
+        the model logp is taken to be normalized already -- true of a plain
+        PyMC model built from proper distributions, never of an EXOZIPPy
+        System's -- and ``status["log_norm"]`` is then None, so a caller
+        can tell.  The bridge's own number is kept as
+        ``status["lnZ_bridge"]``.
 
     Returns
     -------
@@ -678,6 +732,9 @@ def estimate_mode_evidences(
     """
     rng = np.random.default_rng(seed)
     results = []
+    norm = 0.0 if log_norm is None else float(log_norm)
+    if not np.isfinite(norm):
+        raise ValueError(f"evidence: log_norm must be finite, got {log_norm}")
 
     layout, D, skipped_rvs = _build_layout(model, idata)
     # Named here, once, before anything is evaluated: a free RV the trace
@@ -755,7 +812,7 @@ def estimate_mode_evidences(
 
     if all_points:
         stacked = np.vstack(all_points)
-        logp_all = _batch_logp(model, layout, stacked)
+        logp_all = _batch_logp(model, layout, stacked, cores=cores)
     else:
         logp_all = np.zeros(0)
 
@@ -794,6 +851,13 @@ def estimate_mode_evidences(
         lnZ, lnZ_err, re2, converged = bridge_lnZ(
             l1, l2, l1_chains=chain_lengths, status=status
         )
+        # The bridge integrates the model logp as compiled, whose prior terms
+        # are normalized only up to a constant that depends on the run's
+        # whitening.  A constant shifts every mode alike, so it moves no
+        # weight and no diagnostic; it is what makes lnZ itself meaningful.
+        status["lnZ_bridge"] = lnZ
+        status["log_norm"] = None if log_norm is None else norm
+        lnZ = lnZ + norm
 
         n_unsup = status.get("n_prop_unsupported", 0)
         frac_unsup = status.get("frac_unsupported", 0.0)

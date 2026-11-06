@@ -302,6 +302,72 @@ def test_barrier_grows_as_the_fit_leaves_the_grid(hat3_star_only):
     assert off_grid[-1] < -1.0
 
 
+def _closed_form_barrier(logg, lower, upper, scale):
+    """Both loggsed barriers summed, from the log-sigmoid written out here.
+
+    ``potentials.soft_lower_bound`` / ``soft_upper_bound`` with softness
+    0.01 are log(sigmoid((val - lower) * k)) and log(sigmoid((upper - val)
+    * k)), k = 4.4 / (0.01 * scale); log(sigmoid(z)) = -logaddexp(0, -z)
+    is the numerically stable spelling of the same function.
+    """
+    k = 4.4 / (0.01 * scale)
+    return float(
+        np.sum(-np.logaddexp(0.0, -(logg - lower) * k))
+        + np.sum(-np.logaddexp(0.0, -(upper - logg) * k))
+    )
+
+
+def test_the_built_barrier_equals_the_closed_form_soft_bound(hat3_star_only):
+    """
+    Given the hat3 star-only example and the sweep of radiussed raw offsets
+      that carries star.loggsed from on the grid to well past its ceiling,
+    When the built low_bound/up_bound.star.loggsed potentials are evaluated
+      at each point,
+    Then their sum equals the closed-form log-sigmoid barrier of the
+      loggsed value the model computes there, with the grid's own lower /
+      upper and the barrier scale the build holds, to rel 1e-9.
+
+    test_barrier_grows_as_the_fit_leaves_the_grid only checks the penalty
+    is monotone and below -1 off the grid; a barrier on the wrong edge, at
+    the wrong steepness (scale vs 1/scale, softness dropped) or fed a
+    second logg expression rather than loggsed's own node would pass that.
+    """
+    # ARRANGE
+    system, model, point = hat3_star_only
+    loggsed = system.star.loggsed
+    lower = np.atleast_1d(np.asarray(loggsed.lower, dtype=float))
+    upper = np.atleast_1d(np.asarray(loggsed.upper, dtype=float))
+    scale = np.asarray(
+        loggsed.export_whitening()["barrier_scales"], dtype=float
+    )
+    key = _radiussed_key(point)
+    offsets = [0.0, -40.0, -60.0, -80.0, -200.0]
+
+    # ACT
+    loggs, built, expected = [], [], []
+    for off in offsets:
+        moved = _shifted(point, key, off)
+        logg = _loggsed_value(system, model, moved)
+        loggs.append(float(logg.max()))
+        built.append(_barrier_value(model, moved))
+        expected.append(_closed_form_barrier(logg, lower, upper, scale))
+
+    # ASSERT -- the sweep exercises both regimes
+    assert loggs[0] < upper.max() < loggs[-1], loggs
+    assert expected[-1] < -1.0
+    off_grid = [
+        (b, e) for lg, b, e in zip(loggs, built, expected) if lg > upper.max()
+    ]
+    assert len(off_grid) >= 2, loggs
+    for b, e in off_grid:
+        assert b == pytest.approx(e, rel=1e-9)
+    # On the grid both are tiny; compare absolutely (the log-sigmoid there is
+    # ~exp(-k * distance), far below any relative statement's meaning).
+    for lg, b, e in zip(loggs, built, expected):
+        if lg < upper.max():
+            assert abs(b - e) <= 1e-12 + 1e-9 * abs(e)
+
+
 @pytest.mark.slow
 def test_gradient_is_finite_on_and_off_grid(hat3_star_only):
     """
@@ -381,7 +447,7 @@ def test_prior_contribution_is_declared_and_reported(hat3_star_only):
         assert "NextGen" in rendered
         assert "bound" in rendered
         assert "Uniform" not in rendered and "U(" not in rendered
-        assert "[0, 5]" in rendered.replace("$", "")
+        assert "[0, 5.5]" in rendered.replace("$", "")
     assert cell == ""
     assert len(notes) == 1
     # A barrier is not a normalized density over the interval, and the note
@@ -424,13 +490,15 @@ def test_off_grid_start_warns_and_names_the_star(tmp_path, caplog):
 
     A warning and not a raise: the interpolator extrapolates rather than
     failing there, so such fits have been running, and the barrier pulls
-    the chain back by itself.  examples/gj1214 is the shipped case (its
-    M dwarf starts at loggsed = 5.02).
+    the chain back by itself.  examples/gj1214 was the shipped case (its
+    M dwarf starts at loggsed = 5.02, off the grid until the 5.5 plane).
     """
-    # ARRANGE -- 0.178 solMass, 0.215 solRad is GJ 1214: logg ~ 5.03
+    # ARRANGE -- 0.08 solMass at 0.07 solRad: logg ~ 5.65, above the grid's
+    # 5.5 ceiling (GJ 1214's 5.03 was off the grid until 2026-10-20, when
+    # the logg 5.5 plane was added, padded above 5000 K)
     sed, _ = _minimal_sed(tmp_path)
     loggsed = _loggsed_parameter()
-    system = _fake_system(loggsed, np.log10(0.178), 0.215, star_names=("A",))
+    system = _fake_system(loggsed, np.log10(0.08), 0.07, star_names=("A",))
 
     # ACT
     with caplog.at_level(logging.WARNING):
@@ -441,7 +509,7 @@ def test_off_grid_start_warns_and_names_the_star(tmp_path, caplog):
     hits = [m for m in messages if "loggsed" in m and "OUTSIDE" in m]
     assert len(hits) == 1, messages
     assert "star 'A'" in hits[0]
-    assert "5.0" in hits[0]
+    assert "5.5" in hits[0]
     assert "bound_scale" in hits[0]
 
 
@@ -487,7 +555,7 @@ def test_softening_the_barrier_does_not_silence_the_warning(tmp_path, caplog):
     # ARRANGE
     sed, _ = _minimal_sed(tmp_path)
     loggsed = _loggsed_parameter(bound_scale=25.0)
-    system = _fake_system(loggsed, np.log10(0.178), 0.215)
+    system = _fake_system(loggsed, np.log10(0.08), 0.07)  # logg ~ 5.65
 
     # ACT
     with caplog.at_level(logging.WARNING):
@@ -532,38 +600,3 @@ def test_reported_penalty_matches_the_barrier_formula(logg, scale):
 
     # ASSERT
     assert f"{expected:.2f} nats" in message
-
-
-def test_gj1214_example_ships_the_softened_barrier():
-    """
-    Given the shipped gj1214 example, whose M dwarf starts at loggsed =
-    5.022 -- past NextGen's 5.0 logg ceiling,
-    Then its params file widens the loggsed barrier and says why.
-
-    Not a style check: with no M-dwarf-capable BC grid shipping, the
-    measured barrier would clamp this fit to the grid edge at a cost of
-    ~434 nats, and the repo owner's ruling is that a modestly extrapolated
-    bolometric correction beats refusing to fit -- provided the caveat is
-    written where the person running the example will see it.
-    """
-    # ARRANGE
-    params_file = (
-        Path(__file__).parent.parent
-        / "examples"
-        / "gj1214"
-        / "gj1214.params.yaml"
-    )
-    if not params_file.is_file():
-        pytest.skip("examples/gj1214 not present")
-    text = params_file.read_text()
-
-    # ACT
-    params = yaml.safe_load(text)
-
-    # ASSERT -- the softening itself
-    entry = params.get("star.A.loggsed")
-    assert entry is not None, "gj1214 no longer softens the loggsed barrier"
-    assert entry.get("bound_scale") == 25.0
-    # ...and the caveat, in the file, in the words that matter
-    assert "EXTRAPOLATED" in text
-    assert "NextGen" in text

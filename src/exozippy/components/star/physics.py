@@ -79,6 +79,27 @@ def calc_pm_from_murel(pm_source, mu_rel_component):
     return pm_source + mu_rel_component
 
 
+# mas per radian: the lens offset below is in mas, star.ra/dec in radians.
+RAD2MAS = float(np.degrees(1.0) * 3.6e6)
+
+
+@register_physics
+def calc_ra_from_lens_offset(ra_source, dec_source, offset_e):
+    # The microlensing LENS star's position, derived from the source's
+    # (review 8.10.4): offset_e is mulensevent.lens_offset_e, the
+    # barycentric lens-minus-source offset at the astrometric reference
+    # epoch on the sky's East axis (an arc, hence the 1/cos(dec)).
+    # ra_source arrives through a same-parameter element dep
+    # (star.ra[track_source_map]), as calc_pm_from_murel's pm_source does.
+    return ra_source + offset_e / (pt.cos(dec_source) * RAD2MAS)
+
+
+@register_physics
+def calc_dec_from_lens_offset(dec_source, offset_n):
+    # calc_ra_from_lens_offset's North twin.
+    return dec_source + offset_n / RAD2MAS
+
+
 # --- Proper motion relative to Sgr A* (mulensing/conventions.md C31) -----
 #
 # Sgr A*'s apparent (reflex) proper motion, Galactic components, mas/yr:

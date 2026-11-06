@@ -354,6 +354,14 @@ def test_ob161003_event_potentials_are_scalar_and_single():
 # re-normalization in the presplit reconciliation below.
 _ERR_SCALE_PRESPLIT_BOUNDS = (1e-6, 1e6)
 
+# The four soft-bound potentials the stage-0 recording carries on the derived
+# f_source/f_blend and the current model does not (review 1.6.18).
+_F_BOUND_TERMS = {
+    f"POT:{side}_bound.mulensinstrument.{name}"
+    for side in ("low", "up")
+    for name in ("f_source", "f_blend")
+}
+
 
 def _err_scale_renormalization(system):
     """Sum over err_scale elements of log(q(1-q)) at the CURRENT bounds
@@ -375,7 +383,23 @@ def _err_scale_renormalization(system):
     return float(total)
 
 
-@pytest.mark.slow
+#: The recording's Galactic prior was the 3-population model, removed in
+#: review 1.7.6 (galacticmodel.md): its two potentials are rebuilt by the
+#: genulens port and cannot reconcile against the recording.  Exactly these
+#: two may move (each must stay finite); nothing else of the Galactic model
+#: is in the decomposition.
+_GALACTIC_TERMS = frozenset(
+    {"POT:galacticmodel.kinematic_prior", "POT:galacticmodel.imf_prior"}
+)
+
+
+def _untied(cfg):
+    """Turn the Claret limb-darkening tie off on every band: the pre-split
+    recording predates it (see the reconciliation below)."""
+    for band in cfg.get("band") or []:
+        band["star_constrains_ld"] = False
+
+
 def test_ob161003_collapse_reconciles_against_the_presplit_recording():
     """
     Given the post-split ob161003 model started at the stage-0 recording's
@@ -401,15 +425,93 @@ def test_ob161003_collapse_reconciles_against_the_presplit_recording():
     replay tests all the same.
     """
     # ARRANGE -- the pre-split recording (labels translated, values
-    # untouched) and the post-split model at its exact start.
+    # untouched) and the post-split model at its exact start, built with
+    # the EARTH PLACED AS THE RECORDING PLACED IT.  Review 1.10.13 moved
+    # the observer to the instant it received each epoch's light (BJD_TDB
+    # minus the Roemer delay; conventions.md C4) and the frame velocity to
+    # a 0.05 d step (C5).  Both move the data term at a matched
+    # trajectory, legitimately, by ~1e-5 relative -- which is exactly the
+    # motion this test's sharp edge exists to catch as a wiring bug.  So
+    # the split is reconciled against the recording with the recording's
+    # own Earth (the two 1.10.13 changes switched off for the build), and
+    # the 1.10.13 motion is measured separately below.  Switching the
+    # physics off for a comparison is the same move as the analytic
+    # err_scale and u1 reconciliations further down: the recording's
+    # values stay untouched, and every later change is accounted for.
+    # Likewise the forced second limb-darkening annulus (`vbm.minannuli =
+    # 2`, mulensing.md "VBM's limb-darkened finite source never stops after
+    # one annulus"), which moves this data term by -7.5e-8 relative: the
+    # recording ran VBM's default of 1, so the build does too.
+    # Likewise the Claret limb-darkening tie, which since 2026-11 applies to
+    # a microlensing band as to any other (components/sed/sed.md): the
+    # recording has no tie, and with it on the source star's teff/feh
+    # become sampled and the band gains du1 -- terms that "appear" for a
+    # reason that has nothing to do with the split.  So both builds below
+    # run with star_constrains_ld: false on every band (_untied).
+    # The Galactic prior is NOT switched back: the recording ran the
+    # 3-population model (with its pre-1.7.1 two-frame basis, its pre-1.7.3
+    # bar and the IMF as the present-day mass function), and that model was
+    # removed in review 1.7.6.  Its two potentials (_GALACTIC_TERMS) are
+    # therefore the genulens port's here and are accepted as moved below,
+    # finite; every other term reconciles exactly as before.
+    import exozippy.components.mulensing.mulensevent as mulensevent_mod
+    import exozippy.components.mulensing.op as op_mod
+    import exozippy.ephemeris as ephemeris_mod
+
+    build_vbm = op_mod.VBMDirectMagOp._build_vbm
+
+    def _recording_annuli(self):
+        vbm = build_vbm(self)
+        vbm.minannuli = 1
+        return vbm
+
     presplit = load(os.path.join(FIXTURES, "presplit", "ob161003.json"))
     fixture = load_fixture("ob161003")
-    system, model = build(fixture, extra_params=_OB161003_PRESPLIT_PM)
-
-    # ACT -- decompose at this model's own solved start (which the seeds
-    # above pin to the recording's start).
-    parts, _, reconciles, _ = decompose(system, model)
+    with (
+        unittest.mock.patch.object(
+            ephemeris_mod,
+            "reception_instant",
+            lambda bjd_tdb, ra, dec, **kw: np.atleast_1d(
+                np.asarray(bjd_tdb, dtype=float)
+            ),
+        ),
+        unittest.mock.patch.object(
+            mulensevent_mod, "FRAME_VELOCITY_STEP_DAYS", 0.5
+        ),
+        unittest.mock.patch.object(
+            op_mod.VBMDirectMagOp, "_build_vbm", _recording_annuli
+        ),
+    ):
+        system, model = build(
+            fixture,
+            extra_params=_OB161003_PRESPLIT_PM,
+            edit_config=_untied,
+        )
+        # ACT -- decompose at this model's own solved start (which the
+        # seeds above pin to the recording's start).
+        parts, _, reconciles, _ = decompose(system, model)
     assert reconciles, "the instrument stopped reconciling; fix it first"
+
+    # The 1.10.13 motion itself (plus the second annulus), with the Earth
+    # placed as the code now places it: a bounded, directional shift of
+    # the data term at the same start, well inside 1e-4 relative, and nothing like the 1e-9 edge
+    # held below.  Pins that the switch above is what separates the two
+    # builds, so a future change cannot hide behind it.
+    system_now, model_now = build(
+        fixture,
+        extra_params=_OB161003_PRESPLIT_PM,
+        edit_config=_untied,
+    )
+    parts_now, _, reconciles_now, _ = decompose(system_now, model_now)
+    assert reconciles_now
+    data_shift = (
+        parts_now["RV:mulensinstrument.model"]
+        - parts["RV:mulensinstrument.model"]
+    ) / abs(parts["RV:mulensinstrument.model"])
+    assert 1e-9 < abs(data_shift) < 1e-4, (
+        f"1.10.13's Earth placement moved the data term by {data_shift:.3e} "
+        f"relative; expected a small, nonzero shift"
+    )
     moved, appeared, vanished = compare(
         presplit["terms"], parts, rtol=COLLAPSE_RTOL
     )
@@ -425,7 +527,15 @@ def test_ob161003_collapse_reconciles_against_the_presplit_recording():
     )
 
     assert not appeared, f"terms appeared: {sorted(appeared)}"
-    assert not vanished, f"terms vanished: {sorted(vanished)}"
+    # The f_source/f_blend soft bounds were REMOVED after this recording
+    # (review 1.6.18: a derived-bound barrier in the file's arbitrary flux
+    # units; the unit-free limits are q_source's), so exactly their four
+    # potentials vanish -- no more, no fewer.  The recording keeps them,
+    # untouched, as the rule for that file says.
+    assert set(vanished) == _F_BOUND_TERMS, (
+        f"terms vanished: {sorted(vanished)}; expected exactly the removed "
+        f"f_source/f_blend bounds {sorted(_F_BOUND_TERMS)}"
+    )
 
     # ONE PRIOR HAS MOVED SINCE THE STAGE-0 RECORDING, AND IT RECONCILES
     # ANALYTICALLY TOO (review 8.2.2): mulensinstrument.err_scale's bounds
@@ -444,6 +554,11 @@ def test_ob161003_collapse_reconciles_against_the_presplit_recording():
     halved_seen = set()
     renorm_seen = False
     for name, (before, after, delta) in moved.items():
+        if name in _GALACTIC_TERMS:
+            # The recording's Galactic model was removed (review 1.7.6);
+            # the port's value is a different prior, not a regression.
+            assert np.isfinite(after), f"{name} is not finite: {after}"
+            continue
         if (
             name == "POT:low_bound.mulensevent.mu_rel_geo_mag"
             and abs(after) <= 1e-12
