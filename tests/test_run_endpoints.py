@@ -28,7 +28,7 @@ from exozippy.gui.runner import _CONSOLE_SUFFIX
 EXAMPLE_DIR = Path(__file__).parent.parent / "examples" / "kelt4"
 
 # Poll budgets for the slow end-to-end test at the bottom. Their sum must sit
-# comfortably UNDER that test's @pytest.mark.timeout(1260): if the guard fires
+# comfortably UNDER that test's @pytest.mark.timeout(1500): if the guard fires
 # first, pytest-timeout kills the test instead of letting the poll report what
 # it was waiting for (and under xdist that used to surface as a nameless dead
 # worker). Warm, that test measures 52-84 s end to end; a cold pytensor compile
@@ -36,8 +36,11 @@ EXAMPLE_DIR = Path(__file__).parent.parent / "examples" / "kelt4"
 # compile stays large and the post-stop ones -- which only cover wrap-up and
 # process reaping -- are sized to that work, not to the compile.
 #
-#   REACH_SAMPLING_TIMEOUT 360 s  subprocess + imports + model build + a COLD
-#                                 pytensor compile + tune + 100 draws
+#   REACH_SAMPLING_TIMEOUT 600 s  subprocess + imports + model build + a COLD
+#                                 pytensor compile + tune + 100 draws.  Was
+#                                 360 s; GitHub's ubuntu 3.12 shard 2 missed
+#                                 it on 4 of 5 runs on 2026-11-05/06 (#576,
+#                                 #579), still in sampling, under runner load.
 #   GRACEFUL_STALL_TIMEOUT 180 s  wrap-up may go this long with NO new console
 #                                 output before the test calls it hung
 #   GRACEFUL_EXIT_CEILING  720 s  ...and this long in total, however busy
@@ -57,8 +60,8 @@ EXAMPLE_DIR = Path(__file__).parent.parent / "examples" / "kelt4"
 # escalates only on a stall or at the ceiling.
 #
 # Worst case, counting the ~50 s each force stop blocks internally:
-# 360 + 720 + 50 + 45 + 50 = 1225 s < 1260 s.
-REACH_SAMPLING_TIMEOUT = 360.0
+# 600 + 720 + 50 + 45 + 50 = 1465 s < 1500 s.
+REACH_SAMPLING_TIMEOUT = 600.0
 GRACEFUL_STALL_TIMEOUT = 180.0
 GRACEFUL_EXIT_CEILING = 720.0
 FORCE_EXIT_TIMEOUT = 45.0
@@ -490,7 +493,7 @@ def test_utilities_schema_form_roundtrip(client):
 
 
 @pytest.mark.slow
-@pytest.mark.timeout(1260)
+@pytest.mark.timeout(1500)
 def test_endpoint_run_lifecycle_start_sampling_stop(kelt4_workdir, tmp_path):
     """
     Given the run endpoints backed by the real subprocess runner,
