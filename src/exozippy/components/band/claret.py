@@ -71,7 +71,9 @@ def claret_band_lookup(filter_label: str) -> tuple[str | None, str | None]:
             f"filter {filter_label!r} has no Claret limb-darkening table "
             f"(the Claret & Bloemen 2011 and Claret 2017 bands are U B V R I "
             f"J H K, SDSS u'g'r'i'z', Kepler, CoRoT, TESS, Spitzer IRAC and "
-            f"Stromgren uvby)"
+            f"Stromgren uvby; ld_source: phoenix on the band reads tables "
+            f"built through the filter's own profile instead, the Roman WFI "
+            f"set among them)"
         )
     return names.pop(), None
 

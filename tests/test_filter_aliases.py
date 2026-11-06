@@ -6,7 +6,9 @@ them, taking the first row that hits.  Two labels hit twice: a bare "I" and
 a bare "R" appear in the Claret column for BOTH the Bessell and the Cousins
 rows (and once more in the Keivan column, for Bessell).  First-row-wins made
 them Bessell purely because Bessell_I is typed above Cousins_I in the file --
-an accident of file order.
+an accident of file order.  "U", "B" and "V" hit twice the same way since
+Generic/Johnson.U/B/V got Claret's U B V tables (Claret & Bloemen's U B V
+are the Johnson-Cousins system); they stay Bessell, now by name.
 
 The project convention is Cousins, declared in
 ``bc_grid.AMBIGUOUS_FILTER_ALIASES`` and applied by name rather than by row
@@ -38,6 +40,24 @@ def alias_df():
 
 
 # ---------------------------------------------------------------- resolution
+
+
+@pytest.mark.parametrize("bare", ["U", "B", "V"])
+def test_bare_u_b_v_resolve_to_bessell(alias_df, bare):
+    """
+    Given a bare 'U', 'B' or 'V', which names the Bessell row and, through
+    its Claret column, the Johnson row,
+    When it is resolved to a MIST or an SVO name,
+    Then it resolves to the Bessell row, as it did before Johnson U/B/V
+    were given Claret tables -- by the map, not by which row is typed first.
+    """
+    assert (
+        resolve_filter_name(bare, alias_df, alias="MIST") == f"Bessell_{bare}"
+    )
+    assert (
+        resolve_filter_name(bare, alias_df, alias="SVO")
+        == f"Generic/Bessell.{bare}"
+    )
 
 
 @pytest.mark.parametrize(
@@ -79,7 +99,6 @@ def test_spelled_out_names_are_honored(alias_df, spelled, mist, svo):
 @pytest.mark.parametrize(
     "name,mist,svo",
     [
-        ("V", "Bessell_V", "Generic/Bessell.V"),
         ("K", "2MASS_Ks", "2MASS/2MASS.Ks"),
         ("Sloani", "SDSS_i", "SLOAN/SDSS.i"),
         ("TESS", "TESS", "TESS/TESS.Red"),
@@ -117,7 +136,8 @@ def test_alias_table_ambiguities_are_the_declared_ones(alias_df):
     Given every naming column of the alias table,
     When labels appearing on more than one row are collected,
     Then they are exactly the known set: 'I' and 'R' (Claret, Bessell vs
-    Cousins), which the disambiguation map resolves.
+    Cousins) and 'U', 'B', 'V' (Bessell vs Johnson, which share Claret's
+    tables), which the disambiguation map resolves.
 
     A new duplicate must fail this test rather than quietly resolve by file
     order, which is the bug this module exists to prevent.
