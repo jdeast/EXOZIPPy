@@ -616,6 +616,7 @@ def generate_bc_tables(
     model_root: Path = DEFAULT_MODEL_ROOT,
     save: bool = True,
     overwrite: bool = False,
+    raw_path: Path = SPECTRA_RAW_PATH_DEFAULT,
 ) -> Dict[str, pd.DataFrame]:
     """
     Compute BCs for every filter set on the NextGen.grid.yaml axes from
@@ -636,6 +637,18 @@ def generate_bc_tables(
 
     feh is the outer loop so each (large) processed-spectra file is read
     once for all filter sets.
+
+    A grid node SVO lists NO spectrum for (the hot end of the logg 5.5
+    plane; `unavailable_grid_nodes`, read from the SVO index cached under
+    `raw_path`) is padded here exactly as `pad_missing_nodes` pads it: its
+    cells are computed from the spectrum of the nearest lower-gravity node
+    at the same (teff, feh), which gives the same numbers as copying that
+    node's rows (a BC depends on its node only through the spectrum), and
+    the node is recorded in the table's ``meta["padding"]``.  This is what
+    lets a NEW column be added to a table whose padded rows already exist
+    -- pad_missing_nodes skips a node it padded before, so it cannot fill
+    a column that did not exist then.  A node missing from the processed
+    spectra that SVO DOES list is still an error (step 1 is unfinished).
 
     Returns {facility: DataFrame of the newly computed cells} (NaN where a
     cell was not computed).
@@ -673,6 +686,16 @@ def generate_bc_tables(
                 if c in svo_of[fac] and not reusable(fmeta.get(c, {}))
             ]
 
+    # The padded nodes: SVO's index is the authority (read lazily, only
+    # when a node is missing locally, so a complete run needs no index).
+    key = lambda *v: tuple(round(float(x), _KEY_DECIMALS) for x in v)
+    unavailable = None
+    padding = {}
+    for fac in plan:
+        path = bc_table_path(model_root, MODEL, fac)
+        old = read_bc_meta(path).get("padding", []) if path.is_file() else []
+        padding[fac] = {key(p["teff"], p["logg"], p["feh"]): p for p in old}
+
     out: Dict[str, list] = {fac: [] for fac in plan}
     fehs = sorted({f for todo in plan.values() for f in todo["feh"].unique()})
     for feh in tqdm(fehs, desc="feh"):
@@ -687,11 +710,35 @@ def generate_bc_tables(
                 try:
                     row = df_spec.loc[(teff, logg)]
                 except KeyError:
-                    raise FileNotFoundError(
-                        f"No step-1 spectrum for teff={teff}, logg={logg}, "
-                        f"feh={feh} in {processed_path}; re-run step 1 "
-                        f"(it processes only the missing nodes)."
-                    ) from None
+                    if unavailable is None:
+                        unavailable = {
+                            key(*n)
+                            for n in unavailable_grid_nodes(grid, raw_path)
+                        }
+                    if key(teff, logg, feh) not in unavailable:
+                        raise FileNotFoundError(
+                            f"No step-1 spectrum for teff={teff}, logg={logg}, "
+                            f"feh={feh} in {processed_path}; re-run step 1 "
+                            f"(it processes only the missing nodes)."
+                        ) from None
+                    lower = [
+                        g for t, g in df_spec.index if t == teff and g < logg
+                    ]
+                    if not lower:
+                        raise ValueError(
+                            f"No lower-gravity spectrum to pad teff={teff}, "
+                            f"logg={logg}, feh={feh} from in {processed_path}."
+                        )
+                    source = max(lower)
+                    row = df_spec.loc[(teff, source)]
+                    k = key(teff, logg, feh)
+                    if k not in padding[fac]:
+                        padding[fac][k] = {
+                            "teff": float(teff),
+                            "logg": float(logg),
+                            "feh": float(feh),
+                            "from_logg": float(source),
+                        }
                 av = node["Av"].values
                 bc_obj = BolometricCorrection(
                     [svo_of[fac][c] for c in ncols],
@@ -746,7 +793,15 @@ def generate_bc_tables(
                     df,
                     path,
                     filter_meta,
-                    table_meta={"facility": fac, **table_meta},
+                    table_meta={
+                        "facility": fac,
+                        **table_meta,
+                        **(
+                            {"padding": list(padding[fac].values())}
+                            if padding[fac]
+                            else {}
+                        ),
+                    },
                     allow_new_nodes=True,
                     replace_columns=to_replace.pop(fac, ()),
                 )
@@ -824,7 +879,9 @@ def pad_missing_nodes(
     spectrum actually used) and the padding is recorded in the table's
     metadata, ``meta["padding"]``: one record per padded node naming the
     plane it was copied from.  Runs BEFORE step 2 (generate_bc_tables),
-    which then plans nothing for those nodes.
+    which then plans nothing for those nodes.  A column added LATER is
+    padded by step 2 itself (this function skips a node it padded before),
+    from the same lower-gravity spectrum -- see generate_bc_tables.
 
     Returns {facility: number of padded rows}.
     """

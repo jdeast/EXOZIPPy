@@ -28,10 +28,11 @@ from exozippy.components.sed.bc_grid import (
 )
 from exozippy.models.NextGen import generate_NextGen_BC_Tables as gen
 proc = Path.home() / "spectra" / "BT-NextGen_AGSS2009_processed"
+raw = Path.home() / "spectra" / "BT-NextGen_AGSS2009"  # holds svo_index.votable.xml (which nodes SVO lacks)
 t0 = time.time()
 plan = gen.plan_bc_work(gen.FILTER_SETS)
 print("plan:", {fac: (len(todo), [c for c in todo.columns if c not in gen.GRID_KEY_COLS]) for fac, todo in plan.items()})
-gen.generate_bc_tables(processed_path=proc, save=True)
+gen.generate_bc_tables(processed_path=proc, raw_path=raw, save=True)
 print(f"step 2 done in {time.time()-t0:.0f} s")
 for fac in gen.FILTER_SETS:
     p = bc_table_path(DEFAULT_MODEL_ROOT, "NextGen", fac)
