@@ -235,9 +235,9 @@ Unsupported	TYCHO_B_bes	     Unsupported	TYCHO/TYCHO.B_bes	   TYCHO.B_bes
 Unsupported	TYCHO_V_bes	     Unsupported	TYCHO/TYCHO.V_bes	   TYCHO.V_bes
 Unsupported	TYCHO_B_MvB	     Unsupported	TYCHO/TYCHO.B_MvB	   TYCHO.B_MvB
 Unsupported	TYCHO_V_MvB	     Unsupported	TYCHO/TYCHO.V_MvB	   TYCHO.V_MvB
-Unsupported	Johnson_U	       Unsupported	Generic/Johnson.U	   Johnson.U
-Unsupported	Johnson_B	       Unsupported	Generic/Johnson.B	   Johnson.B
-Unsupported	Johnson_V	       Unsupported	Generic/Johnson.V	   Johnson.V
+Unsupported	Johnson_U	       U          	Generic/Johnson.U	   Johnson.U
+Unsupported	Johnson_B	       B          	Generic/Johnson.B	   Johnson.B
+Unsupported	Johnson_V	       V          	Generic/Johnson.V	   Johnson.V
 Unsupported	Johnson_R	       Unsupported	Generic/Johnson.R	   Johnson.R
 Unsupported	Johnson_I	       Unsupported	Generic/Johnson.I	   Johnson.I
 Unsupported	Johnson_J	       Unsupported	Generic/Johnson.J	   Johnson.J

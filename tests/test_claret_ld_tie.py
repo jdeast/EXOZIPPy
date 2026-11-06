@@ -103,6 +103,10 @@ _V_UNTIED = {"name": "V", "filter": "V", "star_constrains_ld": False}
         ("Generic/Cousins.R", "R"),
         ("Sloani", "Sloani"),
         ("2MASS/2MASS.Ks", "K"),
+        # Claret & Bloemen's U B V are the Johnson-Cousins system.
+        ("Generic/Johnson.U", "U"),
+        ("Generic/Johnson.B", "B"),
+        ("Generic/Johnson.V", "V"),
     ],
 )
 def test_filter_labels_resolve_to_claret_tables(label, claret):
@@ -114,7 +118,17 @@ def test_filter_labels_resolve_to_claret_tables(label, claret):
     assert claret_band_name(label, "test") == claret
 
 
-@pytest.mark.parametrize("label", ["GAIA/GAIA2r.G", "NoSuchFilter"])
+@pytest.mark.parametrize(
+    "label",
+    [
+        "GAIA/GAIA2r.G",
+        "NoSuchFilter",
+        # Johnson R/I/J are not Claret's Cousins R/I or 2MASS-like J.
+        "Generic/Johnson.R",
+        "Generic/Johnson.I",
+        "Generic/Johnson.J",
+    ],
+)
 def test_a_filter_with_no_claret_table_raises(label):
     """
     Given a filter the alias table marks Unsupported, or does not know,
