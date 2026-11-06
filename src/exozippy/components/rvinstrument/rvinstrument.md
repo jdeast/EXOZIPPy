@@ -321,7 +321,7 @@ quadrature nodes in the exposure. In `RVInstrument._raw_rv_model` the nodes are 
 of the geometry, `_rv_model` runs on their emission times, and an `inc_subtensor` segment
 sum by a constant index forms each row's mean. Per exposure, the most complete
 description it has wins (`Instrument.exposure_node_table`, the Instrument base's since
-review 4.5.4 folded #565's machinery into it; the rules are in `components/exposure.py`):
+review 4.5.4 folded #565's machinery into it, #588; the rules are in `components/exposure.py`):
 
 1. **`exposure_meter: <file>`**, the full record. Long format, one row per meter bin:
    `t_mid` (the exposure's midpoint EXACTLY as the data file's time column writes it --
