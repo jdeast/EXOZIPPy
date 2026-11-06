@@ -236,6 +236,39 @@ def test_a_second_stage_3_pass_keeps_the_links_without_a_warning(
 
 
 @pytest.mark.slow
+def test_a_second_pass_does_not_repeat_the_first_passs_log_lines(
+    files, model_root, caplog, monkeypatch
+):
+    """
+    Given an orbit group, whose stage-3 pass logs the links it makes,
+    When System.prepare runs stages 3 and 4 a second time (forced here by a
+    start re-read that settles after one pass, as the mulensinstrument flux
+    bootstrap does),
+    Then the link line is printed once, not once per pass -- while the
+    re-read's own message, new in the second pass, still prints.
+    """
+    from exozippy.components.star.star import Star
+
+    calls = {"n": 0}
+
+    def reread_once(self, system):
+        calls["n"] += 1
+        return [("start re-read for the test", [])] if calls["n"] == 1 else []
+
+    monkeypatch.setattr(Star, "reread_after_starts", reread_once)
+    with caplog.at_level(logging.INFO, logger="exozippy"):
+        _prepare(_config(files, model_root, [ORBITS["static"]]), _params())
+    assert calls["n"] == 2, "the second pass did not run"
+    link_lines = [
+        r for r in caplog.records if "orbit group: B shares" in r.message
+    ]
+    assert len(link_lines) == 1
+    assert any(
+        "start re-read for the test" in r.message for r in caplog.records
+    )
+
+
+@pytest.mark.slow
 def test_a_user_soft_link_breaks_exactly_that_link(files, model_root, caplog):
     """
     Given a soft link the user wrote on B's age (sigma > 0),
