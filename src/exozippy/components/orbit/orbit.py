@@ -558,23 +558,47 @@ class Orbit(Component):
         if system is None:
             return
         flipped = [
-            self.names[i] if i < len(self.names) else str(i)
+            i
             for i in range(self.n_elements)
             if self.fitvcve[i]
             and not (self.config[i] or {}).get("fitvcve", False)
         ]
         if not flipped:
             return
-        logger.info(
-            "[%s] %s measured by transits alone: sampling V_c/V_e and the "
-            "transit chord instead of sqrt(e)cos(omega)/sqrt(e)sin(omega) and "
-            "cos i (Eastman 2024), which is what a transit duration "
-            "constrains.  secosw/sesinw/cosi are still reported.  Set "
-            "'fitvcve: false' on the orbit to fit the conventional "
-            "coordinates.",
-            self.prefix,
-            ", ".join(flipped),
-        )
+        # Grouped by each orbit's own fitchord: the chord follows fitvcve
+        # unless set on its own, and an orbit with 'fitchord: false' samples
+        # cos i -- naming "the transit chord" there sent the reader looking
+        # for a coordinate the trace does not hold.
+        for with_chord in (True, False):
+            names = [
+                self.names[i]
+                for i in flipped
+                if bool(self.fitchord[i]) is with_chord
+            ]
+            if not names:
+                continue
+            if with_chord:
+                sampled = "V_c/V_e and the transit chord"
+                replaced = "sqrt(e)cos(omega)/sqrt(e)sin(omega) and cos i"
+                reported = "secosw/sesinw/cosi are"
+                inclination = ""
+            else:
+                sampled = "V_c/V_e"
+                replaced = "sqrt(e)cos(omega)/sqrt(e)sin(omega)"
+                reported = "secosw/sesinw are"
+                inclination = "  cos i is sampled as set ('fitchord: false')."
+            logger.info(
+                "[%s] %s measured by transits alone: sampling %s instead of "
+                "%s (Eastman 2024), which is what a transit duration "
+                "constrains.  %s still reported.%s  Set 'fitvcve: false' on "
+                "the orbit to fit the conventional coordinates.",
+                self.prefix,
+                ", ".join(names),
+                sampled,
+                replaced,
+                reported,
+                inclination,
+            )
 
     def _e_omega_datasets(self, system):
         """Per orbit: the datasets that measure (e, omega) more directly than

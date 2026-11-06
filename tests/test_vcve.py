@@ -1586,3 +1586,43 @@ def test_vcve_warns_where_an_occultation_or_rvs_measure_e_omega(
     with_rv_hk = _transit_config(transit_lc, False)
     with_rv_hk["rvinstrument"] = [{"name": "harps", "file": rv_data}]
     assert _vcve_warnings(caplog, with_rv_hk) == []
+
+
+def _transit_only_log_lines(caplog, config):
+    import logging
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        System(config, user_params=dict(_TRANSIT_PARAMS)).prepare()
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if "measured by transits alone" in r.getMessage()
+    ]
+
+
+@pytest.mark.parametrize("fitchord", [None, False])
+def test_the_transit_only_log_line_names_what_the_orbit_samples(
+    transit_lc, caplog, fitchord
+):
+    """
+    Given a transit-only orbit (fitvcve on by default), with the chord left
+      to follow it or switched off with 'fitchord: false',
+    When the system is prepared,
+    Then the one startup line names the transit chord only when the chord is
+      sampled, and says cos i is sampled when it is.
+
+    It named "the transit chord" for every flipped orbit, so a fitchord:
+    false run sent the reader looking for a coordinate the trace does not
+    hold.  Reported by Castle639.
+    """
+    extra = None if fitchord is None else {"fitchord": fitchord}
+    (msg,) = _transit_only_log_lines(
+        caplog, _transit_config(transit_lc, None, extra_orbit=extra)
+    )
+    if fitchord is None:
+        assert "V_c/V_e and the transit chord" in msg
+        assert "fitchord: false" not in msg
+    else:
+        assert "chord" not in msg.replace("'fitchord: false'", "")
+        assert "cos i is sampled as set ('fitchord: false')" in msg
