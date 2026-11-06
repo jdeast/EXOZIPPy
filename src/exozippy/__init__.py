@@ -21,6 +21,55 @@ for _tvar in (
 ):
     os.environ.setdefault(_tvar, "1")
 
+
+# PyTensor serializes C compilation through ONE file lock per compiledir
+# (`~/.pytensor/compiledir_<platform>/.lock`, shared by every process of the
+# user), held for the whole gcc compile of a module and for the cache walk,
+# and a waiting process gives up after `compile__timeout` -- 120 s by default
+# -- with `filelock._error.Timeout`.  So a second fit started while the first
+# was compiling crashed (JDE, 2026-11-05: "the user can't run two fits at
+# the same time").  Waiting is the right behavior: the second fit compiles
+# when the first lets go, the shared cache stays warm, and sampling still
+# runs in parallel.  The bound is a day, not forever, only as a backstop
+# against a holder that is alive but hung: the OS releases the lock of a
+# process that dies.  It must be set before pytensor is imported
+# (`compile__timeout` is immutable after), and a user's own setting -- in
+# PYTENSOR_FLAGS or a .pytensorrc -- is left alone.
+COMPILE_LOCK_TIMEOUT_S = 86400
+
+
+def _user_set_compile_timeout():
+    """True when PyTensor will read a compile__timeout of the user's.
+
+    Exactly the two spellings PyTensor reads (configparser.fetch_val_for_key):
+    the flag `compile__timeout`, and `timeout` in the rc's `[compile]`
+    section.  Anything else (`[global] compile__timeout`) PyTensor ignores,
+    so treating it as set would leave the 120 s default in force.
+    """
+    flags = os.environ.get("PYTENSOR_FLAGS", "")
+    if any(
+        f.split("=", 1)[0].strip() == "compile__timeout"
+        for f in flags.split(",")
+    ):
+        return True
+    import configparser
+
+    rc = configparser.ConfigParser()
+    rc.read(
+        os.path.expanduser(p)
+        for p in os.environ.get("PYTENSORRC", "~/.pytensorrc").split(
+            os.pathsep
+        )
+    )
+    return rc.has_option("compile", "timeout")
+
+
+if not _user_set_compile_timeout():
+    _flags = os.environ.get("PYTENSOR_FLAGS", "")
+    os.environ["PYTENSOR_FLAGS"] = ",".join(
+        f for f in (_flags, f"compile__timeout={COMPILE_LOCK_TIMEOUT_S}") if f
+    )
+
 import pytensor
 
 # PyTensor 3 changed the "auto" linker default from a C-based linker to numba.
