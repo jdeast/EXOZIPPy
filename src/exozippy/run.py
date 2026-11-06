@@ -20,7 +20,7 @@ import xarray as xr
 from matplotlib.backends.backend_pdf import PdfPages
 
 from exozippy.config import user_entry
-from exozippy.samplers import convergence, de_metropolis
+from exozippy.samplers import convergence, de_metropolis, nuts_checkpoint
 from exozippy.samplers._common import (
     DEFAULT_TUNE_FORECAST,
     DEFAULT_TUNE_FORECAST_AFTER,
@@ -35,6 +35,15 @@ from . import reporting
 from .angles import (
     adopt_direct_angles,
     choose_direct_angles,
+)
+from .angles import (
+    apply_choices as apply_direct_angle_choices,
+)
+from .angles import (
+    choices_from_json as direct_angle_choices_from_json,
+)
+from .angles import (
+    choices_to_json as direct_angle_choices_to_json,
 )
 from .angles import (
     has_auto_slots as has_auto_angle_slots,
@@ -91,7 +100,7 @@ from .trace_meta import (
     stamp_trace_attr,
     structural_metadata,
 )
-from .whitening import prepare_whitening
+from .whitening import prepare_whitening, restore_whitening_for_resume
 
 logger = logging.getLogger(__name__)
 
@@ -158,6 +167,7 @@ KNOWN_SAMPLER_KEYS = {
     "maxtime",
     "chain_method",
     "jitter",
+    "checkpoint_every",
     "eval_timeout",
     "rung_thin_factor",
     "rung_thin_start",
@@ -469,6 +479,8 @@ METHOD_ONLY_SAMPLER_KEYS = {
     # pymc.sampling.jax.sample_jax_nuts only.
     "chain_method": _JAX_METHODS,
     "jitter": _JAX_METHODS,
+    # samplers/nuts_checkpoint.py: numpyro only.
+    "checkpoint_every": ("numpyro",),
     # samplers/nested.py only.
     "nested_backend": ("nested",),
     "nlive": ("nested",),
@@ -913,6 +925,13 @@ def _run_fit(config, gui, user_params=None):
     else:
         seed = int(_seed_raw)
         seed_source = "config"
+    # A numpyro fit resuming from its NUTS checkpoint continues chains STARTED
+    # under the checkpoint's seed, so that is the seed this run reports, stamps
+    # and tells the user to reuse (samplers/nuts_checkpoint.py).
+    _ckpt_seed = nuts_checkpoint.checkpoint_seed(f"{prefix}_nutsckpt.pkl")
+    if _ckpt_seed is not None:
+        seed = _ckpt_seed
+        seed_source = "from the NUTS checkpoint being resumed"
     recompute_trace = sampler_cfg.get("recompute_trace", False)
     nthin = int(sampler_cfg.get("nthin", 1))
     # Data-driven whitening: probe each raw element's true local scale from
@@ -990,6 +1009,31 @@ def _run_fit(config, gui, user_params=None):
     # trace BEFORE the build, the way the whitening is restored after it.
     if os.path.exists(str(prefix) + "_trace.nc") and not recompute_trace:
         restore_direct_angles(system, str(prefix) + "_trace.nc")
+    # A NUTS checkpoint about to be resumed (samplers/nuts_checkpoint.py)
+    # holds chains sampled in the angle coordinates its fresh run chose, and
+    # its saved whitening describes that model; the choice is restored from
+    # the checkpoint BEFORE the build for the same reason.  The method may
+    # still be "auto" here, so whether this run really resumes the
+    # checkpoint is checked once it is known (resuming_nuts, below).
+    ckpt_angles_restored = False
+    if (
+        _ckpt_seed is not None
+        and int(sampler_cfg.get("checkpoint_every", 100)) > 0
+        and not (
+            os.path.exists(str(prefix) + "_trace.nc") and not recompute_trace
+        )
+    ):
+        ckpt_angles = nuts_checkpoint.checkpoint_direct_angles(
+            f"{prefix}_nutsckpt.pkl"
+        )
+        if ckpt_angles is not None:
+            apply_direct_angle_choices(
+                system,
+                direct_angle_choices_from_json(
+                    ckpt_angles, f"{prefix}_nutsckpt.pkl"
+                ),
+            )
+            ckpt_angles_restored = True
     gui.phase("compiling")  # build_model + get_mcmc_init compile the graph
     model = system.build_model()
 
@@ -1134,6 +1178,29 @@ def _run_fit(config, gui, user_params=None):
         trace_path = str(prefix) + "_trace.nc"
         whitening_path = str(prefix) + "_whitening.json"
         reusing_trace = os.path.exists(trace_path) and not recompute_trace
+        # A NUTS checkpoint being resumed (samplers/nuts_checkpoint.py) was
+        # sampled in the coordinates its fresh run polished, measured and
+        # saved here, so they are restored as a reused trace's are, and the
+        # polish and the probe do not run again.  Its chains continue from
+        # their saved positions: a second polish would only rebuild the
+        # start they left, minutes per resume, and one that landed a digit
+        # off (another machine, another BLAS) would have the checkpoint
+        # refused as a different fit.  The checkpoint's fingerprint still
+        # checks the restored start's logp against the one it was made at.
+        resuming_nuts = (
+            not reusing_trace
+            and method == "numpyro"
+            and int(sampler_cfg.get("checkpoint_every", 100)) > 0
+            and _ckpt_seed is not None
+            and os.path.exists(whitening_path)
+        )
+        if ckpt_angles_restored and not resuming_nuts:
+            raise ValueError(
+                f"{prefix}_nutsckpt.pkl carries the direct-angle choice of "
+                f"the fit it checkpoints, but this run does not resume it "
+                f"(method {method!r}, or no {whitening_path}).  Delete the "
+                f"checkpoint to start the fit over."
+            )
 
         # Pre-whitening seed polish (sampler-config `seed_polish`): promote
         # each solution-estimate start to its basin's optimum BEFORE the
@@ -1170,7 +1237,7 @@ def _run_fit(config, gui, user_params=None):
             polish_timeout = resolve_polish_timeout(
                 sampler_cfg.get("polish_timeout", DEFAULT_POLISH_TIMEOUT_S)
             )
-            if polish_steps:
+            if polish_steps and not resuming_nuts:
                 polish_rounds(
                     system,
                     model,
@@ -1220,6 +1287,12 @@ def _run_fit(config, gui, user_params=None):
             raw_start = system.get_raw_start(model)
 
         whiten_report = None
+        if resuming_nuts:
+            restore_whitening_for_resume(system, whitening_path)
+            raw_start = system.get_raw_start(model)
+            # The restored anchor IS the polished start the checkpoint's
+            # fresh run sampled from.
+            polished_start = True
         # Fresh run -> measure + persist.  Reuse -> restore only: the
         # whitening is a property of the draws being decoded, so it is
         # never re-measured and never rewritten there (a mismatch
@@ -1238,7 +1311,7 @@ def _run_fit(config, gui, user_params=None):
         # sampled without measurement is already built in: no whitening file
         # exists, so the restore warns and keeps the preliminary scales, which
         # for that trace ARE the sampled coordinates.
-        if reusing_trace or measure_scales:
+        elif reusing_trace or measure_scales:
             whiten_report = prepare_whitening(
                 system,
                 model,
@@ -1271,9 +1344,13 @@ def _run_fit(config, gui, user_params=None):
         # polished point carried over, and the whitening measured again on
         # the new model (that file supersedes the first).
         if not reusing_trace:
-            angle_choices, _ = choose_direct_angles(
-                system, model, raw_start, angle_logp_fn
-            )
+            if resuming_nuts:
+                # restored from the checkpoint before the build (above)
+                angle_choices = system.direct_angles or {}
+            else:
+                angle_choices, _ = choose_direct_angles(
+                    system, model, raw_start, angle_logp_fn
+                )
             if angle_choices != (system.direct_angles or {}):
                 model_context.close()
                 model = adopt_direct_angles(
@@ -1601,16 +1678,56 @@ def _run_fit(config, gui, user_params=None):
                 # with 'measure_scales: false' the preliminary scales bring
                 # it right back -- so the default stays off.  Opt back in
                 # with 'jitter: true'.
-                idata = sample_jax_nuts(
-                    draws=draws,
-                    tune=tune,
-                    chains=chains,
-                    target_accept=target_accept,
-                    jitter=sampler_cfg.get("jitter", False),
-                    chain_method=chain_method,
-                    nuts_sampler=method,
-                    random_seed=seed,
-                )
+                # Checkpointed (samplers/nuts_checkpoint.py): the warmup and
+                # every `checkpoint_every` draws are saved beside the trace, so
+                # a fit stopped mid-sampling resumes on a rerun instead of
+                # losing every draw.  0 turns it off.  numpyro only.
+                ckpt_every = int(sampler_cfg.get("checkpoint_every", 100))
+                ckpt_path = f"{prefix}_nutsckpt.pkl"
+                if method == "numpyro" and ckpt_every > 0:
+                    ckpt = nuts_checkpoint.checkpointed_numpyro(
+                        ckpt_path,
+                        ckpt_every,
+                        nuts_checkpoint.fingerprint(
+                            trace_stamp,
+                            tune=tune,
+                            draws=draws,
+                            chains=chains,
+                            target_accept=target_accept,
+                            chain_method=chain_method,
+                            # Every other sampler key that can change a chain
+                            # (jitter, and any key added later), so a resume
+                            # can never mix two samplers' chains.
+                            sampler=nuts_checkpoint.chain_settings(
+                                sampler_cfg
+                            ),
+                            # The model's VALUE at the start, not only its
+                            # structure: a code or data change that keeps
+                            # every name and shape (a potential's width, a
+                            # light curve edited) must not resume another
+                            # model's chains.  The polish and whitening are
+                            # deterministic, so a true resume reproduces it.
+                            start_logp=nuts_checkpoint.start_logp_stamp(model),
+                        ),
+                        direct_angles=(
+                            direct_angle_choices_to_json(system.direct_angles)
+                            if system.direct_angles
+                            else None
+                        ),
+                    )
+                else:
+                    ckpt = contextlib.nullcontext()
+                with ckpt:
+                    idata = sample_jax_nuts(
+                        draws=draws,
+                        tune=tune,
+                        chains=chains,
+                        target_accept=target_accept,
+                        jitter=sampler_cfg.get("jitter", False),
+                        chain_method=chain_method,
+                        nuts_sampler=method,
+                        random_seed=seed,
+                    )
             elif method == "nutpie":
                 # No start is passed, and here that FIXES the branch rather
                 # than merely simplifying it (review 4.3.1).  It used to hand
@@ -1757,6 +1874,11 @@ def _run_fit(config, gui, user_params=None):
             idata = _save_sampled_trace(
                 idata, trace_path, nthin=nthin, seed=seed, stamp=trace_stamp
             )
+            # The trace is on disk, so the NUTS checkpoint has done its job
+            # (samplers/nuts_checkpoint.py); left behind, it would resume a
+            # later fit of a changed config only to be refused.
+            if os.path.exists(f"{prefix}_nutsckpt.pkl"):
+                os.remove(f"{prefix}_nutsckpt.pkl")
 
     # Sampling is done (or the trace was reloaded); the rest is post-
     # processing + report/plot output, from a trace that is already on disk.
