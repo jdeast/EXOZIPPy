@@ -5,6 +5,51 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+
+class _RepeatedRecords(logging.Filter):
+    """Records the package's log lines, then drops exact repeats of them.
+
+    ``System.prepare`` may run stages 3 and 4 a second time (after a
+    topology revision or a start re-read).  Every component's
+    ``register_parameters`` then says again what it said the first time --
+    the same skipped Claret tie, the same orbit-group links -- and the user
+    reads each line twice.  Installed on every ``exozippy`` logger, it
+    remembers the first pass's (logger, level, message) and, once
+    ``dropping`` is set, swallows a record identical to one of them.  A
+    message whose text the second pass changes is NEW and still prints.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.seen = set()
+        self.dropping = False
+        self._installed = []
+
+    def filter(self, record):
+        key = (record.name, record.levelno, record.getMessage())
+        if self.dropping:
+            return key not in self.seen
+        self.seen.add(key)
+        return True
+
+    def install(self):
+        # A logger-level filter sees only the records that logger itself
+        # creates, so it goes on each package logger, not on the parent.
+        self._installed = [
+            lg
+            for name, lg in logging.root.manager.loggerDict.items()
+            if isinstance(lg, logging.Logger)
+            and (name == "exozippy" or name.startswith("exozippy."))
+        ]
+        for lg in self._installed:
+            lg.addFilter(self)
+
+    def remove(self):
+        for lg in self._installed:
+            lg.removeFilter(self)
+        self._installed = []
+
+
 import arviz as az
 import pymc as pm
 import pytensor
@@ -373,22 +418,29 @@ class System(Component):
             comp.load_data(self)
             comp.build_maps()
 
-        # Stage 3: REGISTRATION (The Blueprint)
-        for comp in self.active_components.values():
-            comp.register_parameters(self)
+        # Stages 3 and 4, remembering what they log so that a second pass
+        # below does not print it all again (_RepeatedRecords).
+        first_pass_log = _RepeatedRecords()
+        first_pass_log.install()
+        try:
+            # Stage 3: REGISTRATION (The Blueprint)
+            for comp in self.active_components.values():
+                comp.register_parameters(self)
 
-        # After stage 3: the REPORTED-element invariant, checked before anything is
-        # built (see _validate_reported_not_consumed).
-        self._validate_reported_not_consumed()
-        self._adopt_element_owners()
+            # After stage 3: the REPORTED-element invariant, checked before
+            # anything is built (see _validate_reported_not_consumed).
+            self._validate_reported_not_consumed()
+            self._adopt_element_owners()
 
-        # Stage 4: RECONCILIATION (The Solver).  The snapshot is what a
-        # second solve must start from: finalize_user_params injects its
-        # solved starts back into user_params, so it is not re-entrant
-        # (ConfigManager.snapshot_solve_inputs).
-        solve_inputs = self.config_manager.snapshot_solve_inputs()
-        self.config_manager.set_engine_roles(self._engine_roles())
-        self.config_manager.finalize_user_params()
+            # Stage 4: RECONCILIATION (The Solver).  The snapshot is what a
+            # second solve must start from: finalize_user_params injects its
+            # solved starts back into user_params, so it is not re-entrant
+            # (ConfigManager.snapshot_solve_inputs).
+            solve_inputs = self.config_manager.snapshot_solve_inputs()
+            self.config_manager.set_engine_roles(self._engine_roles())
+            self.config_manager.finalize_user_params()
+        finally:
+            first_pass_log.remove()
 
         # After stage 4: TOPOLOGY REVISIONS that depend on a solved start
         # (Component.revise_after_starts; today only the SED's no-grid
@@ -415,12 +467,17 @@ class System(Component):
         ]
         if self.topology_revisions or start_rereads:
             self.config_manager.restore_solve_inputs(solve_inputs)
-            for comp in self.active_components.values():
-                comp.register_parameters(self)
-            self._validate_reported_not_consumed()
-            self._adopt_element_owners()
-            self.config_manager.set_engine_roles(self._engine_roles())
-            self.config_manager.finalize_user_params()
+            first_pass_log.dropping = True
+            first_pass_log.install()
+            try:
+                for comp in self.active_components.values():
+                    comp.register_parameters(self)
+                self._validate_reported_not_consumed()
+                self._adopt_element_owners()
+                self.config_manager.set_engine_roles(self._engine_roles())
+                self.config_manager.finalize_user_params()
+            finally:
+                first_pass_log.remove()
             # Asked again: an estimate the extra pass moved once more depends
             # on the start it seeds.  One pass is the contract; raise rather
             # than iterate to a fixed point nobody has shown exists.
