@@ -93,12 +93,14 @@ Tests: `tests/test_transit_fitspline.py`.
 
 ### `fitramp`: an exponential detector ramp (transit only)
 
-`transit`'s per-file `fitramp: true` is EXOFASTv2's FITRAMP (exofast_chi2v2.pro, "exponential ramp (e.g., Spitzer & JWST)"): the settling of an IR detector's response at the start of a time series. It adds `transit.<name>.ramp_amp` (A) and `ramp_tau` (tau, days) on that file only (`pin_unselected`, the `dilute` pattern) and multiplies the model, in `Transit._lc_model` step 5 next to the baseline and after the sub-exposure average (not smeared, as in EXOFASTv2):
+`transit`'s per-file `fitramp: true` is EXOFASTv2's FITRAMP (exofast_chi2v2.pro, "exponential ramp (e.g., Spitzer & JWST)"): the settling of an IR detector's response at the start of a time series. It adds `transit.<name>.ramp_amp` (A) and `ramp_tau` (tau, days) on that file only (`pin_unselected`, the `dilute` pattern) and multiplies the model, in `Transit._lc_model` step 5 next to the baseline:
 
 ```
 R(t) = 1 - A * (1 - exp(-(t - t0) / tau))       # = 1 + A * expm1(-dt / tau)
-lc   = baseline * R * rel ;  mu = lc + X . c
+lc   = baseline * <R> * <rel> ;  mu = lc + X . c
 ```
+
+where `<.>` is the exposure average (see "Exposure smearing" below).
 
 Rulings, each of which looks like an omission and is not:
 
@@ -107,7 +109,8 @@ Rulings, each of which looks like an omission and is not:
 - **tau is on the logit transform over [1e-5 d, 10 x span]**, not behind EXOFASTv2's `chi2 = infinity` rejection. The upper bound is EXOFASTv2's `10 * timerange`, per file, through the manifest `"overrides"` channel; the lower is a strictly positive floor (`ramp.TAU_FLOOR`, defaults.yaml), since at tau <= 0 the exponential overflows. Two finite bounds is the standard uniform prior here, with finite gradients up to both walls (tested under numpyro).
 - **A is bounded [-1, 1]** where EXOFASTv2 leaves it free: an unbounded element here would carry an implicit `N(initval, init_scale)` prior.
 - **The seed is not EXOFASTv2's.** mkss.pro seeds A and tau with a `curvefit` of `ramp_func`, which evaluates `exp(a1 * (t0 - t))` and steers toward `a1 < 0` -- a GROWING exponential, the opposite sign from the chi2 model (and without its `-A` or F0). `components/transit/ramp.py` instead fits the decaying form by weighted least squares on a log grid of tau (linear in the two amplitudes at fixed tau), clipping the transit, and also seeds the ramp file's `baseline` at the fitted level at `t0`.
-- **The planet terms carry no ramp.** `ramp * (baseline + sum(planet_terms)) == lc`. A phased model curve is a grid at the seeded epoch, possibly periods from the data, where no ramp applies, so it is divided by the baseline alone, while the phased DATA and error bars are divided by `baseline * ramp` at the data, read from the likelihood's own node (`_lc_data_fn`'s third output). Without `fitramp` that ramp is exactly 1.0 and the panel is bit-for-bit the ramp-free expression. On plot grids `t - t0` is clamped at 0 so a grid before the data cannot overflow; on data rows it is already non-negative.
+- **The planet terms carry no ramp.** `ramp * (baseline + sum(planet_terms)) == lc`. A phased model curve is a grid at the seeded epoch, possibly periods from the data, where no ramp applies, so it is divided by the baseline alone, while the phased DATA and error bars are divided by `baseline * ramp` at the data, read from the likelihood's own node (`_lc_data_fn`'s third output). Without `fitramp` that ramp is exactly 1.0 and the panel is bit-for-bit the ramp-free expression. `t - t0` is clamped at 0 so a plot grid before the data, or a sub-exposure node before the first timestamp, cannot overflow at a short tau; at `dt == 0` the gradient in both `A` and `tau` is exactly 0, so the clamp creates no `0 * inf`.
+- **The ramp is exposure-averaged on its own: `<R> * <rel>`, not `<R * rel>`.** On a file with `exptime_s`/`ninterp`, `R` is averaged over the SAME sub-exposure nodes and weights as the planet terms (`Transit._ramp_profile` calls the base's `smear`), then multiplies the separately averaged relative model. EXOFASTv2 evaluates the ramp unsmeared at the timestamp, which drops the ramp's curvature over an exposure, `A (exptime/tau)^2 / 24` to leading order -- the largest error, and the one that grows as tau shortens toward the cadence. The exact `<R * rel>` differs from `<R> * <rel>` only by the within-exposure covariance of the ramp and the transit, the product of two small slopes (`A exptime/tau` times the ingress change over one exposure), and averaging the ramp INSIDE the planet loop would break `ramp * (baseline + sum(planet_terms)) == lc` (below), which the phased panels rely on; beaming and ellipsoidal are unsmeared in any case. With `ninterp == 1` the average is the identity. Inside the first exposure the nodes before `t0` see `R = 1` (the clamp below): the ramp starts at `t0` by definition.
 - **Composition with detrending** is the `fitspline` approximation again: EXOFASTv2's `f0 * R * (rel + X . c')` vs `baseline * R * rel + X . c` here.
 
 Tests: `tests/test_transit_fitramp.py`.

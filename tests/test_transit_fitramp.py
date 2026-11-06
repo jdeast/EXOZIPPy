@@ -29,7 +29,7 @@ _TC = 2459781.8
 _PERIOD = 1.58040453
 _ERR = 2e-4
 _N = 1000
-# A JWST-like visit: 0.5 d centred on the transit.
+# A JWST-like visit: 0.5 d centered on the transit.
 _T_START = _TC - 0.25
 _SPAN = 0.5
 _RADIUS_TRUE = 0.2427  # jupiterRad; with star.radius 0.215 -> p ~0.116
@@ -522,6 +522,52 @@ def test_a_mixed_config_leaves_the_other_file_untouched(truth):
 
 
 # ---------------------------------------------------------------------------
+# Exposure smearing: the ramp is averaged on the planet terms' own nodes
+# ---------------------------------------------------------------------------
+
+
+def test_ramp_is_averaged_over_each_exposure(truth):
+    """
+    Given the ramp file with exptime_s = 300 s and ninterp = 5, and a
+    short tau = 0.002 d (so the ramp curves visibly within one exposure),
+    When the likelihood's ramp node is read at the observations,
+    Then it equals the node-weighted mean of the ramp written out on each
+    row's own sub-exposure nodes (nodes before t0 held at R = 1), differs
+    from the timestamp ramp where it curves, and the model is still
+    ramp * (baseline + sum(planet terms)).
+    """
+    system, model, raw, point = _build(
+        [
+            (
+                "MIRI",
+                truth[1],
+                {"fitramp": True, "exptime_s": 300.0, "ninterp": 5},
+            )
+        ],
+        _params(radius=0.95 * _RADIUS_TRUE),
+    )
+    tr = system.transit
+    amp, tau = 0.003, 0.002
+    values = _values(system, point, ramp_amp=[amp], ramp_tau=[tau])
+    phys, terms, data_ramp = tr._eval_lc_data_and_ramp(values)
+
+    t0 = tr.ramp_t0[0]
+    offsets, weights = tr.exposure_nodes(0)
+    assert offsets.size == 5
+    t_sub = tr.time[:, None] + offsets[None, :]
+    expected = _ramp(np.maximum(t_sub, t0), t0, amp, tau) @ weights
+    np.testing.assert_allclose(data_ramp, expected, rtol=1e-13, atol=0)
+    # The average is not the timestamp value where the ramp curves.
+    assert np.max(np.abs(data_ramp - _ramp(tr.time, t0, amp, tau))) > 1e-6
+
+    b = tr._point_value(point, tr.baseline, 0)
+    np.testing.assert_allclose(
+        phys, data_ramp * (b + terms.sum(axis=1)), rtol=1e-14
+    )
+    np.testing.assert_allclose(phys, _mu(system, model, values), rtol=1e-14)
+
+
+# ---------------------------------------------------------------------------
 # Gradients next to tau's walls
 # ---------------------------------------------------------------------------
 
@@ -550,6 +596,7 @@ def test_gradient_is_finite_next_to_the_tau_bounds(truth, tau_start):
     assert np.all(np.isfinite(grad))
 
 
+@pytest.mark.slow
 def test_numpyro_samples_finitely_next_to_the_upper_bound(truth):
     """
     Given tau started 2% below its 10 x span upper bound,

@@ -9,7 +9,10 @@ import pytensor.tensor as pt
 
 from exozippy.components.instrument import Instrument
 from exozippy.components.limbdark import quad_limb_darkened_flux
-from exozippy.components.parameterization import pin_unselected
+from exozippy.components.parameterization import (
+    merge_overrides,
+    pin_unselected,
+)
 from exozippy.outputs.prose import get_collector
 from exozippy.outputs.texutils import latex_escape
 
@@ -876,15 +879,18 @@ class Transit(Instrument):
         # bound); NaN leaves the pinned files' elements alone.  With both
         # bounds finite tau is on the logit transform -- no hard chi2 wall.
         if any(self.fitramp):
-            amp_entry = pin_unselected(self.n_elements, self.fitramp)
-            tau_entry = pin_unselected(self.n_elements, self.fitramp)
-            tau_overrides = dict(tau_entry.get("overrides", {}))
-            tau_overrides["upper"] = [
-                ramp.TAU_SPAN_FACTOR * s if fit else np.nan
-                for fit, s in zip(self.fitramp, self.ramp_span)
-            ]
-            self.manifest["ramp_amp"] = amp_entry
-            self.manifest["ramp_tau"] = {"overrides": tau_overrides}
+            self.manifest["ramp_amp"] = pin_unselected(
+                self.n_elements, self.fitramp
+            )
+            self.manifest["ramp_tau"] = merge_overrides(
+                pin_unselected(self.n_elements, self.fitramp),
+                {
+                    "upper": [
+                        ramp.TAU_SPAN_FACTOR * s if fit else np.nan
+                        for fit, s in zip(self.fitramp, self.ramp_span)
+                    ]
+                },
+            )
             self._hint_ramp()
 
     def _hint_baseline(self):
@@ -1511,10 +1517,11 @@ class Transit(Instrument):
 
         # 5. The normalization multiplies the WHOLE astrophysical model
         # (EXOFASTv2's ``modelflux *= f0``): flux = baseline * rel.  A
-        # fitramp file's exponential ramp multiplies with it (6.), after the
-        # sub-exposure average, as in EXOFASTv2 (it is not smeared).
+        # fitramp file's exponential ramp multiplies with it (6.), averaged
+        # over each exposure on the planet terms' own nodes (EXOFASTv2
+        # evaluates it unsmeared, at the timestamp).
         if "ramp_amp" in self.manifest:
-            ramp_obs = self._ramp_profile(t, blocks, baseline_obs)
+            ramp_obs = self._ramp_profile(t, blocks)
             lc_model = (baseline_obs * ramp_obs) * lc_model
         else:
             ramp_obs = pt.ones_like(baseline_obs)
@@ -1522,8 +1529,9 @@ class Transit(Instrument):
 
         return lc_model, pt.stack(planet_terms, axis=1), ramp_obs
 
-    def _ramp_profile(self, t, blocks, like):
-        """6. The per-row exponential ramp (EXOFASTv2's FITRAMP), ``(N,)``.
+    def _ramp_profile(self, t, blocks):
+        """6. The per-row exponential ramp (EXOFASTv2's FITRAMP), ``(N,)``,
+        exposure-averaged.
 
         For a ``fitramp`` file's rows,
         ``R = 1 - A * (1 - exp(-(t - t0) / tau)) = 1 + A * expm1(-dt / tau)``
@@ -1534,25 +1542,45 @@ class Transit(Instrument):
         TODO: if the baseline-A covariance is bad for a short tau, try the
         plain ``1 + A * exp(-dt / tau)`` form (baseline = the late level).
 
+        ``R`` is averaged over each exposure on the SAME sub-exposure nodes
+        and weights as the planet terms (the base's ``smear``), so a file
+        with ``exptime_s``/``ninterp`` sees the exposure-mean ramp; the model
+        is then ``baseline * <R> * <rel>`` (instrument.md, "fitramp").  With
+        ``ninterp == 1`` the average is the identity and ``R`` is evaluated
+        at the timestamp.
+
         Every other row is exactly 1.0 by construction (``set_subtensor``
-        onto ones, never ``pt.where``).  ``dt`` is clamped at 0 so a plot
-        grid that starts before the data (the phased window sits at the
-        seeded epoch, possibly periods away) cannot overflow; on data rows
-        ``dt >= 0`` already, and the clamp acts on a time, not a parameter,
-        so it has no gradient to trap.
+        onto ones, never ``pt.where``).  ``dt`` is clamped at 0 so neither a
+        plot grid that starts before the data (the phased window sits at the
+        seeded epoch, possibly periods away) nor the first exposure's early
+        sub-exposure nodes can overflow at a short tau; the clamp acts on a
+        time, not a parameter, and at ``dt == 0`` the gradient in ``A`` and
+        ``tau`` is exactly 0 (``expm1(0) == 0``, ``d/dtau = dt/tau**2 == 0``),
+        so there is no ``0 * inf`` to trap.
         """
-        ramp_obs = pt.ones_like(like)
+        inst_map = self._blocks_inst_map(blocks)
+        fitramp = np.asarray(self.fitramp, dtype=bool)
+        ramp_t0 = np.asarray(self.ramp_t0, dtype=float)
         amp = self.ramp_amp.value
         tau = self.ramp_tau.value
-        for inst_idx, rows in blocks:
-            if not self.fitramp[inst_idx] or len(rows) == 0:
-                continue
-            rows = np.asarray(rows, dtype=int)
-            dt = pt.maximum(t[rows] - self.ramp_t0[inst_idx], 0.0)
-            ramp_obs = pt.set_subtensor(
-                ramp_obs[rows],
-                1.0 + amp[inst_idx] * pt.expm1(-dt / tau[inst_idx]),
+
+        def _ramp_nodes(t_sub, rows):
+            """The instantaneous ramp on one node group, ``(n_g, k_g)``."""
+            inst = inst_map[rows]
+            local = np.flatnonzero(fitramp[inst])
+            out = pt.ones_like(t_sub)
+            if local.size == 0:
+                return (out,)
+            inst_r = inst[local]
+            dt = pt.maximum(
+                t_sub[local] - pt.constant(ramp_t0[inst_r])[:, None], 0.0
             )
+            r = 1.0 + amp[inst_r][:, None] * pt.expm1(
+                -dt / tau[inst_r][:, None]
+            )
+            return (pt.set_subtensor(out[local], r),)
+
+        (ramp_obs,) = self.smear(_ramp_nodes, t, blocks)
         return ramp_obs
 
     def _data_blocks(self):
@@ -2116,7 +2144,7 @@ class Transit(Instrument):
         ramp_labels = [
             getattr(self, name).label
             for name in ("ramp_amp", "ramp_tau")
-            if name in getattr(self, "manifest", {})
+            if name in self.manifest
         ]
         numpy_deps = (
             ([baseline_label] if baseline_label else [])
