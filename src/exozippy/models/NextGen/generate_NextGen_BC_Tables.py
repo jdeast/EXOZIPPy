@@ -638,13 +638,17 @@ def generate_bc_tables(
     feh is the outer loop so each (large) processed-spectra file is read
     once for all filter sets.
 
-    A grid node SVO lists NO spectrum for (the hot end of the logg 5.5
-    plane; `unavailable_grid_nodes`, read from the SVO index cached under
-    `raw_path`) is padded here exactly as `pad_missing_nodes` pads it: its
-    cells are computed from the spectrum of the nearest lower-gravity node
-    at the same (teff, feh), which gives the same numbers as copying that
-    node's rows (a BC depends on its node only through the spectrum), and
-    the node is recorded in the table's ``meta["padding"]``.  This is what
+    A grid node SVO lists NO spectrum for (`unavailable_grid_nodes`, read
+    from the SVO index cached under `raw_path`) is padded here
+    (`_pad_spectrum`): an INTERIOR hole -- both Teff neighbours on the grid
+    have a spectrum at the same (logg, feh); four such nodes, whose SVO
+    files are empty -- from the spectrum linearly interpolated along Teff;
+    any other (the hot end of the logg 5.5 plane) exactly as
+    `pad_missing_nodes` pads it, from the spectrum of the nearest
+    lower-gravity node, which gives the same numbers as copying that
+    node's rows (a BC depends on its node only through the spectrum).  The
+    node is recorded in the table's ``meta["padding"]`` with the columns
+    padded there.  This is what
     lets a NEW column be added to a table whose padded rows already exist
     -- pad_missing_nodes skips a node it padded before, so it cannot fill
     a column that did not exist then.  A node missing from the processed
@@ -691,6 +695,7 @@ def generate_bc_tables(
     key = lambda *v: tuple(round(float(x), _KEY_DECIMALS) for x in v)
     unavailable = None
     padding = {}
+    existing_alpha = {}
     for fac in plan:
         path = bc_table_path(model_root, MODEL, fac)
         old = read_bc_meta(path).get("padding", []) if path.is_file() else []
@@ -721,24 +726,20 @@ def generate_bc_tables(
                             f"feh={feh} in {processed_path}; re-run step 1 "
                             f"(it processes only the missing nodes)."
                         ) from None
-                    lower = [
-                        g for t, g in df_spec.index if t == teff and g < logg
-                    ]
-                    if not lower:
-                        raise ValueError(
-                            f"No lower-gravity spectrum to pad teff={teff}, "
-                            f"logg={logg}, feh={feh} from in {processed_path}."
-                        )
-                    source = max(lower)
-                    row = df_spec.loc[(teff, source)]
+                    row, record = _pad_spectrum(
+                        df_spec, grid, teff, logg, feh, processed_path
+                    )
                     k = key(teff, logg, feh)
                     if k not in padding[fac]:
-                        padding[fac][k] = {
-                            "teff": float(teff),
-                            "logg": float(logg),
-                            "feh": float(feh),
-                            "from_logg": float(source),
-                        }
+                        padding[fac][k] = {**record, "columns": list(ncols)}
+                    if existing_alpha.get(fac) is None:
+                        existing_alpha[fac] = _table_alphas(
+                            bc_table_path(model_root, MODEL, fac)
+                        )
+                    if k in existing_alpha[fac]:
+                        # The row's other columns come from the spectrum
+                        # the published table used; keep their label.
+                        row = {**row, "alpha": existing_alpha[fac][k]}
                 av = node["Av"].values
                 bc_obj = BolometricCorrection(
                     [svo_of[fac][c] for c in ncols],
@@ -824,6 +825,70 @@ def generate_bc_tables(
 # -------------------------------------------------------------------
 # Padding: the grid nodes no spectrum exists for
 # -------------------------------------------------------------------
+
+
+def _pad_spectrum(df_spec, grid, teff, logg, feh, processed_path):
+    """The (alpha, flux) row to compute an unavailable node's BCs from,
+    and the padding record naming its source.
+
+    An interior hole (both Teff grid neighbours have a spectrum at this
+    logg) takes the spectrum linearly interpolated along Teff -- far
+    closer to the missing model than a plane 0.5 dex away in gravity.
+    Anything else takes the nearest lower-gravity spectrum (the
+    pad_missing_nodes rule).  Raises when neither exists.
+    """
+    teffs = sorted(float(t) for t in grid["teff"])
+    i = teffs.index(float(teff))
+    if 0 < i < len(teffs) - 1:
+        t0, t1 = teffs[i - 1], teffs[i + 1]
+        if (t0, logg) in df_spec.index and (t1, logg) in df_spec.index:
+            r0, r1 = df_spec.loc[(t0, logg)], df_spec.loc[(t1, logg)]
+            if float(r0["alpha"]) != float(r1["alpha"]):
+                raise ValueError(
+                    f"Cannot interpolate teff={teff}, logg={logg}, feh={feh}: "
+                    f"its Teff neighbours have alpha {r0['alpha']} and "
+                    f"{r1['alpha']}."
+                )
+            w = (float(teff) - t0) / (t1 - t0)
+            flux = (1 - w) * np.asarray(r0["flux"]) + w * np.asarray(
+                r1["flux"]
+            )
+            row = {"alpha": float(r0["alpha"]), "flux": flux}
+            record = {
+                "teff": float(teff),
+                "logg": float(logg),
+                "feh": float(feh),
+                "from_teff": [t0, t1],
+            }
+            return row, record
+    lower = [g for t, g in df_spec.index if t == teff and g < logg]
+    if not lower:
+        raise ValueError(
+            f"No spectrum to pad teff={teff}, logg={logg}, feh={feh} from in "
+            f"{processed_path}: no Teff neighbours on both sides and no "
+            f"lower-gravity plane."
+        )
+    source = max(lower)
+    r = df_spec.loc[(teff, source)]
+    row = {"alpha": float(r["alpha"]), "flux": np.asarray(r["flux"])}
+    record = {
+        "teff": float(teff),
+        "logg": float(logg),
+        "feh": float(feh),
+        "from_logg": float(source),
+    }
+    return row, record
+
+
+def _table_alphas(path) -> dict:
+    """{(teff, logg, feh): alpha} of a table's rows (empty if no table)."""
+    if not Path(path).is_file():
+        return {}
+    df = read_bc_table(path)
+    return {
+        tuple(round(float(x), _KEY_DECIMALS) for x in (t, g, z)): float(a)
+        for t, g, z, a in zip(df.teff, df.logg, df.feh, df.alpha)
+    }
 
 
 def unavailable_grid_nodes(

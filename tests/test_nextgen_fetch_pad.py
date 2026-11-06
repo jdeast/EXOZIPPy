@@ -195,7 +195,7 @@ class _FakeBC:
         )
 
 
-def _step2_fixture(tmp_path, monkeypatch, listed_by_svo):
+def _step2_fixture(tmp_path, monkeypatch, listed_by_svo, hole=(6000.0, 5.5)):
     grid = {
         "teff": np.array([4000.0, 5000.0, 6000.0]),
         "logg": np.array([4.5, 5.0, 5.5]),
@@ -211,9 +211,7 @@ def _step2_fixture(tmp_path, monkeypatch, listed_by_svo):
     monkeypatch.setattr(
         gen,
         "unavailable_grid_nodes",
-        lambda g=None, raw_path=None: (
-            [] if listed_by_svo else [(6000.0, 5.5, 0.0)]
-        ),
+        lambda g=None, raw_path=None: [] if listed_by_svo else [(*hole, 0.0)],
     )
     gen.pad_missing_nodes({"2MASS": ["2MASS/2MASS.J"]}, model_root=root)
     # Step 1's product: every node except the hot logg 5.5 one.
@@ -227,7 +225,7 @@ def _step2_fixture(tmp_path, monkeypatch, listed_by_svo):
             }
             for t in grid["teff"]
             for g in grid["logg"]
-            if (t, g) != (6000.0, 5.5)
+            if (t, g) != hole
         ]
     )
     monkeypatch.setattr(
@@ -294,3 +292,42 @@ def test_step2_still_raises_for_a_node_svo_lists_but_step1_lacks(
             processed_path=tmp_path,
             model_root=root,
         )
+
+
+def test_step2_interpolates_an_interior_hole_along_teff(tmp_path, monkeypatch):
+    """
+    Given a 2MASS table whose (5000 K, logg 4.5) row exists (the published
+      tables hold such nodes from spectra SVO no longer serves), a new
+      filter 2MASS_H, and no spectrum for that node (SVO lists none),
+    When step 2 runs,
+    Then the node's 2MASS_H cells come from the spectrum interpolated
+      between its Teff neighbours (4000 and 6000 K at logg 4.5), its
+      2MASS_J cells and alpha are untouched, and meta['padding'] records
+      the node with its Teff sources and the one column padded.
+    """
+    root, path = _step2_fixture(
+        tmp_path, monkeypatch, listed_by_svo=False, hole=(5000.0, 4.5)
+    )
+    before = read_bc_table(path)
+
+    gen.generate_bc_tables(
+        {"2MASS": ["2MASS/2MASS.J", "2MASS/2MASS.H"]},
+        processed_path=tmp_path,
+        model_root=root,
+    )
+
+    df = read_bc_table(path)
+    sel = lambda d, a: d[(d.teff == 5000) & (d.logg == 4.5) & (d.Av == a)]
+    for a in (0.0, 1.0):
+        new, old = sel(df, a), sel(before, a)
+        # flux = mean of (4000/1000 + 4.5) and (6000/1000 + 4.5)
+        assert float(new["2MASS_H"].iloc[0]) == 9.5 + a
+        assert float(new["2MASS_J"].iloc[0]) == float(old["2MASS_J"].iloc[0])
+        assert float(new["alpha"].iloc[0]) == float(old["alpha"].iloc[0])
+    assert {
+        "teff": 5000.0,
+        "logg": 4.5,
+        "feh": 0.0,
+        "from_teff": [4000.0, 6000.0],
+        "columns": ["2MASS_H"],
+    } in read_bc_meta(path)["padding"]
