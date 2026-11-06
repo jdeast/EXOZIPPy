@@ -25,6 +25,7 @@ from exozippy.samplers._common import (
     DEFAULT_TUNE_FORECAST,
     DEFAULT_TUNE_FORECAST_AFTER,
     default_cores,
+    map_draws,
 )
 from exozippy.samplers.ptde import ptde_sample
 from exozippy.samplers.ptde_async import ptde_async_sample
@@ -544,8 +545,9 @@ ALL_METHOD_SAMPLER_KEYS = {
 # stall either of them on any method).
 METHOD_ONLY_KEYS_HONORED_ELSEWHERE = {
     "eval_timeout": (
-        "the seed polish's DE engine and the startup whitening probe still "
-        "bound every logp call by it"
+        "the seed polish's DE engine, the startup whitening probe and the "
+        "wrap-up's per-draw evaluations (lp, branch weights, evidence, "
+        "hot-chain midpoints) still bound every logp call by it"
     ),
 }
 
@@ -1821,7 +1823,14 @@ def _wrap_up(
     # trace always needs it; a reused one only when the run that wrote it
     # died before this point (it is then stamped POSTERIOR_UNITS_UNFINISHED).
     wrapup.stage("finishing the saved trace (lp, user units)")
-    _finish_saved_trace(idata, model, system, trace_path, cores=cores)
+    _finish_saved_trace(
+        idata,
+        model,
+        system,
+        trace_path,
+        cores=cores,
+        eval_timeout=eval_timeout,
+    )
 
     # Collapse any exact label degeneracy a component declares (review
     # 1.8.3's ascending node is the one case today).  HERE, and exactly once:
@@ -1854,7 +1863,12 @@ def _wrap_up(
         wrapup.stage("drawing each draw's branch combination (V_c/V_e roots)")
         lookup = system.get_parameter_lookup()
         rebranched = resolve_branch_draws(
-            system, model, idata, param_lookup=lookup, cores=cores
+            system,
+            model,
+            idata,
+            param_lookup=lookup,
+            cores=cores,
+            eval_timeout=eval_timeout,
         )
         _convert_posterior_to_user_units(idata, lookup, only=rebranched)
         tmp_trace = str(trace_path) + ".branches.tmp"
@@ -1955,8 +1969,10 @@ def _wrap_up(
         == "evidence",
         seed_ledger=seed_ledger,
         hot_status=hot_status,
-        # The bridge's logp pool takes the sampler's grant (2.6.43 audit).
+        # The bridge's logp pool takes the sampler's grant (2.6.43 audit)
+        # and bounds each call by eval_timeout (2.6.44).
         cores=cores,
+        eval_timeout=eval_timeout,
     )
 
     # A posterior piled against a component's modelling cap (the hogg
@@ -3099,6 +3115,7 @@ def _element_coord_labels(da):
 # forking; child processes inherit them via copy-on-write without IPC.
 _LP_FN = None
 _LP_POINT_MAP = None
+_LP_DRAWS = None
 
 
 def _write_trace_atomic(idata, trace_path):
@@ -3164,7 +3181,9 @@ def _save_sampled_trace(idata, trace_path, *, nthin, seed, stamp):
     return idata
 
 
-def _finish_saved_trace(idata, model, system, trace_path, cores=None):
+def _finish_saved_trace(
+    idata, model, system, trace_path, cores=None, eval_timeout=None
+):
     """The post-save half of the save path; returns whether it ran.
 
     A trace stamped ``POSTERIOR_UNITS_UNFINISHED`` (a fresh one, or one
@@ -3179,7 +3198,13 @@ def _finish_saved_trace(idata, model, system, trace_path, cores=None):
         return False
     # Ensure lp is in sample_stats; computed and persisted once, so no later
     # reader (modes, mkparam, the plotters) has to recompute it.
-    _ensure_lp(idata, model, cores=cores, trace_path=trace_path)
+    _ensure_lp(
+        idata,
+        model,
+        cores=cores,
+        trace_path=trace_path,
+        eval_timeout=eval_timeout,
+    )
     # Convert sampled variables to user-facing units before archiving, so
     # the trace file, trace plots, ArviZ summary and mkparam output all use
     # the units the user specified.
@@ -3289,20 +3314,29 @@ def _seed_ledger_from_trace(idata, trace_path):
     return ledger_from_json(blob)
 
 
-def _lp_eval_chain(args):
-    """Evaluate logp for every draw in one chain (runs in a forked child)."""
-    chain_data, chain_idx, n_draws = args
-    lp_chain = np.full(n_draws, np.nan)
-    for d in range(n_draws):
-        point = {
-            _LP_POINT_MAP[tname]: np.atleast_1d(chain_data[tname][d])
-            for tname in chain_data
-        }
-        lp_chain[d] = float(_LP_FN(point))
-    return chain_idx, lp_chain
+def _lp_eval_range(lo, hi):
+    """lp at flattened draws [lo, hi) (in a forked worker, or in-process).
+
+    Reads the compiled logp, the trace->value-variable name map and the
+    (chain*draw, ...) draw arrays from the module globals
+    _compute_lp_from_model sets before samplers._common.map_draws forks.
+    """
+    return [
+        float(
+            _LP_FN(
+                {
+                    _LP_POINT_MAP[tname]: np.atleast_1d(_LP_DRAWS[tname][i])
+                    for tname in _LP_DRAWS
+                }
+            )
+        )
+        for i in range(lo, hi)
+    ]
 
 
-def _ensure_lp(idata, model=None, cores=None, trace_path=None):
+def _ensure_lp(
+    idata, model=None, cores=None, trace_path=None, eval_timeout=None
+):
     """Make sure ``idata.sample_stats["lp"]`` exists; return whether it does.
 
     NUTS writes lp itself; the Metropolis/DE families and PTDE do not, so it
@@ -3335,8 +3369,12 @@ def _ensure_lp(idata, model=None, cores=None, trace_path=None):
         return False
 
     logger.info("lp is not in the trace -- computing it from the model")
-    lp_vals = _compute_lp_from_model(
-        model, idata, cores=cores, trace_path=trace_path
+    lp_vals, n_timed_out = _compute_lp_from_model(
+        model,
+        idata,
+        cores=cores,
+        trace_path=trace_path,
+        eval_timeout=eval_timeout,
     )
 
     import xarray as xr
@@ -3351,10 +3389,15 @@ def _ensure_lp(idata, model=None, cores=None, trace_path=None):
             "draw": idata.posterior.draw,
         },
     )
+    # How many of those draws have NaN lp because their call outlasted
+    # eval_timeout (review 2.6.44): on the trace, not only in the log.
+    idata.sample_stats["lp"].attrs["n_eval_timeout"] = int(n_timed_out)
     return True
 
 
-def _compute_lp_from_model(model, idata, cores=None, trace_path=None):
+def _compute_lp_from_model(
+    model, idata, cores=None, trace_path=None, eval_timeout=None
+):
     """Compute log posterior at each draw by evaluating the compiled model logp.
 
     Used when the sampler (Metropolis) doesn't write lp to sample_stats.
@@ -3401,21 +3444,18 @@ def _compute_lp_from_model(model, idata, cores=None, trace_path=None):
             f"({len(point_map)} unconstrained vars)"
         )
 
-        # Extract per-chain numpy arrays (picklable; logp_fn is NOT pickled —
-        # it's inherited by child processes via fork).
-        chain_arrays = []
-        for c in range(n_chains):
-            chain_arrays.append(
-                {
-                    tname: idata.posterior[tname].values[c]
-                    for tname in point_map
-                }
-            )
-
-        # Set module-level globals so forked workers inherit them without pickling.
-        global _LP_FN, _LP_POINT_MAP
+        # The draws, flattened to (chain*draw, ...), and the compiled logp
+        # go in module globals the forked workers inherit -- nothing but two
+        # integers per task crosses IPC, and logp_fn is never pickled.
+        global _LP_FN, _LP_POINT_MAP, _LP_DRAWS
         _LP_FN = logp_fn
         _LP_POINT_MAP = point_map
+        _LP_DRAWS = {
+            tname: np.asarray(idata.posterior[tname].values).reshape(
+                (n_chains * n_draws,) + idata.posterior[tname].values.shape[2:]
+            )
+            for tname in point_map
+        }
 
         # RESPECT THE USER'S GRANT (review 2.3.9).  This read
         # mp.cpu_count() directly, which is the NODE's CPU count and not
@@ -3427,32 +3467,54 @@ def _compute_lp_from_model(model, idata, cores=None, trace_path=None):
         # destroyed the WRAP-UP of three completed multi-day runs at 771,
         # 613 and 705 GB (severed-v3/v5/v6, all exit 137, all after sampling
         # finished and the trace was written).  cores=None means AUTO, the
-        # same convention as _common.default_cores everywhere else.
-        grant = default_cores() if cores is None else max(1, int(cores))
-        n_workers = min(n_chains, grant)
-        ctx = mp.get_context("fork")
+        # same convention as _common.default_cores everywhere else, which
+        # create_pool (inside map_draws) applies.
+        #
+        # BELOW ONE TASK PER CHAIN, UNDER eval_timeout (review 2.6.44).  It
+        # was one pool.map task per chain with no timeout: a hung call held
+        # its chain, and so the trace's finish, forever, and with more
+        # chains than cores the last round ran one chain per worker while
+        # the rest idled.  map_draws cuts the draws into ranges sized to
+        # the pool and writes off a call past eval_timeout.
         try:
-            with ctx.Pool(n_workers) as pool:
-                results = pool.map(
-                    _lp_eval_chain,
-                    [(arr, c, n_draws) for c, arr in enumerate(chain_arrays)],
-                )
+            values, timed_out = map_draws(
+                _lp_eval_range,
+                n_chains * n_draws,
+                cores=cores,
+                eval_timeout=eval_timeout,
+                label="lp from the model",
+                log=logger,
+            )
         finally:
             # Also 2.3.9: these kept the compiled logp alive for the whole
             # of wrap-up, which is the other half of the footprint the fork
             # above multiplies.
             _LP_FN = None
             _LP_POINT_MAP = None
+            _LP_DRAWS = None
 
-        lp_vals = np.full((n_chains, n_draws), np.nan)
-        for chain_idx, chain_lp in results:
-            lp_vals[chain_idx] = chain_lp
-            logger.info(
-                f"  chain {chain_idx}: lp range "
-                f"[{chain_lp.min():.1f}, {chain_lp.max():.1f}]"
+        # A draw whose call outlasted eval_timeout has NO lp: NaN, which
+        # every lp consumer already reads as an invalid draw (the mode
+        # pass's invalid-draw gate counts it).  Counted, logged, and
+        # stamped on the trace -- never a silent hole.
+        flat = np.array(
+            [np.nan if v is None else v for v in values], dtype=float
+        )
+        lp_vals = flat.reshape(n_chains, n_draws)
+        if timed_out:
+            logger.warning(
+                f"lp: {len(timed_out)} of {flat.size} draw(s) exceeded "
+                f"eval_timeout={float(eval_timeout):g}s; their lp is NaN, "
+                f"so the mode pass counts them as invalid draws "
+                f"(sample_stats['lp'].attrs['n_eval_timeout'])."
             )
+        for chain_idx in range(n_chains):
+            chain_lp = lp_vals[chain_idx]
+            seen = chain_lp[~np.isnan(chain_lp)]
+            lo, hi = (seen.min(), seen.max()) if seen.size else (np.nan,) * 2
+            logger.info(f"  chain {chain_idx}: lp range [{lo:.1f}, {hi:.1f}]")
 
-        return lp_vals
+        return lp_vals, len(timed_out)
 
     except Exception as exc:
         raise RuntimeError(

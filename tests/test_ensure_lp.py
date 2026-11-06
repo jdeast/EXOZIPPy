@@ -76,7 +76,10 @@ def test_lp_is_computed_and_inserted_when_a_model_is_available(monkeypatch):
     monkeypatch.setattr(
         run_module,
         "_compute_lp_from_model",
-        lambda model, idata, cores=None, trace_path=None: lp,
+        lambda model, idata, cores=None, trace_path=None, eval_timeout=None: (
+            lp,
+            0,
+        ),
     )
     idata = _with_lp()
     del idata.sample_stats["lp"]
@@ -104,7 +107,10 @@ def test_a_trace_with_no_sample_stats_group_gets_one(monkeypatch):
     monkeypatch.setattr(
         run_module,
         "_compute_lp_from_model",
-        lambda model, idata, cores=None, trace_path=None: lp,
+        lambda model, idata, cores=None, trace_path=None, eval_timeout=None: (
+            lp,
+            0,
+        ),
     )
     idata = _posterior_only()
     assert getattr(idata, "sample_stats", None) is None
@@ -156,33 +162,12 @@ def test_a_failed_lp_computation_raises_naming_the_trace(monkeypatch):
     is a bug; the computation now runs after the trace is saved
     (run._finish_saved_trace), where a raise loses nothing.
     """
-    from exozippy import run as run_module
+    from exozippy.samplers import _common
 
-    monkeypatch.setattr(run_module, "default_cores", lambda: 1)
+    # serial: the evaluation runs in-process (cores resolving to 1)
+    monkeypatch.setattr(_common, "default_cores", lambda: 1)
     idata = _posterior_only()
     model = _ModelWithFreeRVs(["x"])
-
-    # serial pool: the fork context is real, so stub it to run in-process
-    class _InlinePool:
-        def __init__(self, n):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return False
-
-        def map(self, fn, args):
-            return [fn(a) for a in args]
-
-    class _Ctx:
-        def Pool(self, n):  # noqa: N802 - mirrors mp API
-            return _InlinePool(n)
-
-    import multiprocessing as mp
-
-    monkeypatch.setattr(mp, "get_context", lambda _m: _Ctx())
 
     with pytest.raises(RuntimeError) as err:
         _ensure_lp(idata, model=model, trace_path="fit_trace.nc")
@@ -232,28 +217,31 @@ def test_compute_lp_honours_the_core_grant(monkeypatch):
     box -- 78 on a 128-CPU node -- and it forks AFTER the caller has the
     trace resident, so each worker inherits a multi-GB parent.  That
     destroyed the wrap-up of three completed multi-day runs at 771, 613 and
-    705 GB.  Pin the grant so it cannot regress.
+    705 GB.  Pin the grant so it cannot regress: the pool is sized by
+    create_pool from the grant the caller passes (None = default_cores()).
     """
-    import multiprocessing as mp
-
     from exozippy import run as run_module
+    from exozippy.samplers import _common
 
     seen = {}
 
-    class _FakeCtx:
-        def Pool(self, n):  # noqa: N802 - mirrors mp API
-            seen["n_workers"] = n
-            raise RuntimeError("stop here: the worker count is the assertion")
+    def _fake_create_pool(cores, total, label, log):
+        seen["cores"] = cores
+        raise RuntimeError("stop here: the grant is the assertion")
 
-    monkeypatch.setattr(mp, "get_context", lambda _m: _FakeCtx())
-    monkeypatch.setattr(run_module, "default_cores", lambda: 999)
+    monkeypatch.setattr(_common, "create_pool", _fake_create_pool)
+
+    with pytest.raises(RuntimeError, match="the grant is the assertion"):
+        run_module._compute_lp_from_model(
+            _ModelWithFreeRVs(["x"]), _posterior_only(), cores=5
+        )
+    assert seen["cores"] == 5
 
     # CODE, not prose: the fix's own comment names mp.cpu_count() as the
     # thing it replaced, so a naive substring test over the raw source
     # fails on the explanation rather than on a regression.
     src = inspect.getsource(run_module._compute_lp_from_model)
     code = "\n".join(ln.split("#", 1)[0] for ln in src.splitlines())
-    assert "mp.cpu_count()" not in code, (
+    assert "cpu_count" not in code, (
         "the wrap-up pool is sizing itself from the NODE again (2.3.9)"
     )
-    assert "default_cores() if cores is None" in code
