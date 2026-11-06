@@ -109,3 +109,35 @@ transit:
     internal_unit: ""
     latex: "c"
     description: "Detrending Coefficients"
+  ramp_amp:
+    # EXOFASTv2's RAMPAMP (FITRAMP): the exponential detector ramp
+    # R(t) = 1 - A * (1 - exp(-(t - t0) / tau)), so R(t0) = 1 and the late
+    # level is 1 - A.  Exists only where a file sets fitramp
+    # (Transit.register_parameters); EXOFASTv2 leaves it unbounded, but an
+    # unbounded element here carries an implicit N(initval, init_scale)
+    # prior, so it gets a flat [-1, 1] instead (A < 1 keeps 1 - A > 0).
+    # Seeded per file from the data (components/transit/ramp.py).
+    lower: -1.0
+    upper: 1.0
+    initval: 0.0
+    init_scale: 0.001
+    unit: ""
+    internal_unit: ""
+    latex: "A_{Ramp}"
+    description: "Exponential ramp amplitude"
+  ramp_tau:
+    # EXOFASTv2's RAMPEXP: the ramp's e-folding time.  The lower bound is a
+    # STRICTLY POSITIVE floor (~1 s, below any cadence): at tau <= 0 the
+    # exponential overflows.  The upper bound here is only a backstop: each
+    # ramp file's own 10 x (time span) upper bound (EXOFASTv2's rejection
+    # limit) arrives through the manifest overrides, so the element sits on
+    # the logit transform over [1e-5 d, 10 x span] -- uniform in tau, as in
+    # EXOFASTv2, with finite gradients up to both walls.
+    lower: 1.0e-5
+    upper: 1.0e6
+    initval: 0.01
+    init_scale: 0.001
+    unit: "d"
+    internal_unit: "d"
+    latex: "\\tau_{Ramp}"
+    description: "Exponential ramp time constant"
