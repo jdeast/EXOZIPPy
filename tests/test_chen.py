@@ -6,6 +6,8 @@ exactly one side is data-constrained (transits measure the radius, RVs and
 astrometry measure the mass); a per-planet `chen: true/false` key overrides.
 """
 
+from types import SimpleNamespace
+
 import numpy as np
 import pymc as pm
 import pytensor
@@ -166,8 +168,13 @@ class _FakeSystem:
         self.config = {}
 
 
+# _resolve_chen reads the user's own mass entries (a prior or a pin mutes the
+# transit-only default), so the stub carries an empty params file.
+_NO_USER_PARAMS = SimpleNamespace(user_params={})
+
+
 def _resolve(planet_cfg, **comps):
-    comp = Planet(planet_cfg, config_manager=None)
+    comp = Planet(planet_cfg, config_manager=_NO_USER_PARAMS)
     comp._resolve_chen(_FakeSystem(**comps))
     return comp.chen
 
@@ -276,13 +283,105 @@ def test_user_override_beats_the_default():
     ) == [False]
 
 
+def _resolve_with_params(planet_cfg, user_params, **comps):
+    from types import SimpleNamespace
+
+    comp = Planet(
+        planet_cfg, config_manager=SimpleNamespace(user_params=user_params)
+    )
+    comp._resolve_chen(_FakeSystem(**comps))
+    return comp.chen
+
+
+_MASS_PRIOR = {"planet.0.mass": {"initval": 0.6, "mu": 0.6, "sigma": 0.03}}
+
+
+def test_a_mass_prior_turns_the_transit_only_default_off():
+    """
+    Given a transit-only planet whose params file gives the mass a prior,
+    When Chen is resolved,
+    Then the relation is off.
+
+    A user's prior on the mass measures it, as RV data would: the relation
+    would otherwise act only on the transit-measured radius (on one KeplerCam
+    transit of HAT-P-3 b it moved T14 and Rp/R* past 2 sigma of the paper).
+    """
+    assert _resolve_with_params(
+        [{"name": "b"}], _MASS_PRIOR, transit=object(), orbit=_ONE_PLANET_ORBIT
+    ) == [False]
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"planet.mass": {"mu": 0.6, "sigma": 0.03}},  # the broadcast spelling
+        {"planet.0.msini": {"mu": 0.6, "sigma": 0.03}},
+        {"planet.0.mass": {"initval": 0.6, "sigma": 0}},  # a pin
+        {"planet.0.log_q": {"mu": -3.2, "sigma": 0.05}},
+        {"planet.0.K": {"mu": 90.0, "sigma": 3.0}},
+    ],
+)
+def test_every_spelling_of_a_mass_measurement_counts(entry):
+    """
+    Given a prior or a pin on mass, msini, log_q or K, indexed or broadcast,
+    When Chen is resolved for a transit-only planet,
+    Then the relation is off.
+    """
+    assert _resolve_with_params(
+        [{"name": "b"}], entry, transit=object(), orbit=_ONE_PLANET_ORBIT
+    ) == [False]
+
+
+def test_a_mass_start_alone_is_not_a_measurement():
+    """
+    Given a transit-only planet with only a start on its mass,
+    When Chen is resolved,
+    Then the relation stays on.
+
+    An initval is a start value, not a prior: the default stays on.
+    """
+    assert _resolve_with_params(
+        [{"name": "b"}],
+        {"planet.0.mass": {"initval": 0.6}},
+        transit=object(),
+        orbit=_ONE_PLANET_ORBIT,
+    ) == [True]
+
+
+def test_a_mass_prior_never_turns_the_relation_on():
+    """
+    Given a planet with no transit and no RV, and a mass prior,
+    When Chen is resolved,
+    Then the relation stays off.
+
+    No transit and no RV: the default is off, and a prior keeps it off.
+    """
+    assert _resolve_with_params(
+        [{"name": "b"}], _MASS_PRIOR, orbit=_ONE_PLANET_ORBIT
+    ) == [False]
+
+
+def test_an_explicit_chen_true_still_wins_over_a_mass_prior():
+    """
+    Given a transit-only planet with a mass prior and chen: true,
+    When Chen is resolved,
+    Then the relation is on.
+    """
+    assert _resolve_with_params(
+        [{"name": "b", "chen": True}],
+        _MASS_PRIOR,
+        transit=object(),
+        orbit=_ONE_PLANET_ORBIT,
+    ) == [True]
+
+
 def test_non_bool_chen_is_actionable():
     with pytest.raises(ValueError, match="must be true or false"):
         _resolve([{"name": "b", "chen": "yes"}], transit=object())
 
 
 def _derives(planet_cfg, **comps):
-    comp = Planet(planet_cfg, config_manager=None)
+    comp = Planet(planet_cfg, config_manager=_NO_USER_PARAMS)
     comp._resolve_chen(_FakeSystem(**comps))
     return comp.chen_derives
 
