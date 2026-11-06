@@ -274,7 +274,16 @@ def build_config(event, files, prefix, settings):
         # The line of sight is the source's (index 1 in star:).
         "galacticmodel": [{"name": event["event_id"], "anchor_idx": 1}],
         "band": [
-            {"name": b, "filter": f"Roman/WFI.{b}", "ld_law": "linear"}
+            # No Roman WFI filter has a Claret table, so the limb-darkening
+            # tie is stated explicitly (it raises otherwise).  false is what
+            # this pipeline has always done; ld_source: phoenix would tie
+            # each band to tables built through its own WFI profile.
+            {
+                "name": b,
+                "filter": f"Roman/WFI.{b}",
+                "ld_law": "linear",
+                "star_constrains_ld": False,
+            }
             for b in bands
         ],
         "mulensinstrument": [],
