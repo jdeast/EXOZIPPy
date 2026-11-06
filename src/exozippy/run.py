@@ -72,6 +72,7 @@ from .outputs.ledger import (
 from .outputs.modeling import build_modeling_output, compile_modeling_pdf
 from .outputs.modes import DEFAULT_MAX_INVALID_FRAC, mode_suffix
 from .outputs.report_pipeline import build_mode_reports
+from .plotrender import plot_pool
 from .polish import (
     DEFAULT_POLISH_TIMEOUT_S,
     polish_rounds,
@@ -2044,8 +2045,13 @@ def _wrap_up(
         f"posterior plots for {len(system.active_components)} component(s)"
     )
     draws = _plot_points(system, idata, idata, exclude=report_only)
-    for comp in system.active_components.values():
-        comp.plot(system, draws, filename_prefix=str(prefix) + "_mcmc")
+    # The posterior plots, the summary figure and the per-mode plots call
+    # plot_data once per draw; on a finite-source binary lens that is ~74
+    # logp-equivalents a draw (review 2.6.44), so they get the sampler's
+    # grant and eval_timeout (plotrender.plot_pool).
+    with plot_pool(cores, eval_timeout):
+        for comp in system.active_components.values():
+            comp.plot(system, draws, filename_prefix=str(prefix) + "_mcmc")
 
     # The one-page system figure (outputs/summary_plot.py) at the median
     # draw of the posterior the tables above were built from -- `idata` is
@@ -2059,15 +2065,17 @@ def _wrap_up(
     wrapup.stage("one-page summary figure")
     from .outputs.summary_plot import write_summary_plot
 
-    write_summary_plot(
-        system,
-        idata,
-        f"{prefix}_mcmc_summary.pdf",
-        title=(config.get("run") or {}).get("name"),
-        # the random draws only: the figure draws its own median-draw point,
-        # which _plot_points put first in `draws` for the component PDFs
-        draws=draws[1:],
-    )
+    with plot_pool(cores, eval_timeout):
+        write_summary_plot(
+            system,
+            idata,
+            f"{prefix}_mcmc_summary.pdf",
+            title=(config.get("run") or {}).get("name"),
+            # the random draws only: the figure draws its own median-draw
+            # point, which _plot_points put first in `draws` for the
+            # component PDFs
+            draws=draws[1:],
+        )
 
     # Multimodal posteriors: re-emit the same corner + component plots once
     # per mode, restricted to that mode's draws (interim solution; a
@@ -2079,7 +2087,8 @@ def _wrap_up(
         wrapup.stage(
             f"per-mode outputs for {mode_report.n_modes} identified modes"
         )
-        _emit_per_mode_outputs(system, idata, mode_report, prefix)
+        with plot_pool(cores, eval_timeout):
+            _emit_per_mode_outputs(system, idata, mode_report, prefix)
 
     # Final modeling-draft checkpoint: the table fragments and posterior
     # plots now exist on disk and the convergence/mode facts are known, so
