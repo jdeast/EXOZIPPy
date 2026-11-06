@@ -393,6 +393,13 @@ _GALACTIC_TERMS = frozenset(
 )
 
 
+def _untied(cfg):
+    """Turn the Claret limb-darkening tie off on every band: the pre-split
+    recording predates it (see the reconciliation below)."""
+    for band in cfg.get("band") or []:
+        band["star_constrains_ld"] = False
+
+
 def test_ob161003_collapse_reconciles_against_the_presplit_recording():
     """
     Given the post-split ob161003 model started at the stage-0 recording's
@@ -435,6 +442,12 @@ def test_ob161003_collapse_reconciles_against_the_presplit_recording():
     # 2`, mulensing.md "VBM's limb-darkened finite source never stops after
     # one annulus"), which moves this data term by -7.5e-8 relative: the
     # recording ran VBM's default of 1, so the build does too.
+    # Likewise the Claret limb-darkening tie, which since 2026-11 applies to
+    # a microlensing band as to any other (components/sed/sed.md): the
+    # recording has no tie, and with it on the source star's teff/feh
+    # become sampled and the band gains du1 -- terms that "appear" for a
+    # reason that has nothing to do with the split.  So both builds below
+    # run with star_constrains_ld: false on every band (_untied).
     # The Galactic prior is NOT switched back: the recording ran the
     # 3-population model (with its pre-1.7.1 two-frame basis, its pre-1.7.3
     # bar and the IMF as the present-day mass function), and that model was
@@ -472,6 +485,7 @@ def test_ob161003_collapse_reconciles_against_the_presplit_recording():
         system, model = build(
             fixture,
             extra_params=_OB161003_PRESPLIT_PM,
+            edit_config=_untied,
         )
         # ACT -- decompose at this model's own solved start (which the
         # seeds above pin to the recording's start).
@@ -486,6 +500,7 @@ def test_ob161003_collapse_reconciles_against_the_presplit_recording():
     system_now, model_now = build(
         fixture,
         extra_params=_OB161003_PRESPLIT_PM,
+        edit_config=_untied,
     )
     parts_now, _, reconciles_now, _ = decompose(system_now, model_now)
     assert reconciles_now
