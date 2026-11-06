@@ -1154,20 +1154,24 @@ class Planet(Component):
         ]
         return self._mass_side
 
-    # The planet quantities whose user prior measures the mass.
+    # The planet quantities whose user prior or pin measures each side of
+    # the Chen & Kipping relation.
     _MASS_PRIOR_PARAMS = ("mass", "msini", "log_q", "K")
+    _RADIUS_PRIOR_PARAMS = ("radius", "p")
 
-    def _user_mass_priors(self, index):
-        """Which mass quantities the user gave a prior (mu/sigma) or a pin on.
+    def _user_measured(self, index, params):
+        """Which of ``params`` the user gave a prior (mu/sigma) or a pin on,
+        for planet ``index``.
 
         Reads the user's own entries in the two spellings that survive
         `standardize_param_names`, as Orbit._user_pinned does: a defaults.yaml
         value is not a measurement anybody made, and a bare `initval` is a
-        start, not a prior.
+        start, not a prior.  A broadcast entry may carry a per-planet list;
+        this planet's element is the one read.
         """
         user = self.config_manager.user_params
         found = []
-        for param in self._MASS_PRIOR_PARAMS:
+        for param in params:
             for key in (
                 f"{self.prefix}.{index}.{param}",
                 f"{self.prefix}.{param}",
@@ -1175,10 +1179,13 @@ class Planet(Component):
                 entry = user_entry(user, key)
                 if entry is None:
                     continue
-                sigma = entry.get("sigma")
-                if sigma is not None and (
-                    sigma == 0 or entry.get("mu") is not None
-                ):
+                sigma, mu = entry.get("sigma"), entry.get("mu")
+                if key == f"{self.prefix}.{param}":
+                    if isinstance(sigma, list):
+                        sigma = sigma[index]
+                    if isinstance(mu, list):
+                        mu = mu[index]
+                if sigma is not None and (sigma == 0 or mu is not None):
                     found.append(param)
                     break
         return found
@@ -1215,25 +1222,32 @@ class Planet(Component):
                     )
                 self.chen.append(user)
             else:
-                # A prior the user wrote on the mass is a mass measurement too
-                # (an RV fit's mass, quoted from a paper): with it, the
-                # relation would only act on the RADIUS, a population prior
-                # pulling a transit-measured radius toward the mass's predicted
-                # one.
+                # A prior or pin the user wrote on one side is a measurement
+                # of that side (an RV mass, or a transit radius, quoted from
+                # a paper): with it, the relation would only act as a
+                # population prior on the OTHER, data-measured side.
                 # Measured on HAT-P-3 b (one KeplerCam transit, the paper's
                 # 0.599 +/- 0.026 MJ as a prior): T14 0.0867 -> 0.0908 d and
                 # Rp/R* 0.111 -> 0.116, five of nine parameters past 2 sigma
                 # of Torres et al. 2007; with the relation off, all nine
                 # within 0.95 sigma.
-                # Only ever turns the relation OFF: a fit with no transit and
-                # a mass prior keeps the default it always had.
+                # Only ever turns the relation OFF: a fit with neither side
+                # measured by data keeps the default it always had.
                 default = radius_side != mass_side
-                prior_on = self._user_mass_priors(p)
-                muted = default and radius_side and bool(prior_on)
+                prior_on = []
+                if default:
+                    prior_on = self._user_measured(
+                        p,
+                        self._MASS_PRIOR_PARAMS
+                        if radius_side
+                        else self._RADIUS_PRIOR_PARAMS,
+                    )
+                muted = bool(prior_on)
                 if muted:
+                    side = "mass" if radius_side else "radius"
                     logger.info(
                         f"planet '{nm}': not applying the Chen & Kipping "
-                        f"(2017) relation -- the params file gives the mass "
+                        f"(2017) relation -- the params file gives the {side} "
                         f"a prior or a pin ({', '.join(prior_on)}), which "
                         f"measures it "
                         f"(set 'chen: true' on the planet to apply it anyway)."
@@ -1252,9 +1266,15 @@ class Planet(Component):
                     )
             derives = set()
             if self.chen[-1]:
-                if not mass_side:
+                # A side the user measured is not derived from the relation,
+                # even under an explicit chen: true.
+                if not mass_side and not self._user_measured(
+                    p, self._MASS_PRIOR_PARAMS
+                ):
                     derives.add("mass")
-                if not radius_side:
+                if not radius_side and not self._user_measured(
+                    p, self._RADIUS_PRIOR_PARAMS
+                ):
                     derives.add("radius")
             self.chen_derives.append(derives)
 

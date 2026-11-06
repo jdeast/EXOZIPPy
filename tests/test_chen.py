@@ -284,8 +284,6 @@ def test_user_override_beats_the_default():
 
 
 def _resolve_with_params(planet_cfg, user_params, **comps):
-    from types import SimpleNamespace
-
     comp = Planet(
         planet_cfg, config_manager=SimpleNamespace(user_params=user_params)
     )
@@ -373,6 +371,76 @@ def test_an_explicit_chen_true_still_wins_over_a_mass_prior():
         transit=object(),
         orbit=_ONE_PLANET_ORBIT,
     ) == [True]
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"planet.0.radius": {"mu": 1.3, "sigma": 0.05}},
+        {"planet.radius": {"mu": 1.3, "sigma": 0.05}},  # broadcast
+        {"planet.0.p": {"initval": 0.11, "sigma": 0}},  # a pin on Rp/R*
+    ],
+)
+def test_a_radius_prior_turns_the_rv_only_default_off(entry):
+    """
+    Given an RV-only planet whose params file gives the radius (or Rp/R*) a
+      prior or a pin,
+    When Chen is resolved,
+    Then the relation is off -- the mirror of a mass prior in a transit fit.
+    """
+    assert _resolve_with_params(
+        [{"name": "b"}],
+        entry,
+        rvinstrument=_FakeRV([0]),
+        orbit=_ONE_PLANET_ORBIT,
+    ) == [False]
+
+
+def test_a_radius_start_alone_keeps_the_rv_only_default_on():
+    assert _resolve_with_params(
+        [{"name": "b"}],
+        {"planet.0.radius": {"initval": 1.3}},
+        rvinstrument=_FakeRV([0]),
+        orbit=_ONE_PLANET_ORBIT,
+    ) == [True]
+
+
+def test_a_broadcast_list_prior_is_read_per_planet():
+    """
+    Given a broadcast mass entry whose sigma is a per-planet list, a prior
+      on planet 0 only,
+    When Chen is resolved for two transit-only planets,
+    Then only planet 0 is muted.
+    """
+    orbit = _FakeOrbit(
+        memberships={0: [(0, "primary"), (1, "primary")]},
+        bodies={
+            0: [("star", 0), ("planet", 0)],
+            1: [("star", 0), ("planet", 1)],
+        },
+    )
+    assert _resolve_with_params(
+        [{"name": "b"}, {"name": "c"}],
+        {"planet.mass": {"mu": [0.6, None], "sigma": [0.03, None]}},
+        transit=object(),
+        orbit=orbit,
+    ) == [False, True]
+
+
+def test_an_explicit_chen_true_with_a_measured_mass_derives_nothing():
+    """
+    Given a transit planet with a mass prior and chen: true,
+    When Chen is resolved,
+    Then the relation is on, but neither side is marked "Derived from
+      Chen": the mass is the user's, the radius the transit's.
+    """
+    comp = Planet(
+        [{"name": "b", "chen": True}],
+        config_manager=SimpleNamespace(user_params=_MASS_PRIOR),
+    )
+    comp._resolve_chen(_FakeSystem(transit=object(), orbit=_ONE_PLANET_ORBIT))
+    assert comp.chen == [True]
+    assert comp.chen_derives == [set()]
 
 
 def test_non_bool_chen_is_actionable():
