@@ -1,0 +1,89 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 4
+#$ -q mThM.q
+#$ -l use_himem=TRUE
+#$ -cwd
+#$ -j y
+#$ -N ngspecbundle
+#$ -o scripts/build_nextgen_spectra_bundle.$JOB_ID.log
+#
+# The Zenodo bundle of the step-1 product (the BT-NextGen AGSS2009 spectra
+# resampled to R = 20000, one parquet per [Fe/H]): the same files and
+# metadata with the flux cast to float32 and zstd-compressed (3.2 GB, not
+# 7.6), plus the wavelength grid.  float32 changes a flux by at most 6e-8
+# relative wherever it carries light (pixels below ~1e-38 erg/s/cm^2/A,
+# <1e-52 of a spectrum's flux, underflow to 0), i.e. ~1e-7 mag in a BC;
+# the check at the end recomputes BCs from the float32 files and compares
+# them with the published tables.
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export OMP_NUM_THREADS=1
+cd $HOME/python/EXOZIPPy
+echo "commit $(git rev-parse --short HEAD) on $(git branch --show-current)   $(date)   slots $NSLOTS"
+python -u - <<'PY'
+import numpy as np  # before pyarrow: pyarrow first loads the system libstdc++ numpy cannot use
+import json
+from pathlib import Path
+import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+from exozippy.components.sed.bc_grid import DEFAULT_MODEL_ROOT, bc_table_path, read_bc_table
+from exozippy.models.NextGen import generate_NextGen_BC_Tables as gen
+from exozippy.models.NextGen.bolometric_correction import BolometricCorrection
+from exozippy.models.NextGen.nextgen_spectra import WAVELENGTH_PTS
+
+src = Path.home() / "spectra" / "BT-NextGen_AGSS2009_processed"
+out = Path.home() / "zenodo_bundles" / "nextgen_spectra_r20000"
+out.mkdir(parents=True, exist_ok=True)
+
+for path in sorted(src.glob("feh*.spectra.parquet")):
+    t = pq.read_table(path)
+    md = dict(t.schema.metadata)
+    attrs = json.loads(md[b"PANDAS_ATTRS"])
+    attrs["meta"].pop("raw_path", None)  # a path on the generating machine
+    attrs["meta"]["flux_dtype"] = "float32"
+    md[b"PANDAS_ATTRS"] = json.dumps(attrs).encode()
+    i = t.schema.get_field_index("flux")
+    f32 = t.column(i).cast(pa.list_(pa.float32()))
+    t32 = t.set_column(i, pa.field("flux", pa.list_(pa.float32())), f32).replace_schema_metadata(md)
+    dst = out / path.name
+    pq.write_table(t32, dst, compression="zstd", compression_level=9)
+    # round trip: same nodes, flux within float32 precision where it carries light
+    back = pq.read_table(dst)
+    assert back.num_rows == t.num_rows
+    a = np.stack(t.column("flux").to_numpy(zero_copy_only=False))
+    b = np.stack(back.column("flux").to_numpy(zero_copy_only=False)).astype(np.float64)
+    m = a > 1e-30 * a.max(axis=1, keepdims=True)
+    err = np.max(np.abs(b[m] / a[m] - 1))
+    assert err < 1e-7, (path.name, err)
+    print(f"{path.name}: {t.num_rows} spectra, {path.stat().st_size/1e6:.0f} -> {dst.stat().st_size/1e6:.0f} MB, max rel err {err:.1e}", flush=True)
+    del t, t32, back, a, b
+
+wave = pd.DataFrame({"wavelength": np.asarray(WAVELENGTH_PTS, dtype=np.float64)})
+wave.attrs["meta"] = {"wavelength_unit": "Angstrom", "wavelength_resolution": 20000}
+wave.to_parquet(out / "wavelength.parquet", compression="zstd")
+print("wavelength.parquet:", len(wave), "points")
+
+# BCs from the float32 files against the published tables
+filters = gen.FILTER_SETS["2MASS"]
+tab = read_bc_table(bc_table_path(DEFAULT_MODEL_ROOT, "NextGen", "2MASS"))
+worst = 0.0
+for feh in (-2.0, 0.0, 0.5):
+    spec = gen._index_spectra(gen.load_processed_spectra(feh, out))
+    for teff, logg in [(3000.0, 5.0), (4500.0, 4.5), (5800.0, 4.5), (9000.0, 4.0)]:
+        r = spec.loc[(teff, logg)]
+        bc = BolometricCorrection(filters, {"teff": teff, "logg": logg, "feh": feh, "av": np.array([0.0, 4.0])},
+                                  spectrum=(float(r["alpha"]), np.asarray(r["flux"])), weighting=gen.FLUX_WEIGHTING)
+        for k, col in enumerate(bc.filters_MIST):
+            for j, av in enumerate((0.0, 4.0)):
+                ref = tab[(tab.teff == teff) & (tab.logg == logg) & (tab.feh == feh) & (tab.Av == av)][col].iloc[0]
+                worst = max(worst, abs(bc.BC_by_av[j][k] - ref))
+print(f"max |BC(float32) - published| over 24 nodes x 3 filters: {worst:.2e} mag")
+print("DONE")
+PY
+echo "exit $?   $(date)"
