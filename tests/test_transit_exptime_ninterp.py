@@ -477,14 +477,19 @@ def test_the_retired_minutes_key_raises_naming_exptime_s(tmp_path_factory):
         System(config, user_params=_params())
 
 
-def test_a_component_that_does_not_smear_refuses_the_keys():
+def test_a_component_that_does_not_smear_refuses_the_keys(monkeypatch):
     """
-    Given an rvinstrument file carrying exptime_s (the RV model is evaluated
-    at each timestamp: its exposure averaging is not wired yet),
+    Given a data component that does not declare supports_exposure (every
+    shipped Instrument child smears since review 4.5.4, so rvinstrument
+    with the flag turned off stands in for a future one), and a file
+    carrying exptime_s,
     When the system is constructed,
     Then it raises naming the component and the key, instead of ignoring a
     stated exposure.
     """
+    from exozippy.components.rvinstrument.rvinstrument import RVInstrument
+
+    monkeypatch.setattr(RVInstrument, "supports_exposure", False)
     config = {
         "star": [{"name": "A", "mist": False}],
         "planet": [{"name": "b"}],

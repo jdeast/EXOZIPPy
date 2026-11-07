@@ -32,12 +32,12 @@ on a 9-point midpoint grid per step (``exposures`` / ``predict``).  The
 three files carry the three levels of exposure information the model reads
 (rvinstrument.md, "The exposure average"):
 
-* HPF  -- uniform flux, an ``exptime`` column (s);
+* HPF  -- uniform flux, an ``exptime_s`` column (s);
 * NEID -- passing clouds, the photon arrival times' RMS ``t_rms`` (s) and
           third central moment ``t_skew3`` (s^3) as columns;
 * FIES -- passing clouds, the full exposure-meter record in
           ``Gaia4like.FIES.expmeter`` (t_mid, bin center t, dt [s], counts),
-          plus the ``exptime`` column a release carries anyway.
+          plus the ``exptime_s`` column a release carries anyway.
 
 The time column is each exposure's flux-weighted midpoint.
 

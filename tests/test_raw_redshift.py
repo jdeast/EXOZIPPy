@@ -285,9 +285,11 @@ def test_the_exposure_rules_reproduce_the_photon_moments():
       over the exposure; and the 2-node moment rule has exactly the given
       mean (0), RMS and third central moment.
     """
-    from exozippy.components.rvinstrument.redshift import (
+    from exozippy.components.exposure import (
+        gauss_legendre_rule as uniform_exposure_rule,
+    )
+    from exozippy.components.exposure import (
         moment_rule,
-        uniform_exposure_rule,
         weighted_exposure_rule,
     )
 
@@ -342,7 +344,7 @@ def test_the_exposure_average_matches_barycorrpy_integrated_densely():
       sites x two stars x hour angles -5..+5 h x 10/30/60 min, for a
       uniform exposure and for one whose flux ramps linearly to zero,
     When the model's rules average the same correction --
-      the 3-node Gauss-Legendre rule (an exptime column) and the 2-node
+      the 3-node Gauss-Legendre rule (an exptime_s column) and the 2-node
       moment rule (t_rms) for the uniform exposures; the exposure-meter
       rule (2-s bins, 3 nodes) and the moment rule with and without the
       third moment for the ramps --
@@ -355,9 +357,11 @@ def test_the_exposure_average_matches_barycorrpy_integrated_densely():
       are off by 9.1 mm/s at 60 min (1.1 mm/s at 30 min).  The absolute
       correction agrees to < 1 mm/s (the builtin ephemeris vs DE430).
     """
-    from exozippy.components.rvinstrument.redshift import (
+    from exozippy.components.exposure import (
+        gauss_legendre_rule as uniform_exposure_rule,
+    )
+    from exozippy.components.exposure import (
         moment_rule,
-        uniform_exposure_rule,
         weighted_exposure_rule,
     )
 
@@ -411,7 +415,9 @@ def test_three_nodes_converge_with_a_fast_binary_on_top():
       resolution floor, ~0.04 mm/s for this K), where the midpoint model
       alone is off by meters per second.
     """
-    from exozippy.components.rvinstrument.redshift import uniform_exposure_rule
+    from exozippy.components.exposure import (
+        gauss_legendre_rule as uniform_exposure_rule,
+    )
 
     stars, sites, _ = _read_fixture()
     st, ep = _internal(stars[1])
@@ -537,7 +543,7 @@ def _raw_entry(**over):
         "time_frame": "jd",
         "time_scale": "utc",
         "epoch": MD.TRUTH["epoch"],
-        "columns": {"time": 0, "rv": 1, "err": 2, "exptime": 3},
+        "columns": {"time": 0, "rv": 1, "err": 2, "exptime_s": 3},
     }
     e.update(over)
     return {k: v for k, v in e.items() if v is not None}
@@ -562,7 +568,6 @@ def _cfg(entry):
         ({"time_frame": None}, "time_frame: said explicitly"),
         ({"epoch": "J2016"}, "reference epoch"),
         ({"data_format": None}, "belongs to data_format: raw_redshift"),
-        ({"ninterp": 0}, "number of Gauss nodes"),
         ({"exposure_meter": 3}, "path of the exposure-meter"),
     ],
 )
@@ -729,7 +734,7 @@ def test_the_likelihood_is_the_forward_model_at_the_truth(example):
       noise) to < 1 mm/s -- the residual is the start's logit round trip --
       with every spectrum the photon-weighted mean over its exposure
       (make_data.py integrates each 30-s flux step on its own 9-point
-      grid; the model reads an exptime column for HPF, t_rms/t_skew3 for
+      grid; the model reads an exptime_s column for HPF, t_rms/t_skew3 for
       NEID and the exposure meter for FIES).
       The numpy model is handed the graph's TARGET-frame conjunction: a raw
       file retards the orbit, so the fitted `tc` is the OBSERVED (virtual

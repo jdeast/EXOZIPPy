@@ -537,14 +537,14 @@ class Instrument(TimeSystem, Component):
     # model builder averages its model over each exposure through ``smear``
     # sets ``supports_exposure = True`` and names its quadrature rule, a key
     # of ``exposure.RULES`` ("midpoint" or "gauss").  A child that does not
-    # smear REFUSES the ``exptime_s:``/``ninterp:`` keys, naming itself, so a
-    # stated exposure is never silently ignored.  ``OWN_EXPOSURE_KEYS`` lists
-    # the keys a non-smearing child reads ITSELF and the base must therefore
-    # leave alone (rvinstrument's raw-redshift ``ninterp:``, #565, until its
-    # exposure average is folded into ``smear``).
+    # smear REFUSES the exposure keys, naming itself, so a stated exposure
+    # is never silently ignored.  ``reads_exposure_rows`` marks a child
+    # whose reader also accepts the PER-ROW description (the
+    # ``EXPOSURE_ROLES`` columns and the ``exposure_meter:`` file;
+    # ``exposure_node_table``); today rvinstrument.
     supports_exposure = False
     EXPOSURE_RULE = None
-    OWN_EXPOSURE_KEYS = ()
+    reads_exposure_rows = False
 
     def __init__(self, component_config, config_manager):
         super().__init__(component_config, config_manager)
@@ -2166,7 +2166,22 @@ class Instrument(TimeSystem, Component):
     INERT_EXPTIME_S = 60.0
 
     #: The per-file keys the base parses.
-    EXPOSURE_KEYS = ("exptime_s", "ninterp")
+    EXPOSURE_KEYS = ("exptime_s", "ninterp", "exposure_meter")
+
+    #: The optional column roles that describe each exposure PER ROW, all in
+    #: SECONDS of the file's own time scale: ``exptime_s`` the duration of a
+    #: uniform-flux exposure (the FITS EXPTIME), ``t_rms`` the flux-weighted
+    #: RMS of the photon arrival times about the flux-weighted midpoint,
+    #: ``t_skew3`` (s^3) their third central moment (needs ``t_rms``).
+    #: Read by a child with ``reads_exposure_rows`` when ``columns:`` names
+    #: them (#565, folded into the base).
+    EXPOSURE_ROLES = ("exptime_s", "t_rms", "t_skew3")
+
+    #: An exposure_meter: group's midpoint matches a data-file tag when the
+    #: two differ by less than this (days, in the file's own units after
+    #: time_offset): 0.0864 s.  Write the midpoint exactly as in the data
+    #: file.
+    METER_MATCH_TOL_D = 1e-6
 
     def _load_exposure_config(self):
         """Read the per-file ``exptime_s:`` / ``ninterp:`` keys (at
@@ -2192,21 +2207,27 @@ class Instrument(TimeSystem, Component):
           falls back to the instantaneous model -- user input, not an
           internal invariant, so the rope-not-gates rule applies.
 
-        A child without ``supports_exposure`` RAISES on either key (except
-        the ones it lists in ``OWN_EXPOSURE_KEYS``), naming itself.
+        A child without ``supports_exposure`` RAISES on any exposure key,
+        naming itself; one without ``reads_exposure_rows`` on the per-row
+        ``exposure_meter:``.  The retired ``exptime`` COLUMN role (seconds
+        already, but a second spelling of ``exptime_s``) raises too.
         """
         for i, c in enumerate(self.config):
             if "exptime" in c:
                 raise ValueError(
                     self._retired_exptime_message(i, c["exptime"])
                 )
+            spec = self.column_specs[i] or {}
+            if "exptime" in spec:
+                raise ValueError(
+                    f"[{self.prefix}[{self.names[i]}]] columns: the "
+                    f"'exptime' role is now 'exptime_s' (the same seconds, "
+                    f"one spelling with the per-file exptime_s: key); "
+                    f"rename it."
+                )
         if not self.supports_exposure:
             for i, c in enumerate(self.config):
-                stated = [
-                    k
-                    for k in self.EXPOSURE_KEYS
-                    if k in c and k not in self.OWN_EXPOSURE_KEYS
-                ]
+                stated = [k for k in self.EXPOSURE_KEYS if k in c]
                 if stated:
                     raise NotImplementedError(
                         f"[{self.prefix}[{self.names[i]}]] exposure smearing "
@@ -2225,8 +2246,30 @@ class Instrument(TimeSystem, Component):
         self.exptime_s = [self.INERT_EXPTIME_S] * n
         self.ninterp = [1] * n
         self.exptime_stated = [False] * n
+        self.ninterp_stated = ["ninterp" in c for c in self.config]
+        self.exposure_meters = [c.get("exposure_meter") for c in self.config]
+        self._exposure_read_roles = {}
         for i, c in enumerate(self.config):
             where = f"{self.prefix}[{self.names[i]}]"
+            meter = self.exposure_meters[i]
+            if meter is not None and not self.reads_exposure_rows:
+                raise NotImplementedError(
+                    f"[{where}] exposure_meter: (a per-row exposure "
+                    f"description) is not read by the {self.prefix} "
+                    f"component; give the per-file exptime_s: instead."
+                )
+            if meter is not None and (not isinstance(meter, str) or not meter):
+                raise ValueError(
+                    f"[{where}] exposure_meter: is the path of the "
+                    f"exposure-meter file (columns: t_mid, t, dt, counts); "
+                    f"got {meter!r}."
+                )
+            # A per-row description (an exposure column or a meter) is what
+            # ninterp > 1 may smear over in place of a per-file exptime_s.
+            spec = self.column_specs[i] or {}
+            has_rows = meter is not None or any(
+                r in spec for r in self.EXPOSURE_ROLES
+            )
             try:
                 exptime = float(c.get("exptime_s", self.INERT_EXPTIME_S))
                 ninterp = int(c.get("ninterp", 1))
@@ -2241,7 +2284,7 @@ class Instrument(TimeSystem, Component):
             if (
                 ninterp < 1
                 or exptime <= 0
-                or (ninterp > 1 and "exptime_s" not in c)
+                or (ninterp > 1 and "exptime_s" not in c and not has_rows)
             ):
                 logger.warning(
                     f"{self.prefix} {self.names[i]}: invalid exposure "
@@ -2298,11 +2341,32 @@ class Instrument(TimeSystem, Component):
                 "required": False,
                 "doc": (
                     "Sub-exposure nodes per point for exposure smearing "
-                    "(default 1: the model at the timestamp). Needs "
-                    "exptime_s when > 1."
+                    "(default 1: the model at the timestamp; 3 for an "
+                    "exposure described per row, by an exposure column or "
+                    "an exposure_meter). Needs exptime_s (or a per-row "
+                    "description) when > 1."
                 ),
             },
         ]
+
+    @staticmethod
+    def _exposure_meter_config_schema():
+        """The ``exposure_meter`` config-schema entry; a child with
+        ``reads_exposure_rows`` appends it."""
+        return {
+            "key": "exposure_meter",
+            "kind": "option",
+            "accepts": None,
+            "required": False,
+            "doc": (
+                "Path of an exposure-meter file, one row per meter bin: "
+                "t_mid (the exposure's midpoint exactly as the data file "
+                "writes it), t (bin center, the data file's time system), "
+                "dt (bin width, s), counts. The model is averaged over each "
+                "exposure's photons (Tronsgaard et al. 2019); overrides the "
+                "exposure columns for that exposure."
+            ),
+        }
 
     @staticmethod
     def _blocks_inst_map(blocks):
@@ -2458,6 +2522,225 @@ class Instrument(TimeSystem, Component):
             )
         w = pt.constant(weights)
         return tuple(self._node_mean(x, w) for x in out)
+
+    # -- the per-row exposure description (reads_exposure_rows) ---------
+    def _read_data_with_exposure(self, i, roles, detrend=False, **kw):
+        """``_read_data`` plus file ``i``'s per-row exposure columns
+        (``EXPOSURE_ROLES`` named in its ``columns:``): ``(df, moments,
+        disk_rows)``, the exposure columns split off ``df`` (they are not
+        detrend columns) into ``moments`` (role -> (N,) seconds) and
+        ``disk_rows`` the on-disk row of each returned row (the
+        ``exposure_meter:`` key, and error messages).  ``roles`` and ``kw``
+        are ``_read_data``'s."""
+        spec = self.column_specs[i] or {}
+        extra = tuple(r for r in self.EXPOSURE_ROLES if r in spec)
+        if "t_skew3" in extra and "t_rms" not in extra:
+            raise ValueError(
+                f"[{self.prefix}.{self.names[i]}] columns: t_skew3 (the "
+                f"third central moment of the photon arrival times) needs "
+                f"t_rms (their RMS) as well."
+            )
+        read_roles = tuple(roles) + extra
+        df, disk_rows = self._read_data(
+            i, roles=read_roles, detrend=detrend, row_index=True, **kw
+        )
+        # The meter matches its bins against the time column as written,
+        # selected with these same roles (_read_exposure_meter).
+        self._exposure_read_roles[i] = (read_roles, detrend)
+        moments = {}
+        for k, role in enumerate(extra):
+            moments[role] = df.pop(len(roles) + k).values.astype(float)
+        df.columns = range(df.shape[1])
+        return df, moments, disk_rows
+
+    def exposure_node_table(
+        self, i, t, moments, disk_rows, observer_time=None, ninterp=None
+    ):
+        """File ``i``'s sub-exposure quadrature as a RAGGED node table,
+        ``(row, t_node, w)``: one entry per node -- the file-local row
+        (index into ``t``) it averages into, its time (``t``'s time system)
+        and its weight (each row's summing to 1).  instrument.md,
+        "Exposure smearing"; rvinstrument.md, "The exposure average".
+
+        Per exposure, the most complete description it has wins:
+
+        1. its ``exposure_meter:`` bins -> the n-node Gauss rule of the
+           meter's photon distribution, each bin a uniform box
+           (``exposure.weighted_exposure_rule``; exact to degree 2n - 1);
+        2. its ``t_rms`` (and ``t_skew3``) columns -> the 2-node rule with
+           exactly those moments about the tag (``exposure.moment_rule``;
+           exact to degree 3);
+        3. its ``exptime_s`` COLUMN -> n-node Gauss-Legendre over
+           ``[t - exptime/2, t + exptime/2]``, uniform flux;
+        4. the file's ``exptime_s:`` KEY -> ``exposure_nodes(i)`` (this
+           child's rule, the file's ``ninterp``);
+        5. nothing -> one node at the tag.
+
+        n for rules 1 and 3 is the file's ``ninterp:`` when stated, else
+        ``exposure.DEFAULT_ROW_NODES`` (3): a per-row description is written
+        to be used, and three Gauss nodes converge a smooth hour-long
+        exposure.  ``ninterp`` (optional) replaces the node count for this
+        call only, as for ``smear``.  ``observer_time`` is ``_read_data``'s,
+        so the meter's times convert exactly as the data's did.
+        """
+        where = f"[{self.prefix}.{self.names[i]}]"
+        t = np.asarray(t, dtype=float)
+        stated = ninterp is not None or self.ninterp_stated[i]
+        n = int(ninterp if ninterp is not None else self.ninterp[i])
+        n_rows = n if stated else exposure_rules.DEFAULT_ROW_NODES
+        N = t.size
+        for role, vals in moments.items():
+            ok = np.isfinite(vals)
+            if role != "t_skew3":
+                ok &= vals > 0.0
+            if not ok.all():
+                raise ValueError(
+                    f"{where} {role} column: must be "
+                    + ("finite" if role == "t_skew3" else "positive (s)")
+                    + f"; data rows {sorted(int(r) for r in disk_rows[~ok])} "
+                    f"are not ({vals[~ok][:5].tolist()})."
+                )
+        meter = self._read_exposure_meter(i, disk_rows, observer_time)
+        x_u, w_u = exposure_rules.gauss_legendre_rule(n_rows)
+        x_f, w_f = self.exposure_nodes(i, ninterp)
+        rows, ts, ws = [], [], []
+        bare, worst = [], 0.0
+        for j in range(N):
+            if j in meter:
+                t_k, w_k = exposure_rules.weighted_exposure_rule(
+                    *meter[j], n_rows
+                )
+                # The meter's photon-weighted mean time IS the flux-weighted
+                # midpoint the file's time column claims to be.
+                worst = max(worst, abs(float(np.sum(w_k * t_k)) - t[j]))
+            elif "t_rms" in moments:
+                skew = moments["t_skew3"][j] if "t_skew3" in moments else 0.0
+                x, w_k = exposure_rules.moment_rule(moments["t_rms"][j], skew)
+                t_k = t[j] + x / exposure_rules.SECONDS_PER_DAY
+            elif "exptime_s" in moments:
+                t_k = t[j] + x_u * (
+                    moments["exptime_s"][j] / exposure_rules.SECONDS_PER_DAY
+                )
+                w_k = w_u
+            elif x_f.size > 1:
+                t_k = t[j] + x_f
+                w_k = w_f
+            else:
+                t_k, w_k = np.array([t[j]]), np.array([1.0])
+                if meter:
+                    bare.append(int(disk_rows[j]))
+            rows.append(np.full(t_k.size, j, dtype=int))
+            ts.append(t_k)
+            ws.append(w_k)
+        if bare:
+            logger.warning(
+                "%s exposure_meter: no bins for data rows %s and no "
+                "exposure columns: those exposures are modeled at their "
+                "midpoints.",
+                where,
+                bare,
+            )
+        if worst * exposure_rules.SECONDS_PER_DAY > 1.0:
+            logger.warning(
+                "%s exposure_meter: an exposure's photon-weighted mean time "
+                "differs from its time-column tag by up to %.1f s; the model "
+                "uses the meter (the tag only places the plotted point).",
+                where,
+                worst * exposure_rules.SECONDS_PER_DAY,
+            )
+        return np.concatenate(rows), np.concatenate(ts), np.concatenate(ws)
+
+    def _read_exposure_meter(self, i, disk_rows, observer_time=None):
+        """File ``i``'s ``exposure_meter:`` file as ``{row: (t, counts)}``
+        keyed by the file-local (sorted, unmasked) row, each bin expanded
+        into its 3-node Gauss-Legendre sub-points (a bin is a uniform box
+        of photons: its moments through degree 5 are then exact), times
+        converted exactly as the data's (``observer_time`` as in
+        ``_read_data``).  ``{}`` without one.
+
+        The file (long format; rvinstrument.md, docs/raw_redshift_data.md):
+        whitespace columns ``t_mid t dt counts``, ``#`` comments.
+        ``t_mid`` is the exposure's midpoint EXACTLY as the data file's
+        time column writes it, which is how a bin finds its exposure
+        (within ``METER_MATCH_TOL_D``; no match, or more than one, raises
+        -- a bin of a masked exposure is ignored); ``t`` the bin center in
+        the data file's own time system, ``dt`` its width (s), ``counts``
+        the photons (or anything proportional) in it.
+        """
+        path = self.exposure_meters[i]
+        if path is None:
+            return {}
+        where = f"[{self.prefix}.{self.names[i]}] exposure_meter: {path!r}"
+        try:
+            tab = np.loadtxt(path, comments="#", ndmin=2)
+        except (OSError, ValueError) as e:
+            raise ValueError(
+                f"{where} could not be read as four numeric columns "
+                f"(t_mid, t, dt, counts): {e}"
+            ) from e
+        if tab.shape[1] != 4 or tab.shape[0] == 0:
+            raise ValueError(
+                f"{where} must have four columns (t_mid, t, dt[s], counts) "
+                f"and at least one row; got shape {tab.shape}."
+            )
+        t_mid, t, dt, counts = tab.T
+        if not np.all(np.isfinite(dt) & (dt > 0.0)):
+            raise ValueError(f"{where}: dt (bin width, s) must be > 0.")
+        if not np.all(np.isfinite(counts) & (counts >= 0.0)):
+            raise ValueError(f"{where}: counts must be finite and >= 0.")
+        # The data file's tags as written, every on-disk row (masked ones
+        # too, so a masked exposure's bins are recognized, not unmatched).
+        roles, detrend = self._exposure_read_roles[i]
+        tags = (
+            self._select_columns(self._read_table(i), i, roles, detrend)
+            .iloc[:, 0]
+            .values.astype(float)
+        )
+        local = {int(r): j for j, r in enumerate(disk_rows)}
+        out_t, out_c, out_row = [], [], []
+        x3, w3 = exposure_rules.gauss_legendre_rule(3)
+        if observer_time is None:
+            t_conv = self._to_bjd_tdb(t, i)
+        else:
+            t_conv = self._to_observer_tdb(t, i, observer_time)
+        for m in np.unique(t_mid):
+            hit = np.nonzero(np.abs(tags - m) < self.METER_MATCH_TOL_D)[0]
+            if hit.size != 1:
+                raise ValueError(
+                    f"{where}: t_mid {m!r} matches "
+                    + ("no" if hit.size == 0 else f"{hit.size}")
+                    + f" data-file time tags within "
+                    f"{self.METER_MATCH_TOL_D} d; write each exposure's "
+                    f"midpoint exactly as the data file does."
+                )
+            r = int(hit[0])
+            if r not in local:
+                continue  # a masked exposure
+            sel = t_mid == m
+            if not np.any(counts[sel] > 0.0):
+                raise ValueError(
+                    f"{where}: exposure t_mid {m!r} has no counts."
+                )
+            sub_t = (
+                t_conv[sel][:, None]
+                + x3[None, :]
+                * dt[sel][:, None]
+                / exposure_rules.SECONDS_PER_DAY
+            )
+            sub_c = counts[sel][:, None] * w3[None, :]
+            out_row.append(local[r])
+            out_t.append(sub_t.ravel())
+            out_c.append(sub_c.ravel())
+        return {r: (tt, cc) for r, tt, cc in zip(out_row, out_t, out_c)}
+
+    @staticmethod
+    def node_mean(x, row, w, n_rows):
+        """The weighted mean over a RAGGED node table: ``x`` (M,) at the
+        nodes, ``row`` (M,) the row each averages into, ``w`` (M,) its
+        weight (each row's summing to 1) -> (n_rows,).  A segment sum by a
+        CONSTANT index (duplicates accumulate) -- the node-table form of
+        ``_node_mean``, for a model evaluated on every node at once."""
+        return pt.inc_subtensor(pt.zeros(n_rows)[row], w * x)
 
     def add_parameter(self, model, param_name, system, context_nodes=None):
         """Stage 6, plus the detrend coefficients' whitening scale.

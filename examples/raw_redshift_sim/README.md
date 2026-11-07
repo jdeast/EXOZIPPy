@@ -33,9 +33,9 @@ on NEID and FIES), and its `c z_meas` is the photon-weighted mean of the instant
 model over it (Tronsgaard et al. 2019): averaging moves these data by up to 0.2 m/s from
 the model at each midpoint. The three files carry the three kinds of exposure
 information the model reads (`rvinstrument.md`, "The exposure average"): HPF an
-`exptime` column (uniform flux), NEID the photon arrival times' `t_rms` and `t_skew3`
+`exptime_s` column (uniform flux), NEID the photon arrival times' `t_rms` and `t_skew3`
 columns, and FIES the full exposure-meter record in `Gaia4like.FIES.expmeter` (which
-overrides its `exptime` column).
+overrides its `exptime_s` column).
 
 The model, its validation against barycorrpy and what a corrected-RV fit would miss on
 this system are in `src/exozippy/components/rvinstrument/rvinstrument.md`; why to publish

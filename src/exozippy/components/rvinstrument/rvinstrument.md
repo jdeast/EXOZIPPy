@@ -137,7 +137,7 @@ rvinstrument:
   2457389.0, Gaia DR3's J2016.0). One star, one set of astrometric parameters, one epoch:
   with absolute astrometry in the system the astrometry's reference epoch is used and a
   raw file's `epoch:` that disagrees raises; without it every raw file must name it.
-- **The exposure**: optional columns named in `columns:` (`exptime`, `t_rms`,
+- **The exposure**: optional columns named in `columns:` (`exptime_s`, `t_rms`,
   `t_skew3`, in seconds of the file's own time scale), an optional `exposure_meter:`
   file, and `ninterp:` for the nodes ("The exposure average", below).
 - **`star.rv` must carry a prior** (next section). `observer_location` and `epoch` on a
@@ -320,7 +320,8 @@ retarded emission time, the astrometric wobble and the companion potential -- ov
 quadrature nodes in the exposure. In `RVInstrument._raw_rv_model` the nodes are the rows
 of the geometry, `_rv_model` runs on their emission times, and an `inc_subtensor` segment
 sum by a constant index forms each row's mean. Per exposure, the most complete
-description it has wins (`RVInstrument._exposure_nodes`; the rules are in `redshift.py`):
+description it has wins (`Instrument.exposure_node_table`, the Instrument base's since
+review 4.5.4 folded #565's machinery into it, #588; the rules are in `components/exposure.py`):
 
 1. **`exposure_meter: <file>`**, the full record. Long format, one row per meter bin:
    `t_mid` (the exposure's midpoint EXACTLY as the data file's time column writes it --
@@ -328,7 +329,7 @@ description it has wins (`RVInstrument._exposure_nodes`; the rules are in `redsh
    raise; bins of a masked exposure are ignored), `t` (the bin center, in the data file's
    time system), `dt` (the bin width, s) and `counts`. Each bin is a uniform box of
    photons. The model uses the `ninterp`-node Gauss rule OF THAT PHOTON DISTRIBUTION
-   (Golub-Welsch on the discrete measure, `redshift.weighted_exposure_rule`): positive
+   (Golub-Welsch on the discrete measure, `exposure.weighted_exposure_rule`): positive
    weights, nodes inside the record, and the photon-weighted mean of every polynomial of
    degree `2 ninterp - 1` reproduced exactly, so a 1000-bin record costs 3 model
    evaluations, not 1000. A meter whose photon-weighted mean time differs from the tag by
@@ -338,18 +339,21 @@ description it has wins (`RVInstrument._exposure_nodes`; the rules are in `redsh
    bins.
 2. **`t_rms` (and `t_skew3`) columns**: the flux-weighted RMS of the photon arrival times
    about the flux-weighted midpoint (s) and their third central moment (s^3; needs
-   `t_rms`). The 2-node rule with exactly those moments (`redshift.moment_rule`) is
+   `t_rms`). The 2-node rule with exactly those moments (`exposure.moment_rule`) is
    exact for every cubic in time, which covers the curvature and the skew terms. What it
    cannot know is the 4th moment: 0.43 mm/s at 60 min for a uniform exposure and 0.26
    mm/s for the ramp, scaling as T^4.
-3. **`exptime` column** (s): uniform flux over `[t - exptime/2, t + exptime/2]`,
+3. **`exptime_s` column** (s): uniform flux over `[t - exptime/2, t + exptime/2]`,
    `ninterp`-node Gauss-Legendre. (Its `t_rms` is `exptime / sqrt(12)`; the column adds
    the shape.)
-4. **Nothing**: one node at the tag, the model at the midpoint, wrong by the Tronsgaard
+4. **The file's `exptime_s:` key** (s): the same Gauss-Legendre rule for every exposure,
+   with the file's `ninterp` (default 1 for the per-file key, as for every component:
+   `components/instrument.md`, "Exposure smearing").
+5. **Nothing**: one node at the tag, the model at the midpoint, wrong by the Tronsgaard
    term above. That is what corrected-RV practice does, and the reason
    `docs/raw_redshift_data.md` asks a release for the meter record.
 
-**`ninterp:`** (default 3, `redshift.DEFAULT_EXPOSURE_NODES`) is read by rules 1 and 3.
+**`ninterp:`** (default 3 for a per-row description, `exposure.DEFAULT_ROW_NODES`) is read by rules 1, 3 and 4.
 Gaussian rules converge far faster than the transit component's midpoint grid, which is
 built for light curves with kinks at contact; the redshift is smooth. Against a
 4001-point Simpson reference, a 60-min exposure 5 h from the meridian is off by 1.2 m/s
@@ -358,7 +362,8 @@ on top, every n >= 3 sits at the float64 time-resolution floor (~0.1 mm/s for th
 JD carries 40 us). The cost is `ninterp` times the raw rows' geometry and Kepler solves.
 
 The exposure columns are not detrend columns (they are split off before the detrend
-block), and a corrected file refuses them (`columns:` names an unknown role). The plots
+block, `Instrument._read_data_with_exposure`). The column is `exptime_s`, the same
+seconds and the one spelling of the per-file key; the old `exptime` role raises. The plots
 read the tag: `self.time` is the start star's BJD_TDB of the midpoint. The seed
 correction is photon-averaged like the model.
 
@@ -370,6 +375,25 @@ up to 1.13 m/s, agrees to 0.0012 mm/s with Gauss-Legendre, 0.034 mm/s with a 2-s
 and 0.43/0.26 mm/s with the moment rules; convergence with a fast binary; and the
 example's likelihood against `make_data.py`'s 9-point-per-step integration, for all
 three kinds of input.
+
+### Corrected velocities are exposure-averaged too
+
+The same description averages a CORRECTED file (`data_format: rv`): its model is then
+`gamma + <reflex>`, the star's velocity -- every orbit, and an `rm:` file's anomaly --
+evaluated at each node by the one builder (`_rv_model`) and averaged with the node weights
+(`RVInstrument._smear_corrected`, `Instrument.node_mean`). The star's flux is constant over
+an exposure, so the weights are the exposure's own (uniform, its moments, or its meter).
+EXOFASTv2 never averaged RVs; the target here is correctness, not parity. The size: a
+uniform exposure T of a sinusoid of period P is attenuated by `sinc(pi T / P)`, so a
+K = 200 m/s, P = 1 d orbit loses ~0.6 m/s at the extremes in a 1-hour exposure
+(`tests/test_rv_exposure.py` recovers the sinc). Off unless a file states an exposure
+(nothing shipped does); the corrected model is then unchanged.
+
+The plots draw an averaged corrected file the way they draw a raw one: the curve is the
+instantaneous `gamma + reflex`, and each datum is `gamma + reflex(tag)` plus its own
+likelihood residual from the exposure mean (`_plotted_rv`, from `_rv_bary_data_node`, the
+gap between the likelihood's model and the plotted one), so every plotted residual is the
+likelihood's.
 
 ### The instrument zero point, and what the data constrain
 
