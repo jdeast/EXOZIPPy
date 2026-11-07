@@ -231,11 +231,26 @@ def facility_from_svo_name(svo_name: str) -> str:
         "GAIA/GAIA2r.G"    -> "GAIA"
         "WISE/WISE.W1"     -> "WISE"
 
-    The mapping is a simple prefix lookup; extend as more facilities
-    are added to the tree.
+    The mapping is the SVO prefix, except where one site hosts unrelated
+    instruments whose photometry is catalogued separately: those are
+    grouped by INSTRUMENT (``_FACILITY_BY_INSTRUMENT``), so VISTA's bands
+    live in VISTA.bc.parquet rather than in a Paranal table shared with
+    whatever else SVO files under Paranal.  Extend the override table as
+    such facilities are added; the generator's `_check_filter_sets` holds
+    every FILTER_SETS key to this function's answer.
     """
     prefix = svo_name.split("/")[0]
-    return prefix
+    instrument = svo_name.split(".")[0]
+    return _FACILITY_BY_INSTRUMENT.get(instrument, prefix)
+
+
+# SVO "site/instrument" -> the facility table it is read from (see
+# facility_from_svo_name).  Only sites that host several catalogued
+# instruments are listed; everything else is its SVO prefix.
+_FACILITY_BY_INSTRUMENT = {
+    "Paranal/VISTA": "VISTA",  # VVV / VIRAC photometry
+    "CTIO/DECam": "DECam",  # DECaPS photometry
+}
 
 
 # -------------------------------------------------------------------
