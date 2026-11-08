@@ -704,6 +704,12 @@ def example():
     os.chdir(EXAMPLE)
     try:
         cfg = yaml.safe_load(open("raw_redshift_sim.yaml"))
+        # The CONVERGED node count, stated: the forward-model pin below
+        # tests the averaging to 1 mm/s, while the automatic count stops
+        # where the smearing error is small against the error bars
+        # (Delta chi2 < 0.1, instrument.md "Choosing ninterp", #PRNUM).
+        for entry in cfg["rvinstrument"]:
+            entry["ninterp"] = 3
         params = yaml.safe_load(open(cfg["parameter_file"]))
         for name in MD.SITES:
             params[f"rvinstrument.{name}.gamma"] = {

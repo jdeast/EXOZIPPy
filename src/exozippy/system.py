@@ -1216,6 +1216,13 @@ class System(Component):
                         f"configuration."
                     )
 
+            # Stage 6b: choices that need the model AT THE START but shape
+            # the likelihood graph (Component.prepare_likelihood; the
+            # automatic exposure ninterp, components/instrument.md), made
+            # before any likelihood exists so they cost no rebuild.
+            for comp in self.active_components.values():
+                comp.prepare_likelihood(model, self)
+
             # Stage 7: LIKELIHOOD
             for comp in self.active_components.values():
                 comp.build_likelihood(model, system=self)
@@ -1249,6 +1256,74 @@ class System(Component):
         self.verify_element_slices(model)
 
         self.compile_plotter_functions(model)
+        return model
+
+    def check_at_point(self, model, point, where):
+        """Re-check every component's build-time choices at ``point`` (raw)
+        -- ``where`` "polished" or "median" (``Component.check_at_point``).
+        Returns True when some component revised a choice and the model must
+        be rebuilt (``rebuild_carrying_start``) before sampling."""
+        changed = False
+        for comp in self.active_components.values():
+            changed |= bool(comp.check_at_point(model, self, point, where))
+        return changed
+
+    def checks_at_point(self):
+        """Whether any component re-checks a build choice at a point."""
+        return any(
+            c.checks_at_point() for c in self.active_components.values()
+        )
+
+    def build_choices(self):
+        """``{component prefix: choices}`` for every component that settled
+        a data-dependent build choice (``Component.build_choices``)."""
+        out = {}
+        for comp in self.active_components.values():
+            ch = comp.build_choices()
+            if ch:
+                out[comp.prefix] = ch
+        return out
+
+    def restore_build_choices(self, choices):
+        """Apply ``build_choices`` read back from a trace, before the build;
+        a prefix this System has no component for RAISES."""
+        by_prefix = {c.prefix: c for c in self.active_components.values()}
+        for prefix, ch in (choices or {}).items():
+            if prefix not in by_prefix:
+                raise ValueError(
+                    f"The trace records build choices for component "
+                    f"{prefix!r}, which this config does not build."
+                )
+            by_prefix[prefix].restore_build_choices(ch)
+
+    def rebuild_carrying_start(self, raw_start):
+        """Rebuild the model with the SAME sampled parameters and carry
+        ``raw_start`` (seed 0, the old model's raw coordinates) across as a
+        PHYSICAL point, through the new model's own transforms
+        (``apply_polished_starts``) -- what a revised build choice that
+        changes no coordinate (an exposure node count) needs after the seed
+        polish.  The caller must have LEFT the old model's context.
+        Returns the new model."""
+        old = {}
+        for par in self.get_all_parameters():
+            key = f"{par.label}_raw"
+            if key in raw_start:
+                old[par.label] = par.phys_from_raw(
+                    np.asarray(raw_start[key], dtype=float)
+                )
+        model = self.build_model()
+        new_raw = {}
+        for par in self.get_all_parameters():
+            if getattr(par, "_raw_transform", None) is None:
+                continue
+            if par.label not in old:
+                raise ValueError(
+                    f"[{par.label}] is sampled in the rebuilt model but not "
+                    f"in the model it replaces: a rebuild that carries the "
+                    f"start must not change the sampled parameters."
+                )
+            new_raw[f"{par.label}_raw"] = par.raw_from_initval(old[par.label])
+        self.apply_polished_starts([new_raw], [0])
         return model
 
     def _warn_unmatched_user_params(self, model):

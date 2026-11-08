@@ -331,6 +331,9 @@ class RVInstrument(Instrument):
         self._raw_files = [None] * self.n_elements
         seed_blocks = []
         corr_nodes = {}
+        # Each file's exposure description, kept so the node tables can be
+        # rebuilt for another node count (_refresh_exposure_state).
+        self._exposure_inputs = [None] * self.n_elements
 
         blocks = self._concat_blocks()
         for i in range(self.n_elements):
@@ -366,6 +369,11 @@ class RVInstrument(Instrument):
             # The file's exposures (the base's description), kept only when
             # some exposure has more than one node: its reflex is then the
             # exposure average (_smear_corrected).
+            self._exposure_inputs[i] = (
+                df.iloc[:, 0].values.astype(float),
+                moments,
+                disk_rows,
+            )
             node = self.exposure_node_table(
                 i, df.iloc[:, 0].values.astype(float), moments, disk_rows
             )
@@ -454,6 +462,7 @@ class RVInstrument(Instrument):
             i, ("time", "rv", "err"), detrend=True, observer_time=loc
         )
         t_tdb = df.iloc[:, 0].values.astype(float)
+        self._exposure_inputs[i] = (t_tdb, moments, disk_rows)
         node_row, t_node, w_node = self.exposure_node_table(
             i, t_tdb, moments, disk_rows, observer_time=loc
         )
@@ -489,6 +498,7 @@ class RVInstrument(Instrument):
             "node_t_tdb": t_node,
             "node_w": w_node,
             "node_obs": obs_node,
+            "obs": obs,
         }
         return df, np.asarray(t_bary, dtype=float), v_seed
 
@@ -1647,6 +1657,90 @@ class RVInstrument(Instrument):
             blocks.append((i, np.arange(sl.start, sl.stop)))
         return blocks
 
+    def _rv_model_at_data(self, system, time):
+        """The likelihood's detrend-free model on the data's own times:
+        ``(rv_model, rv_matrix, bary)``, internal units.  ``bary`` is the
+        gap between it and the plotted corrected-mode curve (gamma + the
+        instantaneous reflex at each tag) where they depart -- a raw file's
+        in-graph barycentric correction, or an exposure-averaged corrected
+        file -- else None (``_plotted_rv``)."""
+        if any(self.raw):
+            # Some file is raw: its rows are the in-graph barycentric
+            # correction of the fitted star (_raw_rv_model).
+            rv_model, rv_matrix, kep, offset = self._raw_rv_model(
+                system, time, self._data_blocks()
+            )
+            if self._corr_nodes is not None:
+                rv_model = self._smear_corrected(system, rv_model, offset)
+            return rv_model, rv_matrix, rv_model - (offset + kep)
+        if self._corr_nodes is not None:
+            kep, rv_matrix = self._rv_model(
+                system, time, self._data_blocks(), offset=None
+            )
+            offset = self.gamma.value[self.inst_map_tensor]
+            rv_model = self._smear_corrected(system, offset + kep, offset)
+            return rv_model, rv_matrix, rv_model - (offset + kep)
+        rv_model, rv_matrix = self._rv_model(
+            system,
+            time,
+            self._data_blocks(),
+            offset=self.gamma.value[self.inst_map_tensor],
+        )
+        return rv_model, rv_matrix, None
+
+    def _exposure_check_terms(self, system):
+        """``Instrument._exposure_check_terms``: the likelihood's
+        detrend-free model at the data (``_rv_model_at_data``) and its
+        sigma, internal units.  ``_raw_rv_model`` stashes its node-time
+        BJD for the plots; the check's own build must not replace the
+        likelihood's, so it is put back."""
+        saved = self.__dict__.get("_raw_t_bary_node")
+        try:
+            rv_model, _, _ = self._rv_model_at_data(
+                system, pt.as_tensor_variable(self.time)
+            )
+        finally:
+            self._raw_t_bary_node = saved
+        sigma = self.total_sigma(pt.as_tensor_variable(self.err))
+        return [(self.inst_map, rv_model, sigma)]
+
+    def _refresh_exposure_state(self):
+        """Every node table follows the node counts: the averaged corrected
+        files' (``_corr_nodes``) and the raw files' nodes with the
+        observer's barycentric terms at each (``_raw_nodes``).  The seeds
+        read at load (a raw file's start-star correction) are not redone:
+        they are seeds."""
+        from .redshift import observer_terms
+
+        corr_nodes = {}
+        for i in range(self.n_elements):
+            t, moments, disk_rows = self._exposure_inputs[i]
+            if self.raw[i]:
+                loc = self.observers[i]
+                node_row, t_node, w_node = self.exposure_node_table(
+                    i, t, moments, disk_rows, observer_time=loc, quiet=True
+                )
+                rec = self._raw_files[i]
+                rec["node_row"] = node_row
+                rec["node_t_tdb"] = t_node
+                rec["node_w"] = w_node
+                rec["node_obs"] = (
+                    observer_terms(
+                        t_node, loc, self.time_specs[i]["ephemeris"]
+                    )
+                    if t_node.size > t.size
+                    else rec["obs"]
+                )
+            else:
+                node = self.exposure_node_table(
+                    i, t, moments, disk_rows, quiet=True
+                )
+                if node[0].size > t.size:
+                    corr_nodes[i] = node
+        if any(self.raw):
+            self._concat_raw_observers()
+        self._concat_corrected_nodes(corr_nodes)
+
     def build_likelihood(self, model, system):
         time = pm.Data("rv_time", self.time)
         rv = pm.Data("rv_data", self.rv)
@@ -1670,29 +1764,9 @@ class RVInstrument(Instrument):
         # plots, which draw such data as reflex + likelihood residual
         # (_plotted_rv).
         self._model_departs = any(self.raw) or self._corr_nodes is not None
-        if any(self.raw):
-            # Some file is raw: its rows are the in-graph barycentric
-            # correction of the fitted star (_raw_rv_model).
-            rv_model, rv_matrix, kep, offset = self._raw_rv_model(
-                system, time, self._data_blocks()
-            )
-            if self._corr_nodes is not None:
-                rv_model = self._smear_corrected(system, rv_model, offset)
-            self._rv_bary_data_node = rv_model - (offset + kep)
-        elif self._corr_nodes is not None:
-            kep, rv_matrix = self._rv_model(
-                system, time, self._data_blocks(), offset=None
-            )
-            offset = self.gamma.value[self.inst_map_tensor]
-            rv_model = self._smear_corrected(system, offset + kep, offset)
-            self._rv_bary_data_node = rv_model - (offset + kep)
-        else:
-            rv_model, rv_matrix = self._rv_model(
-                system,
-                time,
-                self._data_blocks(),
-                offset=self.gamma.value[self.inst_map_tensor],
-            )
+        rv_model, rv_matrix, bary = self._rv_model_at_data(system, time)
+        if bary is not None:
+            self._rv_bary_data_node = bary
         self._rv_model_data_node = rv_model
         self._rv_matrix_data_node = rv_matrix
 

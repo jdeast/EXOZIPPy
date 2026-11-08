@@ -1984,7 +1984,7 @@ def create_summary_plot(
 
     from ..angles import restore_from_trace as restore_direct_angles
     from ..system import System
-    from ..trace_meta import check_trace_freshness
+    from ..trace_meta import check_trace_freshness, restore_build_choices
     from ..yamlio import load_system_config
 
     config_path = Path(config_file).expanduser().resolve()
@@ -2010,6 +2010,7 @@ def create_summary_plot(
         # were sampled in (exozippy.angles), which the automatic switch chose
         # from a start this path never computes.
         restore_direct_angles(system, trace_path)
+        restore_build_choices(system, trace_path)
         model = system.build_model()
 
         idata = az.from_netcdf(str(trace_path))

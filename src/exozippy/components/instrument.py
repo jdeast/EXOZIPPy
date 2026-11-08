@@ -67,6 +67,7 @@ design is in instrument.md, "Exposure smearing").  A child opts in with
 REFUSES the keys rather than ignoring them.
 """
 
+import contextlib
 import copy
 import logging
 
@@ -2249,6 +2250,19 @@ class Instrument(TimeSystem, Component):
         self.ninterp_stated = ["ninterp" in c for c in self.config]
         self.exposure_meters = [c.get("exposure_meter") for c in self.config]
         self._exposure_read_roles = {}
+        # The automatic node count (review 8.5.11; instrument.md, "Choosing
+        # ninterp"): a file that describes its exposure (an accepted
+        # exptime_s:, or a per-row description) and states no ninterp has
+        # its n chosen at the build start (Instrument.check_exposure) and
+        # may be raised after the seed polish.  ``_ninterp_chosen`` marks a
+        # count that is settled (chosen, or restored from a trace), so a
+        # rebuild never chooses again.
+        self.exposure_described = [False] * n
+        self.ninterp_auto = [False] * n
+        self._ninterp_chosen = [False] * n
+        self._exposure_checked = False
+        #: The last check's per-file record, ``{file: (label, n, dchi2)}``.
+        self.exposure_report = {}
         for i, c in enumerate(self.config):
             where = f"{self.prefix}[{self.names[i]}]"
             meter = self.exposure_meters[i]
@@ -2298,6 +2312,10 @@ class Instrument(TimeSystem, Component):
                 exptime, ninterp = self.INERT_EXPTIME_S, 1
             else:
                 self.exptime_stated[i] = "exptime_s" in c
+                self.exposure_described[i] = self.exptime_stated[i] or has_rows
+                self.ninterp_auto[i] = (
+                    self.exposure_described[i] and not self.ninterp_stated[i]
+                )
             self.exptime_s[i] = exptime
             self.ninterp[i] = ninterp
 
@@ -2331,7 +2349,7 @@ class Instrument(TimeSystem, Component):
                     "Exposure time of every point in this file, in SECONDS "
                     "(e.g. 1800 for a 30-minute cadence). The model is "
                     "averaged over each exposure on ninterp sub-exposure "
-                    "nodes. Read only with ninterp > 1."
+                    "nodes (chosen automatically when ninterp is unset)."
                 ),
             },
             {
@@ -2340,11 +2358,14 @@ class Instrument(TimeSystem, Component):
                 "accepts": None,
                 "required": False,
                 "doc": (
-                    "Sub-exposure nodes per point for exposure smearing "
-                    "(default 1: the model at the timestamp; 3 for an "
-                    "exposure described per row, by an exposure column or "
-                    "an exposure_meter). Needs exptime_s (or a per-row "
-                    "description) when > 1."
+                    "Sub-exposure nodes per point for exposure smearing. "
+                    "Unset with an exposure (exptime_s, an exposure column "
+                    "or an exposure_meter): the smallest count whose "
+                    "smearing error costs Delta chi2 < 0.1 against the "
+                    "file's error bars, chosen at the start and raised "
+                    "after the polish if needed. Set: kept, and warned "
+                    "about when too coarse or 2x finer than needed. Needs "
+                    "exptime_s (or a per-row description) when > 1."
                 ),
             },
         ]
@@ -2523,6 +2544,309 @@ class Instrument(TimeSystem, Component):
         w = pt.constant(weights)
         return tuple(self._node_mean(x, w) for x in out)
 
+    # -- choosing ninterp (review 8.5.11; instrument.md, "Choosing ninterp")
+    def _exposure_check_terms(self, system):
+        """The likelihood's model at the data, for the node-count check:
+        a list of ``(files, mu, sigma)`` -- ``files`` the (numpy) file
+        index of each entry, ``mu`` the detrend-free model in the
+        likelihood's residual space (1-D tensor, same length), ``sigma`` its
+        error bar there (err_scale / jitter included).  Built with the
+        CURRENT node counts (``_ninterp_override`` sets them), by the same
+        builder the likelihood calls, and with no side effect on the model
+        (no ``pm.*`` node, nothing stashed).  Every smearing child
+        implements it: the check is one numeric comparison in the base and
+        must never fall back to a guess for a child that forgot."""
+        raise NotImplementedError(
+            f"{type(self).__name__} declares supports_exposure but does not "
+            f"implement _exposure_check_terms, which the automatic ninterp "
+            f"check needs (instrument.md, 'Choosing ninterp')."
+        )
+
+    def _refresh_exposure_state(self):
+        """Recompute whatever a child precomputed from ``self.ninterp``
+        (node observer positions, node tables, the recorded groups), after
+        the node counts change.  The base precomputes nothing."""
+
+    @contextlib.contextmanager
+    def _ninterp_override(self, ninterp):
+        """Build with per-file node counts ``ninterp`` for the duration:
+        ``self.ninterp`` is replaced (every count treated as settled, so a
+        per-row description takes it too) and the child's precomputed node
+        state refreshed, then both are restored."""
+        saved = (list(self.ninterp), list(self._ninterp_chosen))
+        self.ninterp = [int(k) for k in ninterp]
+        self._ninterp_chosen = [True] * len(self.ninterp)
+        self._refresh_exposure_state()
+        try:
+            yield
+        finally:
+            self.ninterp, self._ninterp_chosen = saved
+            self._refresh_exposure_state()
+
+    def exposure_dchi2(self, system, model, point, trials):
+        """Each trial's per-file smearing error as a Delta chi2.
+
+        ``trials`` -- a list of ``{file: n}``; every other file is held at
+        one node in that trial (and contributes 0).  For each trial the
+        model at the data is built at those counts and at
+        ``exposure.REFERENCE_FACTOR`` times them (the finer reference),
+        both through the child's own builder (``_exposure_check_terms``),
+        compiled together against the model's value variables and
+        evaluated at ``point`` (raw, as ``System.get_raw_start``):
+        ``dchi2[f] = sum over file f's entries of ((mu_n - mu_ref) /
+        sigma)^2``, sigma at ``point``'s own err_scale / jitter.  Returns
+        one ``{file: dchi2}`` per trial.  One compile per call.
+        """
+        n_files = len(self.names)
+        outputs, layout = [], []
+        for trial in trials:
+            vec = np.ones(n_files, dtype=int)
+            ref = np.ones(n_files, dtype=int)
+            for f, k in trial.items():
+                vec[f] = int(k)
+                ref[f] = exposure_rules.REFERENCE_FACTOR * int(k)
+            with self._ninterp_override(vec):
+                terms_n = self._exposure_check_terms(system)
+            with self._ninterp_override(ref):
+                terms_r = self._exposure_check_terms(system)
+            if len(terms_n) != len(terms_r):
+                raise RuntimeError(
+                    f"{type(self).__name__}._exposure_check_terms returned "
+                    f"{len(terms_n)} entries at one node count and "
+                    f"{len(terms_r)} at another."
+                )
+            entries = []
+            for (files, mu_n, sigma), (_, mu_r, _) in zip(terms_n, terms_r):
+                entries.append(np.asarray(files, dtype=int))
+                outputs.append(pt.sqr((mu_n - mu_r) / sigma))
+            layout.append(entries)
+        outputs = model.replace_rvs_by_values(outputs)
+        fn = model.compile_fn(
+            outputs,
+            inputs=model.value_vars,
+            point_fn=True,
+            on_unused_input="ignore",
+        )
+        values = iter(fn(point))
+        result = []
+        for trial, entries in zip(trials, layout):
+            total = np.zeros(n_files)
+            for files in entries:
+                z = np.asarray(next(values), dtype=float).reshape(-1)
+                if files.shape != z.shape:
+                    raise RuntimeError(
+                        f"{type(self).__name__}._exposure_check_terms: "
+                        f"{z.size} model entries but {files.size} file "
+                        f"indices."
+                    )
+                total += np.bincount(files, weights=z, minlength=n_files)
+            result.append({f: float(total[f]) for f in trial})
+        return result
+
+    def check_exposure(self, system, model, point, where):
+        """Check (and, where allowed, set) every exposure file's node count
+        at ``point``; ``where`` is "start", "polished" or "median".
+
+        - An AUTOMATIC file (``exptime_s`` or a per-row description, no
+          ``ninterp``) gets the smallest n meeting
+          ``exposure.AUTO_DCHI2`` at the START (capped at
+          ``AUTO_NINTERP_CAP``, with a warning naming the file); after the
+          POLISH it is RAISED to the smallest passing n when its count no
+          longer passes (never lowered); at the MEDIAN only warned about.
+        - A USER ``ninterp`` is never changed: it is warned about when too
+          coarse (its Delta chi2, the threshold, the n that would pass) and
+          when too fine (at least ``FINE_WARN_FACTOR`` times the smallest
+          passing n; the runtime factor n_user / n_needed).
+
+        Returns True when a count changed after the start, i.e. the model
+        must be rebuilt to use it.
+        """
+        if not self.supports_exposure:
+            return False
+        files = [
+            i for i in range(len(self.names)) if self.exposure_described[i]
+        ]
+        if not files:
+            return False
+        cap = exposure_rules.AUTO_NINTERP_CAP
+        thr = exposure_rules.AUTO_DCHI2
+        at = {
+            "start": "the start",
+            "polished": "the polished start",
+            "median": "the posterior median",
+        }[where]
+
+        def evaluate(trial):
+            return self.exposure_dchi2(system, model, point, [trial])[0]
+
+        choose = [
+            i
+            for i in files
+            if self.ninterp_auto[i] and not self._ninterp_chosen[i]
+        ]
+        if where != "start" and choose:
+            raise RuntimeError(
+                f"[{self.prefix}] automatic ninterp of "
+                f"{[self.names[i] for i in choose]} checked at {at} before "
+                f"it was chosen at the build start."
+            )
+        settled = [i for i in files if i not in choose]
+        now = (
+            evaluate({i: self.ninterp[i] for i in settled}) if settled else {}
+        )
+        lo, hi = {}, {}
+        for i in choose:
+            lo[i] = 0
+        for i in settled:
+            n_i = int(self.ninterp[i])
+            ok = np.isfinite(now[i]) and now[i] < thr
+            if self.ninterp_auto[i]:
+                # A count restored from a trace is the sampled model's: the
+                # build start never revises it.
+                if not ok and where != "start":
+                    lo[i] = n_i
+            elif not ok:
+                lo[i] = n_i
+            elif n_i >= exposure_rules.FINE_WARN_FACTOR:
+                lo[i], hi[i] = 0, n_i
+        found = (
+            exposure_rules.smallest_ninterp(evaluate, lo, hi, cap)
+            if lo
+            else {}
+        )
+
+        changed = False
+        report = {}
+        for i in files:
+            label = f"[{self.prefix}[{self.names[i]}]]"
+            n_i = int(self.ninterp[i])
+            if i in found:
+                n_new, d_new, capped = found[i]
+            else:
+                n_new, d_new, capped = n_i, now[i], False
+            if self.ninterp_auto[i]:
+                old = n_i
+                if where == "start" or (where == "polished" and i in found):
+                    self.ninterp[i] = int(n_new)
+                    self._ninterp_chosen[i] = True
+                if capped:
+                    logger.warning(
+                        f"{label} automatic ninterp: even {cap} sub-exposure "
+                        f"nodes leave a smearing error of Delta chi2 = "
+                        f"{d_new:.3g} at {at} (threshold {thr}); using {cap}. "
+                        f"Set ninterp: to choose a count yourself."
+                    )
+                elif where == "start":
+                    logger.info(
+                        f"{label} exptime_s {self.exptime_s[i]:g} s: "
+                        f"automatic ninterp = {n_new} (smearing error "
+                        f"Delta chi2 = {d_new:.3g} < {thr} at {at})."
+                    )
+                elif where == "polished" and i in found:
+                    logger.info(
+                        f"{label} automatic ninterp raised from {old} to "
+                        f"{n_new} at {at} (Delta chi2 {now[i]:.3g} with "
+                        f"{old}, {d_new:.3g} with {n_new}; threshold {thr}); "
+                        f"the model is rebuilt before sampling."
+                    )
+                elif where == "median" and i in found:
+                    logger.warning(
+                        f"{label} automatic ninterp = {old} leaves a smearing "
+                        f"error of Delta chi2 = {now[i]:.3g} at {at} "
+                        f"(threshold {thr}); {n_new} would meet it. Set "
+                        f"ninterp: {n_new} and refit."
+                    )
+                changed |= where == "polished" and self.ninterp[i] != old
+                report[i] = (label, int(self.ninterp[i]), d_new)
+                continue
+            # A user's ninterp: warned about, never changed.
+            report[i] = (label, n_i, now[i])
+            if i not in found:
+                continue
+            if n_new > n_i or capped:
+                need = f"more than {cap}" if capped else f"ninterp: {n_new}"
+                logger.warning(
+                    f"{label} ninterp: {n_i} is too coarse at {at}: its "
+                    f"smearing error is Delta chi2 = {now[i]:.3g} (threshold "
+                    f"{thr}); {need} would meet it. Your value is kept."
+                )
+            elif n_i >= exposure_rules.FINE_WARN_FACTOR * n_new:
+                logger.warning(
+                    f"{label} ninterp: {n_i} is finer than needed at {at}: "
+                    f"ninterp: {n_new} already meets the threshold (Delta "
+                    f"chi2 = {d_new:.3g} < {thr}) at ~{n_i / n_new:.1f}x "
+                    f"less smearing cost. Your value is kept."
+                )
+        self.exposure_report = report
+        if where == "start" or changed:
+            self._refresh_exposure_state()
+        return changed
+
+    def prepare_likelihood(self, model, system):
+        """Stage 6b (``System.build_model``, after every parameter exists
+        and before any likelihood): the node-count check at the build
+        start, once per System -- a rebuild keeps the counts it has."""
+        super().prepare_likelihood(model, system)
+        if not self.supports_exposure or self._exposure_checked:
+            return
+        self._exposure_checked = True
+        if any(self.exposure_described):
+            self.check_exposure(
+                system, model, system.get_raw_start(model), "start"
+            )
+
+    def checks_at_point(self):
+        return bool(self.supports_exposure and any(self.exposure_described))
+
+    def check_at_point(self, model, system, point, where):
+        """``Component.check_at_point``: the node-count check after the
+        polish (may raise an automatic count; True = rebuild) and at the
+        posterior median (warn only)."""
+        changed = super().check_at_point(model, system, point, where)
+        if self.supports_exposure and any(self.exposure_described):
+            changed |= self.check_exposure(system, model, point, where)
+        return changed
+
+    def build_choices(self):
+        """``Component.build_choices``: the settled automatic node counts,
+        ``{"ninterp": {file name: n}}``, stamped on the trace so a reuse
+        builds the model it sampled."""
+        out = super().build_choices()
+        if self.supports_exposure:
+            chosen = {
+                str(self.names[i]): int(self.ninterp[i])
+                for i in range(len(self.names))
+                if self.ninterp_auto[i] and self._ninterp_chosen[i]
+            }
+            if chosen:
+                out["ninterp"] = chosen
+        return out
+
+    def restore_build_choices(self, choices):
+        """Apply ``build_choices`` read back from a trace, BEFORE the build:
+        those counts are settled and the start check keeps them."""
+        super().restore_build_choices(choices)
+        counts = dict(choices.get("ninterp", {}))
+        if not counts:
+            return
+        names = [str(n) for n in self.names]
+        for name, n in counts.items():
+            if name not in names:
+                raise ValueError(
+                    f"[{self.prefix}] the trace records an automatic ninterp "
+                    f"for file {name!r}, which this config does not have."
+                )
+            i = names.index(name)
+            if not self.ninterp_auto[i]:
+                raise ValueError(
+                    f"[{self.prefix}[{name}]] the trace records an automatic "
+                    f"ninterp, but this config states ninterp: or no "
+                    f"exposure for the file."
+                )
+            self.ninterp[i] = int(n)
+            self._ninterp_chosen[i] = True
+        self._refresh_exposure_state()
+
     # -- the per-row exposure description (reads_exposure_rows) ---------
     def _read_data_with_exposure(self, i, roles, detrend=False, **kw):
         """``_read_data`` plus file ``i``'s per-row exposure columns
@@ -2554,7 +2878,14 @@ class Instrument(TimeSystem, Component):
         return df, moments, disk_rows
 
     def exposure_node_table(
-        self, i, t, moments, disk_rows, observer_time=None, ninterp=None
+        self,
+        i,
+        t,
+        moments,
+        disk_rows,
+        observer_time=None,
+        ninterp=None,
+        quiet=False,
     ):
         """File ``i``'s sub-exposure quadrature as a RAGGED node table,
         ``(row, t_node, w)``: one entry per node -- the file-local row
@@ -2581,11 +2912,17 @@ class Instrument(TimeSystem, Component):
         to be used, and three Gauss nodes converge a smooth hour-long
         exposure.  ``ninterp`` (optional) replaces the node count for this
         call only, as for ``smear``.  ``observer_time`` is ``_read_data``'s,
-        so the meter's times convert exactly as the data's did.
+        so the meter's times convert exactly as the data's did.  ``quiet``
+        drops the two data warnings (bare rows, a meter's mean-time offset)
+        on a REBUILD of a table load already warned about.
         """
         where = f"[{self.prefix}.{self.names[i]}]"
         t = np.asarray(t, dtype=float)
-        stated = ninterp is not None or self.ninterp_stated[i]
+        stated = (
+            ninterp is not None
+            or self.ninterp_stated[i]
+            or self._ninterp_chosen[i]
+        )
         n = int(ninterp if ninterp is not None else self.ninterp[i])
         n_rows = n if stated else exposure_rules.DEFAULT_ROW_NODES
         N = t.size
@@ -2632,7 +2969,7 @@ class Instrument(TimeSystem, Component):
             rows.append(np.full(t_k.size, j, dtype=int))
             ts.append(t_k)
             ws.append(w_k)
-        if bare:
+        if bare and not quiet:
             logger.warning(
                 "%s exposure_meter: no bins for data rows %s and no "
                 "exposure columns: those exposures are modeled at their "
@@ -2640,7 +2977,7 @@ class Instrument(TimeSystem, Component):
                 where,
                 bare,
             )
-        if worst * exposure_rules.SECONDS_PER_DAY > 1.0:
+        if worst * exposure_rules.SECONDS_PER_DAY > 1.0 and not quiet:
             logger.warning(
                 "%s exposure_meter: an exposure's photon-weighted mean time "
                 "differs from its time-column tag by up to %.1f s; the model "

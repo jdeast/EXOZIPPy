@@ -171,3 +171,103 @@ def partition(exptime_days, ninterp, rule):
             offsets = frac[None, :] * exptime_days[rows][:, None]
             groups.append((rows, offsets, weights))
     return groups
+
+
+# ---------------------------------------------------------------------------
+# The automatic node count (review 8.5.11; instrument.md, "Choosing ninterp")
+# ---------------------------------------------------------------------------
+
+#: The per-file smearing tolerance: the aggregate chi2 the node-count error
+#: may cost, ``sum_i (delta_i / sigma_i)^2`` over the file's rows, with
+#: ``delta_i`` row i's smearing error and ``sigma_i`` its error bar at the
+#: point checked (err_scale / jitter included).  Aggregate, not per point:
+#: the bias is coherent (every in-transit point is biased the same way), so
+#: 1000 points at 0.1 sigma each cost Delta chi2 ~ 10 (JDE ruling
+#: 2026-11-05).
+AUTO_DCHI2 = 0.1
+
+#: The largest node count the automatic choice will pick.  The cost of a
+#: smeared file's model is linear in n; a file still above ``AUTO_DCHI2``
+#: here is given the cap and WARNED about, naming it.
+AUTO_NINTERP_CAP = 32
+
+#: The reference an n-node average is compared with: the same rule on
+#: ``REFERENCE_FACTOR * n`` nodes.  For the midpoint rule's ``n^-2`` error
+#: the difference recovers 15/16 of the n-node error; for a Gauss rule all
+#: of it.  Relative to n rather than one fixed fine grid, so a file that
+#: needs one node costs one plus four evaluations per row, not hundreds.
+REFERENCE_FACTOR = 4
+
+#: A user ``ninterp`` is called too FINE (a warning, never a change) only
+#: when it is at least this many times the smallest n that meets
+#: ``AUTO_DCHI2``: the cost is ~linear in n, and a 1.1x saving is noise.
+FINE_WARN_FACTOR = 2
+
+
+def smallest_ninterp(evaluate, lo, hi=None, cap=AUTO_NINTERP_CAP):
+    """The smallest node count meeting the tolerance, per file.
+
+    ``evaluate({file: n})`` -> ``{file: dchi2}`` evaluates every file of
+    one trial at once (one compiled model evaluation per call, so the
+    files' searches are batched).  ``lo[file]`` is a count known to FAIL
+    (0 when none is), ``hi[file]`` one known to pass (absent when none
+    is).  The search doubles from ``lo`` until a count passes (or ``cap``
+    fails), then bisects, so on return the chosen n passed and n - 1 (when
+    >= 1) was evaluated and failed.
+
+    Returns ``{file: (n, dchi2_at_n, capped)}``; ``capped`` is True when
+    even ``cap`` fails (n is then ``cap``).  A non-finite Delta chi2 counts
+    as a failure.
+    """
+    lo = {f: int(v) for f, v in lo.items()}
+    hi = {f: int(v) for f, v in (hi or {}).items() if f in lo}
+    seen = {f: {} for f in lo}
+
+    def run(trial):
+        got = evaluate(dict(trial))
+        for f, n in trial.items():
+            seen[f][n] = float(got[f])
+
+    def passes(f, n):
+        return np.isfinite(seen[f][n]) and seen[f][n] < AUTO_DCHI2
+
+    capped = set()
+    # Doubling to bracket.
+    while True:
+        trial = {}
+        for f in lo:
+            if f in hi or f in capped:
+                continue
+            if lo[f] >= cap:
+                capped.add(f)
+                continue
+            trial[f] = min(cap, max(1, 2 * lo[f]))
+        if not trial:
+            break
+        run(trial)
+        for f, n in trial.items():
+            if passes(f, n):
+                hi[f] = n
+            else:
+                lo[f] = n
+    # Bisection inside each bracket.
+    while True:
+        trial = {f: (lo[f] + hi[f]) // 2 for f in hi if hi[f] - lo[f] > 1}
+        if not trial:
+            break
+        run(trial)
+        for f, n in trial.items():
+            if passes(f, n):
+                hi[f] = n
+            else:
+                lo[f] = n
+    out = {}
+    for f in lo:
+        if f in hi:
+            n = hi[f]
+            if n not in seen[f]:
+                run({f: n})
+            out[f] = (n, seen[f][n], False)
+        else:
+            out[f] = (cap, seen[f].get(cap, np.nan), True)
+    return out

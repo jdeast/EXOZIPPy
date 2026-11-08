@@ -347,13 +347,18 @@ review 4.5.4 folded #565's machinery into it, #588; the rules are in `components
    `ninterp`-node Gauss-Legendre. (Its `t_rms` is `exptime / sqrt(12)`; the column adds
    the shape.)
 4. **The file's `exptime_s:` key** (s): the same Gauss-Legendre rule for every exposure,
-   with the file's `ninterp` (default 1 for the per-file key, as for every component:
-   `components/instrument.md`, "Exposure smearing").
+   with the file's `ninterp` (chosen when unstated, as for every component:
+   `components/instrument.md`, "Choosing ninterp").
 5. **Nothing**: one node at the tag, the model at the midpoint, wrong by the Tronsgaard
    term above. That is what corrected-RV practice does, and the reason
    `docs/raw_redshift_data.md` asks a release for the meter record.
 
-**`ninterp:`** (default 3 for a per-row description, `exposure.DEFAULT_ROW_NODES`) is read by rules 1, 3 and 4.
+**`ninterp:`** is read by rules 1, 3 and 4. Unstated, it is CHOSEN per file at the build
+start -- the smallest count whose smearing error is below Delta chi2 = 0.1 against the
+file's error bars -- and may be raised after the seed polish (`components/instrument.md`,
+"Choosing ninterp"; #PRNUM). The load-time SEEDS (the start-star correction) read a
+per-row description with 3 nodes (`exposure.DEFAULT_ROW_NODES`) before that choice. Rule
+2's moment rule is always 2 nodes.
 Gaussian rules converge far faster than the transit component's midpoint grid, which is
 built for light curves with kinks at contact; the redshift is smooth. Against a
 4001-point Simpson reference, a 60-min exposure 5 h from the meridian is off by 1.2 m/s
