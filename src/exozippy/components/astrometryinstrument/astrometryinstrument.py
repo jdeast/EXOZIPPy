@@ -2310,6 +2310,17 @@ class AstrometryInstrument(Instrument):
                         )
                 self._background[i] = k
 
+    def sed_flux_bands(self, system):
+        """Every dataset's ``band:`` (``Component.sed_flux_bands``).
+
+        Conservative, as ``SED.photometric_readers`` is for astrometry: the
+        SED fluxfrac of a gaia/abs photocenter, the psf_stars split and a
+        rel dataset's nested-orbit weighting all read the SED in the
+        dataset's band, and which of them applies is settled only at
+        stage 3.  A band named here needs a BC column (synthesized if the
+        published tables lack it); none is ever silently dropped."""
+        return {c["band"] for c in self.config if c.get("band") is not None}
+
     def has_split(self, i):
         """Does dataset ``i`` weigh its PSF member by member (psf_stars
         and/or a background) instead of the one fixed blend?"""

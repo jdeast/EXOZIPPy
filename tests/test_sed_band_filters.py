@@ -10,9 +10,12 @@ for a missing column inside a facility that does exist. The band filter
 was the one case that silently lost its constraint instead.
 
 Since 2026-09-28 `build_bc_grid` no longer generates anything: it REFUSES
-a filter the shipped tables do not cover, naming the request path.  The
-band filter is still passed through, so it is refused loudly like a .sed
-filter rather than dropped quietly -- which is what these tests check.
+a filter no table covers, naming the request path.  A band filter whose SED
+flux a component READS (`Component.sed_flux_bands`) is still passed through
+-- synthesized first where that applies (tests/test_bc_synthesis.py), and
+refused loudly otherwise -- rather than dropped quietly, which is what these
+tests check.  One nothing reads, with no column, is left out
+(tests/test_bc_synthesis.py).
 """
 
 import logging
@@ -25,6 +28,11 @@ class _StubConfigManager:
         self.system_config = {"band": bands}
 
 
+# Every band is READ by some component: the case where dropping the band
+# would lose a constraint.
+_READ = {str(i): ["mulensinstrument"] for i in range(4)}
+
+
 def _sed_stub(bands, tmp_path):
     """An SED with only what _collect_band_filters reads populated."""
     sed = object.__new__(SED)
@@ -32,7 +40,8 @@ def _sed_stub(bands, tmp_path):
     sed.filters = []
     sed.sedmodel = "NextGen"
     # An empty model root: every facility is "missing", which is the
-    # situation under test.
+    # situation under test -- and an explicit model_root, so no column is
+    # synthesized: the read filter goes on to the grid build's refusal.
     sed.model_root = tmp_path
     return sed
 
@@ -40,6 +49,7 @@ def _sed_stub(bands, tmp_path):
 def test_a_band_filter_with_no_tables_is_passed_on_to_the_grid_build(tmp_path):
     """
     Given a band naming a real SVO filter whose facility has no BC tables,
+      and whose SED flux a component reads,
     When the band filters are collected,
     Then it is returned, so build_bc_grid sees it (and refuses it loudly).
 
@@ -50,7 +60,7 @@ def test_a_band_filter_with_no_tables_is_passed_on_to_the_grid_build(tmp_path):
     sed = _sed_stub([{"filter": "2MASS/2MASS.J"}], tmp_path)
 
     # ACT
-    extra = sed._collect_band_filters()
+    extra = sed._collect_band_filters(_READ)
 
     # ASSERT
     assert extra == ["2MASS/2MASS.J"]
@@ -67,7 +77,7 @@ def test_a_filter_resolved_through_the_alias_table_counts_too(tmp_path):
     sed = _sed_stub([{"filter": "2MASS.J"}], tmp_path)
 
     # ACT
-    extra = sed._collect_band_filters()
+    extra = sed._collect_band_filters(_READ)
 
     # ASSERT
     assert extra == ["2MASS.J"]
@@ -86,7 +96,7 @@ def test_a_label_with_no_svo_identity_is_still_skipped(tmp_path, caplog):
 
     # ACT
     with caplog.at_level(logging.WARNING):
-        extra = sed._collect_band_filters()
+        extra = sed._collect_band_filters(_READ)
 
     # ASSERT
     assert extra == []
@@ -104,7 +114,7 @@ def test_a_filter_already_in_the_sed_file_is_not_added_twice(tmp_path):
     sed.filters = ["2MASS/2MASS.J"]
 
     # ACT
-    extra = sed._collect_band_filters()
+    extra = sed._collect_band_filters(_READ)
 
     # ASSERT
     assert extra == []
@@ -120,7 +130,7 @@ def test_a_band_with_no_filter_key_is_ignored(tmp_path):
     sed = _sed_stub([{"name": "unnamed"}], tmp_path)
 
     # ACT
-    extra = sed._collect_band_filters()
+    extra = sed._collect_band_filters(_READ)
 
     # ASSERT
     assert extra == []

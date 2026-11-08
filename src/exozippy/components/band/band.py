@@ -12,6 +12,7 @@ from exozippy.components.band.claret import (
     interpolate,
     interpolate_node,
     kipping_from_quadratic,
+    nearest_claret_band,
 )
 from exozippy.components.component import Component
 from exozippy.components.parameterization import (
@@ -182,6 +183,23 @@ class Band(Component):
                 ),
             },
             {
+                "key": "claret_filter",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Read the Claret table of THIS filter for the limb-"
+                    "darkening tie, as an approximation, when the band's "
+                    "own filter has none (a Roman, Gaia or MOA-Red band): "
+                    "any filter label with a Claret table, or a table's own "
+                    "name ('I', 'J', 'Sloanz', ...). The band's filter: "
+                    "stays its true bandpass for everything else (the SED, "
+                    "the zeropoint tie). The fit warns, and the modeling "
+                    "draft says, that the band's limb darkening was "
+                    "approximated. Only with ld_source: claret."
+                ),
+            },
+            {
                 "key": "star_constrains_ld",
                 "kind": "option",
                 "accepts": None,
@@ -193,10 +211,13 @@ class Band(Component):
                     "(band.du1/du2 sigma) on each coefficient's offset from "
                     "the table, once per band. ON BY DEFAULT, as in "
                     "EXOFASTv2; false turns it off (EXOFASTv2's /NOCLARET). "
-                    "Left unset, a band the tie cannot apply to (a filter "
-                    "with no Claret table, a light curve over several hosts "
-                    "with no star_ndx) is skipped with a warning; an "
-                    "explicit true raises instead. With it on, the star is "
+                    "A band whose limb darkening something reads but whose "
+                    "filter has no table RAISES, even left unset, naming "
+                    "the remedies: ld_source: phoenix, claret_filter: (the "
+                    "nearest Claret band, as an approximation), or false. "
+                    "Left unset, a light curve over several hosts with no "
+                    "star_ndx is skipped with a warning; an explicit true "
+                    "raises instead. With it on, the star is "
                     "held inside the tables' range (Teff 3500-10000 K, logg "
                     "2.0-5.0, [Fe/H] -2.0 to +1.0), and a star that STARTS "
                     "outside it raises: set false on its bands. The star "
@@ -245,6 +266,23 @@ class Band(Component):
                     "Default False, which pins ellipsoidal at 0."
                 ),
             },
+            {
+                "key": "mag_system",
+                "kind": "option",
+                "accepts": ["Vega", "AB"],
+                "required": False,
+                "doc": (
+                    "The filter's NATIVE magnitude system, case-sensitive. "
+                    "Needed only when the published NextGen BC tables have "
+                    "no column for this filter and a component reads the "
+                    "band's SED flux (a stated microlensing zeropoint, a "
+                    "transit seddeblend, an astrometric flux fraction): the "
+                    "column is then synthesized from the full-resolution "
+                    "spectra, and its m_AB - m_Vega record needs the system. "
+                    "Raises if missing there, never guessed. Elsewhere it "
+                    "must match the system recorded for the column."
+                ),
+            },
         ]
 
     def load_data(self, system):
@@ -269,6 +307,7 @@ class Band(Component):
         ]
         self.ld_laws = self._parse_ld_laws()
         self.ld_sources = self._parse_ld_sources()
+        self.claret_filters = self._parse_claret_filters()
         self.fitthermal = [
             bool(c.get("fitthermal", False)) for c in self.config
         ]
@@ -383,6 +422,53 @@ class Band(Component):
             sources.append(norm)
         return sources
 
+    def _parse_claret_filters(self):
+        """Per-band ``claret_filter:`` (None when unset): the filter whose
+        Claret table the tie reads in place of the band's own.  It names a
+        Claret table, so it means nothing to the PHOENIX tables, which are
+        built through the band's own profile: with ``ld_source: phoenix`` it
+        raises rather than being ignored."""
+        out = []
+        for i, c in enumerate(self.config):
+            label = c.get("claret_filter")
+            if label is not None:
+                if not isinstance(label, str):
+                    raise ValueError(
+                        f"{self.prefix}.{self.names[i]}.claret_filter: "
+                        f"expected a filter label, got {label!r}"
+                    )
+                if self.ld_sources[i] != "claret":
+                    raise ValueError(
+                        f"{self.prefix}.{self.names[i]}: claret_filter: "
+                        f"{label!r} names a Claret table, but this band's "
+                        f"ld_source is {self.ld_sources[i]!r}, whose tables "
+                        f"are built through the band's own filter. Drop one."
+                    )
+            out.append(label)
+        return out
+
+    def _no_table_remedies(self, i):
+        """The ways out for band ``i``, whose filter has no limb-darkening
+        table under its ``ld_source``: the other table source, the nearest
+        Claret table as a stated approximation, or no tie."""
+        law = self.ld_laws[i]
+        if self.ld_sources[i] == "phoenix":
+            return (
+                "set ld_source: claret (with claret_filter: to approximate "
+                "the band by a Claret table if its own filter has none), or "
+                "star_constrains_ld: false to fit the limb darkening from "
+                "the data alone"
+            )
+        nearest = nearest_claret_band(self.filter_names[i], TABLE_BANDS[law])
+        return (
+            "set ld_source: phoenix (EXOZIPPy's PHOENIX tables, built "
+            "through the filter's own profile: every filter the BC tables "
+            "carry between 500 and 26000 A, the Roman WFI set among them); "
+            "or claret_filter: <a Claret band> to read that band's table as "
+            f"an approximation ({nearest}); or star_constrains_ld: false to "
+            "fit the limb darkening from the data alone"
+        )
+
     def _parse_star_constrains_ld(self):
         """Per-band ``star_constrains_ld``: True, False, or None when unset.
 
@@ -458,12 +544,21 @@ class Band(Component):
                 )
             else:
                 law = self.ld_laws[i]
+                approx = self.claret_filters[i]
                 if self.ld_sources[i] == "phoenix":
                     name, reason = ldgrid.ld_table_lookup(
                         self.filter_names[i], law
                     )
                 else:
-                    name, reason = claret_band_lookup(self.filter_names[i])
+                    name, reason = claret_band_lookup(
+                        self.filter_names[i] if approx is None else approx
+                    )
+                    if reason is not None and approx is not None:
+                        # The user named the table: it must exist.
+                        raise ValueError(
+                            f"{self.prefix}.{self.names[i]}.claret_filter: "
+                            f"{reason}"
+                        )
                     if name is not None and name not in TABLE_BANDS[law]:
                         reason = (
                             f"there is no {law} Claret table for {name} "
@@ -475,6 +570,16 @@ class Band(Component):
                 if reason is None:
                     tied.append((i, name))
                     continue
+                # Something reads this band's limb darkening and no table
+                # describes its filter.  Never a quiet skip, set or unset
+                # (JDE 2026-11-06): how to treat that band is a modeling
+                # choice, and the error names the three.
+                raise ValueError(
+                    f"{self.prefix}.{self.names[i]}: the limb-darkening tie "
+                    f"(star_constrains_ld, on by default) cannot read a "
+                    f"table for this band: {reason}.  To proceed, "
+                    f"{self._no_table_remedies(i)}."
+                )
             if explicit:
                 raise ValueError(
                     f"{where}: {reason}.  Set star_constrains_ld: false on "
@@ -825,6 +930,15 @@ class Band(Component):
         self._claret_tied = tied
         if not tied:
             return
+        for i, name in plan:
+            if self.claret_filters[i] is not None:
+                logger.warning(
+                    f"[{self.prefix}] {self.names[i]}: limb darkening tied "
+                    f"to Claret's {name} table as an APPROXIMATION for "
+                    f"filter {self.filter_names[i]!r} (claret_filter: "
+                    f"{self.claret_filters[i]!r}); the modeling draft says "
+                    f"so."
+                )
         for i, name in plan:
             if self.ld_sources[i] == "phoenix":
                 self._claret_tables[i] = ldgrid.load_ld_table(
@@ -1236,6 +1350,24 @@ class Band(Component):
                 key=f"{self.prefix}.claret_tie",
                 rank=30,
             )
+            approx = [i for i in claret if self.claret_filters[i] is not None]
+            if approx:
+                parts = join_names(
+                    [
+                        rf"the {latex_escape(self._claret_tables[i].band)} "
+                        rf"table for the {latex_escape(self.names[i])} band "
+                        rf"({latex_escape(self.filter_names[i])})"
+                        for i in approx
+                    ]
+                )
+                get_collector(system).add(
+                    rf"No such table exists for every filter, so {parts} "
+                    rf"stood in as an approximation: the nearest tabulated "
+                    rf"band, not the band observed.",
+                    section="priors",
+                    key=f"{self.prefix}.claret_tie_approx",
+                    rank=31,
+                )
         if phoenix:
             names = join_names([latex_escape(self.names[i]) for i in phoenix])
             av_clause = (

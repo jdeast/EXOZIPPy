@@ -99,7 +99,7 @@ def _stage1_readings(system, model):
     ds = system.astrometryinstrument.datasets[0]
     return {
         "line_of_sight": np.asarray(mi._source_radec_rad),
-        "earth_vperp": np.asarray(system.mulensevent._earth_vperp_en(system)),
+        "earth_vperp": np.asarray(system.mulensevent._earth_vperp_en()),
         "lc_time": np.asarray(mi.time, dtype=float),
         "astro_tangent": np.array([ds["ra_ref"], ds["dec_ref"]]),
         "astro_dE": np.asarray(ds["dE_obs"]),

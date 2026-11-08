@@ -1087,7 +1087,7 @@ def _stub_system(star_names=("A",)):
     from types import SimpleNamespace
 
     star = SimpleNamespace(names=list(star_names), n_elements=len(star_names))
-    return SimpleNamespace(star=star)
+    return SimpleNamespace(star=star, active_components={})
 
 
 @pytest.mark.slow

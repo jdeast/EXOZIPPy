@@ -1643,7 +1643,12 @@ class Engine:
         moving the lens distance at MULENS_LENS_DISTANCE.)"""
         A = self.anchors
         before = (dict(fixed), plan, list(bad), dict(self.moved))
-        bad_keys = {c.key for c in bad}
+        # A failed settle proves nothing short of a bound: see
+        # _release_unbounded.  Undone with the escalation.
+        fixed, plan, bad = self._release_unbounded(
+            fixed, plan, bad, tier_new.get(tier, ()), excluded
+        )
+        bad_keys = {c.key for c in before[2]}
         steps = []
         for up in sorted(
             t for t in tier_new if tier < t < self.ladder["USER"]
@@ -1651,18 +1656,34 @@ class Engine:
             if not bad:
                 break
             syms = sorted({s for c in bad for s in c.symbols})
-            movable = [
+            upstream = [
                 p
                 for p in self._upstream(plan, syms, ("seed",), fixed)
                 if A[p].tier == up and p in tier_new[up]
             ]
-            if not movable:
+            if not upstream:
                 continue
+            # The escalated tier settles with ALL of its own seeds free,
+            # not only those upstream of the violated checks: keeping a
+            # satisfied check satisfied may need one of its other seeds.
+            # Two sources with a rho each share one theta_E; moving it
+            # through source A's radius must be matched by source B's
+            # RADIUS, and with only B's distance free (the one seed of B
+            # upstream of the violated check) the escalation moved B to
+            # 5.2 kpc instead (OGLE-2016-BLG-1003).  The settle still moves
+            # only what some check reaches, by the minimum norm.
+            movable = list(tier_new[up])
             name = (
                 f"{self._tier_name(up)} (escalated from "
                 f"{self._tier_name(tier)})"
             )
+            start = {p: fixed[p] for p in movable}
+            moved_before = dict(self.moved)
             fixed, plan, bad = self._settle(fixed, movable, excluded, name)
+            if bad:
+                fixed, plan, bad = self._release_unbounded(
+                    fixed, plan, bad, movable, excluded, start, moved_before
+                )
             steps.append([self._tier_name(up), movable])
         new_keys = {c.key for c in bad}
         if not steps or not (new_keys < bad_keys):
@@ -1680,6 +1701,45 @@ class Engine:
                 " then ".join(f"{t} {m}" for t, m in steps),
             )
         return fixed, plan, bad
+
+    def _release_unbounded(
+        self, fixed, plan, bad, seeds, excluded, start=None, moved_before=None
+    ):
+        """Return the `seeds` a failed settle left short of every bound,
+        upstream of a check still violated, to where that settle started
+        (`start`, else their anchors), and their `moved` entries to
+        `moved_before` (else none).  Returns (fixed, plan, bad).
+
+        ONLY A BOUND PROVES A TIER CANNOT ABSORB.  Such a seed did not
+        stop because it ran out of room but because the settle failed --
+        an infeasible or ill-posed problem ends wherever the violation was
+        least, which is not a place -- and holding it there makes the
+        tiers above solve around an arbitrary point.  OGLE-2016-BLG-1003
+        under the source-first order held the host at 112 Msun (logmass
+        2.05, bound 2.5) and escalated the rest into the source distances;
+        KMT-2018-BLG-0087 held an escalated lens proper motion at 1.4e4
+        mas/yr.  A seed on a bound, or one only satisfied checks reach,
+        is held as the settle left it.  The caller's undo restores both."""
+        A = self.anchors
+        syms = sorted({s for c in bad for s in c.symbols})
+        upstream = set(self._upstream(plan, syms, ("seed",), fixed))
+        reset = False
+        for p in seeds:
+            if p not in upstream:
+                continue
+            back = A[p].value if start is None else start[p]
+            lo, hi = self._bounds(p)
+            if fixed[p] != back and lo < fixed[p] < hi:
+                fixed[p] = back
+                if moved_before is not None and p in moved_before:
+                    self.moved[p] = moved_before[p]
+                else:
+                    self.moved.pop(p, None)
+                reset = True
+        if not reset:
+            return fixed, plan, bad
+        plan = self.closure(fixed, excluded)
+        return fixed, plan, self.violated(plan, excluded)
 
     def _drop(self, p, a, ups, label, rep):
         rep["dropped"].append([p, a.value, ups, label])

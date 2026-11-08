@@ -12,7 +12,6 @@ from scipy.optimize import nnls
 
 from exozippy.compat import patch_mulensmodel_method_order
 from exozippy.components.instrument import Instrument
-from exozippy.components.star.position import probe_star_radec
 from exozippy.config import PRECEDENCE_DERIVED_DATA, user_entry
 from exozippy.ephemeris import observer_position_at_reception
 from exozippy.outputs.prose import get_collector
@@ -593,26 +592,24 @@ class MulensInstrument(Instrument):
         # stage is the user's config key order, so they may not exist yet).
         self._n_sources = int(system.source.n_elements)
 
-        # Source RA/Dec (radians), stashed for MulensEvent._earth_vperp_en:
-        # the mu_helio -> mu_geo conversion must project Earth's velocity
-        # with the same (ra, dec) the Skowron deltas are projected with.
+        # Source RA/Dec (radians), stashed for the observer positions and
+        # handed to MulensEvent.set_line_of_sight below: the mu_helio ->
+        # mu_geo conversion (MulensEvent._earth_vperp_en) must project
+        # Earth's velocity with the same (ra, dec) the Skowron deltas are
+        # projected with.
         self._source_radec_rad = self._resolve_source_radec_rad(system)
         ra_rad, dec_rad = self._source_radec_rad
 
-        # A PROVISIONAL geocentric frame, at MulensEvent's preliminary
-        # t0_par, so the relaxation engine's geocentric t_E / pi_E relations
-        # (review 8.6.23) are usable by the stage-1 probes that run before
-        # t0_par is final -- the peak finder's question of which of
-        # t_0/u_0/t_E is already informed.  Re-anchored below once t0_par
-        # is final, before the bootstrap's own probe.
+        # The PROVISIONAL geocentric frame -- MulensEvent's preliminary
+        # t0_par, this same line of sight -- was anchored and handed to the
+        # relaxation engine when MulensEvent was CONSTRUCTED
+        # (MulensEvent._register_provisional_frame), so the stage-1 probes
+        # that run before t0_par is final (the peak finder's question of
+        # which of t_0/u_0/t_E is already informed, and any component's
+        # probe that stage 1 runs before this one) see the geocentric t_E /
+        # pi_E relations (review 8.6.23).  Re-anchored below once t0_par is
+        # final, before the bootstrap's own probe.
         self._event = system.mulensevent
-        # The frame's Earth is placed at the instant it received each
-        # epoch's light, which needs the line of sight (review 1.10.13).
-        self._event.set_line_of_sight(ra_rad, dec_rad)
-        _, self._earth_pos_ref, self._earth_vel_ref = (
-            self._event.geocentric_frame()
-        )
-        self._event.register_frame_constants(system)
 
         # Pass 1: read every file.  The raw times must exist before the
         # Skowron reference frame is anchored below (t0_par can fall back to
@@ -753,15 +750,10 @@ class MulensInstrument(Instrument):
         system.mulensevent.t0_par[0] = self._t0_par
         # The frame anchors are the EVENT's (MulensEvent.geocentric_frame):
         # an astrometric dataset of a lensed source builds deviations in the
-        # same frame (conventions.md C30), so there is one owner.  Kept as
-        # attributes here because MulensEvent._earth_vperp_en reads
-        # _earth_vel_ref off this instrument for the mu_helio -> mu_geo
-        # conversion.
+        # same frame (conventions.md C30), so there is one owner, read at
+        # the final t0_par from here on.
         self._event = system.mulensevent
         self._event.set_line_of_sight(ra_rad, dec_rad)
-        _, self._earth_pos_ref, self._earth_vel_ref = (
-            self._event.geocentric_frame()
-        )
         # ... and handed to the relaxation engine BEFORE the probe below:
         # its t_E and pi_E relations are geocentric (review 8.6.23).
         self._event.register_frame_constants(system)
@@ -1047,7 +1039,13 @@ class MulensInstrument(Instrument):
         1.1.10).  A STATED position (a number, or a link to numbers)
         replaces the old ``in user_params`` test, so a link counts as set
         and an unset position raises instead of reaching the placeholder.
+        The reading itself is MulensEvent.stated_line_of_sight (the event
+        anchors its provisional frame with it at construction); this adds
+        the errors for a position that is not stated.
         """
+        radec = system.mulensevent.stated_line_of_sight()
+        if radec is not None:
+            return radec
         # bodies, not star_map: called from load_data (stage 1), before the
         # source component's build_maps has necessarily run.
         source_ndx = int(system.source.bodies[0][1])
@@ -1057,10 +1055,6 @@ class MulensInstrument(Instrument):
         # enforced here rather than silently borrowing a star COMPANION's
         # coordinates.
         p_type, p_ndx = system.lens.bodies[0]
-        wanted = [source_ndx] + ([int(p_ndx)] if p_type == "star" else [])
-        pos = probe_star_radec(self.config_manager, wanted)
-        if pos[source_ndx] is not None:
-            return pos[source_ndx]
         if p_type != "star":
             raise ValueError(
                 f"[{self.prefix}] the source star has no ra/dec, and the "
@@ -1068,16 +1062,14 @@ class MulensInstrument(Instrument):
                 f"which must be a star to lend its coordinates (see "
                 f"MulensEvent._validate_bodies)."
             )
-        if pos[int(p_ndx)] is None:
-            raise ValueError(
-                f"[{self.prefix}] the microlensing line of sight needs the "
-                f"target's sky position, but neither the source "
-                f"(star.{source_ndx}) nor the primary lens "
-                f"(star.{int(p_ndx)}) has ra/dec set (only the "
-                f"defaults.yaml placeholder exists).  Give star.<i>.ra and "
-                f"star.<i>.dec (deg) for one of them in the params file."
-            )
-        return pos[int(p_ndx)]
+        raise ValueError(
+            f"[{self.prefix}] the microlensing line of sight needs the "
+            f"target's sky position, but neither the source "
+            f"(star.{source_ndx}) nor the primary lens "
+            f"(star.{int(p_ndx)}) has ra/dec set (only the "
+            f"defaults.yaml placeholder exists).  Give star.<i>.ra and "
+            f"star.<i>.dec (deg) for one of them in the params file."
+        )
 
     def _probe_bootstrap_geometry(self, system):
         """The flux bootstrap's event geometry, read with ``probe_start``.
@@ -3048,6 +3040,7 @@ class MulensInstrument(Instrument):
         sed = system.sed
         keys = [None] * self.n_elements
         band_map = self._band_indices(system)
+        read = self.sed_flux_bands(system)
         for i, name in enumerate(self.names):
             band_idx = int(band_map[i])
             if band_idx < 0:
@@ -3058,10 +3051,14 @@ class MulensInstrument(Instrument):
                 continue
             filter_key = system.band.filter_mist[band_idx]
             if not sed.has_filter(filter_key):
-                logger.warning(
+                # A band nothing ties has no BC column only because none was
+                # needed (sed.md, "Which band filters need a BC column"): no
+                # constraint is lost, only the reported zeropoint.
+                tied = self.config[i].get("band") in read
+                (logger.warning if tied else logger.info)(
                     f"mulensinstrument {name}: band filter '{filter_key}' "
-                    f"is not in the SED's BC grid; skipping SED flux "
-                    f"constraint."
+                    f"is not in the SED's BC grid; no SED flux constraint "
+                    f"and no zeropoint for this light curve."
                 )
                 continue
             keys[i] = filter_key
@@ -3102,6 +3099,22 @@ class MulensInstrument(Instrument):
             ],
             dtype=bool,
         )
+
+    def sed_flux_bands(self, system):
+        """The bands whose SED-predicted source flux a light curve reads
+        (``Component.sed_flux_bands``): its zeropoint tie, where the user
+        stated both ``mu`` and ``sigma`` (``sed_tie_mask`` without the
+        prediction mask, which needs the grid this answer decides), and its
+        blend tie under ``sed_constrains_blend: true``.  A light curve with
+        neither only REPORTS a zeropoint, which needs no BC column: its band
+        enters the grid only if a column already exists."""
+        stated = self._user_states("mu") & self._user_states("sigma")
+        return {
+            c.get("band")
+            for i, c in enumerate(self.config)
+            if c.get("band") is not None
+            and (stated[i] or c.get("sed_constrains_blend", False))
+        }
 
     def sed_tie_mask(self, system):
         """Per light curve: is f_source TIED to the SED-predicted source

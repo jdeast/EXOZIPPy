@@ -173,8 +173,8 @@ def test_mu_geo_sign_matches_first_principles_trajectory():
 
 def test_earth_vperp_fallback_without_mulens_data():
     """
-    Given a MulensEvent in a system with no mulensinstrument (no t0_par
-      anchor),
+    Given a MulensEvent whose config has no mulensinstrument block (no
+      t0_par anchor),
     When _earth_vperp_en is called,
     Then it returns (0, 0) -- mu_rel_geo degrades to the heliocentric value
       instead of crashing.
@@ -183,7 +183,13 @@ def test_earth_vperp_fallback_without_mulens_data():
 
     from exozippy.components.mulensing.mulensevent import MulensEvent
 
-    mock_self = SimpleNamespace(prefix="mulensevent")
-    mock_system = SimpleNamespace()  # no mulensinstrument attribute
-    v_e, v_n = MulensEvent._earth_vperp_en(mock_self, mock_system)
+    # no mulensinstrument block in the config
+    mock_self = SimpleNamespace(
+        prefix="mulensevent",
+        config_manager=SimpleNamespace(system_config={"mulensevent": [{}]}),
+    )
+    mock_self._has_mulens_data = lambda: MulensEvent._has_mulens_data(
+        mock_self
+    )
+    v_e, v_n = MulensEvent._earth_vperp_en(mock_self)
     assert v_e == 0.0 and v_n == 0.0

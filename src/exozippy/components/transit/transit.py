@@ -121,6 +121,17 @@ class Transit(Instrument):
             )
             self.seddeblend_floor.append(float(floor))
 
+    def sed_flux_bands(self, system):
+        """The bands of the files that ask the SED for their dilution
+        (``seddeblend`` true or a star list; ``Component.sed_flux_bands``).
+        Read from the construction-time ``seddeblend_raw``; whether the
+        request can be honored (an SED, two stars) is judged at stage 3."""
+        return {
+            band
+            for band, raw in zip(self.band_names, self.seddeblend_raw)
+            if band is not None and raw is not False
+        }
+
     @staticmethod
     def sed_reads_dilution(configs, n_stars):
         """Whether any transit config asks the SED for a dilution.

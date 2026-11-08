@@ -20,7 +20,8 @@ from exozippy.config import (
     PRECEDENCE_DERIVED_DATA,
     PRECEDENCE_DERIVED_MIXED,
     PRECEDENCE_DERIVED_USER,
-    PRECEDENCE_MULENS_SOURCE_DISTANCE,
+    PRECEDENCE_MULENS_LENS_PM,
+    PRECEDENCE_MULENS_SOURCE,
     PRECEDENCE_USER,
     ConfigManager,
 )
@@ -38,7 +39,7 @@ def label():
         (None, "default"),
         (PRECEDENCE_DEFAULT, "default"),
         (PRECEDENCE_DEFAULT - 1, "default"),
-        (PRECEDENCE_MULENS_SOURCE_DISTANCE, "data"),
+        (PRECEDENCE_MULENS_SOURCE, "data"),
         (PRECEDENCE_DERIVED_DATA, "data"),
         (PRECEDENCE_DERIVED_MIXED, "solved"),
         (PRECEDENCE_DERIVED_USER, "solved"),
@@ -77,7 +78,7 @@ def test_a_solver_rank_between_the_data_ranks_is_not_called_data(label):
     the mirror image of the bug it replaced.
     """
     assert (
-        PRECEDENCE_MULENS_SOURCE_DISTANCE
+        PRECEDENCE_MULENS_SOURCE
         < PRECEDENCE_DERIVED_MIXED
         < PRECEDENCE_DERIVED_DATA
     )
@@ -91,8 +92,10 @@ def test_the_data_ranks_are_named_constants_not_literals():
     Then it is exactly those -- no bare literal survives in the predicate.
     """
     assert DATA_PRECEDENCES == frozenset(
-        {PRECEDENCE_DERIVED_DATA, PRECEDENCE_MULENS_SOURCE_DISTANCE}
+        {
+            PRECEDENCE_DERIVED_DATA,
+            PRECEDENCE_MULENS_SOURCE,
+            PRECEDENCE_MULENS_LENS_PM,
+        }
     )
-    assert (
-        PRECEDENCE_MULENS_SOURCE_DISTANCE == 30
-    )  # the microlensing distance hint
+    assert PRECEDENCE_MULENS_SOURCE == 30  # the microlensing distance hint

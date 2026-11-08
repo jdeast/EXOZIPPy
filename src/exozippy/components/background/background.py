@@ -501,6 +501,17 @@ class Background(Component):
                 )
             self._tie_filter[e] = fk
 
+    def sed_flux_bands(self, system):
+        """The bands whose light-curve tie reads the SED: every tied
+        (instance, band) element subtracts its psf_stars' predicted flux
+        there (``Component.sed_flux_bands``).  The ties are resolved at
+        construction (``_resolve_light_curve_ties``)."""
+        return {
+            b
+            for (_i, b), e in self._flux_index.items()
+            if self._tie[e] is not None
+        }
+
     def sed_read_stars(self, system):
         """The stars whose SED flux the light-curve tie reads: the primary
         source and every tied instance's psf_stars (empty with no tie).

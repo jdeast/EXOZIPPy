@@ -235,7 +235,18 @@ def shared_config(ev, run):
         ],
         "galacticmodel": [{"name": ev.name, "anchor_idx": 1}],
         "band": (
-            [{"name": b, "filter": f, "ld_law": "linear"} for b, f in BANDS]
+            # No Claret table for either Roman filter: the tie is stated
+            # explicitly (it raises otherwise); false is what these fits
+            # always did, ld_source: phoenix would tie them.
+            [
+                {
+                    "name": b,
+                    "filter": f,
+                    "ld_law": "linear",
+                    "star_constrains_ld": False,
+                }
+                for b, f in BANDS
+            ]
             + [
                 {
                     "name": "Ks_bcgrid",

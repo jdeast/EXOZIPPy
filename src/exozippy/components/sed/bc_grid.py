@@ -28,8 +28,16 @@ The tables are produced by models/NextGen/generate_NextGen_BC_Tables.py
 (full-resolution spectra); models/NextGen/README.md describes the
 workflow.  make_bc.py can synthesize a column from the downsampled Zenodo
 spectra as a MANUAL development step (scripts/make_bc_tables.py); the
-on-the-fly hook that once called it from build_bc_grid is gone
-(_refuse_missing says why).
+on-the-fly hook that once called it from build_bc_grid is gone.
+
+A column the published tables lack can instead be SYNTHESIZED from the
+published full-resolution spectra, by the same step-2 code that made the
+published columns (models/NextGen/bc_synthesis.py, called by the SED for a
+band filter whose flux some component reads).  It lives in a per-user cache
+that mirrors this tree (synthesized_model_root); locate_bc_column finds a
+column in the published table first and in that cache second, and every
+reader here goes through it, so a cached column is read exactly as a
+published one.
 
 Tables grow incrementally. A NaN cell means "not computed yet", so a
 table may be extended along any axis (new Av values, say) for some of
@@ -110,9 +118,18 @@ _FILTERNAMES_ = "filternames.txt"
 # "Generic/Cousins.I".  Spell the filter out ("Bessell.I", "Cousins.I", or
 # any full SVO id) whenever you mean something else; the map is only ever
 # consulted for the bare label.
+#
+# "U", "B" and "V" name two rows each the same way -- Bessell in the Keivan
+# and Claret columns, Johnson in the Claret column, since Claret & Bloemen's
+# U B V are the Johnson-Cousins system and Generic/Johnson.U/B/V read them.
+# A bare U/B/V has always resolved to Bessell (the row typed first); the map
+# makes that a decision rather than file order.
 AMBIGUOUS_FILTER_ALIASES = {
     "I": "Cousins_I",
     "R": "Cousins_R",
+    "U": "Bessell_U",
+    "B": "Bessell_B",
+    "V": "Bessell_V",
 }
 
 
@@ -408,6 +425,72 @@ def read_bc_table(
         columns=None if columns is None else list(columns),
         filters=_pushdown_filters(where),
     )
+
+
+# The per-user cache of synthesized BC columns, under the machine cache root
+# (utilities/zenodo.shared_cache_root); laid out as a model root of its own,
+# {root}/{model}/BCs/{FACILITY}.bc.parquet plus {model}.magsys.csv.
+_SYNTHESIZED_SUBDIR = "bc_synthesized"
+
+
+def synthesized_model_root(model_root: Path | str, model: str) -> Path | None:
+    """The model root holding the columns synthesized for this user, or
+    None where on-the-fly synthesis does not apply.
+
+    It applies only to the NextGen tables in the DEFAULT root: an explicit
+    `model_root:` is the caller's own tree, used as given (the rule
+    ensure_bc_tables follows), and the generator is NextGen's.  And it needs
+    the machine cache (EXOZIPPY_CACHE_DIR / $XDG_CACHE_HOME/exozippy):
+    switched off, there is no per-user place to keep a column -- writing it
+    into the package tree would make the published tables differ from their
+    pins.  A pure path computation; nothing is created.
+    """
+    if model != "NextGen" or Path(model_root) != Path(DEFAULT_MODEL_ROOT):
+        return None
+    from ...utilities import zenodo
+
+    root = zenodo.shared_cache_root()
+    return None if root is None else root / _SYNTHESIZED_SUBDIR
+
+
+def locate_bc_column(
+    model_root: Path | str, model: str, facility: str, column: str
+) -> Path | None:
+    """The table that holds BC `column` of `facility`, or None if none does.
+
+    The published table first; then the per-user cache of synthesized
+    columns (synthesized_model_root), where a column counts only while it
+    is CURRENT -- written by the step-2 generator from the same spectra and
+    covering every node of the grid yaml (bc_synthesis.cached_column_is_
+    current) -- so a stale cached column is re-synthesized rather than read.
+    Raises FileNotFoundError when `model` has no BC tree at all (the error
+    the SED reads as "this model has no tables").
+    """
+    model_dir = Path(model_root) / model / "BCs"
+    if not model_dir.is_dir():
+        raise FileNotFoundError(
+            f"Bolometric corrections not calculated for ``{model}`` model. Specify a different model."
+        )
+    ensure_bc_tables(model_root, model, [facility])
+    shipped = bc_table_path(model_root, model, facility)
+    if shipped.is_file() and column in bc_table_filter_columns(shipped):
+        return shipped
+    synth_root = synthesized_model_root(model_root, model)
+    if synth_root is None:
+        return None
+    cached = bc_table_path(synth_root, model, facility)
+    if not cached.is_file():
+        return None
+    from ...models.NextGen.bc_synthesis import cached_column_is_current
+
+    return cached if cached_column_is_current(cached, column) else None
+
+
+def model_root_of(table: Path | str) -> Path:
+    """The model root a BC table sits in ({root}/{model}/BCs/{file}): the
+    published root or the synthesized-column cache, whose magnitude-system
+    record (sed/magsys.py) describes the table's columns."""
+    return Path(table).parent.parent.parent
 
 
 def find_bc_table(model_root: Path | str, model: str, facility: str) -> Path:
@@ -777,9 +860,11 @@ def peek_grid_axes(
     model_root : Path
         Root directory holding the {model}/BCs/{FACILITY}.bc.parquet tree.
     filters : sequence of str, optional
-        Filter labels (any spelling resolve_filter_name accepts). Filters
-        whose table or column does not exist yet are ignored (they will be
-        generated on the grid yaml's axes). When none of them exists yet,
+        Filter labels (any spelling resolve_filter_name accepts), read from
+        the published table or the synthesized-column cache
+        (locate_bc_column). Filters whose column exists in neither are
+        ignored (they will be synthesized on the grid yaml's axes, or left
+        out of the fit). When none of them exists yet,
         the grid yaml's axes are returned. When None (or the model has no
         grid yaml), every filter column of every table counts.
 
@@ -814,13 +899,16 @@ def peek_grid_axes(
     if filters:
         _, _, by_facility = _filters_by_facility(filters)
         for fac, items in by_facility.items():
-            path = bc_table_path(model_root, model, fac)
-            if not path.is_file():
-                continue
-            have = set(bc_table_filter_columns(path))
-            cols = list(dict.fromkeys(m for _, m in items if m in have))
-            if cols:
-                wanted[path] = cols
+            for _, mist in items:
+                # The published table or the synthesized-column cache; a
+                # column in neither is ignored (it will be synthesized on the
+                # grid yaml's axes, or the grid build refuses it).
+                path = locate_bc_column(model_root, model, fac, mist)
+                if path is None:
+                    continue
+                cols = wanted.setdefault(path, [])
+                if mist not in cols:
+                    cols.append(mist)
     if filters and not wanted:
         # None of THIS fit's filters has a column yet, so every one of them
         # will be generated on the grid yaml's axes -- those, not whatever
@@ -902,28 +990,33 @@ def _bracket(pts: np.ndarray, lo, hi) -> Tuple[float, float]:
 
 
 def _refuse_missing(facility, svo_names, model, detail):
-    """The message for a filter the shipped tables do not cover.
+    """The message for a filter neither the published tables nor the
+    synthesized-column cache cover.
 
-    On-the-fly synthesis from the R = 150 plotting spectra (make_bc.py,
-    the `generate_missing_facility` hook that used to live here) was
-    DISABLED on 2026-09-28 (JDE): the shipped tables are built from the
-    full-resolution spectra (models/NextGen/generate_NextGen_BC_Tables.py,
-    PR #335), and a column synthesized from the downsampled spectra is
-    ~2 percent wrong -- larger than most surveys' photometric errors -- so
-    letting a fit build one silently would put a misleading table under the
-    SED's error scale and everything that depends on it.  A missing filter
-    is therefore refused, with the request path spelled out.
+    The grid build never synthesizes anything itself.  On-the-fly synthesis
+    from the R = 150 plotting spectra (make_bc.py, the
+    `generate_missing_facility` hook that used to live here) was DISABLED on
+    2026-09-28 (JDE): a column from the downsampled spectra is ~2 percent
+    wrong, larger than most surveys' photometric errors.  What exists since
+    is synthesis from the published FULL-RESOLUTION spectra, by the code
+    that made the published columns (models/NextGen/bc_synthesis.py) -- and
+    the SED runs it, before this build, for a band filter whose flux some
+    component reads.  So reaching this message means the filter is a .sed
+    row's, or synthesis does not apply (an explicit model_root, the machine
+    cache switched off, a model other than NextGen).
     """
     return (
         f"Bolometric corrections for {list(svo_names)} ({model}, facility "
-        f"'{facility}') are not in the shipped tables: {detail} They are "
-        f"NOT generated on the fly -- the shipped tables come from the "
-        f"full-resolution spectra (models/{model}/generate_{model}_BC_Tables."
-        f"py) and a table synthesized from the downsampled plotting spectra "
-        f"would be ~2 percent wrong.  Request the filter (open an issue "
-        f"naming the SVO id) or, with the full-resolution spectra in hand, "
-        f"add it with models/{model}/generate_{model}_BC_Tables.py; "
-        f"otherwise choose a filter the tables cover."
+        f"'{facility}') are not in the published tables: {detail} The grid "
+        f"build does not generate them.  A band: filter whose SED flux a "
+        f"component reads is synthesized before the build from the "
+        f"full-resolution spectra (models/{model}/bc_synthesis.py, into the "
+        f"per-user cache), but only for the {model} tables in the default "
+        f"model root with the machine cache on (EXOZIPPY_CACHE_DIR); a "
+        f"filter listed in the .sed file is not.  Request the filter (open "
+        f"an issue naming the SVO id), add it with "
+        f"models/{model}/generate_{model}_BC_Tables.py, or choose a filter "
+        f"the tables cover."
     )
 
 
@@ -985,36 +1078,15 @@ def build_bc_grid(
         user_filter_names
     )
 
-    # 2. For each facility, read its table, keeping only the requested
-    # columns and rows.  A missing facility or column is an ERROR that
-    # names the fix; nothing is synthesized here (see _refuse_missing).
+    # 2. For each facility, read its columns, keeping only the requested
+    # columns and rows.  A column is read from the published table or, if
+    # it is not there, from the synthesized-column cache (locate_bc_column);
+    # one in neither is an ERROR that names the fix -- nothing is
+    # synthesized here (see _refuse_missing).
     per_facility_frames: Dict[str, pd.DataFrame] = {}
     per_facility_axes: Dict[str, Dict[str, np.ndarray]] = {}
     for fac, items in by_facility.items():
-        fac_svo = [svo_names[idx] for idx, _ in items]
         wanted_cols = [mist for _, mist in items]
-
-        try:
-            path = find_bc_table(model_root, model, fac)
-        except (FileNotFoundError, NotImplementedError) as e:
-            raise NotImplementedError(
-                _refuse_missing(fac, fac_svo, model, str(e))
-            ) from e
-
-        missing = set(wanted_cols) - set(bc_table_filter_columns(path))
-        if missing:
-            miss_svo = [
-                svo_names[idx] for idx, mist in items if mist in missing
-            ]
-            raise NotImplementedError(
-                _refuse_missing(
-                    fac,
-                    miss_svo,
-                    model,
-                    f"{path.name} holds no column for {sorted(missing)}.",
-                )
-            )
-
         # Dedupe: the same MIST column may be requested by more than one
         # .sed row (e.g. two independent V-band measurements, or the same
         # filter used for both a blend row and a differential row).
@@ -1022,19 +1094,59 @@ def build_bc_grid(
         # column, breaking the by-name lookup in step 4 below.
         unique_wanted_cols = list(dict.fromkeys(wanted_cols))
 
-        # Bracket the bounds on this table's own points (a cheap read of
-        # the key columns), then read only those rows of only these columns.
-        where = {}
-        if bounds:
-            keys = _canonical_keys(read_bc_table(path, columns=GRID_KEY_COLS))
-            for axis, (lo, hi) in bounds.items():
-                pts = np.sort(keys[AXIS_COLUMNS[axis]].unique())
-                where[axis] = _bracket(pts, lo, hi)
-        df = _canonical_keys(
-            read_bc_table(
-                path, columns=GRID_KEY_COLS + unique_wanted_cols, where=where
+        sources: Dict[Path, List[str]] = {}
+        missing = []
+        for mist in unique_wanted_cols:
+            try:
+                path = locate_bc_column(model_root, model, fac, mist)
+            except FileNotFoundError as e:
+                fac_svo = [svo_names[idx] for idx, _ in items]
+                raise NotImplementedError(
+                    _refuse_missing(fac, fac_svo, model, str(e))
+                ) from e
+            if path is None:
+                missing.append(mist)
+            else:
+                sources.setdefault(path, []).append(mist)
+        if missing:
+            miss_svo = [
+                svo_names[idx] for idx, mist in items if mist in missing
+            ]
+            shipped = bc_table_path(model_root, model, fac)
+            detail = (
+                f"{shipped.name} holds no column for {sorted(missing)}."
+                if shipped.is_file()
+                else f"facility '{fac}' has no published table."
             )
-        )
+            raise NotImplementedError(
+                _refuse_missing(fac, miss_svo, model, detail)
+            )
+
+        # Bracket the bounds on each table's own points (a cheap read of
+        # the key columns), then read only those rows of only these
+        # columns.  A facility whose columns sit in two tables (published
+        # and synthesized) is joined on the grid keys; complete_axes then
+        # uses only the nodes where every requested column has a value.
+        df = None
+        where = {}
+        for path, cols in sources.items():
+            path_where = {}
+            if bounds:
+                keys = _canonical_keys(
+                    read_bc_table(path, columns=GRID_KEY_COLS)
+                )
+                for axis, (lo, hi) in bounds.items():
+                    pts = np.sort(keys[AXIS_COLUMNS[axis]].unique())
+                    path_where[axis] = _bracket(pts, lo, hi)
+            part = _canonical_keys(
+                read_bc_table(
+                    path, columns=GRID_KEY_COLS + cols, where=path_where
+                )
+            )
+            if df is None:
+                df, where = part, path_where
+            else:
+                df = df.merge(part, how="outer", on=GRID_KEY_COLS)
         box = complete_axes(df, unique_wanted_cols)
         for axis, (lo, hi) in where.items():
             pts = box[f"{axis}_pts"]

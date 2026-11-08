@@ -72,7 +72,7 @@ def _loaded_sed(tmp_path, rows, star_names=("A",)):
     }
     sed = SED(config, cm)
     star = SimpleNamespace(names=list(star_names), n_elements=len(star_names))
-    sed.load_data(SimpleNamespace(star=star))
+    sed.load_data(SimpleNamespace(star=star, active_components={}))
     return sed
 
 
