@@ -347,7 +347,7 @@ review 4.5.4 folded #565's machinery into it, #588; the rules are in `components
    `docs/raw_redshift_data.md` asks a release for the meter record.
 
 A photon-time MOMENT description (`t_rms`/`t_skew3` columns, a 2-node rule) existed from
-#565 and was removed in #PR2; naming either role now raises, pointing at the meter record
+#565 and was removed in #595; naming either role now raises, pointing at the meter record
 or an `exptime_s` column (`docs/raw_redshift_data.md` says why and how to revive it).
 
 **`ninterp:`** is read by rules 1, 2 and 3. Unstated, it is CHOSEN per file at the build

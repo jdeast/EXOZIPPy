@@ -189,7 +189,7 @@ about `dt^2 f' / (12 f)` when the flux changes within it.
 exposure's photon-time RMS and third central moment (`t_rms`, `t_skew3` columns), modeled
 with the 2-node rule that has exactly those moments -- to leading order the exposure
 average depends on the variance of the photon arrival times, then on the third moment
-(Tronsgaard et al. 2019, MNRAS 489, 2395). #PR2 removed it: no pipeline publishes the
+(Tronsgaard et al. 2019, MNRAS 489, 2395). #595 removed it: no pipeline publishes the
 moments, the meter record above is strictly better, and it was the one description that
 could not take more nodes. Naming either column now raises; it can be revived from #565
 if a pipeline ever publishes the moments.
