@@ -160,7 +160,7 @@ RECORDS: Mapping[str, ZenodoRecord] = MappingProxyType(
         # models/NextGen/bc_tables.py (fetched per facility on first use,
         # via components/sed/bc_grid.py).
         "nextgen_bc_tables": ZenodoRecord(
-            record_id=23522276,
+            record_id=24017359,
             concept_record_id=23074950,
             title="Bolometric Correction Grids for EXOZIPPy",
             creators=("Eastman, Jason", "Sandhaus, Phoebe"),
@@ -171,9 +171,13 @@ RECORDS: Mapping[str, ZenodoRecord] = MappingProxyType(
                         4566065,
                         "df84dc4426a1b29e7eceebb55d798c08",
                     ),
+                    "DECam.bc.parquet": (
+                        7629667,
+                        "70125ddd529509a919dbd8e581b581fa",
+                    ),
                     "Euclid.bc.parquet": (
-                        4565957,
-                        "cc8ab258863d077a7b9aec4b57fbf927",
+                        6037422,
+                        "bdb1ae5800983b1e0d5c409fbe626bef",
                     ),
                     "GAIA.bc.parquet": (
                         8975523,
@@ -191,6 +195,10 @@ RECORDS: Mapping[str, ZenodoRecord] = MappingProxyType(
                         26609685,
                         "a652a7f764e5e59666cdc04fc8cfe866",
                     ),
+                    "HST.bc.parquet": (
+                        16706872,
+                        "e3d1aa595ddaed04abd3864f5428d5ac",
+                    ),
                     "Keck.bc.parquet": (
                         7505242,
                         "73ac7988b7b485955190ce43f62151af",
@@ -200,8 +208,12 @@ RECORDS: Mapping[str, ZenodoRecord] = MappingProxyType(
                         "6e506f9f70df6480522cc84842a55773",
                     ),
                     "MANIFEST.txt": (
-                        820,
-                        "17928a49ba335de1754341dae2ab9b74",
+                        1167,
+                        "10c38a1260e0b7c05169e47d62a57ccd",
+                    ),
+                    "MOA.bc.parquet": (
+                        1673715,
+                        "6626f019e4bfea76729c99742d2125bd",
                     ),
                     "PAN-STARRS.bc.parquet": (
                         6035220,
@@ -215,6 +227,10 @@ RECORDS: Mapping[str, ZenodoRecord] = MappingProxyType(
                         7504799,
                         "de6cccbd1aa0d3369d917c1169e6212d",
                     ),
+                    "Spitzer.bc.parquet": (
+                        1673749,
+                        "b8be7a6b8eafc0c032c1e3a76a162d52",
+                    ),
                     "TESS.bc.parquet": (
                         1626938,
                         "a5d1b015f0defe7fd36162cd23834c71",
@@ -222,6 +238,14 @@ RECORDS: Mapping[str, ZenodoRecord] = MappingProxyType(
                     "TYCHO.bc.parquet": (
                         8974993,
                         "5fe4ed31af26dc765d84d5dfef8ed4cd",
+                    ),
+                    "UKIRT.bc.parquet": (
+                        1673729,
+                        "c030d83c8f74dcba384523551b00ddf4",
+                    ),
+                    "VISTA.bc.parquet": (
+                        7631590,
+                        "db43d98f986e61339d60241a3cb8814c",
                     ),
                     "WISE.bc.parquet": (
                         6035458,
@@ -232,7 +256,10 @@ RECORDS: Mapping[str, ZenodoRecord] = MappingProxyType(
             superseded=MappingProxyType(
                 {
                     "2MASS.bc.parquet": ("41ff8f2f6e9a1b88f3f085f128dfcc2a",),
-                    "Euclid.bc.parquet": ("44925baf29ad0d1d4d3cedd4d45abc07",),
+                    "Euclid.bc.parquet": (
+                        "cc8ab258863d077a7b9aec4b57fbf927",
+                        "44925baf29ad0d1d4d3cedd4d45abc07",
+                    ),
                     "GAIA.bc.parquet": ("073dcf7acbd6195478954cc13a9fd742",),
                     "GALEX.bc.parquet": ("e5f774a917144a0c942ea65e2a613b11",),
                     "Gemini.bc.parquet": ("73e689d4edafe76052f29f16e5ee9d52",),
@@ -241,6 +268,7 @@ RECORDS: Mapping[str, ZenodoRecord] = MappingProxyType(
                     ),
                     "Keck.bc.parquet": ("7b0be59aef0304dcc68b03a7831b7b85",),
                     "Kepler.bc.parquet": ("9b21575a77dd737b6f0fa4d43c00b52d",),
+                    "MANIFEST.txt": ("17928a49ba335de1754341dae2ab9b74",),
                     "PAN-STARRS.bc.parquet": (
                         "8f5d5a4c24ad21a93028b52e4414e1ab",
                     ),
