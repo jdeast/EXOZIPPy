@@ -227,9 +227,6 @@ class MulensEvent(Component):
         # anchored: the frame's Earth is placed at the instant it received
         # the light tagged t0_par, which depends on the direction.
         self._line_of_sight_rad = None
-        # The provisional frame constants, before ANY stage-1 code runs
-        # (see _register_provisional_frame).
-        self._register_provisional_frame()
 
         # One magnification method per source; all sources start from the
         # event-level config value, and resolve_auto_vbbl refines each slot.
@@ -370,6 +367,11 @@ class MulensEvent(Component):
                     "lens binary and the source binary are different "
                     "systems."
                 )
+
+        # The provisional frame constants, before ANY stage-1 code runs
+        # (see _register_provisional_frame) -- last, once the event config
+        # has passed every check above.
+        self._register_provisional_frame()
 
     def _resolve_t0_par(self, event_config, config_manager):
         """t0_par from the mulensevent block, the source.0.t_0 seed, or the

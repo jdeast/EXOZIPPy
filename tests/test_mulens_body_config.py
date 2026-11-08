@@ -25,6 +25,10 @@ class _DummyConfigManager:
         self.system_config = system_config or {}
         self.user_params = {}
 
+    def add_constant(self, *args, **kwargs):
+        # MulensEvent supplies its frame constants at construction.
+        pass
+
 
 def _system_config(event=None, lens=None, source=None):
     return {
