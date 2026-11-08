@@ -13,6 +13,7 @@ companion is element 1, because element 0 is the masked primary.
 """
 
 import inspect
+import logging
 import warnings
 
 import numpy as np
@@ -173,7 +174,9 @@ def test_clip_q_value_raises_naming_the_parameter():
     assert "must be a number" in msg
 
 
-def test_binary_op_reports_a_nan_q_by_name_and_still_rejects_the_proposal():
+def test_binary_op_reports_a_nan_q_by_name_and_still_rejects_the_proposal(
+    caplog,
+):
     """
     Given a param vector whose q is NaN,
     When BinaryLensMagOp.perform runs,
@@ -189,14 +192,13 @@ def test_binary_op_reports_a_nan_q_by_name_and_still_rejects_the_proposal():
     obs = np.zeros((len(t), 3))
     out = [[None]]
 
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
+    with caplog.at_level(logging.WARNING, logger="exozippy"):
         BinaryLensMagOp(
             coords=_COORDS, mag_method="auto_vbbl", use_rho=False
         ).perform(None, [p, t, obs], out)
 
     assert np.all(np.isnan(out[0][0]))
-    assert any("lens.1.q" in str(w.message) for w in caught)
+    assert any("lens.1.q" in r.getMessage() for r in caplog.records)
 
 
 def test_vbm_direct_still_short_circuits_a_non_finite_param_vector():

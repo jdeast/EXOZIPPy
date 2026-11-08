@@ -360,7 +360,7 @@ def test_a_high_dimensional_model_is_told_that_t1_widened(caplog):
     # ARRANGE / ACT
     # DEBUG since 2026-11 (docs/logging.md): a changed DEFAULT that moves
     # no posterior is a confirmation, not something to act on.
-    with caplog.at_level(logging.DEBUG):
+    with caplog.at_level(logging.DEBUG, logger="exozippy"):
         disp, _ = resolve_start_dispersion(
             None, LADDER, n_params=2000, log=logging.getLogger("exozippy")
         )

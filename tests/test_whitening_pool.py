@@ -460,7 +460,7 @@ def test_a_polish_call_past_eval_timeout_is_written_off_and_the_seed_stops(
     t0 = time.monotonic()
     # DEBUG: the heartbeat (and its drain line) reaches the console only
     # once per logger.INFO_PROGRESS_S; the file log keeps every beat.
-    with caplog.at_level(logging.DEBUG):
+    with caplog.at_level(logging.DEBUG, logger="exozippy"):
         polished, dlps, method = polish_raw_starts(
             model,
             [{"x": np.array(4.0)}],

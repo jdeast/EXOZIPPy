@@ -488,7 +488,7 @@ def test_stromgren_photometry_requires_real_uncertainties():
         assert guard in src, f"missing precondition: {guard}"
 
 
-def test_schlegel_av_does_not_guess_a_column():
+def test_schlegel_av_does_not_guess_a_column(caplog):
     """
     Given an IRSA dust table with none of the four known E(B-V) columns,
     When schlegel_av reads it,
@@ -517,8 +517,9 @@ def test_schlegel_av_does_not_guess_a_column():
     mkticsed.IrsaDust = _FakeIrsa
     try:
         # ACT
-        with pytest.warns(UserWarning, match="E\\(B-V\\) columns"):
+        with caplog.at_level(logging.WARNING, logger="exozippy"):
             av = mkticsed.schlegel_av(10.0, 20.0)
+        assert "E(B-V) columns" in caplog.text
     finally:
         mkticsed.IrsaDust = orig
 

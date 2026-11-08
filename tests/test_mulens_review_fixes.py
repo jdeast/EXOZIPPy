@@ -2008,7 +2008,7 @@ def test_an_underivable_t_E_skips_rather_than_inventing_30_days(caplog):
 
     # Act
     text = _run_check(_geometry(no_te), caplog)
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.DEBUG, logger="exozippy"):
         f_total, q_source, _q_flux = inst._estimate_flux_components(
             t, flux, xyz, 0.0, 0.0, 0, inst.geometry
         )
