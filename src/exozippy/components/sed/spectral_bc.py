@@ -1,6 +1,6 @@
 """Bolometric corrections computed at runtime from the spectrum.
 
-The SED's fitted-R_V mode (``sed: {fit_rv: true}``; sed.md, "The spectral
+The SED's fitted-R_V mode (``sed: {fit_rv_dust: true}``; sed.md, "The spectral
 mode").  Where the default path interpolates tabulated BCs in (Teff, logg,
 [Fe/H], A_V) at one extinction law, this interpolates the SPECTRUM in
 (Teff, logg, [Fe/H]), reddens it with the star's A_V and R_V, and

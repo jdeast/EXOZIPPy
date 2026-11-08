@@ -393,7 +393,7 @@ class Plot:
         # (sed.md, "The spectral mode"), so the figure must too, or it would
         # draw a spectrum the fit never evaluated.  getattr: the plot classes
         # are also driven from tests with a stubbed system (see model_root).
-        if getattr(self.system.sed, "fit_rv", False):
+        if getattr(self.system.sed, "fit_rv_dust", False):
             from .extinction import ccm89_ab
             from .sed import RV_DUST
 

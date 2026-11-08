@@ -1,4 +1,4 @@
-"""The SED's fitted-R_V mode (``sed: {fit_rv: true}``; sed.md, "The
+"""The SED's fitted-R_V mode (``sed: {fit_rv_dust: true}``; sed.md, "The
 spectral mode").
 
 The BCs come from the spectrum at every evaluation -- the R = 3000 runtime
@@ -21,7 +21,7 @@ import pytensor.tensor as pt
 import pytest
 
 from exozippy.components.sed import extinction
-from exozippy.components.sed.sed import fit_rv_from_config
+from exozippy.components.sed.sed import fit_rv_dust_from_config
 from exozippy.components.sed.spectral_bc import SpectralBC
 from exozippy.models.NextGen import runtime_spectra as rs
 from exozippy.models.NextGen.bolometric_correction import BolometricCorrection
@@ -167,11 +167,11 @@ def test_the_graph_matches_numpy_and_has_a_gradient_in_rv():
 
 
 def test_fit_rv_is_a_yaml_boolean():
-    assert fit_rv_from_config({}) is False
-    assert fit_rv_from_config({"fit_rv": True}) is True
-    assert fit_rv_from_config([{"fit_rv": False}]) is False
+    assert fit_rv_dust_from_config({}) is False
+    assert fit_rv_dust_from_config({"fit_rv_dust": True}) is True
+    assert fit_rv_dust_from_config([{"fit_rv_dust": False}]) is False
     with pytest.raises(ValueError, match="YAML boolean"):
-        fit_rv_from_config({"fit_rv": "yes"})
+        fit_rv_dust_from_config({"fit_rv_dust": "yes"})
 
 
 # ------------------------------------------------------------ the fit
@@ -186,7 +186,9 @@ ROWS = [
 ]
 
 
-def _system(tmp_path, monkeypatch, fit_rv, n_rows=6, stars=("A",), pos=None):
+def _system(
+    tmp_path, monkeypatch, fit_rv_dust, n_rows=6, stars=("A",), pos=None
+):
     monkeypatch.setattr(
         rs, "load_runtime_grid", lambda model_root=None: _bb_grid()
     )
@@ -204,7 +206,10 @@ def _system(tmp_path, monkeypatch, fit_rv, n_rows=6, stars=("A",), pos=None):
     sed.write_text("\n".join(lines) + "\n")
     config = {
         "star": [{"name": s, "mist": False} for s in stars],
-        "sed": {"file": str(sed), **({"fit_rv": True} if fit_rv else {})},
+        "sed": {
+            "file": str(sed),
+            **({"fit_rv_dust": True} if fit_rv_dust else {}),
+        },
     }
     system = System(config, {})
     system.prepare()
@@ -215,18 +220,18 @@ def test_fit_rv_declares_rv_dust_and_table_mode_does_not(
     tmp_path, monkeypatch
 ):
     """
-    Given the same SED with and without fit_rv,
+    Given the same SED with and without fit_rv_dust,
     When the model is built,
-    Then only the fit_rv one samples star.rv_dust, its log-probability and
+    Then only the fit_rv_dust one samples star.rv_dust, its log-probability and
       gradient are finite at the start, and its predicted magnitudes move
       with R_V.
     """
-    table = _system(tmp_path, monkeypatch, fit_rv=False)
+    table = _system(tmp_path, monkeypatch, fit_rv_dust=False)
     assert "rv_dust" not in table.star.manifest
     model = table.build_model()
     assert not any("rv_dust" in v.name for v in model.free_RVs)
 
-    system = _system(tmp_path, monkeypatch, fit_rv=True)
+    system = _system(tmp_path, monkeypatch, fit_rv_dust=True)
     assert "rv_dust" in system.star.manifest
     model = system.build_model()
     assert any("rv_dust" in v.name for v in model.free_RVs)
@@ -242,14 +247,14 @@ def test_rv_dust_is_counted_toward_errscale_and_pinned_on_an_unread_star(
     tmp_path, monkeypatch
 ):
     """
-    Given fit_rv on a two-star system whose rows name only A,
+    Given fit_rv_dust on a two-star system whose rows name only A,
     When the inventory is taken,
     Then rv_dust is one of A's free photometric coordinates (six rows now
       leave errscale free only because 1 + 5 = 6) and B's rv_dust is pinned
       with B's other SED knobs.
     """
     system = _system(
-        tmp_path, monkeypatch, fit_rv=True, stars=("A", "B"), pos="A"
+        tmp_path, monkeypatch, fit_rv_dust=True, stars=("A", "B"), pos="A"
     )
     inv = system.sed.data_free_inventory(system)
     assert "rv_dust" in inv.star_knobs

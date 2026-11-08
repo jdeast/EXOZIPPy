@@ -65,8 +65,8 @@ SED_ROW = "sed photometry"
 RV_DUST = "rv_dust"
 
 
-def fit_rv_from_config(block):
-    """The ``fit_rv`` switch of an ``sed:`` block (a dict, or the one-element
+def fit_rv_dust_from_config(block):
+    """The ``fit_rv_dust`` switch of an ``sed:`` block (a dict, or the one-element
     list the base Component wraps it in).  Absent is False; anything but a
     YAML boolean raises (``bool("false")`` is True)."""
     if isinstance(block, list):
@@ -75,15 +75,15 @@ def fit_rv_from_config(block):
                 f"sed is a singleton block; got a list of {len(block)}."
             )
         block = block[0]
-    value = (block or {}).get("fit_rv", False)
+    value = (block or {}).get("fit_rv_dust", False)
     if not isinstance(value, bool):
         raise ValueError(
-            f"sed.fit_rv must be true or false (a YAML boolean), not {value!r}."
+            f"sed.fit_rv_dust must be true or false (a YAML boolean), not {value!r}."
         )
     return value
 
 
-def sed_fits_rv(system):
+def sed_fits_rv_dust(system):
     """Does this system's SED fit R_V?  For readers that may run before the
     SED instance exists: ``in_topology`` returns the built instance or the
     raw block, and both answer."""
@@ -91,8 +91,8 @@ def sed_fits_rv(system):
     if sed is None:
         return False
     if isinstance(sed, Component):
-        return sed.fit_rv
-    return fit_rv_from_config(sed)
+        return sed.fit_rv_dust
+    return fit_rv_dust_from_config(sed)
 
 
 @dataclass(frozen=True)
@@ -263,7 +263,7 @@ class SED(Component):
     * logg for the BC interpolation is reconstructed from
       (star.mass, star.radiussed) — NOT the star component's
       star.logg (which uses star.radius).
-    * By default R_V is the BC tables' (3.1 for NextGen).  ``fit_rv:
+    * By default R_V is the BC tables' (3.1 for NextGen).  ``fit_rv_dust:
       true`` computes the BCs from the spectra at a fitted per-star R_V
       (``star.rv_dust``; spectral_bc.py, sed.md "The spectral mode").
     """
@@ -308,9 +308,9 @@ class SED(Component):
         # inputs, so the unread-star pin, the errscale dof count, the
         # forward model's lazy node build and the dilution start solver all
         # see it; in table mode the class tuples stand as they are.
-        self.fit_rv = fit_rv_from_config(self.config)
+        self.fit_rv_dust = fit_rv_dust_from_config(self.config)
         self.spectral = None
-        if self.fit_rv:
+        if self.fit_rv_dust:
             self.STAR_KNOBS = SED.STAR_KNOBS + (RV_DUST,)
             self.PHOTOMETRIC_DOF = SED.PHOTOMETRIC_DOF + (RV_DUST,)
             self._STAR_NODE_DEPS = SED._STAR_NODE_DEPS + (RV_DUST,)
@@ -579,7 +579,7 @@ class SED(Component):
                 "doc": "Systematic bolometric-flux error floor. Default 0.024.",
             },
             {
-                "key": "fit_rv",
+                "key": "fit_rv_dust",
                 "kind": "option",
                 "accepts": None,
                 "required": False,
@@ -1156,7 +1156,7 @@ class SED(Component):
         # The tables above still name every column, resolve its magnitude
         # system and bound the star (their box is the runtime grid's box or
         # smaller), so the two paths share everything but the BC itself.
-        if self.fit_rv:
+        if self.fit_rv_dust:
             from exozippy.models.NextGen.runtime_spectra import (
                 load_runtime_grid,
             )
@@ -1165,7 +1165,7 @@ class SED(Component):
 
             if self.sedmodel != "NextGen":
                 raise ValueError(
-                    f"sed.fit_rv reads the NextGen runtime spectra; this "
+                    f"sed.fit_rv_dust reads the NextGen runtime spectra; this "
                     f"SED's model is {self.sedmodel!r}."
                 )
             self.spectral = SpectralBC(
@@ -1394,7 +1394,7 @@ class SED(Component):
         # the same node.
         loggsed = star.loggsed.value  # dex(cm/s2)
 
-        if self.fit_rv:
+        if self.fit_rv_dust:
             # Interpolate the spectrum, redden it at the star's own R_V,
             # integrate the bands (spectral_bc.py).
             bc = self.spectral.bc_node(
@@ -1895,7 +1895,7 @@ class SED(Component):
         interp = _RGI(axes, bc_values[..., col])
         flux = {}
         for j in star_indices:
-            if self.fit_rv:
+            if self.fit_rv_dust:
                 bc = float(
                     self.spectral.bc_np(
                         values["teffsed"][j],
@@ -2056,7 +2056,7 @@ class SED(Component):
             # interval's edges, not a density over it.
             support_phrase="whose logg support is",
         )
-        if self.fit_rv:
+        if self.fit_rv_dust:
             support = (
                 r"The model spectra are interpolated on a regular grid in "
                 r"effective temperature, surface gravity and metallicity, "
@@ -2915,7 +2915,7 @@ class SED(Component):
     def _add_spectral_prose(self, system):
         """How the fitted-R_V mode computes a band magnitude, declared only
         in that mode (a table-mode draft is unchanged)."""
-        if not self.fit_rv:
+        if not self.fit_rv_dust:
             return
         get_collector(system).add(
             r"The bolometric corrections are computed at every model "

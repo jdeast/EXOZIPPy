@@ -51,15 +51,15 @@ def relations_apply(system_config):
 
 
 def get_symbol_map(config, system_config):
-    # av (and, under sed.fit_rv, rv_dust) is in no relation: a leaf, mapped
+    # av (and, under sed.fit_rv_dust, rv_dust) is in no relation: a leaf, mapped
     # so the engine owns its start like every other SED input.  rv_dust only
     # where the star declares it, or it would be a phantom leaf (the
     # relations_apply ruling above).
-    from .sed import RV_DUST, fit_rv_from_config
+    from .sed import RV_DUST, fit_rv_dust_from_config
 
     extra = (
         (RV_DUST,)
-        if fit_rv_from_config((system_config or {}).get("sed"))
+        if fit_rv_dust_from_config((system_config or {}).get("sed"))
         else ()
     )
     return {
