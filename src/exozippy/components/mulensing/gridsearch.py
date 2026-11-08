@@ -844,19 +844,17 @@ def default_grid_cores():
 #: the path.  The caller supplies the element NAMES (`source.0` vs
 #: `source.Source`, `lens.1` vs `lens.Companion`); only the leaf is fixed.
 #:
-#: WHAT IS DELIBERATELY ABSENT, and why -- both are DERIVED in a model with a
-#: galactic prior, so an `initval` on them is a silent no-op:
+#: WHAT IS ABSENT, and why -- both are DERIVED in a model with a galactic
+#: prior:
 #:
 #:   t_E   = theta_E / mu_rel_geo, from masses, distances and proper motions.
 #:   rho   = theta_star / theta_E, from the source radius and distance.
 #:
-#: This is not theoretical.  RMDC26 event 096's params file seeds both, and
-#: the run's own auditor reports `mulensevent.0.t_E: you set 8.42027, the
-#: model starts at 9.7949 (+16.33%) -- initval has no effect on a derived
-#: parameter` and `source.0.rho: you set 0.00662299, the model starts at
-#: 0.000976985 (-85.25%)`.  To convey a t_E, seed the LEAVES it derives from
-#: (the lens and source proper motions, with the masses and distances) --
-#: mulensing.md, "Seeding: the built-in peak finder", review 8.6.15.
+#: When this was written an `initval` on them did not reach the model (RMDC26
+#: event 096: the auditor reported t_E +16.33% and rho -85.25% off the
+#: seeds).  Since #592 and #594 a seed set of observables alone places the
+#: model, source first, so writing them here is now possible; it is not done
+#: yet (mulensing.md, "What the grid does not seed (yet)").
 SEED_LEAVES = ("t_0", "u_0", "log_s", "log_q", "alpha")
 
 #: Leaves the grid measures but cannot convey, with the reason, so a writer
@@ -952,11 +950,11 @@ def seed_fragment(
         )
     lines += [
         "#",
-        "# The grid also measured t_E and rho at each basin, and they are",
-        "# NOT written here: both are DERIVED in a model with a galactic",
-        "# prior, so an initval on them is a silent no-op (the run's",
-        "# auditor reports it as 'initval has no effect on a derived",
-        "# parameter').  To convey a t_E, seed the leaves it derives from.",
+        "# The grid also measured t_E and rho at each basin; they are not",
+        "# written as seeds here (both are DERIVED in a model with a",
+        "# galactic prior).  To start from one basin's values, seed its",
+        "# t_E and rho below by hand and leave the masses, distances and",
+        "# proper motions unseeded; the engine places them source first.",
     ]
     for k, why in SEED_DERIVED.items():
         # Skip a value the grid did not record.  A grid written before it
