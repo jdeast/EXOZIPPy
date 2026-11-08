@@ -42,9 +42,11 @@ band:
     ld_law: "linear"
   - name: "R"
     filter: "MOA/MOA.Red"
+    star_constrains_ld: false
     ld_law: "linear"
   - name: "V"
     filter: "Generic/Cousins.V"
+    star_constrains_ld: false
     ld_law: "linear"
 
 mulensinstrument:

@@ -22,9 +22,11 @@ galacticmodel:
 band:
 - name: W149
   filter: Roman.WFI.W149
+  star_constrains_ld: false
   ld_law: linear
 - name: Z087
   filter: Roman.WFI.Z087
+  star_constrains_ld: false
   ld_law: linear
 mulensinstrument:
 - name: Roman_W149
