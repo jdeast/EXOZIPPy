@@ -3285,6 +3285,69 @@ class AstrometryInstrument(Instrument):
     # ------------------------------------------------------------------
     # Stage 7
     # ------------------------------------------------------------------
+    def _exposure_check_terms(self, system):
+        """``Instrument._exposure_check_terms``: each exposure-described
+        dataset's observables at its epochs, built from the exposure-mean
+        position (``_exposure_model``, the one smeared builder) exactly as
+        ``build_likelihood`` forms them -- gaia's along-scan abscissa, abs
+        and lensrel's (dE, dN), rel's separation and position angle -- with
+        their sigmas (jitter included).  lensrel's correlated pair is
+        checked on its two marginals: the check needs the size of the
+        smearing error, not the likelihood's conditional form."""
+        out = []
+        for i, d in enumerate(self.datasets):
+            if not self.exposure_described[i]:
+                continue
+            mode = d["mode"]
+            t = d["time"]
+            jv = self.jitter_variance.value[i]
+            if mode in ("gaia", "abs"):
+                beta = self._sed_beta_node(system, i)
+                dE, dN = self._exposure_model(
+                    system, i, t, beta, *self._exposure_ephemeris(system, i, t)
+                )
+            elif mode == "lensrel":
+                _, _, dev_sub = self._exposure_ephemeris(system, i, t)
+                dE, dN = self._exposure_model(system, i, t, dev=dev_sub)
+            elif mode == "rel":
+                dE, dN = self._exposure_model(system, i, t)
+            else:
+                raise ValueError(
+                    f"[{self.prefix}.{d['name']}] a {mode!r} dataset has no "
+                    f"exposure to check."
+                )
+            files = np.full(len(t), i, dtype=int)
+            if mode == "gaia":
+                out.append(
+                    (
+                        files,
+                        dE * d["sin_psi"] + dN * d["cos_psi"],
+                        pt.sqrt(pt.sqr(d["err"]) + jv),
+                    )
+                )
+            elif mode == "rel":
+                out.append(
+                    (
+                        files,
+                        pt.sqrt(pt.sqr(dE) + pt.sqr(dN)),
+                        pt.sqrt(pt.sqr(d["err_sep"]) + jv),
+                    )
+                )
+                # The likelihood's own wrapped residual, so two node counts
+                # never differ by the +/-pi wrap.
+                delta = pt.arctan2(dE, dN) - d["pa"]
+                out.append(
+                    (
+                        files,
+                        pt.arctan2(pt.sin(delta), pt.cos(delta)),
+                        pt.sqrt(d["err_pa"] ** 2 + jv / d["sep"] ** 2),
+                    )
+                )
+            else:
+                out.append((files, dE, pt.sqrt(pt.sqr(d["err_E"]) + jv)))
+                out.append((files, dN, pt.sqrt(pt.sqr(d["err_N"]) + jv)))
+        return out
+
     def build_likelihood(self, model, system):
         if not hasattr(system, "star"):
             raise ValueError(

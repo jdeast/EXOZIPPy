@@ -88,6 +88,7 @@ from .trace_meta import (
     apply_metadata,
     check_trace_coordinates,
     check_trace_freshness,
+    restore_build_choices,
     stamp_trace_attr,
     structural_metadata,
 )
@@ -990,6 +991,9 @@ def _run_fit(config, gui, user_params=None):
     # trace BEFORE the build, the way the whitening is restored after it.
     if os.path.exists(str(prefix) + "_trace.nc") and not recompute_trace:
         restore_direct_angles(system, str(prefix) + "_trace.nc")
+        # Likewise the build choices the run settled after its polish (the
+        # automatic exposure ninterp): the draws were scored under them.
+        restore_build_choices(system, str(prefix) + "_trace.nc")
     gui.phase("compiling")  # build_model + get_mcmc_init compile the graph
     model = system.build_model()
 
@@ -1193,6 +1197,22 @@ def _run_fit(config, gui, user_params=None):
                 )
                 raw_start = system.get_raw_start(model)
                 polished_start = True
+
+                # Build choices made at the BUILD start, re-checked at the
+                # polished one (Component.check_at_point): an automatic
+                # exposure ninterp that no longer meets its tolerance is
+                # raised (components/instrument.md, "Choosing ninterp").
+                # A raise changes the likelihood graph but no coordinate,
+                # so the model is rebuilt with the polished point carried
+                # across physically -- HERE, before the anchor re-centering
+                # and the whitening probe, so neither runs twice.  The old
+                # model's context is left first (the direct-angle rebuild
+                # below does the same).
+                if system.check_at_point(model, raw_start, "polished"):
+                    model_context.close()
+                    model = system.rebuild_carrying_start(raw_start)
+                    model_context.enter_context(model)
+                    raw_start = system.get_raw_start(model)
 
             # The automatic direct-angle switch needs a compiled logp; it is
             # compiled ONCE here and shared with the probe below, so a model
@@ -1794,6 +1814,27 @@ def _run_fit(config, gui, user_params=None):
         raise
 
 
+def _median_raw_point(system, model, idata):
+    """The posterior's median draw (``summary_plot.median_draw_point``) as
+    a raw point keyed by the model's value variables, the form
+    ``Component.check_at_point`` takes."""
+    from .outputs.summary_plot import median_draw_point
+
+    _, (chain, draw), _ = median_draw_point(system, idata)
+    posterior = idata.posterior
+    point = {}
+    for var in model.value_vars:
+        if var.name not in posterior:
+            raise KeyError(
+                f"The trace has no sampled variable {var.name!r} of the "
+                f"model; it cannot give the model's median point."
+            )
+        point[var.name] = np.asarray(
+            posterior[var.name].values[chain, draw], dtype=float
+        )
+    return point
+
+
 def _wrap_up(
     config,
     user_params,
@@ -1832,6 +1873,17 @@ def _wrap_up(
         cores=cores,
         eval_timeout=eval_timeout,
     )
+
+    # The build choices re-checked at the posterior median, warn only
+    # (Component.check_at_point; the automatic exposure ninterp and a
+    # user's, components/instrument.md "Choosing ninterp"): the start can
+    # be far from the posterior, and a count fixed before sampling cannot
+    # change now.
+    if system.checks_at_point():
+        wrapup.stage("re-checking exposure node counts at the median")
+        system.check_at_point(
+            model, _median_raw_point(system, model, idata), "median"
+        )
 
     # Collapse any exact label degeneracy a component declares (review
     # 1.8.3's ascending node is the one case today).  HERE, and exactly once:

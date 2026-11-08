@@ -2896,6 +2896,32 @@ class MulensInstrument(Instrument):
             + fb
         )
 
+    def _exposure_check_terms(self, system):
+        """``Instrument._exposure_check_terms``: the likelihood's
+        detrend-free flux model at the data (``_model_flux``, the one
+        builder, exposure-averaged where a light curve smears) and its
+        sigma, every row in its instrument's flux."""
+        model_flux = self._model_flux(
+            system,
+            pt.as_tensor_variable(self.time),
+            self.observer_pos,
+            self.inst_map_tensor,
+            self.inst_map,
+            resolve_method=True,
+            exposure="data" if any(k > 1 for k in self.ninterp) else None,
+        )
+        sigma = self.total_sigma(pt.as_tensor_variable(self.err))
+        return [(self.inst_map, model_flux, sigma)]
+
+    def _refresh_exposure_state(self):
+        """The observer at every sub-exposure node follows the counts."""
+        self._node_obs_file = [
+            self._node_observer_positions(i, self.time[self.rows(i)])
+            if self.ninterp[i] > 1
+            else None
+            for i in range(self.n_elements)
+        ]
+
     def build_likelihood(self, model, system):
 
         # 1. Constants

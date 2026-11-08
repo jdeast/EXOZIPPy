@@ -156,6 +156,15 @@ HOT_SEARCH_ATTR = "exozippy_hot_search"
 # is every trace written before the switch existed: those sampled latents.
 ANGLES_ATTR = "exozippy_direct_angles"
 
+# The data-dependent build choices the run settled (System.build_choices):
+# {"<prefix>": {"ninterp": {"<file>": n}}} -- today the automatic exposure
+# node counts (components/instrument.md, "Choosing ninterp"), which the
+# post-polish check may have RAISED, so a rebuild from the same config at
+# the build start cannot re-derive them.  They change no coordinate, only
+# the likelihood the draws were scored under; the reuse path applies them
+# BEFORE building (restore_build_choices).  Absent when nothing was chosen.
+BUILD_CHOICES_ATTR = "exozippy_build_choices"
+
 # The payload is a debugging aid, not the check itself; a pathological
 # config (thousands of per-parameter entries) should not bloat the trace
 # file.  Past this many characters only the hash is stored, and a mismatch
@@ -476,6 +485,12 @@ def structural_metadata(source) -> Dict[str, Any]:
         )
     direct = getattr(source, "direct_angles", None)
     out[ANGLES_ATTR] = json.dumps(direct, sort_keys=True) if direct else None
+    build_choices = getattr(source, "build_choices", None)
+    if callable(build_choices):
+        chosen = build_choices()
+        out[BUILD_CHOICES_ATTR] = (
+            json.dumps(chosen, sort_keys=True) if chosen else None
+        )
     blob = json.dumps(payload, sort_keys=True, default=str)
     out[PAYLOAD_ATTR] = blob if len(blob) <= _MAX_PAYLOAD_CHARS else None
 
@@ -794,3 +809,22 @@ def stamp_trace_attr(trace_path, name: str, value: str) -> None:
         )
     with h5py.File(str(trace_path), "a") as handle:
         handle.attrs[name] = value
+
+
+def restore_build_choices(system, trace_path):
+    """Apply the build choices a saved trace recorded
+    (``BUILD_CHOICES_ATTR``) to ``system``, BEFORE ``build_model``.  A trace
+    without the attr chose nothing (or predates it, when nothing was
+    chosen automatically).  Returns the choices applied."""
+    text = read_trace_root_attr(trace_path, BUILD_CHOICES_ATTR)
+    if text is None:
+        return {}
+    try:
+        choices = json.loads(text)
+    except ValueError as exc:
+        raise ValueError(
+            f"trace attr {BUILD_CHOICES_ATTR!r} of {trace_path} is not JSON: "
+            f"{text!r}"
+        ) from exc
+    system.restore_build_choices(choices)
+    return choices

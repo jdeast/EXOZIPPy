@@ -560,6 +560,38 @@ class Component(ABC):
         the event's Einstein-radius scale.  The default names none."""
         return {}
 
+    def prepare_likelihood(self, model, system):
+        """Stage 6b, called by ``System.build_model`` for every component
+        after stage 6 (every parameter exists) and before stage 7 (no
+        likelihood yet): a choice that needs the model AT THE START but
+        shapes the likelihood graph is made here, so it costs no rebuild
+        (the Instrument base chooses its automatic ``ninterp`` here,
+        components/instrument.md).  Nothing by default."""
+
+    def checks_at_point(self):
+        """Whether ``check_at_point`` has anything to check (so a caller can
+        skip finding a point for it).  False by default."""
+        return False
+
+    def check_at_point(self, model, system, point, where):
+        """Re-check a build-time choice at ``point`` (raw, keyed like
+        ``System.get_raw_start``); ``where`` is "polished" (after the seed
+        polish, before sampling) or "median" (the posterior median, at
+        wrap-up).  Returns True when the model must be rebuilt to honor a
+        revised choice (only ever after the polish).  Nothing by default."""
+        return False
+
+    def build_choices(self):
+        """The data-dependent build choices this component settled (a dict,
+        JSON-serializable), stamped on the trace so a reuse rebuilds the
+        model that was sampled (``trace_meta.BUILD_CHOICES_ATTR``).  None
+        by default."""
+        return {}
+
+    def restore_build_choices(self, choices):
+        """Apply ``build_choices`` read back from a trace, before the build.
+        Nothing by default."""
+
     # Attribute names holding something that BELONGS TO ONE BUILD: a
     # pytensor node the component stashed, or a function compiled against
     # one.  ``System.build_model`` clears every one of them before stage 5,

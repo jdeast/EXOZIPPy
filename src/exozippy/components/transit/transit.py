@@ -1608,6 +1608,20 @@ class Transit(Instrument):
             blocks.append((i, np.arange(sl.start, sl.stop)))
         return blocks
 
+    def _exposure_check_terms(self, system):
+        """``Instrument._exposure_check_terms``: the likelihood's
+        detrend-free light curve at the data (``_lc_model``, the one
+        builder) and its sigma, every row in flux."""
+        lc_model, _, _ = self._lc_model(
+            system, pt.as_tensor_variable(self.time), self._data_blocks()
+        )
+        sigma = self.total_sigma(pt.as_tensor_variable(self.err))
+        return [(self.inst_map, lc_model, sigma)]
+
+    def _refresh_exposure_state(self):
+        """The recorded node groups follow the node counts."""
+        self._record_exposure_groups(self.time, self.inst_map)
+
     def build_likelihood(self, model, system):
         self._add_sed_deblend_prior(system)
 
