@@ -44,11 +44,6 @@ from exozippy.models.NextGen.bolometric_correction import (
 from exozippy.models.NextGen.nextgen_spectra import WAVELENGTH_PTS
 
 PROC = Path.home() / "spectra" / "BT-NextGen_AGSS2009_processed"
-OUT = (
-    Path(sys.argv[1])
-    if len(sys.argv) > 1
-    else Path("runtime_sed_feasibility.json")
-)
 WAVE = np.asarray(WAVELENGTH_PTS, dtype=float)
 LNW = np.log(WAVE)
 GRID = gen.read_grid_yaml()
@@ -360,6 +355,16 @@ def e3_rv(filters, nodes, avs=(1.0, 3.0, 8.0)):
 
 
 def main():
+    import argparse
+
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument(
+        "out",
+        nargs="?",
+        default="runtime_sed_feasibility.json",
+        help="JSON file the results are written to",
+    )
+    OUT = Path(ap.parse_args().out)
     t0 = time.time()
     filters = load_filters()
     print(

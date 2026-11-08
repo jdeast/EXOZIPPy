@@ -59,7 +59,6 @@ AV = np.array(
     ]
 )
 NBANDS = [1, 2, 4, 8, 16, 32, 64]
-N_EVAL = int(sys.argv[2]) if len(sys.argv) > 2 else 400
 
 
 def draws(n):
@@ -137,10 +136,25 @@ def build_specB(nb, nbin):
 
 
 def main():
-    out_path = (
-        sys.argv[1] if len(sys.argv) > 1 else "runtime_sed_benchmark.json"
+    import argparse
+
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument(
+        "out",
+        nargs="?",
+        default="runtime_sed_benchmark.json",
+        help="JSON file the timings are written to",
     )
-    args = draws(N_EVAL)
+    ap.add_argument(
+        "n_eval",
+        nargs="?",
+        type=int,
+        default=400,
+        help="evaluations timed per case",
+    )
+    opts = ap.parse_args()
+    out_path = opts.out
+    args = draws(opts.n_eval)
     rows = []
     for nb in NBANDS:
         cases = [("table", lambda: build_table(nb), None)]
