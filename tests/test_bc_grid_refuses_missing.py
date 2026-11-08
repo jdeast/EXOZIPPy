@@ -31,10 +31,10 @@ def test_a_missing_facility_is_refused_and_nothing_is_synthesized(
     )
     with pytest.raises(NotImplementedError) as exc:
         build_bc_grid(
-            ["Paranal/VISTA.Ks"], model="NextGen", model_root=_MODEL_ROOT
+            ["CFHT/MegaCam.g"], model="NextGen", model_root=_MODEL_ROOT
         )
     msg = str(exc.value)
-    assert "Paranal/VISTA.Ks" in msg
+    assert "CFHT/MegaCam.g" in msg
     assert "NOT generated on the fly" in msg
     assert "generate_NextGen_BC_Tables.py" in msg
     assert called == []
