@@ -266,6 +266,23 @@ class Band(Component):
                     "Default False, which pins ellipsoidal at 0."
                 ),
             },
+            {
+                "key": "mag_system",
+                "kind": "option",
+                "accepts": ["Vega", "AB"],
+                "required": False,
+                "doc": (
+                    "The filter's NATIVE magnitude system, case-sensitive. "
+                    "Needed only when the published NextGen BC tables have "
+                    "no column for this filter and a component reads the "
+                    "band's SED flux (a stated microlensing zeropoint, a "
+                    "transit seddeblend, an astrometric flux fraction): the "
+                    "column is then synthesized from the full-resolution "
+                    "spectra, and its m_AB - m_Vega record needs the system. "
+                    "Raises if missing there, never guessed. Elsewhere it "
+                    "must match the system recorded for the column."
+                ),
+            },
         ]
 
     def load_data(self, system):

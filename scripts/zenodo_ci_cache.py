@@ -43,12 +43,19 @@ def _cache_downloads() -> Path:
 
 
 def current_entry_names() -> set[str]:
-    """``<md5>-<filename>`` for every file of every registered record."""
+    """``<md5>-<filename>`` for every file of every PRE-FETCHED record.
+
+    An on-demand record (``zenodo_assets.ON_DEMAND``) is never fetched by
+    ``fetch``, so its files are not part of the entry: were one ever to land
+    in the cache directory, ``prune`` drops it rather than saving 3.3 GB of
+    spectra into every later cache entry.
+    """
     from exozippy.utilities import zenodo_assets
 
     return {
         f"{pin.md5}-{Path(filename).name}"
-        for rec in zenodo_assets.RECORDS.values()
+        for name, rec in zenodo_assets.RECORDS.items()
+        if name not in zenodo_assets.ON_DEMAND
         for filename, pin in rec.files.items()
     }
 

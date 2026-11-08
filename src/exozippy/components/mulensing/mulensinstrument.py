@@ -3014,6 +3014,7 @@ class MulensInstrument(Instrument):
         sed = system.sed
         keys = [None] * self.n_elements
         band_map = self._band_indices(system)
+        read = self.sed_flux_bands(system)
         for i, name in enumerate(self.names):
             band_idx = int(band_map[i])
             if band_idx < 0:
@@ -3024,10 +3025,14 @@ class MulensInstrument(Instrument):
                 continue
             filter_key = system.band.filter_mist[band_idx]
             if not sed.has_filter(filter_key):
-                logger.warning(
+                # A band nothing ties has no BC column only because none was
+                # needed (sed.md, "Which band filters need a BC column"): no
+                # constraint is lost, only the reported zeropoint.
+                tied = self.config[i].get("band") in read
+                (logger.warning if tied else logger.info)(
                     f"mulensinstrument {name}: band filter '{filter_key}' "
-                    f"is not in the SED's BC grid; skipping SED flux "
-                    f"constraint."
+                    f"is not in the SED's BC grid; no SED flux constraint "
+                    f"and no zeropoint for this light curve."
                 )
                 continue
             keys[i] = filter_key
@@ -3068,6 +3073,22 @@ class MulensInstrument(Instrument):
             ],
             dtype=bool,
         )
+
+    def sed_flux_bands(self, system):
+        """The bands whose SED-predicted source flux a light curve reads
+        (``Component.sed_flux_bands``): its zeropoint tie, where the user
+        stated both ``mu`` and ``sigma`` (``sed_tie_mask`` without the
+        prediction mask, which needs the grid this answer decides), and its
+        blend tie under ``sed_constrains_blend: true``.  A light curve with
+        neither only REPORTS a zeropoint, which needs no BC column: its band
+        enters the grid only if a column already exists."""
+        stated = self._user_states("mu") & self._user_states("sigma")
+        return {
+            c.get("band")
+            for i, c in enumerate(self.config)
+            if c.get("band") is not None
+            and (stated[i] or c.get("sed_constrains_blend", False))
+        }
 
     def sed_tie_mask(self, system):
         """Per light curve: is f_source TIED to the SED-predicted source

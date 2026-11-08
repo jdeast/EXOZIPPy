@@ -26,6 +26,7 @@ from exozippy.components.parameter import Parameter
 from exozippy.constants import ANG_TO_MICRON_CONST
 from exozippy.outputs.prose import get_collector
 
+from ..orbit.bodies import component_instance_names
 from ..star.physics import calc_logg_from_logmass, calc_luminosity
 
 # this import is required even though it's not used explicitly
@@ -37,10 +38,12 @@ from .bc_grid import (
     _load_alias_table,
     build_bc_grid,
     facility_from_svo_name,
-    find_bc_table,
+    locate_bc_column,
+    model_root_of,
     peek_grid_axes,
     read_bc_meta,
     resolve_filter_name,
+    synthesized_model_root,
 )
 from .magsys import (
     AB,
@@ -277,9 +280,15 @@ class SED(Component):
         # the plot compiler, and the cross-component predict_* API.
         self._m_pred_matrix = None
 
-        # facility -> read_bc_meta of its BC table, filled lazily by
-        # _column_magsys (one read per facility per instance).
+        # BC table path -> read_bc_meta of it, filled lazily by
+        # _column_magsys (one read per table per instance).
         self._bc_table_meta = {}
+        # Per grid column, the BC table it was read from (published, or the
+        # synthesized-column cache); filled by _locate_grid_columns.
+        self._grid_column_tables = []
+        # Grid filters read from the synthesized-column cache (the paper
+        # draft names them); filled by _locate_grid_columns.
+        self.synthesized_filters = []
 
         # Grid-axis caches, filled by _inject_grid_bounds below, which
         # puts ALL FOUR of the BC grid's axes onto star Parameters
@@ -719,73 +728,270 @@ class SED(Component):
         # twice, once uselessly (review 1.9.5).
         ensure_model_data(self.sedmodel, self.model_root)
 
-    def _collect_band_filters(self):
+    def consumed_sed_bands(self, system):
+        """{band name: [component prefix, ...]} for every band whose
+        SED-predicted flux some component reads.
+
+        Asked of EVERY component through the generic hook
+        ``Component.sed_flux_bands`` -- this component knows nothing about
+        which components read a band's flux or why; each one declares it.
+        Called at stage 1, so every answer comes from construction-time
+        state (raw config, params file).
         """
-        Gather filters referenced by Band blocks so cross-component flux
-        predictions (mulensing f_source, transit deblending, astrometry
-        fluxfrac) share this SED's BC grid.
+        out = {}
+        for comp in system.active_components.values():
+            for band in comp.sed_flux_bands(system):
+                out.setdefault(band, []).append(comp.prefix)
+        return out
 
-        A band filter whose facility has no BC tables is NOT skipped: it
-        is passed to build_bc_grid exactly as a filter listed in the .sed
-        file is, and build_bc_grid REFUSES it with a message naming the
-        request path (on-the-fly synthesis from the plotting spectra was
-        disabled 2026-09-28; bc_grid._refuse_missing).  Skipping it instead
-        silently dropped the SED flux constraint that band exists to carry:
-        the mulensing zeropoint tie, the transit dilution, the astrometry
-        fluxfrac (review 2.9.6).  So a band filter the tables do not cover
-        fails the fit loudly rather than quietly weakening it -- again as a
-        .sed filter does.
-
-        The one case still skipped is a filter label with no SVO identity
-        at all -- neither in the alias table nor SVO-shaped
-        ("Facility/Instrument.Band"), e.g. gj1214's "MIRILRS".  There is
-        nothing for the generator to synthesize a bandpass FROM, so the
-        skip is not a deferral of work; the warning says so instead of
-        pointing at machinery that cannot help.
-
-        Returns a list of filter names to append to the BC grid build,
-        deduplicated against the .sed file's own filters.
+    def _collect_band_filters(self, consumed):
         """
-        band_cfgs = self.config_manager.system_config.get("band") or []
+        Gather the band blocks' filters that go into the BC grid, so the
+        cross-component flux predictions (mulensing zeropoint, transit
+        dilution, astrometry fluxfrac) share this SED's grid.
+
+        ``consumed`` is ``consumed_sed_bands``: {band name: [reader, ...]}.
+        Which band filters go in is decided by whether the filter HAS a BC
+        column (published, or synthesized earlier into the per-user cache --
+        ``bc_grid.locate_bc_column``) and whether its band's flux is READ:
+
+          * a column exists: in, read or not, so predicted magnitudes, the
+            reported zeropoint and the outputs keep working;
+          * no column, read: in, and its column is synthesized from the
+            full-resolution spectra before the grid build
+            (``self._to_synthesize``; models/NextGen/bc_synthesis.py) --
+            which needs the filter's native magnitude system from the band's
+            ``mag_system:`` and raises without it.  Where synthesis does not
+            apply (an explicit model_root, the machine cache off) it is
+            passed on and build_bc_grid refuses it naming the request path.
+            Dropping it instead would silently lose the constraint the band
+            exists to carry (review 2.9.6);
+          * no column, not read: left out, with one INFO line saying nothing
+            reads its SED flux.  Requiring a column nobody reads is what
+            failed a microlensing fit whose MOA band had no zeropoint.
+
+        The one case skipped with a WARNING is a filter label with no SVO
+        identity at all -- neither in the alias table nor SVO-shaped
+        ("Facility/Instrument.Band"), e.g. gj1214's "MIRILRS": there is no
+        bandpass to synthesize a column FROM.
+
+        Returns the filter labels to append to the BC grid build,
+        deduplicated against the .sed file's own filters.  Sets
+        ``self._to_synthesize`` ({MIST column: (svo id, native system,
+        where)}) and ``self._band_mag_systems`` ({MIST column: {band: stated
+        system}}, checked against the column's record after the build).
+        """
+        sys_cfg = self.config_manager.system_config
+        band_cfgs = sys_cfg.get("band") or []
+        band_names = component_instance_names(sys_cfg, "band")
         alias_df = _load_alias_table()
 
         known_mist = {
             resolve_filter_name(n, alias_df, alias="MIST")
             for n in self.filters
         }
-        extra = []
-        for cfg in band_cfgs:
-            name = cfg.get("filter")
-            if not name:
+        # One entry per distinct filter: two band blocks may share a filter
+        # (one read, one not), and the filter goes in if either needs it.
+        pending = {}
+        for band, cfg in zip(band_names, band_cfgs):
+            label = cfg.get("filter")
+            if not label:
                 continue
-            mist = resolve_filter_name(name, alias_df, alias="MIST")
+            mist = resolve_filter_name(label, alias_df, alias="MIST")
             if mist in known_mist:
                 continue
-            svo = resolve_filter_name(name, alias_df, alias="SVO")
+            entry = pending.setdefault(
+                mist,
+                {"label": label, "bands": [], "readers": [], "stated": {}},
+            )
+            entry["bands"].append(band)
+            entry["readers"].extend(consumed.get(band, []))
+            stated = parse_magsys(
+                cfg.get("mag_system"),
+                f"[band] {band!r} mag_system",
+            )
+            if stated is not None:
+                entry["stated"][band] = stated
+
+        self._to_synthesize = {}
+        self._band_mag_systems = {}
+        synth_root = synthesized_model_root(self.model_root, self.sedmodel)
+        extra = []
+        for mist, entry in pending.items():
+            label, bands = entry["label"], entry["bands"]
+            svo = resolve_filter_name(label, alias_df, alias="SVO")
             facility = facility_from_svo_name(svo)
             try:
-                find_bc_table(self.model_root, self.sedmodel, facility)
-            except (FileNotFoundError, NotImplementedError) as e:
-                if "/" not in svo:
-                    logger.warning(
-                        f"SED: no BC tables for band filter '{name}' "
-                        f"(facility '{facility}'): {e} That label resolves "
-                        f"to no SVO filter id, so there is no table to "
-                        f"look up -- give the band a "
-                        f"'Facility/Instrument.Band' filter the shipped "
-                        f"tables cover. Flux predictions in this band will "
-                        f"be unavailable."
-                    )
-                    continue
-                logger.info(
-                    f"SED: band filter '{name}' (facility '{facility}') has "
-                    f"no shipped BC tables; passing it to the grid build, "
-                    f"which refuses it with the request path (as for a "
-                    f"filter listed in the .sed file)."
+                path = locate_bc_column(
+                    self.model_root, self.sedmodel, facility, mist
                 )
+            except FileNotFoundError:
+                # This model_root has no BC tree for the model at all: no
+                # column, exactly as far as this choice is concerned (the
+                # grid build raises the model-level error if it gets there).
+                path = None
+            if entry["stated"]:
+                self._band_mag_systems[mist] = dict(entry["stated"])
+            if path is not None:
+                known_mist.add(mist)
+                extra.append(label)
+                continue
+            if "/" not in svo:
+                logger.warning(
+                    f"SED: no BC column for band filter '{label}' "
+                    f"(band(s) {bands}, facility '{facility}'). That label "
+                    f"resolves to no SVO filter id, so there is no bandpass "
+                    f"to compute one from -- give the band a "
+                    f"'Facility/Instrument.Band' filter. Flux predictions "
+                    f"in this band will be unavailable."
+                )
+                continue
+            if not entry["readers"]:
+                logger.info(
+                    f"SED: band(s) {bands} filter '{label}' ({svo}) has no "
+                    f"{self.sedmodel} BC column, and no component reads its "
+                    f"SED flux, so it is left out of the BC grid (no "
+                    f"predicted magnitude or zeropoint is reported in it)."
+                )
+                continue
+            readers = sorted(set(entry["readers"]))
+            where = f"[band] {bands} (filter {svo!r}, read by {readers})"
             known_mist.add(mist)
-            extra.append(name)
+            extra.append(label)
+            if synth_root is None:
+                logger.info(
+                    f"SED: {where} has no {self.sedmodel} BC column, and a "
+                    f"column cannot be synthesized here (model_root "
+                    f"{self.model_root}, or the machine cache is off); the "
+                    f"grid build refuses it with the request path."
+                )
+                continue
+            self._to_synthesize[mist] = (
+                svo,
+                self._synthesis_native_system(svo, entry["stated"], where),
+                where,
+            )
         return extra
+
+    def _synthesis_native_system(self, svo, stated, where):
+        """The native magnitude system a synthesized column is recorded
+        with: the band's ``mag_system:``, REQUIRED -- the column's
+        m_AB - m_Vega record (magsys.py) needs it, and a guess would put
+        every AB light curve or row in that band off by the offset.  A
+        filter the generator already lists (``NATIVE_SYSTEM``) carries its
+        own, which a stated one must match.  Raises naming the band and the
+        key."""
+        from ...models.NextGen.generate_NextGen_BC_Tables import NATIVE_SYSTEM
+
+        systems = set(stated.values())
+        if len(systems) > 1:
+            raise ValueError(
+                f"{where}: the band blocks of one filter state different "
+                f"mag_system values {stated}; a filter has one native "
+                f"magnitude system."
+            )
+        given = next(iter(systems), None)
+        known = NATIVE_SYSTEM.get(svo)
+        if known:
+            if given is not None and given != known:
+                raise ValueError(
+                    f"{where}: mag_system: {given} contradicts the native "
+                    f"system {known} the {self.sedmodel} generator records "
+                    f"for {svo} (NATIVE_SYSTEM)."
+                )
+            return known
+        if given is None:
+            raise ValueError(
+                f"{where}: the published {self.sedmodel} BC tables have no "
+                f"column for this filter, so it is synthesized from the "
+                f"full-resolution spectra -- and its magnitude-system record "
+                f"(m_AB - m_Vega) needs the filter's native system, which "
+                f"is not guessed.  State it on the band block with the "
+                f"'mag_system' key: `mag_system: Vega` or `mag_system: AB` "
+                f"(case-sensitive)."
+            )
+        return given
+
+    def _synthesize_missing_columns(self):
+        """Synthesize every column ``_collect_band_filters`` found missing
+        and read (models/NextGen/bc_synthesis.py), before the grid build
+        reads them.  Imported lazily: a fit whose columns all exist never
+        loads the generator."""
+        if not self._to_synthesize:
+            return
+        from ...models.NextGen.bc_synthesis import synthesize_column
+
+        for svo, native, where in self._to_synthesize.values():
+            synthesize_column(svo, native, f"SED {where}")
+
+    def _column_table(self, col_idx):
+        """The BC table grid column ``col_idx`` was read from: published,
+        or the per-user synthesized-column cache (``_locate_grid_columns``,
+        right after the grid build)."""
+        return self._grid_column_tables[col_idx]
+
+    def _locate_grid_columns(self):
+        """After the grid build: which table each grid column came from
+        (``self._grid_column_tables``), and ``self.synthesized_filters``,
+        the grid filters read from the per-user synthesized-column cache
+        (this fit's synthesis, or an earlier one's) -- for the magnitude-
+        system record, the INFO line and the paper draft.  build_bc_grid
+        read every column, so a column no table holds is a bookkeeping
+        error and raises."""
+        alias_df = _load_alias_table()
+        self._grid_column_tables = []
+        for i, name in enumerate(self.all_filters):
+            col = self.mist_filters[i]
+            svo = resolve_filter_name(name, alias_df, alias="SVO")
+            fac = facility_from_svo_name(svo)
+            path = locate_bc_column(self.model_root, self.sedmodel, fac, col)
+            if path is None:
+                raise RuntimeError(
+                    f"SED grid column {i} ({name!r}, BC column {col}) is in "
+                    f"the grid but in no {self.sedmodel} BC table."
+                )
+            self._grid_column_tables.append(path)
+
+        synth_root = synthesized_model_root(self.model_root, self.sedmodel)
+        self.synthesized_filters = []
+        if synth_root is None:
+            return
+        for i, name in enumerate(self.all_filters):
+            path = self._grid_column_tables[i]
+            if model_root_of(path) == synth_root:
+                self.synthesized_filters.append(name)
+                if self.mist_filters[i] not in self._to_synthesize:
+                    logger.info(
+                        f"SED: filter '{name}' (BC column "
+                        f"{self.mist_filters[i]}) is not in the published "
+                        f"{self.sedmodel} tables; reading the column "
+                        f"synthesized earlier from the full-resolution "
+                        f"spectra, cached at {path}."
+                    )
+
+    def _check_band_mag_systems(self):
+        """A band's ``mag_system:`` must agree with the native system its
+        column RECORDS.  It declares the native system only where a column
+        is synthesized; on a published or already-cached column it is
+        either redundant or wrong, and a wrong one would otherwise be
+        silently ignored."""
+        for mist, stated in self._band_mag_systems.items():
+            if mist not in self.mist_filters:
+                continue  # left out of the grid: nothing to check against
+            col_idx = self.mist_filters.index(mist)
+            rec, record_path = self._column_record(
+                col_idx, f"[band] {sorted(stated)}"
+            )
+            native = rec["native_system"]
+            for band, system in stated.items():
+                if system != native:
+                    raise ValueError(
+                        f"[band] {band!r} mag_system: {system} contradicts "
+                        f"the native system {native or 'none'} recorded for "
+                        f"BC column {mist} in {record_path}.  The key only "
+                        f"declares the native system of a SYNTHESIZED "
+                        f"column; drop it, or correct it."
+                    )
 
     def load_data(self, system):
         if self.sedfile is None:
@@ -808,14 +1014,19 @@ class SED(Component):
 
         # Filters from the .sed file first (their columns feed the SED
         # likelihood), then any Band-referenced filters for cross-component
-        # flux predictions.
-        self.band_filters = self._collect_band_filters()
+        # flux predictions -- those with a BC column, and those whose SED
+        # flux a component reads (synthesized below if they have none).
+        self.band_filters = self._collect_band_filters(
+            self.consumed_sed_bands(system)
+        )
         self.all_filters = list(self.filters) + self.band_filters
         if not self.all_filters:
             raise ValueError(
                 "SED has no usable filters: the .sed file lists none and no "
-                "band block references a filter with BC tables."
+                "band block references a filter with a BC column or one "
+                "whose SED flux a component reads."
             )
+        self._synthesize_missing_columns()
 
         # The star parameter bounds, from config_manager.resolve():
         # _inject_grid_bounds() registered the grid's coverage on the
@@ -842,6 +1053,8 @@ class SED(Component):
         )
         self.bc_grid_data = grid
         self.mist_filters = grid["filter_order"]
+        self._locate_grid_columns()
+        self._check_band_mag_systems()
         self._convert_to_bc_system()
 
         # Column lookup by user-facing name, MIST name, or SVO name so
@@ -942,27 +1155,15 @@ class SED(Component):
         is returned whatever the system; the caller applies it only to an
         AB magnitude.
         """
-        record = read_magsys_table(self.model_root, self.sedmodel)
-        record_path = magsys_table_path(self.model_root, self.sedmodel)
-        name = self.all_filters[col_idx]
         col = self.mist_filters[col_idx]
-        if col not in record.index:
-            raise ValueError(
-                f"{where}: BC column {col} has no magnitude-system "
-                f"record in {record_path}. Re-run write_magsys_table "
-                f"in models/NextGen/generate_NextGen_BC_Tables.py for "
-                f"its facility."
-            )
-        rec = record.loc[col]
+        rec, record_path = self._column_record(col_idx, where)
+        table = self._column_table(col_idx)
+        fac = table.name[: -len(".bc.parquet")]
 
-        svo = resolve_filter_name(name, _load_alias_table(), alias="SVO")
-        fac = facility_from_svo_name(svo)
         table_meta = self._bc_table_meta
-        if fac not in table_meta:
-            table_meta[fac] = read_bc_meta(
-                find_bc_table(self.model_root, self.sedmodel, fac)
-            )
-        meta = table_meta[fac]
+        if table not in table_meta:
+            table_meta[table] = read_bc_meta(table)
+        meta = table_meta[table]
         if meta.get("mag_system") != VEGA:
             raise ValueError(
                 f"{where}: the {fac} BC table's mag_system is "
@@ -995,6 +1196,24 @@ class SED(Component):
                     f"{differential_note}."
                 )
         return system, float(rec["ab_minus_vega"])
+
+    def _column_record(self, col_idx, where):
+        """(magnitude-system record row, record path) of grid column
+        ``col_idx``, from the record beside the table the column was read
+        from -- the published ``NextGen.magsys.csv``, or the synthesized-
+        column cache's own.  Raises naming ``where`` if it has no row."""
+        col = self.mist_filters[col_idx]
+        root = model_root_of(self._column_table(col_idx))
+        record = read_magsys_table(root, self.sedmodel)
+        record_path = magsys_table_path(root, self.sedmodel)
+        if col not in record.index:
+            raise ValueError(
+                f"{where}: BC column {col} has no magnitude-system record in "
+                f"{record_path}. Re-run write_magsys_table in "
+                f"models/NextGen/generate_NextGen_BC_Tables.py for its "
+                f"facility."
+            )
+        return record.loc[col], record_path
 
     def filter_magsys(self, filter_key, stated, where):
         """(system, m_AB - m_Vega) of a magnitude in one grid filter.
@@ -1678,6 +1897,7 @@ class SED(Component):
 
         self._declare_grid_support(system)
         self._add_data_free_prose(system)
+        self._add_synthesized_prose(system)
 
     # ------------------------------------------------------------------
     # The BC grid's support, as the reports see it.
@@ -2537,6 +2757,34 @@ class SED(Component):
             section="data",
             key=f"{self.prefix}.magsys",
             rank=21.5,
+        )
+
+    def _add_synthesized_prose(self, system):
+        """The draft says which bolometric corrections are NOT from the
+        published tables: a column synthesized from the full-resolution
+        spectra (models/NextGen/bc_synthesis.py) for a filter the tables
+        lack, by this fit or an earlier one (``synthesized_filters``).  It is
+        computed exactly as the published columns are, but a reader
+        reproducing the fit from the published tables alone would not find
+        it, so the paper must say where it came from."""
+        from ...outputs.prose import join_names
+        from ...outputs.texutils import latex_escape
+
+        names = list(dict.fromkeys(self.synthesized_filters))
+        if not names:
+            return
+        filters = join_names(latex_escape(n) for n in names)
+        get_collector(system).add(
+            f"The bolometric corrections in {filters}, which the published "
+            r"tables \citep{Eastman:2026bc} do not include, were computed "
+            "for this fit from the BT-NextGen (AGSS2009) model spectra "
+            r"resampled to $R = 20000$ \citep{Eastman:2026spectra}, by the "
+            "same procedure, filter transmission curves, flux weighting, "
+            "extinction law and Vega zero points as the published "
+            "tables. ",
+            section="data",
+            key=f"{self.prefix}.synthesized_bcs",
+            rank=21.6,
         )
 
     def _add_data_free_prose(self, system):
