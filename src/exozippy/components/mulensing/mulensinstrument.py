@@ -877,7 +877,7 @@ class MulensInstrument(Instrument):
         if val is not None:
             return float(val)
         t_med = float(np.median(all_times))
-        logger.info(
+        logger.debug(
             f"[{self.prefix}] No t0_par, lens t_0, or seed t_0 found; "
             f"anchoring the parallax reference epoch at the median data "
             f"time ({t_med:.2f})."
@@ -1345,7 +1345,7 @@ class MulensInstrument(Instrument):
                 zp,
             )
         else:
-            logger.info(
+            logger.debug(
                 "[%s:%s] data_format: dia -- reference flux %.6g at "
                 "zp %.4f (residual rms %.3g mag); total flux = ref - dflux. "
                 "A solved pySIS reference is the pipeline's, not the "
@@ -1520,7 +1520,7 @@ class MulensInstrument(Instrument):
             if val is None
         ]
         if missing:
-            logger.info(
+            logger.debug(
                 f"[{label}] flux bootstrap: the companion lens's "
                 f"{', '.join(missing)} has no start derivable at stage 1, so "
                 f"the flux split uses point-lens columns (degenerate for "
@@ -1878,7 +1878,7 @@ class MulensInstrument(Instrument):
             if val is None
         ]
         if missing:
-            logger.info(
+            logger.debug(
                 f"[{label}] flux bootstrap: {', '.join(missing)} has no start "
                 f"derivable at stage 1 (no user entry, seed or hint implies "
                 f"one), so the flux scale is the data's median and "
@@ -1912,7 +1912,7 @@ class MulensInstrument(Instrument):
                 tE_j = tE  # ONE event t_E now (the per-source fallback dance dissolved)
                 if t0_j is None or u0_j is None:
                     logger.warning(
-                        f"source.{j}.t_0/u_0 missing — flux bootstrap treats source {j} "
+                        f"source.{j}.t_0/u_0 missing -- flux bootstrap treats source {j} "
                         f"as blended into source 0."
                     )
                     continue
@@ -2437,7 +2437,7 @@ class MulensInstrument(Instrument):
             d_pc = self.config_manager.hints.get(f"star.{src}.distance")
         if d_pc is None:
             d_pc = 8000.0
-            logger.info(
+            logger.debug(
                 f"source-flux seeding: no distance start for star "
                 f"'{src_name}'; assuming a bulge source at {d_pc:.0f} pc."
             )
@@ -2540,7 +2540,7 @@ class MulensInstrument(Instrument):
         loci = np.array(self._ms_locus())[::-1]  # ascending mass for interp
         teff = float(np.interp(mass, loci[:, 2], loci[:, 0]))
         radius = float(np.interp(mass, loci[:, 2], loci[:, 1]))
-        logger.info(
+        logger.debug(
             f"source-flux seeding: star '{src_name}' starts as a "
             f"{mass:.2f} Msun / {radius:.2f} Rsun / {teff:.0f} K dwarf "
             f"(from f_source through the zeropoint at {d_pc:.0f} pc), "
@@ -3044,8 +3044,8 @@ class MulensInstrument(Instrument):
         for i, name in enumerate(self.names):
             band_idx = int(band_map[i])
             if band_idx < 0:
-                logger.info(
-                    f"mulensinstrument {name}: no band reference; skipping "
+                logger.debug(
+                    f"{self.log_tag(i)} no band reference; skipping "
                     f"SED flux constraint."
                 )
                 continue
@@ -3187,7 +3187,7 @@ class MulensInstrument(Instrument):
             # estimate re-read after the start solve, System.prepare): log a
             # light curve's resolution once, and again only if it CHANGED.
             if self._zp_magsys_logged.get(name) != message:
-                logger.info(message)
+                logger.debug(message)
                 self._zp_magsys_logged[name] = message
 
     def _user_states(self, field):
@@ -3250,7 +3250,7 @@ class MulensInstrument(Instrument):
         for i, name in enumerate(self.names):
             if has_mu[i] and not has_sigma[i]:
                 logger.warning(
-                    f"mulensinstrument.{name}.zeropoint has a mu but no "
+                    f"{self.log_tag(i)} zeropoint has a mu but no "
                     f"sigma: a zeropoint center with no width applies no SED "
                     f"tie, so it DOES NOTHING. Give a sigma (how much you "
                     f"trust the calibration, in mag) to tie f_source to the "
@@ -3258,14 +3258,28 @@ class MulensInstrument(Instrument):
                 )
         has_pred = self.sed_prediction_mask(system)
         tied = self.sed_tie_mask(system)
-        for i, name in enumerate(self.names):
-            if has_pred[i] and not tied[i]:
-                logger.info(
-                    f"mulensinstrument {name}: no zeropoint prior stated "
-                    f"(mu and sigma), so f_source is NOT tied to the SED; "
-                    f"the zeropoint is reported as derived "
-                    f"({self.zp_magsys[i]})."
-                )
+        untied = [
+            name
+            for i, name in enumerate(self.names)
+            if has_pred[i] and not tied[i]
+        ]
+        # ONE line for every untied light curve (docs/logging.md).  When NO
+        # light curve with an SED prediction is tied, the SED constrains no
+        # source flux at all -- in a config that has an SED, almost always a
+        # forgotten (or misspelled) zeropoint entry -- so it is a WARNING.
+        # When at least one is tied, the untied ones are a choice the user
+        # made per light curve (a survey with no trustworthy calibration),
+        # and the line is DEBUG.
+        if untied:
+            level = logging.WARNING if not np.any(tied) else logging.DEBUG
+            logger.log(
+                level,
+                f"{self.log_tag()} no zeropoint prior on "
+                f"{', '.join(untied)}, so their f_source is NOT tied to the "
+                f"SED (the zeropoint is only reported, as derived).\nTo tie "
+                f"one, set `mulensinstrument.<name>.zeropoint: {{mu: <zp>, "
+                f"sigma: <mag>}}` in the params file.",
+            )
         return tied
 
     def _predicted_mag_on_zp_system(self, star_indices, i, system):
@@ -3412,8 +3426,10 @@ class MulensInstrument(Instrument):
                 continue
             if not other_indices:
                 logger.warning(
-                    f"mulensinstrument {name}: sed_constrains_blend is "
-                    f"set but every modeled star is a source; skipping."
+                    f"{self.log_tag(i)} sed_constrains_blend is set but "
+                    f"every modeled star is a source, so there is no blend "
+                    f"star to constrain and it is IGNORED.  Remove it, or "
+                    f"add the blend star to the config."
                 )
                 continue
             if not system.sed.can_predict(other_indices):
@@ -4172,7 +4188,7 @@ class MulensInstrument(Instrument):
         noted = self.__dict__.setdefault("_plot_notes", set())
         if key not in noted:
             noted.add(key)
-            logger.info(f"[{self.prefix}] {message}")
+            logger.debug(f"[{self.prefix}] {message}")
 
     def _anomaly_windows(self, system, param_values, tE, peak):
         """Where the companion shows in the data (mmplot.anomaly_windows).

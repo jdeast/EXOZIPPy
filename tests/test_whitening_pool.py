@@ -346,7 +346,7 @@ def test_the_probe_reports_its_progress(cores, monkeypatch, caplog):
     kw = {} if cores == 1 else {"cores": cores, "eval_timeout": 60.0}
 
     # ACT
-    with caplog.at_level(logging.INFO, logger="exozippy.whitening"):
+    with caplog.at_level(logging.DEBUG, logger="exozippy.whitening"):
         probe_scales(_start(), logp, **kw)
     lines = [
         r.getMessage()
@@ -370,7 +370,7 @@ def test_a_fast_probe_logs_no_progress(caplog):
     Then no progress line is logged -- a fast model's log stays quiet.
     """
     logp = _aniso_logp([0.01, 3.0, 1e-4, 50.0], [0.2, -1.0, 5.0, 0.0])
-    with caplog.at_level(logging.INFO, logger="exozippy.whitening"):
+    with caplog.at_level(logging.DEBUG, logger="exozippy.whitening"):
         probe_scales(_start(), logp)
     assert "element(s) done" not in caplog.text
 
@@ -458,7 +458,9 @@ def test_a_polish_call_past_eval_timeout_is_written_off_and_the_seed_stops(
 
     # ACT
     t0 = time.monotonic()
-    with caplog.at_level(logging.INFO):
+    # DEBUG: the heartbeat (and its drain line) reaches the console only
+    # once per logger.INFO_PROGRESS_S; the file log keeps every beat.
+    with caplog.at_level(logging.DEBUG):
         polished, dlps, method = polish_raw_starts(
             model,
             [{"x": np.array(4.0)}],

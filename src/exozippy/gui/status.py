@@ -277,7 +277,7 @@ class GuiReporter:
         cost = time.time() - t0
         if cost > SNAPSHOT_BUDGET_S:
             self._snapshot_over_budget = True
-            logger.warning(
+            logger.info(
                 "GuiReporter: snapshot write took %.1fs (> %.0fs budget); "
                 "skipping further snapshots for the rest of this run.",
                 cost,

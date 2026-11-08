@@ -56,7 +56,7 @@ def _mulens_config(lc, bands=None, mulens_band="I", finite_source=False):
         ],
         "lens": [{"body": "star.Lens"}],
         "source": [{"body": "star.Source"}],
-        "mulensinstrument": [{"name": "OGLE", "file": lc, "filter": "I"}],
+        "mulensinstrument": [{"name": "OGLE", "file": lc}],
     }
     if bands is not None:
         config["band"] = bands
@@ -159,13 +159,16 @@ def test_band_block_costs_nothing_when_its_ld_is_unread(pspl_lc):
     assert lp_b == lp_n
 
 
-def test_omission_is_logged_at_info(pspl_lc, caplog):
+def test_omission_is_logged_at_debug(pspl_lc, caplog):
     """
     Given a band whose limb darkening nothing reads,
     When the system is prepared,
-    Then an INFO record says the LD parameters were omitted and why.
+    Then a DEBUG record says the LD parameters were omitted and why (DEBUG:
+      a decision that follows from the config, docs/logging.md).
     """
-    with caplog.at_level(logging.INFO, logger="exozippy.components.band.band"):
+    with caplog.at_level(
+        logging.DEBUG, logger="exozippy.components.band.band"
+    ):
         system = System(
             _mulens_config(pspl_lc, bands=[{"name": "I", "filter": "I"}]),
             user_params=_mulens_params(),

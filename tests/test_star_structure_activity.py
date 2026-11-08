@@ -151,7 +151,8 @@ def test_finite_source_warns_that_the_freed_radius_is_degenerate(caplog):
     """
     Given a finite-source fit with nothing else constraining the source size,
     When the star component registers its parameters,
-    Then it warns that the radius is not separately identifiable and names the
+    Then it warns that the radius is constrained only by the upper limit on
+      rho (not separately identifiable) and names the
       ways to break the degeneracy.
 
     Rope, not gates: the degeneracy is real (theta_E and d_S absorb any
@@ -165,7 +166,7 @@ def test_finite_source_warns_that_the_freed_radius_is_degenerate(caplog):
 
     # Assert
     text = caplog.text
-    assert "not separately identifiable" in text
+    assert "constrained only by the light curve's upper limit on rho" in text
     assert "Source" in text
     for remedy in ("sed:", "mann", "torres"):
         assert remedy in text

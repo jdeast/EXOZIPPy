@@ -51,7 +51,7 @@ def mulens_config(
         "mulensevent": [{"name": "EV", **(event or {})}],
         "lens": [{"body": f"star.{n}"} for n in lenses],
         "source": [{"body": f"star.{n}", **kw} for n, kw in sources],
-        "mulensinstrument": [{"name": "OGLE", "file": lc_path, "filter": "I"}],
+        "mulensinstrument": [{"name": "OGLE", "file": lc_path}],
     }
 
 

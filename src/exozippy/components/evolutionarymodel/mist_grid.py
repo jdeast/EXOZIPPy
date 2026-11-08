@@ -898,7 +898,7 @@ def load_mist_grid(
     df = pd.read_parquet(path, engine="pyarrow")
     df_trimmed, dropped = trim_to_complete_grid(df)
     if dropped["dropped_mass"] or dropped["dropped_initfeh"]:
-        logger.warning(
+        logger.debug(
             f"MIST grid ({path.name}) is missing some (mass, initfeh) "
             f"tracks; trimmed to a complete rectangle by dropping "
             f"mass in {dropped['dropped_mass']} and initfeh in "
@@ -911,7 +911,7 @@ def load_mist_grid(
     assembled = _assemble_grid(df_trimmed)
 
     if assembled["n_dragon_rows_added"]:
-        logger.info(
+        logger.debug(
             f"MIST grid ({path.name}): raised here_be_dragons on "
             f"{assembled['n_dragon_rows_added']} rows so every track's "
             f"unresolved-age tail is flagged continuously. The generator "
@@ -921,7 +921,7 @@ def load_mist_grid(
             f"docstring."
         )
     reaxis = assembled["reaxis"]
-    logger.info(
+    logger.debug(
         f"MIST grid ({path.name}): re-axed on the present-day mass; "
         f"{reaxis['n_unreachable']} nodes lie beyond every track's "
         f"present-day mass and {reaxis['n_hidden']} blend across a track "
@@ -930,7 +930,7 @@ def load_mist_grid(
     )
     if assembled["unflagged_nonmonotone_tracks"]:
         tracks = assembled["unflagged_nonmonotone_tracks"]
-        logger.warning(
+        logger.debug(
             f"MIST grid ({path.name}): {len(tracks)} track(s) step BACKWARDS "
             f"in age outside any unresolved-age tail. Every decrease this "
             f"module understands is a consequence of the generator's +1 yr "

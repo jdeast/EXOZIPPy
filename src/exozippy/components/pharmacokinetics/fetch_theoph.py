@@ -94,7 +94,7 @@ def fetch(dest_dir=".", force=False):
     fetch_assets(
         {FILENAME: THEOPH_ASSET},
         dest_dir,
-        on_fetch=lambda name: logger.warning(
+        on_fetch=lambda name: logger.info(
             "[theoph] downloading %s from %s -- see fetch_theoph.py for its "
             "provenance and licence.",
             name,

@@ -82,14 +82,12 @@ band:
 mulensinstrument:
   - name: "OGLE"
     file: "phot.dat"
-    filter: "I"
     band: "I"
     columns: {time: 0, mag: 1, err: 2}
     time_scale: "utc"
     time_frame: "hjd"
 #  - name: "OGLE_V"
 #    file: "photV.dat"
-#    filter: "V"
 #    band: "V"
 #    columns: {time: 0, mag: 1, err: 2}
 #    time_scale: "utc"

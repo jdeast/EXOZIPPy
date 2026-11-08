@@ -28,6 +28,8 @@ synthetic orbit (NEVER against MulensModel's keplerian branch, which
 contradicts its own linear mode by a sign -- conventions.md section 6).
 """
 
+import logging
+
 import numpy as np
 import pymc as pm
 import pytensor
@@ -328,7 +330,7 @@ def test_geometry_at_t0_par_is_the_static_geometry():
     )
 
 
-def test_nan_series_yields_nan_curve():
+def test_nan_series_yields_nan_curve(caplog):
     """
     Given: a NaN in the per-epoch geometry (a junk proposal),
     When: the Op evaluates,
@@ -349,8 +351,13 @@ def test_nan_series_yields_nan_curve():
     s_t, a_t = _series(times, p)
     s_t = np.asarray(s_t, dtype=float).copy()
     s_t[3] = np.nan
-    with pytest.warns(RuntimeWarning, match="orbital"):
+    with caplog.at_level(logging.WARNING, logger="exozippy"):
         a = fn(np.array([p[k] for k in _ORDER_STATIC]), times, obs, s_t, a_t)
+    assert any(
+        "orbital" in r.getMessage()
+        for r in caplog.records
+        if r.levelname == "WARNING"
+    )
     assert np.all(np.isnan(a))
 
 
@@ -400,7 +407,7 @@ def _om_system(tmp_path, backend="vbm_direct", otype="uniform_rotation"):
             }
         ],
         "source": [{"body": "star.Source"}],
-        "mulensinstrument": [{"name": "OGLE", "file": lc, "filter": "I"}],
+        "mulensinstrument": [{"name": "OGLE", "file": lc}],
     }
     params = {
         "source.Source.t_0": {"initval": _MAP["t_0"]},

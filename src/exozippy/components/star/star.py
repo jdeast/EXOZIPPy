@@ -739,7 +739,7 @@ class Star(Component):
                 f"{p} ({', '.join(names)})"
                 for p, names in sorted(deactivated.items())
             )
-            logger.info(
+            logger.debug(
                 f"[{self.prefix}] nothing in this topology reads {detail}, so "
                 f"those are not parameters of this fit: they are held at "
                 f"their resolved values, sample nothing and are not reported. "
@@ -786,16 +786,12 @@ class Star(Component):
 
         names = ", ".join(self.names[i] for i in degenerate)
         logger.warning(
-            f"[{self.prefix}] finite_source is on, so the source radius of "
-            f"{names} IS read (rho = theta_star/theta_E) -- but it is not "
-            f"separately identifiable: theta_E and the source distance "
-            f"absorb any rescaling of it, so it is sampled with only the "
-            f"light curve's UPPER limit on rho constraining it.  It is left "
-            f"free deliberately (that upper limit is real information, and "
-            f"pinning it would be this code choosing a radius for you).  To "
-            f"break the degeneracy supply the angular source size another "
-            f"way: an 'sed:' block, a mann/torres relation on that star, or "
-            f"an explicit prior -- 'star.{self.names[degenerate[0]]}.radius: "
+            f"[{self.prefix}] the source radius of {names} is constrained "
+            f"only by the light curve's upper limit on rho: theta_E and the "
+            f"source distance absorb any rescaling of it (left free on "
+            f"purpose; pinning it would choose a radius for you).\nTo break "
+            f"the degeneracy, add an 'sed:' block, a mann/torres relation, "
+            f"or a prior 'star.{self.names[degenerate[0]]}.radius: "
             f"{{mu: ..., sigma: ...}}'."
         )
 
@@ -1067,12 +1063,12 @@ class Star(Component):
                     self.manifest[param], pin
                 )
         for (i, a), params in added.items():
-            logger.info(
+            logger.debug(
                 f"[{self.prefix}] orbit group: {self.names[i]} shares "
                 f"{', '.join(params)} with {self.names[a]} (hard link)."
             )
         if redundant:
-            logger.warning(
+            logger.debug(
                 f"[{self.prefix}] params-file link(s) on {redundant} repeat "
                 f"the link an orbit group makes on its own; they can be "
                 f"deleted."
@@ -1084,9 +1080,10 @@ class Star(Component):
                 f"{'; '.join(broken)}."
             )
         if superseded:
-            logger.info(
+            logger.warning(
                 f"[{self.prefix}] the params-file initval on {superseded} is "
-                f"unused: an orbit group ties the element to its anchor."
+                f"IGNORED: an orbit group ties the element to its anchor.  "
+                f"Remove it, or set the anchor's value instead."
             )
 
     def _merge_sigma_pin(self, entry, elements):
@@ -1161,7 +1158,7 @@ class Star(Component):
             return
         has_gm = self._has_galacticmodel(system)
         if has_gm:
-            logger.info(
+            logger.debug(
                 f"[{self.prefix}] neighbor star(s) "
                 f"{[self.names[i] for i in neighbors]}: proper motion free "
                 f"under the galactic kinematic prior at each star's own "
@@ -1224,7 +1221,7 @@ class Star(Component):
                 if i not in tied:
                     self.config_manager.add_hint(f"star.{i}.{key}", mu)
         if tied:
-            logger.info(
+            logger.debug(
                 f"[{self.prefix}] neighbor star(s) "
                 f"{[self.names[i] for i in tied]}: proper motion tied by the "
                 f"params-file link (a bound companion)."
@@ -1232,7 +1229,7 @@ class Star(Component):
         pinned = [i for i in unread if i not in tied]
         if not pinned:
             return
-        logger.info(
+        logger.debug(
             f"[{self.prefix}] neighbor star(s) "
             f"{[self.names[i] for i in pinned]}: proper motion pinned at the "
             f"bulge field mean ({mu_ra:.2f}, {mu_dec:.2f}) mas/yr -- no "
@@ -1608,7 +1605,7 @@ class Star(Component):
                         **self._unread_loggsed_bounds(unread),
                     )
                     names = ", ".join(self.names[i] for i in unread)
-                    logger.info(
+                    logger.debug(
                         f"[{self.prefix}] nothing reads the SED flux of "
                         f"{names}: {'/'.join(inv.star_knobs)} pinned (and "
                         f"inactive, with what derives from them, unless a "
@@ -1902,7 +1899,7 @@ class Star(Component):
         """
         bounds = sampled_bounds(self.distance)
         if bounds is None:
-            logger.warning(
+            logger.debug(
                 f"[{self.prefix}] Cannot read finite bounds on "
                 f"{self.prefix}.distance; the d^2 volume prior is left "
                 f"unnormalized (harmless for sampling, but its logp is "
@@ -1915,7 +1912,7 @@ class Star(Component):
         # pc, so this is belt and braces.
         bad = (upper <= 0.0) | (lower < 0.0) | (upper <= lower)
         if np.any(bad):
-            logger.warning(
+            logger.debug(
                 f"[{self.prefix}] Non-positive or inverted bounds on "
                 f"{self.prefix}.distance; the d^2 volume prior is left "
                 f"unnormalized."
@@ -1927,7 +1924,7 @@ class Star(Component):
         # this constant does not normalize it.  Say so rather than pretend.
         links = getattr(self.distance, "element_links", None) or {}
         if links.get("lower") or links.get("upper"):
-            logger.warning(
+            logger.debug(
                 f"[{self.prefix}] {self.prefix}.distance carries a linked "
                 f"lower/upper bound, so its support is dynamic; the d^2 "
                 f"volume prior is normalized over the STATIC bounds and is "

@@ -216,7 +216,7 @@ def test_a_mixed_topology_gives_each_planet_its_own_coordinate(caplog):
     over a huge mass range instead of the ratio coordinate its topology asks
     for.  Roles are per element now, so nothing has to be given up.
     """
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.DEBUG):
         modes = _modes(
             [{"name": "b"}, {"name": "c"}],
             rvinstrument=_FakeRV([0]),
@@ -686,7 +686,7 @@ def test_mass_pin_with_pinned_host_is_applied_to_log_q(caplog):
     import astropy.units as u
 
     params = _pinned_params()
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.DEBUG):
         system = System(_binary_config(), user_params=params)
         system.prepare()
         model = system.build_model()

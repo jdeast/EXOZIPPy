@@ -16,6 +16,9 @@ logger = logging.getLogger(__name__)
 # that on every run would train people to skip the block that matters.
 USER_START_RTOL = 1e-4
 USER_START_ATOL = 1e-12
+# Below this magnitude a start counts as zero for `polish_moves`, whose
+# relative change is then the absolute one.
+USER_START_ZERO = 1e-9
 
 # Sub-keys that resolve() does NOT read but that legitimately appear in a
 # params file, so warning about them would be a false positive:
@@ -610,7 +613,12 @@ class ModelAuditor:
                 continue
             unit = getattr(p, "unit", "")
             diff = self._wrap_if_angle(after - before, unit)
-            denom = abs(before) if before else 1.0
+            # A start at (or within rounding of) zero has no relative scale:
+            # the move is then reported as an ABSOLUTE change ("rel" holds
+            # the difference itself).  Dividing by a 1e-18 build value is
+            # what printed "-707346329155310.38%" for a seed of 0.
+            absolute = abs(before) <= USER_START_ZERO
+            denom = 1.0 if absolute else abs(before)
             rel = diff / denom
             if abs(diff) <= USER_START_ATOL or abs(rel) <= USER_START_RTOL:
                 continue
@@ -621,6 +629,7 @@ class ModelAuditor:
                     "build": before,
                     "polished": after,
                     "rel": rel,
+                    "absolute": absolute,
                 }
             )
         moves.sort(key=lambda m: -abs(m["rel"]))

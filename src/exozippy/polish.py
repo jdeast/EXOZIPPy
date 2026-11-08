@@ -104,7 +104,7 @@ from collections import deque
 
 import numpy as np
 
-from .logger import fmt_duration
+from .logger import INFO_PROGRESS_S, ProgressCadence, fmt_duration
 
 logger = logging.getLogger(__name__)
 
@@ -370,6 +370,9 @@ class PolishMonitor:
         ]
         self.t_start = time.monotonic()
         self._t_last_log = self.t_start
+        # Every heartbeat goes to the file log (DEBUG); one per
+        # logger.INFO_PROGRESS_S reaches the console (docs/logging.md).
+        self._cadence = ProgressCadence()
         self._beat_t = self.t_start
         self._beat_done = 0.0
 
@@ -496,21 +499,24 @@ class PolishMonitor:
         if now - self._t_last_log < float(self.progress_interval_s):
             return
         self._t_last_log = now
+        level = self._cadence.level()
         elapsed = fmt_duration(now - self.t_start)
         if draining is not None:
             n, oldest_s, note = draining
-            self.log.info(
+            self.log.log(
+                level,
                 f"{self.label}: every seed has stopped; draining {n} "
                 f"in-flight evaluation(s), the oldest running "
-                f"{fmt_duration(oldest_s)}; {note}  elapsed={elapsed}"
+                f"{fmt_duration(oldest_s)}; {note}  elapsed={elapsed}",
             )
             return
         if opening is not None:
             # No step exists yet, so there is no rate to extrapolate from.
             k, m = opening
-            self.log.info(
+            self.log.log(
+                level,
                 f"{self.label}: {self.opening_text} ({k}/{m} evaluations "
-                f"back)  elapsed={elapsed}"
+                f"back)  elapsed={elapsed}",
             )
             return
         live = [s for s in range(self.n_seeds) if self.stop_kind[s] is None]
@@ -558,9 +564,10 @@ class PolishMonitor:
             for s in range(self.n_seeds)
         )
         extra = detail() if detail is not None else ""
-        self.log.info(
+        self.log.log(
+            level,
             f"{self.label}: {where}  elapsed={elapsed}  {pace}  "
-            f"dlp=[{gains}]{extra}  ({len(live)} seed(s) still running)"
+            f"dlp=[{gains}]{extra}  ({len(live)} seed(s) still running)",
         )
 
 
@@ -662,7 +669,7 @@ def _compile_logp_grad(model):
             on_unused_input="ignore",
         )
     except Exception as e:
-        logger.info(
+        logger.debug(
             f"Seed polish: gradient graph unavailable ({type(e).__name__}: "
             f"{e}); falling back to the gradient-free DE polish."
         )
@@ -874,7 +881,7 @@ def _de_engine(
             pool = mp.get_context("fork").Pool(
                 processes=n_proc, initializer=_common._worker_init
             )
-            logger.info(
+            logger.debug(
                 f"Seed polish: DE engine on {n_proc} worker process(es), "
                 f"proposals pooled across all {n_seeds} seed(s), "
                 f"{cap} sweeps per round."
@@ -887,7 +894,7 @@ def _de_engine(
             # 6.11.3, examples/ob09020: 1 core of 36 for 38 minutes).  Since
             # cores=None means AUTO, reaching here at all means somebody
             # asked for serial -- or the machine has one core.
-            logger.info(
+            logger.debug(
                 f"Seed polish: DE engine running SERIAL on one core "
                 f"(cores={cores!r}), {n_seeds} seed(s), {cap} sweeps per "
                 f"round; this gradient-free branch is far more expensive "
@@ -1045,7 +1052,7 @@ def polish_raw_starts(
             [np.all(np.isfinite(np.asarray(v))) for v in vals]
         )
         if not grad_finite:
-            logger.info(
+            logger.debug(
                 "Seed polish: gradient non-finite at the start; falling "
                 "back to the gradient-free DE polish."
             )
@@ -1094,7 +1101,7 @@ def polish_raw_starts(
     for s, (lp_best, note) in enumerate(zip(lp_bests, notes)):
         lp0 = monitor.lp0[s]
         dlps.append(lp_best - lp0)
-        logger.info(
+        logger.debug(
             f"Seed polish ({eng.label}): seed {seed_indices[s]} lp "
             f"{lp0:.1f} -> {lp_best:.1f} (dlp=+{lp_best - lp0:.1f}, "
             f"{monitor.steps[s]} {eng.unit}{note}, {monitor.describe(s)})"
@@ -1257,6 +1264,16 @@ def polish_rounds(
     t0 = time.monotonic()
     deadline = None if timeout_s is None else t0 + float(timeout_s)
     raw_starts, seed_indices = system.get_raw_starts(model)
+    budget = (
+        "no time limit"
+        if timeout_s is None
+        else f"at most {fmt_duration(float(timeout_s))}"
+    )
+    logger.info(
+        f"Seed polish: moving {len(seed_indices)} start point(s) to their "
+        f"basin optimum (up to {int(max_rounds)} round(s), {budget}; "
+        f"progress every {fmt_duration(INFO_PROGRESS_S)})."
+    )
     logp_fn = model.compile_logp()
     if rng is None:
         rng = np.random.default_rng(0)
@@ -1338,7 +1355,7 @@ def polish_rounds(
             else "restarting at the polished point (measure_scales is off, "
             "so no re-whitening)"
         )
-        logger.info(f"Seed polish round {r}/{int(max_rounds)}: {how}; {why}.")
+        logger.debug(f"Seed polish round {r}/{int(max_rounds)}: {how}; {why}.")
         # Re-center first, exactly as run.py orders it before its own probe:
         # the probe measures around the anchor, which must be the start.
         system.recenter_whitening_anchor(model)
@@ -1350,6 +1367,7 @@ def polish_rounds(
                 logp_fn,
                 cores=cores,
                 eval_timeout=eval_timeout,
+                start_diagnostics=False,
             )
         raw_all, idx_all = system.get_raw_starts(model)
         if list(idx_all) != list(seed_indices):
@@ -1403,10 +1421,16 @@ def polish_rounds(
             f"below its basin optimum."
         )
     engine_label = "L-BFGS" if method == "lbfgs" else "DE"
-    logger.info(
-        f"Seed polish: {len(rounds)} {engine_label} round(s) in {wall_s:.0f} "
-        f"s; gain per seed (per round): {per_seed}.  {verdict}"
+    # INFO: one short line (the totals and the verdict); the per-round gains
+    # and each seed's last stop reason are DEBUG (docs/logging.md).
+    totals = ", ".join(
+        f"+{sum(rd[k] for rd in rounds):.1f}" for k in seed_indices
     )
+    logger.info(
+        f"Seed polish: {len(rounds)} {engine_label} round(s) in "
+        f"{fmt_duration(wall_s)}; lp gain per seed: {totals}.  {verdict}"
+    )
+    logger.debug(f"Seed polish detail (per round): {per_seed}.")
     return summary
 
 

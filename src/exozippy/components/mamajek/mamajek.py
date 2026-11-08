@@ -122,7 +122,8 @@ class Mamajek(StellarRelation, Component):
                 "star '{star}' starts at {value:.3f} solMass, outside the "
                 f"dwarf sequence's tabulated range "
                 f"[{physics.MSTAR_MIN}, {physics.MSTAR_MAX}] solMass; the "
-                "prediction is clamped at the nearest edge there."
+                "prediction is clamped at the nearest edge there. If it "
+                "stays there, prefer MIST/PARSEC or a direct prior."
             ),
         )
 

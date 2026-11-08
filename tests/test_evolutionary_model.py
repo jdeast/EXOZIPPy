@@ -2435,7 +2435,7 @@ def test_load_mist_grid_end_to_end_on_a_defective_grid(tmp_path, caplog):
     path.parent.mkdir(parents=True)
     df.to_parquet(path, engine="pyarrow", index=False)
 
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.DEBUG):
         grid = mist_grid.load_mist_grid(model_root=root)
 
     assert "trimmed to a complete rectangle" in caplog.text

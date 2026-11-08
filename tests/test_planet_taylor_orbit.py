@@ -37,7 +37,7 @@ def _planet_lens_system(tmp_path):
             }
         ],
         "source": [{"body": "star.Source"}],
-        "mulensinstrument": [{"name": "OGLE", "file": lc, "filter": "I"}],
+        "mulensinstrument": [{"name": "OGLE", "file": lc}],
     }
     params = {
         "source.Source.t_0": {"initval": _T0_PAR},
@@ -182,7 +182,7 @@ def _triple_lens_config(lc, with_static_orbit=True):
         ],
         "orbit": orbits,
         "source": [{"body": "star.Source"}],
-        "mulensinstrument": [{"name": "OGLE", "file": lc, "filter": "I"}],
+        "mulensinstrument": [{"name": "OGLE", "file": lc}],
     }
 
 

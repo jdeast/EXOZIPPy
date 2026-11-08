@@ -274,8 +274,8 @@ class StellarRelation:
         different grids).
 
         ``message`` is a format string taking ``{star}`` (the star's name),
-        ``{value}``, ``{low}`` and ``{high}``; it is prefixed with
-        ``"<prefix> '<instance>': "``.  The wording is the caller's because
+        ``{value}``, ``{low}`` and ``{high}``; it is prefixed with the
+        instance's ``log_tag`` (docs/logging.md).  The wording is the caller's because
         the advice is relation-specific (which other relation to prefer, and
         whether the range is two-sided).
         """
@@ -292,7 +292,7 @@ class StellarRelation:
             if value is None or lo <= value <= hi:
                 continue
             logger.warning(
-                f"{self.prefix} '{nm}': "
+                f"{self.log_tag(i)} "
                 + message.format(
                     star=system.star.names[si], value=value, low=lo, high=hi
                 )

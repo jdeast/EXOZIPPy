@@ -30,9 +30,10 @@ def test_a_config_without_a_parameter_file_builds(caplog):
     """
     Given a config with no parameter_file key,
     When a System is built from it,
-    Then it succeeds with empty user_params and says so at INFO.
+    Then it succeeds with empty user_params and says so at DEBUG (a config
+      choice taking effect, docs/logging.md).
     """
-    with caplog.at_level(logging.INFO, logger="exozippy.system"):
+    with caplog.at_level(logging.DEBUG, logger="exozippy.system"):
         system = System(dict(_CONFIG))
 
     assert system.user_params == {}

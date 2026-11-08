@@ -1,9 +1,11 @@
-import warnings
+import logging
 
 import numpy as np
 from scipy.interpolate import interpn
 
 from exozippy.components.sed.plot import Plot
+
+logger = logging.getLogger(__name__)
 
 
 class NextGenPlot(Plot):
@@ -75,22 +77,40 @@ class NextGenPlot(Plot):
         self.mag_pred_draws = mag_pred_draws
         self.combined_pred_draws = combined_pred_draws
 
-    def _warn_if_off_grid(self, nstar, axis_names, points, eval_point):
-        """Say so when a draw is being extrapolated off the spectra grid.
+    def _warn_if_off_grid(
+        self, nstar, axis_names, points, eval_point, off_grid
+    ):
+        """Record a draw that is being extrapolated off the spectra grid.
 
         The extrapolation itself is the deliberate choice (see the call
         site); what would be wrong is doing it silently, since the drawn
         spectrum is then no longer a model spectrum the grid contains.
+        Each draw is logged at DEBUG and counted in ``off_grid`` (keyed by
+        star and axis); `_log_off_grid` then warns ONCE for the figure.
         """
         for axis, axis_pts, value in zip(axis_names, points, eval_point):
             lo, hi = float(np.min(axis_pts)), float(np.max(axis_pts))
             if value < lo or value > hi:
-                warnings.warn(
+                logger.debug(
                     f"{self.sedmodel}: star {nstar} has {axis}={value:g}, "
-                    f"outside the bracketing spectra cell [{lo:g}, {hi:g}]. "
-                    "The plotted spectrum is linearly extrapolated there "
-                    "and is not a model spectrum the grid contains."
+                    f"outside the bracketing spectra cell [{lo:g}, {hi:g}]."
                 )
+                off_grid[(nstar, axis)] = off_grid.get((nstar, axis), 0) + 1
+
+    def _log_off_grid(self, off_grid):
+        """One WARNING naming every star and axis a plotted draw left the
+        spectra grid on (docs/logging.md, "logged ONCE")."""
+        if not off_grid:
+            return
+        where = ", ".join(
+            f"star {nstar} {axis} ({n} of {self.ndraws} draws)"
+            for (nstar, axis), n in sorted(off_grid.items())
+        )
+        logger.warning(
+            f"{self.sedmodel} SED plot: {where} outside the model spectra "
+            "grid; those plotted spectra are linearly extrapolated, not "
+            "model spectra the grid contains."
+        )
 
     def _interp_spectra(self):
         """
@@ -106,6 +126,7 @@ class NextGenPlot(Plot):
             (self.ndraws, self.nstars, len(self.df_wave))
         )
 
+        off_grid = {}
         for d, draw in enumerate(self.draws):
             pt_dict = {}
             for col in self.df_spec.columns:
@@ -185,7 +206,7 @@ class NextGenPlot(Plot):
                 )
                 eval_point = np.array([pt_dict[ax][nstar] for ax in pt_dict])
                 self._warn_if_off_grid(
-                    nstar, list(pt_dict), points, eval_point
+                    nstar, list(pt_dict), points, eval_point, off_grid
                 )
                 # bounds_error=False + fill_value=None -> linear
                 # EXTRAPOLATION off the bracketing cell, deliberately, and
@@ -207,4 +228,5 @@ class NextGenPlot(Plot):
 
             model_spectrum_flux_draws[d, :] = interp_flux
 
+        self._log_off_grid(off_grid)
         self.model_spectrum_flux_draws = model_spectrum_flux_draws

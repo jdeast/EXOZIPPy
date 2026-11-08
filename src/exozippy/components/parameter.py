@@ -2337,12 +2337,11 @@ class Parameter:
             if fields:
                 logger.warning(
                     f"Parameter '{self.get_display_label(int(i))}': your "
-                    f"{'/'.join(fields)}{where} is DROPPED -- this element is "
+                    f"{'/'.join(fields)}{where} is DROPPED: this element is "
                     f"not a parameter of its instance's parameterization, so "
-                    f"it is held at a bookkeeping value, given no prior, and "
-                    f"reported nowhere. Put the constraint on the quantity "
-                    f"this instance actually samples, or change the "
-                    f"instance's parameterization if you meant to fit it."
+                    f"it is held at a bookkeeping value with no prior.  Put "
+                    f"the constraint on the quantity this instance samples, "
+                    f"or change its parameterization to fit it."
                 )
 
             # A START VALUE IS DROPPED JUST AS SILENTLY, and until 2026-09
@@ -2383,13 +2382,11 @@ class Parameter:
                 logger.warning(
                     f"Parameter '{self.get_display_label(int(i))}': "
                     f"{whose}{where if start_src == 'user' else ''} is "
-                    f"DROPPED -- this element is not a parameter of its "
-                    f"instance's parameterization, so it is held at a "
-                    f"bookkeeping value whatever start was supplied, while "
-                    f"OTHER elements of this parameter are live -- so the "
-                    f"value most likely went to the wrong element. If a "
-                    f"component wrote this, it is seeding an element that no "
-                    f"longer samples: check the path it pushed."
+                    f"DROPPED: this element is not a parameter of its "
+                    f"instance's parameterization, while other elements of "
+                    f"this parameter are live, so the value most likely went "
+                    f"to the wrong element.  Check the key (for a "
+                    f"data-derived start, the path the component pushed)."
                 )
         self.is_sampled = is_sampled
         self.is_derived = is_derived
@@ -2559,16 +2556,13 @@ class Parameter:
                 if q_init != q_raw:
                     nudged_to = lowers[i] + q_init * span
                     logger.warning(
-                        f"Parameter '{self.label}'[{i}]: start value "
-                        f"{inits[i]} sits on (or unrepresentably close to) "
-                        f"its bounds [{lowers[i]}, {uppers[i]}], where the "
-                        f"logit transform diverges and no raw start exists; "
-                        f"nudged inward to {nudged_to}, a move of "
-                        f"{abs(nudged_to - inits[i]):.3g} (internal units). "
-                        f"This is the ON-THE-BOUND case only -- a start "
-                        f"OUTSIDE the bounds is refused outright, never "
-                        f"clipped. Set an 'initval' further inside the bound "
-                        f"to remove this nudge."
+                        f"Parameter '{self.get_display_label(i)}': start "
+                        f"value {float(inits[i])} sits on (or unrepresentably "
+                        f"close to) its bounds [{float(lowers[i])}, "
+                        f"{float(uppers[i])}], where no raw start exists, so "
+                        f"it is nudged inward to {float(nudged_to)} (a move "
+                        f"of {abs(nudged_to - inits[i]):.3g}, internal "
+                        f"units).  Set an 'initval' further inside the bound."
                     )
                 logit_q_inits[i] = np.log(q_init / (1.0 - q_init))
                 jac = (
@@ -3979,8 +3973,8 @@ class Parameter:
                 # move to, and silently pinning it at raw = 0 would invent a
                 # physical start.  Leave the displacement where it is so the
                 # existing start-value checks keep reporting it.
-                logger.warning(
-                    f"Parameter '{self.label}'[{i}]: raw start {ri[j]} puts "
+                logger.debug(
+                    f"Parameter '{self.get_display_label(int(i))}': raw start {ri[j]} puts "
                     f"the logit anchor at {lq_start}; leaving the anchor "
                     f"where it is rather than re-centering on a "
                     f"non-representable point."
@@ -4006,13 +4000,11 @@ class Parameter:
                 q = 1.0 / (1.0 + np.exp(-np.clip(lq_start, -100.0, 100.0)))
                 if q < qf or q > 1.0 - qf:
                     logger.warning(
-                        f"Parameter '{self.label}'[{i}]: the polished start "
-                        f"sits within q_floor ({qf:.3g}) of its bounds "
-                        f"[{tf['lowers'][i]}, {tf['uppers'][i]}] (q="
-                        f"{q:.3g}); the re-centered anchor is kept there "
-                        f"rather than nudged inward, so raw = 0 still means "
-                        f"the value the polish found. A start pinned on a "
-                        f"wall usually means the bound, not the start, is "
+                        f"Parameter '{self.get_display_label(int(i))}': the "
+                        f"polished start sits within q_floor ({qf:.3g}) of "
+                        f"its bounds [{float(tf['lowers'][i])}, "
+                        f"{float(tf['uppers'][i])}] (q={q:.3g}).  A start on "
+                        f"a wall usually means the bound, not the start, is "
                         f"the thing to revisit." + self.remedy_suffix()
                     )
 
@@ -5045,8 +5037,8 @@ class Parameter:
         for c in text:
             if c not in _PASSTHROUGH_LOGGED:
                 _PASSTHROUGH_LOGGED.add(c)
-                logger.info(
-                    f"{self.label}: citation {c!r} is not a references.bib "
+                logger.debug(
+                    f"Parameter '{self.label}': citation {c!r} is not a references.bib "
                     "key; printed as text in the table note -- replace it "
                     "with a \\citet by hand when writing the paper."
                 )
@@ -5453,8 +5445,8 @@ class Parameter:
                 self.posterior = old.copy(data=new)
             else:
                 self.posterior = new
-        logger.info(
-            f"[{self.label}] reported at the epoch least correlated with "
+        logger.debug(
+            f"Parameter '{self.label}': reported at the epoch least correlated with "
             f"'{sib_label}': {shifts.tolist()} period(s) from the sampled "
             f"epoch."
         )
@@ -5486,9 +5478,10 @@ class Parameter:
             sibling = param_lookup.get(f"{prefix}.{spec['param']}")
             if sibling is None:
                 logger.warning(
-                    f"[{self.label}] periodic: sibling parameter "
-                    f"'{prefix}.{spec['param']}' not found; the posterior "
-                    "is not recentered."
+                    f"Parameter '{self.label}': periodic sibling "
+                    f"'{prefix}.{spec['param']}' not found, so the posterior "
+                    "is not recentered and its reported interval may "
+                    "straddle the wrap."
                 )
                 return None
             if sibling.posterior is not None:
@@ -5513,9 +5506,10 @@ class Parameter:
                 sib_internal = np.repeat(sib_internal, n)
             if sib_internal.size != n:
                 logger.warning(
-                    f"[{self.label}] periodic: sibling '{sibling.label}' has "
-                    f"{sib_internal.size} elements for {n}; the posterior "
-                    "is not recentered."
+                    f"Parameter '{self.label}': periodic sibling "
+                    f"'{sibling.label}' has {sib_internal.size} elements for "
+                    f"{n}, so the posterior is not recentered and its "
+                    "reported interval may straddle the wrap."
                 )
                 return None
             internal = sib_internal
@@ -5560,8 +5554,9 @@ class Parameter:
             return
         if arr.ndim > 1 and int(np.prod(arr.shape[:-1])) != period.size:
             logger.warning(
-                f"[{self.label}] periodic: {period.size} periods for a "
-                f"posterior of shape {arr.shape}; not recentered."
+                f"Parameter '{self.label}': {period.size} periods for a "
+                f"posterior of shape {arr.shape}, so it is not recentered and "
+                f"its reported interval may straddle the wrap."
             )
             return
         new = recenter_periodic(arr, period, label=self.label)

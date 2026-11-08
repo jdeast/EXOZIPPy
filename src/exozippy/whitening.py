@@ -49,6 +49,8 @@ from collections import deque
 
 import numpy as np
 
+from .logger import ProgressCadence
+
 logger = logging.getLogger(__name__)
 
 # target = 0.5 nats (dlogp=0.5 <-> dchi2=1, the EXOFASTv2 convention); for a
@@ -367,6 +369,11 @@ class _ProbeProgress:
         self.t0 = time.monotonic()
         self.last = self.t0
         self.n_lines = 0
+        # Every beat goes to the file log; one per logger.INFO_PROGRESS_S
+        # (and the closing total of a probe that showed one) reaches the
+        # console (docs/logging.md).
+        self._cadence = ProgressCadence()
+        self.n_info = 0
 
     def beat(self, n_done, n_evals, n_in_flight=None, force=False):
         now = time.monotonic()
@@ -374,6 +381,9 @@ class _ProbeProgress:
             return
         self.last = now
         self.n_lines += 1
+        level = self._cadence.level(force=force and self.n_info > 0)
+        if level == logging.INFO:
+            self.n_info += 1
         elapsed = now - self.t0
         if n_done >= self.total:
             eta = "done"
@@ -385,10 +395,11 @@ class _ProbeProgress:
         else:
             eta = "ETA unknown (no element finished yet)"
         flight = "" if n_in_flight is None else f", {n_in_flight} in flight"
-        logger.info(
+        logger.log(
+            level,
             f"{self.label}: {n_done}/{self.total} element(s) done, "
             f"{n_evals} logp evaluation(s){flight} ({self.where}), "
-            f"elapsed {elapsed:.0f} s, {eta}."
+            f"elapsed {elapsed:.0f} s, {eta}.",
         )
 
     def finish(self, n_evals):
@@ -572,7 +583,7 @@ def _probe_on_pool(
         if eval_timeout is not None
         else " (no eval_timeout: a hung call is not written off)"
     )
-    logger.info(
+    logger.debug(
         f"{label}: {len(elems)} element(s) on {n_workers} worker "
         f"process(es){timeout_msg}."
     )
@@ -651,7 +662,7 @@ def _probe_on_pool(
         rest = [(e, st) for e, st in ready if e not in stale]
         ready.clear()
         ready.extend(survivors + rest)
-        logger.warning(
+        logger.debug(
             f"{label}: recycling the worker pool -- a hung worker never "
             f"rejoins it on its own."
         )
@@ -975,7 +986,14 @@ def _probe_selected(raw_start, logp_fn, elems, *, cores=1, eval_timeout=None):
 
 
 def apply_measured_whitening(
-    system, model, raw_start=None, logp_fn=None, *, cores=1, eval_timeout=None
+    system,
+    model,
+    raw_start=None,
+    logp_fn=None,
+    *,
+    cores=1,
+    eval_timeout=None,
+    start_diagnostics=True,
 ):
     """Measure every sampled element's true raw-space scale and rescale the
     model's whitening in place.
@@ -1067,17 +1085,28 @@ def apply_measured_whitening(
         for k, g in probe_diag.get("gradient_nats", {}).items()
         if g > _GRAD_DOMINATED_NATS
     }
+    # ``start_diagnostics=False`` is the seed polish's between-round probe:
+    # the polish is about to move that start again, so what it says about
+    # the start is DEBUG there; the final probe (run.py) reports it.
     if grad_dom:
         worst = sorted(grad_dom.items(), key=lambda kv: -kv[1])
-        logger.warning(
-            "Whitening: gradient-dominated start -- displaced ~N sigma from "
-            "its conditional optimum along: "
+        named = ", ".join(f"{k} (~{g:.0f} sigma)" for k, g in worst[:3])
+        if len(worst) > 3:
+            named += f" and {len(worst) - 3} more"
+        logger.log(
+            logging.WARNING if start_diagnostics else logging.DEBUG,
+            f"Whitening: the start is far from its conditional optimum "
+            f"along {len(worst)} direction(s): {named}.  The sampler begins "
+            f"there and has to burn in from it.\nPolish the start (sampler: "
+            f"seed_polish) or move those initvals closer in the params file.",
+        )
+        logger.debug(
+            "Whitening: gradient-dominated directions: "
             + "; ".join(f"{k} (~{g:.0f} sigma)" for k, g in worst)
-            + " -- scales are curvature-measured and stay valid, but "
-            "consider a polished start (seed_polish) or closer initvals."
+            + " -- scales are curvature-measured and stay valid."
         )
     if probe_diag.get("linear_fallback"):
-        logger.warning(
+        logger.debug(
             "Whitening: no measurable positive curvature (ridge/saddle/"
             "linear logp) along: "
             + "; ".join(probe_diag["linear_fallback"])
@@ -1142,7 +1171,7 @@ def apply_measured_whitening(
         if not clipped or round_i >= _MAX_ESCALATION_ROUNDS:
             break
         round_i += 1
-        logger.warning(
+        logger.debug(
             f"Whitening: {len(clipped)} element(s) hit the probe's dynamic "
             f"range (preliminary scale off by >9 orders of magnitude too "
             f"tight, or >14 too loose); escalation round {round_i}: "
@@ -1282,7 +1311,14 @@ _BARRIER_FEEDBACK_NATS = 0.1
 
 
 def measure_and_whiten(
-    system, model, raw_start=None, logp_fn=None, *, cores=1, eval_timeout=None
+    system,
+    model,
+    raw_start=None,
+    logp_fn=None,
+    *,
+    cores=1,
+    eval_timeout=None,
+    start_diagnostics=True,
 ):
     """Full startup whitening: probe + rescale, then measured barrier
     steepness, with one correction round if the two interact.
@@ -1315,6 +1351,7 @@ def measure_and_whiten(
         logp_fn,
         cores=cores,
         eval_timeout=eval_timeout,
+        start_diagnostics=start_diagnostics,
     )
     # Each rescale re-expresses a polished (nonzero) start in the new raw
     # coordinates -- re-read it before evaluating or probing there again
@@ -1337,6 +1374,7 @@ def measure_and_whiten(
             logp_fn,
             cores=cores,
             eval_timeout=eval_timeout,
+            start_diagnostics=start_diagnostics,
         )
         raw_start = _refetch_raw_start(system, model, raw_start)
         # Fold the correction into the cumulative multipliers for reporting.
@@ -1596,7 +1634,6 @@ def restore_whitening_for_trace(system, path, trace_path):
         # reproducible, and it would move the soft-bound barriers (a real
         # posterior term) away from the sampled model as well.
         logger.warning(
-            f"{_BANNER}\n"
             f"UNVERIFIABLE WHITENING: reusing the saved trace {trace_path}, "
             f"but no whitening state was found at {path}, so the raw draws "
             f"cannot be checked against -- or decoded under -- the "
@@ -1607,7 +1644,6 @@ def restore_whitening_for_trace(system, path, trace_path):
             f"correct, but anything recomputed from the raw draws (mode "
             f"labels, the seed ledger, a recomputed lp) may not be. To be "
             f"certain, re-sample with 'sampler: {{recompute_trace: true}}'."
-            f"\n{_BANNER}"
         )
         return "unverifiable"
 

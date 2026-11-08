@@ -43,7 +43,7 @@ def _system(tmp_path, stars, orbits, sources, extra_params=None):
         "mulensevent": [{"finite_source": False, "t0_par": _T0_PAR}],
         "lens": [{"body": "star.L1"}],
         "source": sources,
-        "mulensinstrument": [{"name": "OGLE", "file": lc, "filter": "I"}],
+        "mulensinstrument": [{"name": "OGLE", "file": lc}],
     }
     params = {
         "mulensevent.t_E": {"initval": 45.0},

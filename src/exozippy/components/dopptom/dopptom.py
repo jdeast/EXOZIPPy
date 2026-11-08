@@ -383,8 +383,10 @@ class Dopptom(Component):
                     # auto self-limits: keep at least 2 bins
                     nbin = max(1, vel.size // 2)
                     logger.warning(
-                        f"[dopptom.{self.names[i]}] velbin auto clamped "
-                        f"to {nbin} on a {vel.size}-pixel grid."
+                        f"{self.log_tag(i)} velbin: auto clamped to {nbin} on "
+                        f"a {vel.size}-pixel grid, which spans less than a "
+                        f"third of a resolution element at R={R:.0f}.  Check "
+                        f"`resolution:` and the velocity grid."
                     )
             else:
                 nbin = max(1, int(vb))
@@ -409,8 +411,8 @@ class Dopptom(Component):
                 ccf2d = np.add.reduceat(ccf2d, edges, axis=1) / counts[None, :]
                 vel = np.add.reduceat(vel, edges) / counts
                 rem = int(counts[-1] - nbin)
-                logger.info(
-                    f"[dopptom.{self.names[i]}] velocity grid binned x{nbin} "
+                logger.debug(
+                    f"{self.log_tag(i)} velocity grid binned x{nbin} "
                     f"(dv {dv_native:.3f} -> {dv_native * nbin:.3f} km/s; "
                     f"velbin: {vb}"
                     + (
@@ -435,9 +437,9 @@ class Dopptom(Component):
             indep = (rvel / FWHM2SIGMA) / dv
             if indep < 1.0:
                 logger.warning(
-                    f"[dopptom.{self.names[i]}] velocity grid is coarser "
-                    f"than the spectral resolution (IndepVels={indep:.2f}; "
-                    f"velbin too aggressive?) -- clamping the tempering to 1."
+                    f"{self.log_tag(i)} velocity grid is coarser than the "
+                    f"spectral resolution (IndepVels={indep:.2f}), so the "
+                    f"tempering is clamped to 1.  Use a smaller velbin."
                 )
                 indep = 1.0
 
@@ -447,8 +449,8 @@ class Dopptom(Component):
             self.med.append(med)
             self.rms.append(rms)
             self.indep_vels.append(indep)
-            logger.info(
-                f"[dopptom.{self.names[i]}] {ccf2d.shape[0]} exposures x "
+            logger.debug(
+                f"{self.log_tag(i)} {ccf2d.shape[0]} exposures x "
                 f"{ccf2d.shape[1]} velocities, R={R:.0f}, rms={rms:.3e}, "
                 f"IndepVels={indep:.1f}"
             )
@@ -511,8 +513,8 @@ class Dopptom(Component):
         need = ("orbit.svcoslam", "orbit.svsinlam", "star.vline")
         missing = [k for k in need if k not in points[0]]
         if missing:
-            logger.warning(
-                f"[{self.prefix}] shadow-window check skipped: the "
+            logger.debug(
+                f"{self.log_tag()} shadow-window check skipped: the "
                 f"point dict lacks {missing}."
             )
             return
@@ -535,7 +537,7 @@ class Dopptom(Component):
                 )
             if worst > half:
                 logger.warning(
-                    f"[dopptom.{self.names[i]}] the sampled vsini/vline "
+                    f"{self.log_tag(i)} the sampled vsini/vline "
                     f"need a shadow window of ~{worst:.1f} km/s but the "
                     f"build-time window is {half:.1f} km/s (set from the "
                     f"start values): the shadow is being clipped against "
@@ -635,11 +637,11 @@ class Dopptom(Component):
             ltt_on = bool(self._light_travel_time_active[i])
             if ltt_on and not ltt.orbit_supports_ltt(orbit):
                 logger.warning(
-                    "[dopptom.%s] light-travel-time correction disabled "
-                    "-- the orbit does not define %s (its bodies did not "
-                    "resolve). Set light_travel_time: false on this "
-                    "dataset to silence this.",
-                    self.names[i],
+                    "%s light-travel-time correction disabled: the orbit "
+                    "does not define %s (its bodies did not resolve).  Set "
+                    "light_travel_time: false on this dataset to silence "
+                    "this.",
+                    self.log_tag(i),
                     ", ".join(ltt.REQUIRED_ORBIT_PARAMS),
                 )
                 ltt_on = False
@@ -695,8 +697,8 @@ class Dopptom(Component):
                 * p_init_all[pidx]
             ) / sigma_floor
             n_gl_i = choose_quadrature_order(ratio0)
-            logger.info(
-                f"[dopptom.{self.names[i]}] quadrature order "
+            logger.debug(
+                f"{self.log_tag(i)} quadrature order "
                 f"n_gl={n_gl_i} (worst-case width ratio {ratio0:.1f})"
             )
             shadow = dt_shadow(v_win, x, vsini_kms, p, sigma_g, n_gl=n_gl_i)
@@ -893,7 +895,9 @@ class Dopptom(Component):
         if isinstance(points, dict):
             points = [points]
         if len(points) == 0:
-            logger.warning("No points provided for DT plotting.")
+            logger.debug(
+                f"{self.log_tag()} no points provided for DT plotting."
+            )
             return
         # The REFERENCE draw, same convention as plot_via_specs (data and
         # decorations from points[0]): a parameter-wise median across
@@ -1009,4 +1013,4 @@ class Dopptom(Component):
             out = f"{filename_prefix}_DT_{self.names[i]}.pdf"
             fig.savefig(out)
             plt.close(fig)
-            logger.info(f"[dopptom.{self.names[i]}] wrote {out}")
+            logger.debug(f"{self.log_tag(i)} wrote {out}")

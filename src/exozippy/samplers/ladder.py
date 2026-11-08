@@ -80,7 +80,7 @@ def resolve_n_temps(n_temps, n_params, T_max):
                 f"n_temps must be an integer or 'auto', got {n_temps!r}"
             )
         n = max(8, int(np.ceil(np.sqrt(n_params / 2.0) * np.log(T_max))))
-        logger.info(
+        logger.debug(
             f"n_temps: auto -> {n} rungs "
             f"(D={n_params}, T_max={T_max:g}, sqrt(D/2)*ln(T_max))"
         )
@@ -123,7 +123,7 @@ def ladder_health_report(temperatures, n_swap_accept, n_swap_propose):
             pair_idx[~measured], pair_idx[measured], rej[measured]
         )
     lam = float(np.sum(np.clip(rej, 0.0, 1.0)))
-    logger.info(
+    logger.debug(
         f"PT ladder health: communication barrier Lambda={lam:.2f} with "
         f"n_temps={n_temps} (DEO round-trip ceiling ~ 1/(2+2*Lambda) = "
         f"{1.0 / (2.0 + 2.0 * lam):.3f} per swap round)"

@@ -736,7 +736,7 @@ class Subject(Component):
                 for name, m in zip(self.names, self.coord_modes)
                 if m == mode
             ]
-            logger.info(
+            logger.debug(
                 "[%s] sampling %s (%s) for %d subject(s): %s.",
                 self.prefix,
                 self.BASIS_DESCRIPTIONS[mode],
@@ -798,7 +798,7 @@ class Subject(Component):
                 )
             ),
         )
-        logger.info(
+        logger.debug(
             "[%s] assuming ka > ke (a soft bound, not a truncation) for %s; "
             "the mirrored flip-flop solution is penalized, not excluded.",
             self.prefix,

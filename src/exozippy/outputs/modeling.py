@@ -161,13 +161,16 @@ def collect_figures(system, prefix, point=None):
         if specs is None:
             try:
                 specs = comp.plot_data(system) or []
-            except Exception:
+            except Exception as exc:
                 logger.warning(
-                    "plot_data failed for %s while collecting figures "
-                    "(non-fatal; its figures are omitted from modeling.tex)",
+                    "plot_data failed for %s while collecting figures (%s: "
+                    "%s); its figures are omitted from modeling.tex. The "
+                    "traceback is in the log file.",
                     getattr(comp, "prefix", comp.__class__.__name__),
-                    exc_info=True,
+                    type(exc).__name__,
+                    exc,
                 )
+                logger.debug("plot_data traceback", exc_info=True)
                 continue
         for spec in specs:
             tag = spec.meta.get("file_tag") or spec.id.replace(".", "_")
@@ -257,13 +260,13 @@ def copy_support_files(out_dir):
         src = SUPPORT_DIR / name
         try:
             shutil.copy(src, Path(out_dir) / name)
-        except OSError:
+        except OSError as exc:
             logger.warning(
-                "Could not copy %s next to modeling.tex; the document "
+                "Could not copy %s next to modeling.tex (%s); the document "
                 "will only compile where AASTeX/the references are "
                 "already installed",
                 src,
-                exc_info=True,
+                exc,
             )
 
 
@@ -301,7 +304,7 @@ def build_modeling_output(system, prefix, point=None):
     with open(tex_path, "w") as f:
         f.write(text)
     copy_support_files(os.path.dirname(tex_path) or ".")
-    logger.info("Wrote %s", tex_path)
+    logger.debug("Wrote %s", tex_path)
     return tex_path
 
 

@@ -71,6 +71,7 @@ from exozippy.components.parameter import Parameter, SeedBoundViolation, to_vec
 from exozippy.config import ConfigManager
 from exozippy.evaluator import structural_hash, structural_payload
 from exozippy.graph import determine_pymc_build_order
+from exozippy.logger import reset_first_time
 from exozippy.manifest import interpret_manifest_entry, normalize_selector
 from exozippy.outputs.prose import ProseCollector
 from exozippy.yamlio import load_yaml
@@ -206,7 +207,7 @@ class System(Component):
                 # write a config, not a mistake to apologize for.  A key that
                 # IS present still has to name a file that exists, which is
                 # the real typo (below) and stays fatal.
-                logger.info(
+                logger.debug(
                     "No 'parameter_file' in the config; proceeding with no "
                     "user parameter overrides. Start values come from each "
                     "component's defaults.yaml, its data-derived hints and "
@@ -239,6 +240,8 @@ class System(Component):
         # were never folded and survived name-form forever (review 2d-1).
         # The registry is discovered here rather than below for the same
         # reason: the hook lives on the component classes.
+        # A new model: every once-per-run warning may be said again.
+        reset_first_time()
         self.registry = discover_components()
         for key, block in self.config.items():
             CompClass = self.registry.get(key)
@@ -291,7 +294,21 @@ class System(Component):
         for key in self.config.keys():
             if key in self.registry:
                 CompClass = self.registry[key]
+                # The keys the USER wrote, taken before construction: a
+                # component may normalize its own block in __init__.
+                user_block = [
+                    dict(e) if isinstance(e, dict) else e
+                    for e in (
+                        self.config[key]
+                        if isinstance(self.config[key], list)
+                        else [self.config[key]]
+                    )
+                ]
                 inst = CompClass(self.config[key], self.config_manager)
+                # After construction, so a component's own refusal of a
+                # retired key comes first; then every key nobody reads
+                # raises (docs/logging.md).
+                CompClass.validate_config_keys(key, user_block)
                 self.active_components[key] = inst
                 setattr(self, key, inst)
             elif key not in reserved_keys:
@@ -311,12 +328,20 @@ class System(Component):
                         f"model without it."
                     ) from exc
                 logger.warning(
-                    f"YAML key '{key}' does not match any registered component and will be ignored."
+                    f"YAML key '{key}' does not match any registered "
+                    f"component and will be ignored.  Check its spelling; "
+                    f"components: {', '.join(sorted(self.registry))}."
                 )
 
-        logger.info("Modeling the following components:")
-        for key, comp in self.active_components.items():
-            logger.info(f"  {key} ({comp.n_elements})")
+        # ONE line for the model (docs/logging.md): "Model: star (3), lens
+        # (2), ...", in config order, the count being the instances.
+        logger.info(
+            "Model: "
+            + ", ".join(
+                f"{key} ({comp.n_elements})"
+                for key, comp in self.active_components.items()
+            )
+        )
 
         # Prose topic vocabulary: HERE, once every component exists, because a
         # component may add a sentence as early as stage 1 and add() validates
@@ -494,7 +519,7 @@ class System(Component):
                     + "; ".join(m for m, _ in unsettled)
                 )
             for message, paths in start_rereads:
-                logger.info(message)
+                logger.debug(message)
                 self.config_manager.record_diagnostic("info", message, paths)
             for message, paths in self.topology_revisions:
                 logger.warning(
@@ -1168,7 +1193,7 @@ class System(Component):
                 len(branches),
             )
         else:
-            logger.info(
+            logger.debug(
                 "[system] marginalizing the likelihood over %d branch "
                 "combination(s) (%s).",
                 n_comb,
@@ -1440,12 +1465,13 @@ class System(Component):
             return []
         self._warned_unmatched_user_params = True
         if unmatched:
+            where = self.config_manager.param_file or "the params"
             logger.warning(
-                f"The following parameters in the parameter.yaml file did "
-                f"not match any model parameter and were not applied: "
-                f"{unmatched}\n"
-                "This can be safely ignored if intentional, but check for "
-                "typos."
+                f"{len(unmatched)} key(s) in {where} did not match any model "
+                f"parameter and were NOT applied: "
+                f"{', '.join(map(str, unmatched))}.\n"
+                "Check their spelling against the startup table, or remove "
+                "the ones for a component this config does not include."
             )
         return unmatched
 
@@ -1680,7 +1706,7 @@ class System(Component):
                 starts.append(raw)
                 seed_indices.append(k)
 
-        logger.info(
+        logger.debug(
             f"Multi-seed starts: {len(starts)}/{len(seed_resolved)} seeds "
             f"usable (seed indices {seed_indices})."
         )
@@ -1825,7 +1851,7 @@ class System(Component):
             )
         if moved:
             n = sum(len(v) for v in moved.values())
-            logger.info(
+            logger.debug(
                 f"Whitening anchor re-centered on the polished start: "
                 f"{n} logit element(s) across {len(moved)} parameter(s) now "
                 f"have raw = 0 at the start."
@@ -1943,7 +1969,7 @@ class System(Component):
                 posterior[name] = posterior[name].copy(
                     data=np.array(regenerated[name].values)
                 )
-        logger.info(
+        logger.debug(
             "degeneracy fold applied; %d deterministics regenerated.",
             len(regenerated.data_vars),
         )
@@ -1966,7 +1992,7 @@ class System(Component):
                 keep = labels >= 0
                 posterior = posterior.isel(sample=keep)
                 labels = labels[keep]
-                logger.info(
+                logger.debug(
                     f"distribute_posterior: dropped {int((~keep).sum())} "
                     f"invalid/unassigned draws flagged by mode identification"
                 )

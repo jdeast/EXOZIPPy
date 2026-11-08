@@ -32,10 +32,10 @@ Examples:
 
 import argparse
 import json
+import logging
 import math
 import re
 import sys
-import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -48,6 +48,8 @@ from astroquery.vizier import Vizier
 
 from ..components.sed.bc_grid import DEFAULT_MODEL_ROOT
 from ..components.sed.magsys import native_system
+
+logger = logging.getLogger(__name__)
 
 try:
     from zero_point import zpt as _gaia_zpt
@@ -193,7 +195,7 @@ def query_region(catalog, ra, dec, radius_arcmin):
         )
         return res[0] if len(res) > 0 else None
     except Exception as e:
-        warnings.warn(f"Vizier {catalog} query failed: {e}")
+        logger.warning(f"Vizier {catalog} query failed: {e}")
         return None
 
 
@@ -204,7 +206,7 @@ def query_id(catalog, target_id):
         res = v.query_object(target_id, catalog=catalog)
         return res[0] if len(res) > 0 else None
     except Exception as e:
-        warnings.warn(f"Vizier {catalog} query for '{target_id}' failed: {e}")
+        logger.warning(f"Vizier {catalog} query for '{target_id}' failed: {e}")
         return None
 
 
@@ -261,12 +263,13 @@ def schlegel_av(ra, dec):
         # bound on star.av (the logit transform truncates the posterior
         # there) under a note claiming Schlegel+1998 provenance it does not
         # have.  Returning None is handled by the caller.
-        warnings.warn(
+        logger.warning(
             f"IRSA dust table has none of the expected E(B-V) columns "
-            f"(got {list(t.colnames)}); no Av upper limit will be written."
+            f"(got {', '.join(t.colnames)}); no Av upper limit will be "
+            f"written."
         )
     except Exception as e:
-        warnings.warn(f"Dust map query failed: {e}")
+        logger.warning(f"Dust map query failed: {e}")
     return None
 
 

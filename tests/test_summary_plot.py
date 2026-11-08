@@ -559,7 +559,7 @@ def test_a_degenerate_kiel_posterior_gets_no_contour(teff, logg, caplog):
     contours = [("MIST", teff, logg), ("Global fit", teff, logg)]
     fig, ax = plt.subplots()
     try:
-        with caplog.at_level("INFO", logger=sp.logger.name):
+        with caplog.at_level("DEBUG", logger=sp.logger.name):
             extent = sp._contours(ax, contours)
         handles, _ = ax.get_legend_handles_labels()
     finally:

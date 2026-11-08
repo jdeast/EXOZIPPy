@@ -622,17 +622,15 @@ def check_posterior_units(attrs, trace_path) -> str:
         return POSTERIOR_UNITS_UNFINISHED
     if stamped:
         logger.warning(
-            f"{_BANNER}\n"
             f"UNKNOWN POSTERIOR UNITS: {trace_path} declares its posterior "
             f"is stored in '{stamped}' units, which this version of EXOZIPPy "
             f"does not know how to read (it writes '{POSTERIOR_UNITS}'). "
             f"Every reported value may be wrong by a unit conversion factor. "
             f"Upgrade EXOZIPPy, or re-sample with "
-            f"'sampler: {{recompute_trace: true}}'.\n{_BANNER}"
+            f"'sampler: {{recompute_trace: true}}'."
         )
         return "unknown"
     logger.warning(
-        f"{_BANNER}\n"
         f"UNVERIFIABLE POSTERIOR UNITS: {trace_path} carries no unit stamp, "
         f"so it cannot be confirmed to hold USER-unit draws. Traces written "
         f"before the posterior conversion existed (pre-2026) hold INTERNAL-"
@@ -641,7 +639,7 @@ def check_posterior_units(attrs, trace_path) -> str:
         f"told apart from the numbers, so nothing here converts or refuses. "
         f"This is NOT a detected mismatch -- proceeding. If the reported "
         f"values look wrong by a unit conversion factor, re-sample with "
-        f"'sampler: {{recompute_trace: true}}'.\n{_BANNER}"
+        f"'sampler: {{recompute_trace: true}}'."
     )
     return "unverifiable"
 
@@ -691,14 +689,13 @@ def check_trace_freshness(
 
     if not stored:
         logger.warning(
-            f"{_BANNER}\n"
             f"UNVERIFIABLE TRACE: {trace_path} carries no structural "
             f"fingerprint, so it cannot be checked against the model this "
             f"config builds. It predates the check (or was written by "
             f"another tool). This is NOT a detected mismatch -- proceeding. "
             f"If the config or parameter file has been edited since the "
             f"trace was sampled, re-sample with "
-            f"'sampler: {{recompute_trace: true}}'.\n{_BANNER}"
+            f"'sampler: {{recompute_trace: true}}'."
         )
         return "unverifiable"
 
