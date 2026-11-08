@@ -368,6 +368,11 @@ class MulensEvent(Component):
                     "systems."
                 )
 
+        # The provisional frame constants, before ANY stage-1 code runs
+        # (see _register_provisional_frame) -- last, once the event config
+        # has passed every check above.
+        self._register_provisional_frame()
+
     def _resolve_t0_par(self, event_config, config_manager):
         """t0_par from the mulensevent block, the source.0.t_0 seed, or the
         historical fallback.  MulensInstrument re-resolves the final value
@@ -1399,7 +1404,7 @@ class MulensEvent(Component):
         if param_name in ("mu_ra_rel_geo", "mu_dec_rel_geo"):
             context_nodes = dict(context_nodes or {})
             if "earth_vperp_e" not in context_nodes:
-                vperp_e, vperp_n = self._earth_vperp_en(system)
+                vperp_e, vperp_n = self._earth_vperp_en()
                 context_nodes["earth_vperp_e"] = pt.as_tensor_variable(vperp_e)
                 context_nodes["earth_vperp_n"] = pt.as_tensor_variable(vperp_n)
         if param_name in ("lens_offset_e", "lens_offset_n"):
@@ -1434,7 +1439,64 @@ class MulensEvent(Component):
             pos = probe_star_radec(self.config_manager, [source_ndx])
             if pos[source_ndx] is not None:
                 self.set_line_of_sight(*pos[source_ndx])
-        vperp_e, vperp_n = self._earth_vperp_en(system)
+        self._add_frame_constants(warn=True)
+
+    def _register_provisional_frame(self):
+        """The frame constants at CONSTRUCTION, so no stage-1 probe runs
+        without them.
+
+        The engine's geocentric relations (mu_geo = mu_helio - pi_rel *
+        v_perp) read Earth's projected velocity as two constants.  Until
+        they are supplied those relations are unusable, which cuts the
+        geocentric proper motion off from the stellar proper motions -- the
+        only symbols its scale propagates from.  A user who seeds t_E AND
+        pi_E then makes the probe derive mu_rel_geo from those seeds alone,
+        no symbol of mu_rel_geo_mag**2 = mu_ra_rel_geo**2 + mu_dec_rel_geo**2
+        has a scale, and the engine raises (ob110975 with t_E/pi_E seeded:
+        EvolutionaryModel._seed_eep_hint's stage-1 probe).  Supplying them
+        from MulensInstrument.load_data alone made that depend on the
+        config's KEY ORDER, since stage 1 runs components in that order: an
+        `evolutionarymodel:` block written above `mulensinstrument:` probed
+        first.  Every input is known here: the preliminary t0_par (above)
+        and the stated sky position (stated_line_of_sight).  MulensInstrument
+        re-anchors the frame and re-supplies the constants once t0_par is
+        final, and register_frame_constants does again at stage 3.  An
+        UNSTATED position supplies nothing: MulensInstrument.load_data
+        raises for it, naming the coordinates.
+        """
+        if self._has_mulens_data():
+            radec = self.stated_line_of_sight()
+            if radec is None:
+                return
+            self.set_line_of_sight(*radec)
+        self._add_frame_constants(warn=False)
+
+    def stated_line_of_sight(self):
+        """The target's STATED sky position (ra, dec in radians): the source
+        star's, else the PRIMARY lens body's when that is a star (source and
+        lens are angularly coincident, so a params file need state the
+        target once).  None when neither is stated.  Read with
+        probe_star_radec, never resolve(): a linked position reads as the
+        defaults.yaml placeholder there (review 1.1.10)."""
+        source_ndx = int(self.source_bodies[0][1])
+        p_type, p_ndx = self.lens_bodies[0]
+        wanted = [source_ndx] + ([int(p_ndx)] if p_type == "star" else [])
+        pos = probe_star_radec(self.config_manager, wanted)
+        if pos[source_ndx] is not None:
+            return pos[source_ndx]
+        if p_type == "star":
+            return pos[int(p_ndx)]
+        return None
+
+    def _has_mulens_data(self):
+        """True when the config carries microlensing photometry, the only
+        thing that anchors t0_par and so the geocentric frame."""
+        sys_cfg = self.config_manager.system_config or {}
+        return bool(sys_cfg.get("mulensinstrument"))
+
+    def _add_frame_constants(self, warn):
+        """Supply Earth's projected velocity at t0_par to the engine."""
+        vperp_e, vperp_n = self._earth_vperp_en(warn=warn)
         self.config_manager.add_constant(
             "mulensevent.0.earth_vperp_e", vperp_e
         )
@@ -1442,31 +1504,33 @@ class MulensEvent(Component):
             "mulensevent.0.earth_vperp_n", vperp_n
         )
 
-    def _earth_vperp_en(self, system):
+    def _earth_vperp_en(self, warn=True):
         """Earth's velocity at t0_par projected on the sky, (East, North),
         in AU/yr (numerically 1/yr once divided by the 1-AU baseline --
         multiplying by pi_rel in mas gives mas/yr).
 
         This is the Gould (2004) mu_helio -> mu_geo conversion constant:
         mu_geo = mu_helio - pi_rel * v_perp / AU.  The velocity and the
-        (ra, dec) used for the projection come from MulensInstrument -- the
-        SAME anchor epoch and sky position its Skowron deltas use, so the
+        (ra, dec) projected with are the event's own frame anchor
+        (geocentric_frame, read at the CURRENT t0_par) and line of sight --
+        the SAME ones MulensInstrument's Skowron deltas use, so the
         conversion and the trajectory share one frame by construction.
         Without microlensing data there is no t0_par to anchor the frame;
-        the term is dropped (mu_geo == mu_helio) with a warning.
+        the term is dropped (mu_geo == mu_helio), with a warning unless
+        `warn` is False (the provisional constants at construction, which
+        stage 3 supplies again with the warning).
         """
-        inst = getattr(system, "mulensinstrument", None)
-        vel = getattr(inst, "_earth_vel_ref", None)
-        radec = getattr(inst, "_source_radec_rad", None)
-        if vel is None or radec is None:
-            logger.warning(
-                f"[{self.prefix}] No microlensing data to anchor t0_par; "
-                "mu_rel_geo falls back to the heliocentric value (Earth-"
-                "velocity term dropped)."
-            )
+        if not self._has_mulens_data():
+            if warn:
+                logger.warning(
+                    f"[{self.prefix}] No microlensing data to anchor t0_par; "
+                    "mu_rel_geo falls back to the heliocentric value (Earth-"
+                    "velocity term dropped)."
+                )
             return 0.0, 0.0
+        _, _, vel = self.geocentric_frame()
         v = np.asarray(vel, dtype=float) * DAYS_PER_YEAR  # AU/day -> AU/yr
-        ra, dec = radec
+        ra, dec = self._line_of_sight_rad
         # The basis itself, not observer_sky_offset: what is projected here
         # is the Earth's VELOCITY, not its position.
         e_hat, n_hat = sky_basis(ra, dec)
