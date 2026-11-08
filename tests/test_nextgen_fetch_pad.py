@@ -173,3 +173,161 @@ def test_pad_copies_the_nearest_lower_plane_and_records_it(
     assert gen.pad_missing_nodes(
         {"2MASS": ["2MASS/2MASS.J", "2MASS/2MASS.H"]}, model_root=root
     ) == {"2MASS": 0}
+
+
+class _FakeBC:
+    """Stands in for BolometricCorrection: each filter's BC encodes the
+    spectrum it was handed (flux[0]), the filter's position and the Av, so
+    a cell computed from the wrong node's spectrum is recognizable."""
+
+    def __init__(self, filters, node, spectrum, weighting):
+        alpha, flux = spectrum
+        self.alpha = alpha
+        self.filters_SVO = list(filters)
+        self.filters_MIST = [
+            f.split("/")[-1].replace(".", "_") for f in filters
+        ]
+        self.filter_zero_pts = [1.0] * len(filters)
+        self.filter_weightings = ["energy"] * len(filters)
+        av = np.asarray(node["av"], dtype=float)
+        self.BC_by_av = np.array(
+            [[flux[0] + 100 * k + a for k in range(len(filters))] for a in av]
+        )
+
+
+def _step2_fixture(tmp_path, monkeypatch, listed_by_svo, hole=(6000.0, 5.5)):
+    grid = {
+        "teff": np.array([4000.0, 5000.0, 6000.0]),
+        "logg": np.array([4.5, 5.0, 5.5]),
+        "feh": np.array([0.0]),
+        "av": np.array([0.0, 1.0]),
+    }
+    root = tmp_path / "models"
+    path = _synthetic_table(root, grid, cols=("2MASS_J",))
+    # The hot logg 5.5 node: padded once by pad_missing_nodes, when the
+    # table had only 2MASS_J.
+    monkeypatch.setattr(gen, "ensure_bc_tables", lambda *a, **k: None)
+    monkeypatch.setattr(gen, "read_grid_yaml", lambda model_root=None: grid)
+    monkeypatch.setattr(
+        gen,
+        "unavailable_grid_nodes",
+        lambda g=None, raw_path=None: [] if listed_by_svo else [(*hole, 0.0)],
+    )
+    gen.pad_missing_nodes({"2MASS": ["2MASS/2MASS.J"]}, model_root=root)
+    # Step 1's product: every node except the hot logg 5.5 one.
+    spec = pd.DataFrame(
+        [
+            {
+                "teff": t,
+                "logg": g,
+                "alpha": 0.0,
+                "flux": np.array([t / 1000 + g]),
+            }
+            for t in grid["teff"]
+            for g in grid["logg"]
+            if (t, g) != hole
+        ]
+    )
+    monkeypatch.setattr(
+        gen, "load_processed_spectra", lambda feh, processed_path=None: spec
+    )
+    monkeypatch.setattr(gen, "BolometricCorrection", _FakeBC)
+    monkeypatch.setattr(gen, "write_magsys_table", lambda *a, **k: None)
+    return root, path
+
+
+def test_step2_pads_a_new_column_at_a_node_svo_has_no_spectrum_for(
+    tmp_path, monkeypatch
+):
+    """
+    Given a 2MASS table whose hot logg 5.5 node was padded when it had only
+      2MASS_J, and a new filter 2MASS_H asked of step 2,
+    When step 2 runs with no spectrum for that node (SVO lists none),
+    Then the node's 2MASS_H cells are computed from the logg 5.0 spectrum
+      (equal to the logg 5.0 cells, as pad_missing_nodes would have copied),
+      its 2MASS_J cells are untouched, and meta['padding'] still names the
+      node once.
+    """
+    root, path = _step2_fixture(tmp_path, monkeypatch, listed_by_svo=False)
+    before = read_bc_table(path)
+
+    gen.generate_bc_tables(
+        {"2MASS": ["2MASS/2MASS.J", "2MASS/2MASS.H"]},
+        processed_path=tmp_path,
+        model_root=root,
+    )
+
+    df = read_bc_table(path)
+    for a in (0.0, 1.0):
+        pad = df[(df.teff == 6000) & (df.logg == 5.5) & (df.Av == a)]
+        src = df[(df.teff == 6000) & (df.logg == 5.0) & (df.Av == a)]
+        assert float(pad["2MASS_H"].iloc[0]) == float(src["2MASS_H"].iloc[0])
+        # step 2 asks only for the missing H, so it is filter 0: flux + Av,
+        # with flux the logg 5.0 spectrum's (6000/1000 + 5.0)
+        assert float(pad["2MASS_H"].iloc[0]) == 6.0 + 5.0 + a
+        old = before[
+            (before.teff == 6000) & (before.logg == 5.5) & (before.Av == a)
+        ]
+        assert float(pad["2MASS_J"].iloc[0]) == float(old["2MASS_J"].iloc[0])
+    assert read_bc_meta(path)["padding"] == [
+        {"teff": 6000.0, "logg": 5.5, "feh": 0.0, "from_logg": 5.0}
+    ]
+
+
+def test_step2_still_raises_for_a_node_svo_lists_but_step1_lacks(
+    tmp_path, monkeypatch
+):
+    """
+    Given the same table, but SVO's index DOES list the hot logg 5.5 node,
+    When step 2 finds no processed spectrum for it,
+    Then it raises naming the node (step 1 is unfinished; no padding).
+    """
+    root, _ = _step2_fixture(tmp_path, monkeypatch, listed_by_svo=False)
+    monkeypatch.setattr(
+        gen, "unavailable_grid_nodes", lambda g=None, raw_path=None: []
+    )
+    with pytest.raises(FileNotFoundError, match="teff=6000.0, logg=5.5"):
+        gen.generate_bc_tables(
+            {"2MASS": ["2MASS/2MASS.J", "2MASS/2MASS.H"]},
+            processed_path=tmp_path,
+            model_root=root,
+        )
+
+
+def test_step2_interpolates_an_interior_hole_along_teff(tmp_path, monkeypatch):
+    """
+    Given a 2MASS table whose (5000 K, logg 4.5) row exists (the published
+      tables hold such nodes from spectra SVO no longer serves), a new
+      filter 2MASS_H, and no spectrum for that node (SVO lists none),
+    When step 2 runs,
+    Then the node's 2MASS_H cells come from the spectrum interpolated
+      between its Teff neighbours (4000 and 6000 K at logg 4.5), its
+      2MASS_J cells and alpha are untouched, and meta['padding'] records
+      the node with its Teff sources and the one column padded.
+    """
+    root, path = _step2_fixture(
+        tmp_path, monkeypatch, listed_by_svo=False, hole=(5000.0, 4.5)
+    )
+    before = read_bc_table(path)
+
+    gen.generate_bc_tables(
+        {"2MASS": ["2MASS/2MASS.J", "2MASS/2MASS.H"]},
+        processed_path=tmp_path,
+        model_root=root,
+    )
+
+    df = read_bc_table(path)
+    sel = lambda d, a: d[(d.teff == 5000) & (d.logg == 4.5) & (d.Av == a)]
+    for a in (0.0, 1.0):
+        new, old = sel(df, a), sel(before, a)
+        # flux = mean of (4000/1000 + 4.5) and (6000/1000 + 4.5)
+        assert float(new["2MASS_H"].iloc[0]) == 9.5 + a
+        assert float(new["2MASS_J"].iloc[0]) == float(old["2MASS_J"].iloc[0])
+        assert float(new["alpha"].iloc[0]) == float(old["alpha"].iloc[0])
+    assert {
+        "teff": 5000.0,
+        "logg": 4.5,
+        "feh": 0.0,
+        "from_teff": [4000.0, 6000.0],
+        "columns": ["2MASS_H"],
+    } in read_bc_meta(path)["padding"]

@@ -195,7 +195,46 @@ FILTER_SETS: Dict[str, List[str]] = {
         "Euclid/NISP.Y",
         "Euclid/NISP.J",
         "Euclid/NISP.H",
+        # Euclid Q2 VIS photometry of the Roman-bulge events (BC-2026-10-26)
+        "Euclid/VIS.vis",
     ],
+    # The Roman-bulge microlensing SEDs (BC-2026-10-26, review 8.6.37):
+    # HST GO 17776 (THOR) and GO 17923 photometry, VVV / VIRAC and DECaPS2
+    # catalog photometry.
+    "HST": [
+        "HST/ACS_WFC.F606W",
+        "HST/ACS_WFC.F814W",
+        "HST/WFC3_UVIS1.F606W",
+        "HST/WFC3_UVIS1.F814W",
+        "HST/WFC3_UVIS2.F606W",
+        "HST/WFC3_UVIS2.F814W",
+        "HST/WFC3_IR.F098M",
+        "HST/WFC3_IR.F127M",
+        "HST/WFC3_IR.F139M",
+        "HST/WFC3_IR.F153M",
+        "HST/WFC3_IR.F167N",
+    ],
+    "VISTA": [
+        "Paranal/VISTA.Z",
+        "Paranal/VISTA.Y",
+        "Paranal/VISTA.J",
+        "Paranal/VISTA.H",
+        "Paranal/VISTA.Ks",
+    ],
+    "DECam": [
+        "CTIO/DECam.g",
+        "CTIO/DECam.r",
+        "CTIO/DECam.i",
+        "CTIO/DECam.z",
+        "CTIO/DECam.Y",
+    ],
+    # BC-2026-10-26 item 6: every mulensinstrument band needs a BC column
+    # once an sed: block is on, and MOA-II's wide red band is the one SVO
+    # carries (MOA/MOA-II.R; there is no MOA-II.Red id).  IRAC.I1 for
+    # OGLE-2017-BLG-1275's Spitzer source flux, UKIDSS H for catalog rows.
+    "MOA": ["MOA/MOA-II.R"],
+    "Spitzer": ["Spitzer/IRAC.I1"],
+    "UKIRT": ["UKIRT/UKIDSS.H"],
 }
 
 
@@ -232,6 +271,16 @@ NATIVE_SYSTEM: Dict[str, str] = {
     # carries Kp as Vega.  No native system, so a row must state one.
     **{f: "" for f in FILTER_SETS["Kepler"]},
     **{f: "AB" for f in FILTER_SETS["Euclid"]},
+    # THOR (GO 17776) publishes VEGAMAG columns, as does the KMT-2016-0212
+    # calibration (radish, 2026-10-26); a row may still state its own system.
+    **{f: "Vega" for f in FILTER_SETS["HST"]},
+    **{f: "Vega" for f in FILTER_SETS["VISTA"]},  # VVV / VIRAC
+    **{f: "AB" for f in FILTER_SETS["DECam"]},  # DECaPS2
+    # MOA photometry is instrumental and calibrated per event against a
+    # catalog; Vega is the convention radish asked for (2026-10-26).
+    **{f: "Vega" for f in FILTER_SETS["MOA"]},
+    **{f: "Vega" for f in FILTER_SETS["Spitzer"]},  # IRAC Vega (Reach+2005)
+    **{f: "Vega" for f in FILTER_SETS["UKIRT"]},  # UKIDSS Vega (Hewett+2006)
 }
 
 
@@ -567,6 +616,7 @@ def generate_bc_tables(
     model_root: Path = DEFAULT_MODEL_ROOT,
     save: bool = True,
     overwrite: bool = False,
+    raw_path: Path = SPECTRA_RAW_PATH_DEFAULT,
 ) -> Dict[str, pd.DataFrame]:
     """
     Compute BCs for every filter set on the NextGen.grid.yaml axes from
@@ -587,6 +637,22 @@ def generate_bc_tables(
 
     feh is the outer loop so each (large) processed-spectra file is read
     once for all filter sets.
+
+    A grid node SVO lists NO spectrum for (`unavailable_grid_nodes`, read
+    from the SVO index cached under `raw_path`) is padded here
+    (`_pad_spectrum`): an INTERIOR hole -- both Teff neighbours on the grid
+    have a spectrum at the same (logg, feh); four such nodes, whose SVO
+    files are empty -- from the spectrum linearly interpolated along Teff;
+    any other (the hot end of the logg 5.5 plane) exactly as
+    `pad_missing_nodes` pads it, from the spectrum of the nearest
+    lower-gravity node, which gives the same numbers as copying that
+    node's rows (a BC depends on its node only through the spectrum).  The
+    node is recorded in the table's ``meta["padding"]`` with the columns
+    padded there.  This is what
+    lets a NEW column be added to a table whose padded rows already exist
+    -- pad_missing_nodes skips a node it padded before, so it cannot fill
+    a column that did not exist then.  A node missing from the processed
+    spectra that SVO DOES list is still an error (step 1 is unfinished).
 
     Returns {facility: DataFrame of the newly computed cells} (NaN where a
     cell was not computed).
@@ -624,6 +690,17 @@ def generate_bc_tables(
                 if c in svo_of[fac] and not reusable(fmeta.get(c, {}))
             ]
 
+    # The padded nodes: SVO's index is the authority (read lazily, only
+    # when a node is missing locally, so a complete run needs no index).
+    key = lambda *v: tuple(round(float(x), _KEY_DECIMALS) for x in v)
+    unavailable = None
+    padding = {}
+    existing_alpha = {}
+    for fac in plan:
+        path = bc_table_path(model_root, MODEL, fac)
+        old = read_bc_meta(path).get("padding", []) if path.is_file() else []
+        padding[fac] = {key(p["teff"], p["logg"], p["feh"]): p for p in old}
+
     out: Dict[str, list] = {fac: [] for fac in plan}
     fehs = sorted({f for todo in plan.values() for f in todo["feh"].unique()})
     for feh in tqdm(fehs, desc="feh"):
@@ -638,11 +715,31 @@ def generate_bc_tables(
                 try:
                     row = df_spec.loc[(teff, logg)]
                 except KeyError:
-                    raise FileNotFoundError(
-                        f"No step-1 spectrum for teff={teff}, logg={logg}, "
-                        f"feh={feh} in {processed_path}; re-run step 1 "
-                        f"(it processes only the missing nodes)."
-                    ) from None
+                    if unavailable is None:
+                        unavailable = {
+                            key(*n)
+                            for n in unavailable_grid_nodes(grid, raw_path)
+                        }
+                    if key(teff, logg, feh) not in unavailable:
+                        raise FileNotFoundError(
+                            f"No step-1 spectrum for teff={teff}, logg={logg}, "
+                            f"feh={feh} in {processed_path}; re-run step 1 "
+                            f"(it processes only the missing nodes)."
+                        ) from None
+                    row, record = _pad_spectrum(
+                        df_spec, grid, teff, logg, feh, processed_path
+                    )
+                    k = key(teff, logg, feh)
+                    if k not in padding[fac]:
+                        padding[fac][k] = {**record, "columns": list(ncols)}
+                    if existing_alpha.get(fac) is None:
+                        existing_alpha[fac] = _table_alphas(
+                            bc_table_path(model_root, MODEL, fac)
+                        )
+                    if k in existing_alpha[fac]:
+                        # The row's other columns come from the spectrum
+                        # the published table used; keep their label.
+                        row = {**row, "alpha": existing_alpha[fac][k]}
                 av = node["Av"].values
                 bc_obj = BolometricCorrection(
                     [svo_of[fac][c] for c in ncols],
@@ -697,7 +794,15 @@ def generate_bc_tables(
                     df,
                     path,
                     filter_meta,
-                    table_meta={"facility": fac, **table_meta},
+                    table_meta={
+                        "facility": fac,
+                        **table_meta,
+                        **(
+                            {"padding": list(padding[fac].values())}
+                            if padding[fac]
+                            else {}
+                        ),
+                    },
                     allow_new_nodes=True,
                     replace_columns=to_replace.pop(fac, ()),
                 )
@@ -720,6 +825,70 @@ def generate_bc_tables(
 # -------------------------------------------------------------------
 # Padding: the grid nodes no spectrum exists for
 # -------------------------------------------------------------------
+
+
+def _pad_spectrum(df_spec, grid, teff, logg, feh, processed_path):
+    """The (alpha, flux) row to compute an unavailable node's BCs from,
+    and the padding record naming its source.
+
+    An interior hole (both Teff grid neighbours have a spectrum at this
+    logg) takes the spectrum linearly interpolated along Teff -- far
+    closer to the missing model than a plane 0.5 dex away in gravity.
+    Anything else takes the nearest lower-gravity spectrum (the
+    pad_missing_nodes rule).  Raises when neither exists.
+    """
+    teffs = sorted(float(t) for t in grid["teff"])
+    i = teffs.index(float(teff))
+    if 0 < i < len(teffs) - 1:
+        t0, t1 = teffs[i - 1], teffs[i + 1]
+        if (t0, logg) in df_spec.index and (t1, logg) in df_spec.index:
+            r0, r1 = df_spec.loc[(t0, logg)], df_spec.loc[(t1, logg)]
+            if float(r0["alpha"]) != float(r1["alpha"]):
+                raise ValueError(
+                    f"Cannot interpolate teff={teff}, logg={logg}, feh={feh}: "
+                    f"its Teff neighbours have alpha {r0['alpha']} and "
+                    f"{r1['alpha']}."
+                )
+            w = (float(teff) - t0) / (t1 - t0)
+            flux = (1 - w) * np.asarray(r0["flux"]) + w * np.asarray(
+                r1["flux"]
+            )
+            row = {"alpha": float(r0["alpha"]), "flux": flux}
+            record = {
+                "teff": float(teff),
+                "logg": float(logg),
+                "feh": float(feh),
+                "from_teff": [t0, t1],
+            }
+            return row, record
+    lower = [g for t, g in df_spec.index if t == teff and g < logg]
+    if not lower:
+        raise ValueError(
+            f"No spectrum to pad teff={teff}, logg={logg}, feh={feh} from in "
+            f"{processed_path}: no Teff neighbours on both sides and no "
+            f"lower-gravity plane."
+        )
+    source = max(lower)
+    r = df_spec.loc[(teff, source)]
+    row = {"alpha": float(r["alpha"]), "flux": np.asarray(r["flux"])}
+    record = {
+        "teff": float(teff),
+        "logg": float(logg),
+        "feh": float(feh),
+        "from_logg": float(source),
+    }
+    return row, record
+
+
+def _table_alphas(path) -> dict:
+    """{(teff, logg, feh): alpha} of a table's rows (empty if no table)."""
+    if not Path(path).is_file():
+        return {}
+    df = read_bc_table(path)
+    return {
+        tuple(round(float(x), _KEY_DECIMALS) for x in (t, g, z)): float(a)
+        for t, g, z, a in zip(df.teff, df.logg, df.feh, df.alpha)
+    }
 
 
 def unavailable_grid_nodes(
@@ -775,7 +944,9 @@ def pad_missing_nodes(
     spectrum actually used) and the padding is recorded in the table's
     metadata, ``meta["padding"]``: one record per padded node naming the
     plane it was copied from.  Runs BEFORE step 2 (generate_bc_tables),
-    which then plans nothing for those nodes.
+    which then plans nothing for those nodes.  A column added LATER is
+    padded by step 2 itself (this function skips a node it padded before),
+    from the same lower-gravity spectrum -- see generate_bc_tables.
 
     Returns {facility: number of padded rows}.
     """
