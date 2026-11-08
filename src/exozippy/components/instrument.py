@@ -2739,8 +2739,10 @@ class Instrument(TimeSystem, Component):
                 elif where == "start":
                     logger.info(
                         f"{label} exptime_s {self.exptime_s[i]:g} s: "
-                        f"automatic ninterp = {n_new} (smearing error "
-                        f"Delta chi2 = {d_new:.3g} < {thr} at {at})."
+                        f"automatic ninterp = {n_new} "
+                        + ("" if i in choose else "(restored from the trace; ")
+                        + ("(" if i in choose else "")
+                        + f"smearing error Delta chi2 = {d_new:.3g} at {at})."
                     )
                 elif where == "polished" and i in found:
                     logger.info(
