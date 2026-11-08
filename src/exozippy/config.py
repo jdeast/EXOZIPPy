@@ -897,13 +897,39 @@ def _declared_instance_names(system_config):
 #   DERIVED_MIXED        reported for a value derived from a mix; the level
 #                        of a standalone solver's answer and of the 3+-body
 #                        lens seeds.
-#   MULENS_SOURCE_DISTANCE / MULENS_LENS_DISTANCE
-#                        the microlensing distance guesses (~8 kpc bulge
-#                        source, ~4 kpc lens).  Both beat the 10 pc
-#                        defaults.yaml backstop and yield to the user; the
-#                        lens yields to the source, so a relative parallax
+#   MULENS_SOURCE        the microlensing SOURCE-side guess of its ~8 kpc
+#                        bulge distance.  Above every LENS-side guess,
+#                        because "in general, we should know the source
+#                        properties better than the lens properties" (JDE
+#                        2026-11-08): a bulge source is a far narrower
+#                        population than the lens, so the lens absorbs what
+#                        the observables (t_E, pi_E, rho) imply.  The
+#                        source's galactic-model proper motion and mass guess
+#                        are DERIVED_DATA hints, higher still.
+#   MULENS_SOURCE_RADIUS a DECISION level only (declare_decision_level, never
+#                        a hint's rank): a finite source's radius decides
+#                        here whatever seeds it, below the source distance
+#                        (the radius spans dwarf to giant; the bulge
+#                        distance does not) and above every lens guess.  So
+#                        a rho the lens cannot take moves the source's
+#                        radius, never its distance (OGLE-2016-BLG-1003,
+#                        whose user proper motions and t_E fix theta_E).
+#   MULENS_LENS_MASS     the lens host's mass guess (~0.3 Msun).
+#   MULENS_LENS_PM       the lens host's galactic-model proper motion.
+#   MULENS_LENS_DISTANCE the lens distance guess (~4 kpc), the lowest lens
+#                        guess: beats the 10 pc defaults.yaml backstop and
+#                        yields to everything else, so a relative parallax
 #                        the other values imply is absorbed by the LENS
-#                        distance (review 4.6.2 named them).
+#                        distance (review 4.6.2 named the distance levels).
+#                        The order of the three lens guesses decides who
+#                        absorbs what: where theta_E is known (rho over the
+#                        source's angular radius) the mass fixes pi_rel and
+#                        the distance follows, and the proper motion absorbs
+#                        t_E; where it is not, the proper motion keeps the
+#                        galactic model's mu_rel, t_E sets theta_E and the
+#                        distance absorbs it, as before.  A stated pi_E moves
+#                        the mass too (M = theta_E / (kappa pi_E)) and turns
+#                        the lens proper motion to its direction.
 #   DEFAULT              a defaults.yaml value.
 #   DEFAULT_WEAK         a defaults.yaml value written `rank: DEFAULT_WEAK`
 #                        (the stellar proper motions, the planet mass and
@@ -921,7 +947,10 @@ PRECEDENCE_LADDER = {
     "DERIVED_DATA": 60,
     "LIKELIHOOD_BACKED": 55,
     "DERIVED_MIXED": 40,
-    "MULENS_SOURCE_DISTANCE": 30,
+    "MULENS_SOURCE": 30,
+    "MULENS_SOURCE_RADIUS": 28,
+    "MULENS_LENS_MASS": 27,
+    "MULENS_LENS_PM": 26,
     "MULENS_LENS_DISTANCE": 25,
     "DEFAULT": 20,
     "DEFAULT_WEAK": 10,
@@ -932,7 +961,10 @@ PRECEDENCE_DERIVED_USER = PRECEDENCE_LADDER["DERIVED_USER"]
 PRECEDENCE_DERIVED_DATA = PRECEDENCE_LADDER["DERIVED_DATA"]
 PRECEDENCE_LIKELIHOOD_BACKED = PRECEDENCE_LADDER["LIKELIHOOD_BACKED"]
 PRECEDENCE_DERIVED_MIXED = PRECEDENCE_LADDER["DERIVED_MIXED"]
-PRECEDENCE_MULENS_SOURCE_DISTANCE = PRECEDENCE_LADDER["MULENS_SOURCE_DISTANCE"]
+PRECEDENCE_MULENS_SOURCE = PRECEDENCE_LADDER["MULENS_SOURCE"]
+PRECEDENCE_MULENS_SOURCE_RADIUS = PRECEDENCE_LADDER["MULENS_SOURCE_RADIUS"]
+PRECEDENCE_MULENS_LENS_MASS = PRECEDENCE_LADDER["MULENS_LENS_MASS"]
+PRECEDENCE_MULENS_LENS_PM = PRECEDENCE_LADDER["MULENS_LENS_PM"]
 PRECEDENCE_MULENS_LENS_DISTANCE = PRECEDENCE_LADDER["MULENS_LENS_DISTANCE"]
 PRECEDENCE_DEFAULT = PRECEDENCE_LADDER["DEFAULT"]
 PRECEDENCE_DEFAULT_WEAK = PRECEDENCE_LADDER["DEFAULT_WEAK"]
@@ -967,13 +999,21 @@ def ladder_level(name, where):
 # "solved".  Add a level here in the same commit that introduces it.
 # PRECEDENCE_LIKELIHOOD_BACKED is deliberately NOT here: it is a DECISION
 # level only and is never reported (a backed value reports the rank it came
-# with).  PRECEDENCE_MULENS_LENS_DISTANCE is not here either: that is the
+# with).  PRECEDENCE_MULENS_LENS_PM is here because it is the same
+# galactic-model proper motion a source gets at DERIVED_DATA, only ranked
+# among the lens guesses (JDE 2026-11-08, source before lens).
+# PRECEDENCE_MULENS_LENS_DISTANCE and PRECEDENCE_MULENS_LENS_MASS are not
+# here: a constant guess is no measurement.  The distance's exclusion is the
 # historical behavior, and whether those seeds should report as data at all
 # was review item 3.14.6 -- CLOSED, premise wrong (see the 2026-08-24
 # review's appendix A): those sites are computed exclusively from
 # user_params entries, so there was never a provenance lie to remove.
 DATA_PRECEDENCES = frozenset(
-    {PRECEDENCE_DERIVED_DATA, PRECEDENCE_MULENS_SOURCE_DISTANCE}
+    {
+        PRECEDENCE_DERIVED_DATA,
+        PRECEDENCE_MULENS_SOURCE,
+        PRECEDENCE_MULENS_LENS_PM,
+    }
 )
 
 
@@ -1264,6 +1304,12 @@ class ConfigManager:
         # SED, empirical relations): their starts decide at
         # PRECEDENCE_LIKELIHOOD_BACKED.  See declare_likelihood_backed.
         self.likelihood_backed = set()
+        # {path: ladder level} a component's domain knowledge ranks a start
+        # at for the DECISION only (declare_decision_level): the source
+        # radius of a microlensing event decides at MULENS_SOURCE_RADIUS whatever
+        # seeds it.  The likelihood-backed paths are the same mechanism at
+        # one fixed level.
+        self.decision_levels = {}
 
         components_dir = Path(__file__).parent / "components"
 
@@ -3677,6 +3723,33 @@ class ConfigManager:
         translated, _ = self._translate_and_scale(path, 0.0)
         self.likelihood_backed.add(translated)
 
+    def declare_decision_level(self, path, level):
+        """Declare that `path`'s start DECIDES at ladder level `level`.
+
+        The same mechanism as declare_likelihood_backed, at a level the
+        caller names: whatever seeds `path` below `level` -- a defaults.yaml
+        value, a lower hint -- is fixed with that tier, so every lower seed
+        absorbs a contradiction before it does, while the start still
+        REPORTS the rank it came with (a defaults.yaml value still reports
+        "default" and is still not `informed`).  A user value or a higher
+        hint is untouched.  Its caller: MulensEvent, for each source star's
+        radius at MULENS_SOURCE_RADIUS (JDE 2026-11-08: the source is known better
+        than the lens, so a rho seed is absorbed by the lens through
+        theta_E, not by the source radius).  `level` is a ladder NAME.  A
+        second declaration of one path at a different level raises: two
+        components disagree about it, and the higher one silently winning
+        would hide that.
+        """
+        lvl = ladder_level(level, f"declare_decision_level({path!r})")
+        translated, _ = self._translate_and_scale(path, 0.0)
+        old = self.decision_levels.get(translated)
+        if old is not None and old != lvl:
+            raise ValueError(
+                f"declare_decision_level: {translated} is already declared "
+                f"at level {old}, now at {level} ({lvl})."
+            )
+        self.decision_levels[translated] = lvl
+
     def _provenance_label(self, rank):
         """Map a numeric provenance rank to a coarse source label."""
         if rank is None:
@@ -4470,6 +4543,13 @@ class ConfigManager:
                     and tier < L["LIKELIHOOD_BACKED"]
                 ):
                     tier = L["LIKELIHOOD_BACKED"]
+                declared_level = self.decision_levels.get(path)
+                if (
+                    kind == "seed"
+                    and declared_level is not None
+                    and tier < declared_level
+                ):
+                    tier = declared_level
                 anchors[path] = Anchor(
                     float(val), kind, tier, rank, sampled, src
                 )

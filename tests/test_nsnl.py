@@ -298,9 +298,14 @@ def test_event_level_derived_initvals_are_finite(system_2s2l):
 
     Was `test_per_source_derived_initvals_are_finite`: these four are
     event-level scalars now (shape (1,)), so "every element" is one element.
-    The VALUES are unchanged from the per-source era -- 0.8392544170490658
-    mas and pi_rel = 0.125 -- which is the statement that collapsing the
-    duplicate per-source copies onto one did not move the start."""
+    The per-source era's values (0.8392544170490658 mas, pi_rel = 0.125)
+    survived the collapse onto one copy unchanged.  They moved with the
+    source-first order (JDE 2026-11-08, config.md "Source before lens"):
+    the two sources' radii now decide above every lens guess, so the two
+    rhos set theta_E by the minimum-norm split of the radii about their
+    1 Rsun starts (0.419 and 1.203 Rsun) and the lens distance absorbs
+    pi_rel at the guessed masses, where before the 0.32 Msun lens guess at
+    4 kpc set theta_E and the radii absorbed both rhos (0.651, 1.866)."""
     system, _ = system_2s2l
     event = system.mulensevent
 
@@ -312,9 +317,11 @@ def test_event_level_derived_initvals_are_finite(system_2s2l):
         )
 
     np.testing.assert_allclose(
-        event.theta_E.initval, [0.8392544170490658], rtol=1e-9
+        event.theta_E.initval, [0.5406222457942893], rtol=1e-6
     )
-    np.testing.assert_allclose(event.pi_rel.initval, [0.125], rtol=1e-9)
+    np.testing.assert_allclose(
+        event.pi_rel.initval, [0.05186932141214335], rtol=1e-6
+    )
 
 
 def test_no_active_element_has_a_non_finite_initval(system_2s2l):

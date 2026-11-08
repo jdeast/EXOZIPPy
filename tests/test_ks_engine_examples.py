@@ -226,15 +226,17 @@ def test_the_settle_is_minimum_norm_in_the_direction_no_check_sees(
 ):
     """
     Given examples/KMT-2019-BLG-1806, whose params pin Zang+2023's t_E and
-      pi_E on top of default (DEFAULT_WEAK) lens and source proper motions,
+      pi_E with no proper motion stated,
     When the starts are solved,
-    Then the four proper motions move only by what the RELATIVE motion
-      needs (~0.6 mas/yr here): every relation reads them as a difference,
-      so their common motion is a direction no check sees, and the
-      minimum-norm correction leaves it at the anchors.  Before the settle
-      imposed the minimum norm explicitly, difference-quotient noise on the
-      stiff t_E check carried all four to +25,027 mas/yr, and the
-      galactic-model prior took the start to -1.5e8.
+    Then the proper motions move only by what the RELATIVE motion needs
+      (~0.6 mas/yr here): the source keeps its galactic-model seed and the
+      lens -- the seed below it (MULENS_LENS_PM; JDE 2026-11-08, source
+      before lens) -- turns to the pinned pi_E's direction, 0.55 mas/yr
+      from the source.  Before the settle imposed the minimum norm
+      explicitly, difference-quotient noise on the stiff t_E check carried
+      all four (then unseeded defaults, the pi_E gate of #93 skipping the
+      galactic seeds) to +25,027 mas/yr, and the galactic-model prior took
+      the start to -1.5e8.
     """
     system = _prepare(
         monkeypatch, "KMT-2019-BLG-1806", "KMT-2019-BLG-1806.yaml"
@@ -242,8 +244,15 @@ def test_the_settle_is_minimum_norm_in_the_direction_no_check_sees(
     cm = system.config_manager
     sol = cm._last_resolved
     assert sol["mulensevent.0.t_E"] == pytest.approx(134.1, rel=1e-6)
-    pms = [sol[f"star.{i}.pm_{ax}"] for i in (0, 1) for ax in ("ra", "dec")]
-    assert max(abs(v + 3.0) for v in pms) < 1.0, pms
+    for ax in ("ra", "dec"):
+        assert sol[f"star.1.pm_{ax}"] == pytest.approx(
+            cm.hints[f"star.1.pm_{ax}"]
+        )
+    rel = np.hypot(
+        sol["star.0.pm_ra"] - sol["star.1.pm_ra"],
+        sol["star.0.pm_dec"] - sol["star.1.pm_dec"],
+    )
+    assert rel < 1.0, rel
 
 
 def test_a_stage_3_probe_reads_the_roles_of_registered_components(

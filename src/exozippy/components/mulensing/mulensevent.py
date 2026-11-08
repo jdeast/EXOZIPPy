@@ -37,7 +37,9 @@ from exozippy.config import (
     PRECEDENCE_DERIVED_DATA,
     PRECEDENCE_DERIVED_MIXED,
     PRECEDENCE_MULENS_LENS_DISTANCE,
-    PRECEDENCE_MULENS_SOURCE_DISTANCE,
+    PRECEDENCE_MULENS_LENS_MASS,
+    PRECEDENCE_MULENS_LENS_PM,
+    PRECEDENCE_MULENS_SOURCE,
     user_entry,
 )
 from exozippy.constants import DAYS_PER_YEAR
@@ -1048,24 +1050,48 @@ class MulensEvent(Component):
         # Inject event-level physical hints for the body stars.
         l_type, l_idx = self._primary_lens()
 
-        # PRECEDENCE_MULENS_LENS_DISTANCE overrides the 10 pc defaults.yaml
-        # default (PRECEDENCE_DEFAULT) but yields to any value the
-        # relaxation engine derives from pi_rel + d_S
-        # (PRECEDENCE_MULENS_SOURCE_DISTANCE).  That ordering is what breaks
-        # the d_L <-> parallax cycle; see the constants' comment in
-        # config.py.
+        # SOURCE BEFORE LENS (JDE 2026-11-08: "in general, we should know
+        # the source properties better than the lens properties").  Every
+        # source-side guess -- its distance (MULENS_SOURCE) and radius
+        # (MULENS_SOURCE_RADIUS, a decision level), its
+        # galactic-model proper motion and mass (DERIVED_DATA) -- outranks
+        # every lens-side one, and among the lens guesses the mass
+        # (MULENS_LENS_MASS) outranks the proper motion (MULENS_LENS_PM),
+        # which outranks the distance (MULENS_LENS_DISTANCE).  So seeded
+        # observables are absorbed by the lens the way a microlenser reads
+        # them: rho over the source's angular radius is theta_E, theta_E at
+        # the guessed mass is pi_rel (the lens distance), a stated pi_E
+        # moves the mass too (M = theta_E / (kappa pi_E)), and t_E is then
+        # the lens proper motion (theta_E / t_E) about the source's; with
+        # no theta_E (no rho), the proper motion keeps the galactic model's
+        # mu_rel and t_E sets theta_E through the lens distance.  Before,
+        # the lens mass guess sat at DERIVED_DATA above everything: with
+        # pi_E stated that fixed theta_E and the distance, and the source
+        # radius absorbed rho (OGLE-2011-BLG-0975 seeded with its published
+        # t_E/pi_E/rho: a lens at 54 pc, a source of 34.6 Rsun).  All of
+        # these beat the 10 pc / unit-mass defaults.yaml backstops and yield
+        # to the user.  config.md, "the precedence ladder".
         self.config_manager.add_hint(
             f"star.{l_idx}.distance",
             4000.0,
             rank=PRECEDENCE_MULENS_LENS_DISTANCE,
         )
         self.config_manager.add_scale_hint(f"star.{l_idx}.distance", 5.0)
-        self.config_manager.add_hint(f"star.{l_idx}.logmass", -0.5)
+        self.config_manager.add_hint(
+            f"star.{l_idx}.logmass", -0.5, rank=PRECEDENCE_MULENS_LENS_MASS
+        )
         self.config_manager.add_scale_hint(f"star.{l_idx}.logmass", 0.001)
         self.config_manager.add_scale_hint(f"star.{l_idx}.pm_ra", 3.0)
         self.config_manager.add_scale_hint(f"star.{l_idx}.pm_dec", 3.0)
         self.config_manager.add_scale_hint(f"star.{l_idx}.rv", 1e5)
-        self._seed_expected_pm(pm_expected, l_idx, "thin_disk", 4000.0, system)
+        self._seed_expected_pm(
+            pm_expected,
+            l_idx,
+            "thin_disk",
+            4000.0,
+            system,
+            PRECEDENCE_MULENS_LENS_PM,
+        )
 
         # Every source body gets the same bulge-source seeding: each source
         # star's distance and pm still get their own start (the secondary's
@@ -1074,15 +1100,35 @@ class MulensEvent(Component):
             self.config_manager.add_hint(
                 f"star.{s_idx}.distance",
                 8000.0,
-                rank=PRECEDENCE_MULENS_SOURCE_DISTANCE,
+                rank=PRECEDENCE_MULENS_SOURCE,
             )
+            # The source radius decides at MULENS_SOURCE_RADIUS (below the
+            # source distance, above every lens guess) whatever seeds it
+            # (a defaults.yaml 1 Rsun, or a higher hint), so a rho seed is
+            # absorbed by theta_E -- the lens -- not by the source.  Only
+            # for a FINITE source: a point source's model reads no rho, so
+            # a rho in its params file (KMT-2018-BLG-0087's 3.3e-6, an
+            # unmeasured MMEXOFAST leftover) must not set theta_E -- at 1
+            # Rsun it asked for theta_E = 177 mas and no lens could absorb
+            # it.  There the radius stays an ordinary default.
+            if self.finite_source:
+                self.config_manager.declare_decision_level(
+                    f"star.{s_idx}.radius", "MULENS_SOURCE_RADIUS"
+                )
             self.config_manager.add_scale_hint(f"star.{s_idx}.distance", 5.0)
             self.config_manager.add_hint(f"star.{s_idx}.logmass", -0.5)
             self.config_manager.add_scale_hint(f"star.{s_idx}.logmass", 0.3)
             self.config_manager.add_scale_hint(f"star.{s_idx}.pm_ra", 3.0)
             self.config_manager.add_scale_hint(f"star.{s_idx}.pm_dec", 3.0)
             self.config_manager.add_scale_hint(f"star.{s_idx}.rv", 1e5)
-            self._seed_expected_pm(pm_expected, s_idx, "bulge", 8000.0, system)
+            self._seed_expected_pm(
+                pm_expected,
+                s_idx,
+                "bulge",
+                8000.0,
+                system,
+                PRECEDENCE_DERIVED_DATA,
+            )
 
         self._declare_companion_mass_backed(system)
 
@@ -1128,16 +1174,30 @@ class MulensEvent(Component):
 
         cm = self.config_manager
         planet = getattr(system, "planet", None)
-        for c_type, c_idx in self.lens_bodies[1:]:
-            if c_type == "star":
-                cm.declare_likelihood_backed(f"star.{c_idx}.logmass")
-                continue
-            if c_type != "planet":
+        for j, (c_type, c_idx) in enumerate(self.lens_bodies[1:], start=1):
+            # A STATED q (the user's, or a seeder's) already says what the
+            # caustic measures, and the companion's mass then follows the
+            # host's through it.  Backing the companion's defaults.yaml
+            # mass coordinate anyway fixes it ABOVE the host's mass guess
+            # (MULENS_LENS_MASS, JDE 2026-11-08: the lens absorbs), so it
+            # is fixed before the stated q can determine it.  For a planet
+            # the backed log_q is not the stated lens q (q is M_p / M_host,
+            # log_q only reaches it through both masses): log_q = -3 was
+            # fixed beside a user q of 1.9e-5 (KMT-2019-BLG-1806), and the
+            # host's mass, the one seed left to reconcile two proportional
+            # statements, went to zero.  For a stellar companion the backed
+            # logmass set the HOST's mass through q instead.
+            if c_type not in ("star", "planet"):
                 raise ValueError(
                     f"mulensevent: lens companion '{c_type}.{c_idx}' is "
                     "neither a star nor a planet, so its mass coordinate is "
                     "unknown."
                 )
+            if self._companion_q_stated(j):
+                continue
+            if c_type == "star":
+                cm.declare_likelihood_backed(f"star.{c_idx}.logmass")
+                continue
             if planet is None:
                 raise RuntimeError(
                     f"mulensevent: lens companion planet.{c_idx} names a "
@@ -1153,6 +1213,26 @@ class MulensEvent(Component):
                 coord = "mass"
             cm.declare_likelihood_backed(f"planet.{c_idx}.{coord}")
 
+    def _companion_q_stated(self, j):
+        """Whether lens element `j`'s mass ratio has a stated start: a user
+        value (an ``initval`` or ``mu``, or a link to either, under the
+        element's index or name spelling) or a seeder's set.  The broadcast
+        ``lens.q`` is not read: element 0's q is the primary's 1 by
+        construction, so a broadcast states nothing about a companion."""
+        cm = self.config_manager
+        name = self.config_manager.system_config["lens"][j].get("name")
+        keys = [f"lens.{j}.q"] + ([f"lens.{name}.q"] if name else [])
+        for key in keys:
+            entry = user_entry(cm.user_params, key)
+            if entry is not None and any(
+                entry.get(f) is not None for f in ("initval", "mu")
+            ):
+                return True
+            linked = cm.links.get(key, {})
+            if "initval" in linked or "mu" in linked:
+                return True
+        return f"lens.{j}.q" in cm.seeded_paths()
+
     def _galactic_pm_expectations(self, system):
         """Line of sight for the galactic-model proper-motion seeds.
 
@@ -1167,11 +1247,11 @@ class MulensEvent(Component):
         free.  That gap is what the engine used to fill by inventing a
         direction (issue #93).
 
-        THE GATE, AND WHY IT IS ONLY pi_E NOW (#93, JDE 2026-10-20).  Until
-        #93 any user pi_E_N/pi_E_E OR any user pm_ra/pm_dec (any star)
-        skipped ALL seeding, because a prior mean dropped on top of a value
-        the config implied fought it.  Measured then, under the OLD engine,
-        chi2/N at the seed, ungated vs gated:
+        THE GATES, AND WHY THERE ARE NONE NOW.  Until #93 any user
+        pi_E_N/pi_E_E OR any user pm_ra/pm_dec (any star) skipped ALL
+        seeding, because a prior mean dropped on top of a value the config
+        implied fought it.  Measured then, under the OLD engine, chi2/N at
+        the seed, ungated vs gated:
 
             ob140939 (pi_E_N/pi_E_E measured, Yee+2015)  3.04 -> 179.1 | 3.04
             ob161003 (two sources, t_E + rho each)       1.72 ->   3.9 | 1.72
@@ -1179,44 +1259,26 @@ class MulensEvent(Component):
             ob08092 (t_0/u_0/t_E only, PSPL)             1.50 ->   1.42 (kept)
 
         Under the precedence ladder (#455) a USER pm (PRECEDENCE_USER)
-        outranks this seed (PRECEDENCE_DERIVED_DATA) and is never traded
-        against it, so a seed can no longer bend a user's value.  Hence:
-        a star whose pm the user gave a VALUE (an initval or a mu; bounds
-        alone do not count) is simply not seeded (``_seed_expected_pm``),
-        and every OTHER star still is.  The gate
-        stays for pi_E alone: two seeded proper motions would fight a user
-        pi_E over the DIRECTION of mu_rel, and no distance can absorb a
-        direction -- only the magnitude goes into theta_E.
+        outranks any seed and is never traded against it, so a star whose
+        pm the user gave a VALUE (an initval or a mu; bounds alone do not
+        count) is simply not seeded (``_seed_expected_pm``), and every
+        OTHER star still is (#93, JDE 2026-10-20; ob08092 with only a user
+        star.Lens pm of (-2, -5) mas/yr: the source sits at the bulge mean,
+        the lens keeps the user's pm, mu_rel_geo PA 75.5 deg, no miss).  A
+        user Sgr-A*-relative pm (``pm_ra_sgra``) counts as setting the pm.
 
-        Re-measured 2026-10-20 under the new engine.  The metric is
-        check_user_starts (requested vs produced), with start logp as
-        context.  With the narrowed gate EVERY shipped microlensing config
-        starts BYTE-IDENTICAL to the old gate (ob08092, ob140939, ob161003,
-        ob09020, ob09020_linear, KMT-2019-BLG-1806, ob07224, ob170114,
-        OGLE_0383LD, DC2018_128, ob161045, kb180087_obj3,
-        KMT-2021-BLG-1122L): each one either sets pi_E, sets the pm of every
-        seedable star, or sets none (seeded before and after).  The one
-        that changes path is ob161003, which now seeds SourceB; the engine
-        derives SourceB's pm from the user Lens pm and the event's one
-        mu_rel (DERIVED_USER, which outranks the seed), so its start does
-        not move either.  The case the ruling is about, ob08092 with only a user
-        star.Lens pm of (-2, -5) mas/yr:
-
-                         seeded   mu_rel_geo PA  |mu_rel_geo|  logp     misses
-            old gate     none     172.8 deg     11.55         6240.48  0
-            pi_E only    Source    75.5 deg      1.05         6249.94  0
-
-        the source sits at the bulge mean, the lens keeps the user's pm, and
-        t_E is absorbed through the lens distance.  Removing the pi_E gate
-        too (seeding over a user pi_E) still delivers pi_E and leaves chi2/N
-        unchanged -- the old 179.1 blow-up does not return -- but the engine
-        then has to throw the proper motions far out to hold the direction:
-        ob08092 + pi_E (0.3, -0.1) moves the pms to ~40 mas/yr and logp
-        6240.25 -> 5880.32; KMT-2019-BLG-1806 to ~55 mas/yr and logp
-        45542.37 -> 44784.14.  That is the gate's measured reason.  A user
-        Sgr-A*-relative pm (``pm_ra_sgra``) counts as setting the pm: seeding
-        ob140939's source over its user pm_ra_sgra put both pms at ~240
-        mas/yr and logp at -320466 against -1233.58.
+        The pi_E gate outlived it until the source-first order (JDE
+        2026-11-08).  Two proper motions seeded at ONE tier fought a user
+        pi_E over the DIRECTION of mu_rel, which no distance can absorb:
+        ungated, the engine threw both far out to hold the direction
+        (ob08092 + pi_E (0.3, -0.1): ~40 mas/yr, logp 6240.25 -> 5880.32;
+        KMT-2019-BLG-1806: ~55 mas/yr).  Now the source's seed is
+        DERIVED_DATA and the lens's MULENS_LENS_PM, so the lens alone turns
+        to the user's direction and the source keeps the bulge mean, and the
+        gate is gone (measured: ob08092 + that pi_E puts the lens at a
+        plausible stellar proper motion, tests/test_seed_quality.py;
+        KMT-2019-BLG-1806 starts with |mu_rel| = 0.5 mas/yr and both proper
+        motions within 1 mas/yr of the bulge mean).
 
         WITH NO galacticmodel BLOCK there is no direction information at
         all, so nothing is seeded and the engine picks one (ob08092: PA -86
@@ -1252,21 +1314,6 @@ class MulensEvent(Component):
         both halves.
         """
         if "galacticmodel" not in getattr(system, "config", {}):
-            return None
-        # The one remaining gate: a user pi_E fixes the DIRECTION of
-        # mu_rel, and two seeded proper motions would fight it over that
-        # direction, which no distance can absorb.  A user proper motion
-        # is NOT a reason to skip here: it outranks the seed, so it is
-        # handled per star in _seed_expected_pm (#93, JDE 2026-10-20).
-        up = self.config_manager.user_params
-        blockers = [k for k in up if k.endswith((".pi_E_N", ".pi_E_E"))]
-        if blockers:
-            logger.info(
-                f"[{self.prefix}] microlens parallax already given "
-                f"({', '.join(sorted(blockers))}); not seeding from the "
-                f"galactic model, whose proper motions would contradict "
-                f"its direction."
-            )
             return None
         # probe_star_radec, not resolve(): a source position LINKED to the
         # lens's read as the defaults.yaml placeholder under resolve(), and
@@ -1323,7 +1370,7 @@ class MulensEvent(Component):
         )
 
     def _seed_expected_pm(
-        self, line_of_sight, star_idx, population, dist_pc, system
+        self, line_of_sight, star_idx, population, dist_pc, system, rank
     ):
         """Seed one star's pm_ra/pm_dec at the galactic model's prior mean.
 
@@ -1332,25 +1379,23 @@ class MulensEvent(Component):
         seed, so the seed could never move it and is only noise in the log
         and the ledger.  The OTHER stars are still seeded (#93).
 
-        PRECEDENCE_DERIVED_DATA: this is derived from the galactic model
-        the same way an RV offset is derived from the data, so it belongs
-        in that tier and must yield to anything in params.yaml.
+        `rank`: PRECEDENCE_DERIVED_DATA for a SOURCE -- derived from the
+        galactic model the same way an RV offset is derived from the data,
+        so it yields to anything in params.yaml -- and
+        PRECEDENCE_MULENS_LENS_PM for the LENS, below every source guess
+        and the lens mass (JDE 2026-11-08: the source is known better than
+        the lens; config.md, "Source before lens").  Both report "data".
 
-        It ties with the peak finder's seeds (also PRECEDENCE_DERIVED_DATA),
-        which is the point.  Both proper-motion components are now pinned,
-        so ``mu_rel`` has a magnitude AND a direction, and the engine no
-        longer has to invert
+        With both components seeded, ``mu_rel`` has a magnitude AND a
+        direction, and the engine no longer has to invert
         ``mu_rel_mag**2 = mu_ra_rel**2 + mu_dec_rel**2`` -- one equation in
         two unknowns -- by choosing a point on a circle (issue #93).  Where
-        that disagrees with the seeded ``t_E``, the relaxation engine's KS
-        rule (review 3.14.22) holds the data tier and lets a LOWER one
-        absorb ``t_E = theta_E / |mu_rel_geo|``: theta_E through the lens
-        distance (``PRECEDENCE_MULENS_LENS_DISTANCE``) or a defaults.yaml
-        lens mass.  So ``t_E`` keeps its measured value, the proper motion
-        keeps the prior's, and the lens absorbs the difference -- which is the standard
-        microlensing chain (a measured t_E plus an assumed mu_rel implies
-        theta_E, hence a mass) and is the quantity a light curve genuinely
-        cannot pin down.
+        that disagrees with a seeded ``t_E`` and nothing else fixes
+        theta_E, the lens DISTANCE, the lowest lens guess, absorbs
+        ``t_E = theta_E / |mu_rel_geo|`` -- the standard microlensing chain
+        (a measured t_E plus an assumed mu_rel implies theta_E).  Where
+        theta_E is fixed (rho over the source's angular radius), the lens
+        proper motion absorbs t_E instead, and a stated pi_E turns it.
 
         `dist_pc` must match the distance hint seeded for the same star:
         the mean velocity is position-dependent, so a mismatch would seed a
@@ -1386,10 +1431,10 @@ class MulensEvent(Component):
             )
             return
         self.config_manager.add_hint(
-            f"star.{star_idx}.pm_ra", pm_ra, rank=PRECEDENCE_DERIVED_DATA
+            f"star.{star_idx}.pm_ra", pm_ra, rank=rank
         )
         self.config_manager.add_hint(
-            f"star.{star_idx}.pm_dec", pm_dec, rank=PRECEDENCE_DERIVED_DATA
+            f"star.{star_idx}.pm_dec", pm_dec, rank=rank
         )
         logger.info(
             f"[{self.prefix}] star.{star_idx} proper motion seeded at the "
