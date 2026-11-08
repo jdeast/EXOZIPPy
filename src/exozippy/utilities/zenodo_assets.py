@@ -643,8 +643,90 @@ RECORDS: Mapping[str, ZenodoRecord] = MappingProxyType(
                 }
             ),
         ),
+        # The processed BT-NextGen spectra at R = 20000 (step 1 of
+        # models/NextGen/README.md; flux as float32), the input the
+        # published BC tables were computed from.  ON DEMAND (ON_DEMAND
+        # below): 3.3 GB that no prewarm fetches.  Consumer:
+        # models/NextGen/bc_synthesis.py, which downloads it the first time
+        # a fit needs a BC column the published tables lack.
+        "nextgen_spectra_r20000": ZenodoRecord(
+            record_id=24033825,
+            concept_record_id=24033824,
+            title=(
+                "BT-NextGen (AGSS2009) Spectra Resampled to R = 20000 for "
+                "EXOZIPPy"
+            ),
+            creators=("Eastman, Jason", "Sandhaus, Phoebe"),
+            citation_key="Eastman:2026spectra",
+            files=_pins(
+                {
+                    "MANIFEST.txt": (
+                        797,
+                        "4b5dabae26e007ef00e58e4c3ffeabd9",
+                    ),
+                    "feh+0.0.spectra.parquet": (
+                        313708384,
+                        "5a05803b5892fac97f69ee5d0cc3f751",
+                    ),
+                    "feh+0.3.spectra.parquet": (
+                        328553989,
+                        "9ea45558127215d35f4a05158017af6c",
+                    ),
+                    "feh+0.5.spectra.parquet": (
+                        329234147,
+                        "c9db367524952bb19975622379c3f336",
+                    ),
+                    "feh-0.5.spectra.parquet": (
+                        310847234,
+                        "f08342fca58afc8a08f6cb8574bf9ae0",
+                    ),
+                    "feh-1.0.spectra.parquet": (
+                        310520748,
+                        "e5ce3bc2b0d2b70f08796b3c1cd4e29f",
+                    ),
+                    "feh-1.5.spectra.parquet": (
+                        308800664,
+                        "5a76f04076c3656cfd2718a38ccffbe8",
+                    ),
+                    "feh-2.0.spectra.parquet": (
+                        309580998,
+                        "be9b9e08e44f88378ce629af42ed3d76",
+                    ),
+                    "feh-2.5.spectra.parquet": (
+                        313174027,
+                        "9fb6f030e4680a2540951846c5c32ced",
+                    ),
+                    "feh-3.0.spectra.parquet": (
+                        320502692,
+                        "d60698df521cd1dab897f2c56f74f75e",
+                    ),
+                    "feh-3.5.spectra.parquet": (
+                        328020468,
+                        "f4c521f1de3634d871cdff8b56e556ed",
+                    ),
+                    "feh-4.0.spectra.parquet": (
+                        327898574,
+                        "bd2c824d2b8cacda9978012347e84213",
+                    ),
+                    "wavelength.parquet": (
+                        1284348,
+                        "5e23d8b567f1b60ddae2b2382e013c37",
+                    ),
+                }
+            ),
+        ),
     }
 )
+
+# Records fetched ONLY when a loader actually needs them, never by
+# ``zenodo.fetch_every_record`` -- so neither the test suite's prewarm nor
+# CI's download-cache step (scripts/zenodo_ci_cache.py) touches them.  For a
+# record too large to fetch on every fresh machine "just in case": the 3.3 GB
+# full-resolution spectra are read only to synthesize a BC column the
+# published tables lack, which most fits never do.  An on-demand record still
+# has an owner with a ``fetch_all()`` (the explicit pre-fetch for a machine
+# that will run offline); only the automatic pre-fetch skips it.
+ON_DEMAND: frozenset[str] = frozenset({"nextgen_spectra_r20000"})
 
 # The module that OWNS each record: the one whose loader reads its files, and
 # whose module-level ``fetch_all()`` puts every file that loader reads into
@@ -660,6 +742,7 @@ OWNERS: Mapping[str, str] = MappingProxyType(
         "mist_eep_grids": "exozippy.models.MIST.eep_grid",
         "claret_ld_tables": "exozippy.models.Claret.claret_tables",
         "phoenix_ld_tables": "exozippy.models.PHOENIX.ld_tables",
+        "nextgen_spectra_r20000": "exozippy.models.NextGen.bc_synthesis",
     }
 )
 

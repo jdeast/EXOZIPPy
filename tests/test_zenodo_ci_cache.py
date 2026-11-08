@@ -47,16 +47,21 @@ def test_every_pinned_file_has_a_current_entry_name():
     """
     Given the registry,
     When the names prune keeps are listed,
-    Then there is one per pinned file, spelled as zenodo.py names an entry.
+    Then there is one per pinned file of every pre-fetched record, spelled
+    as zenodo.py names an entry -- and none for an on-demand record, which
+    fetch never puts in the cache entry.
     """
     from exozippy.utilities import zenodo
 
     names = ci_cache.current_entry_names()
+    prefetched = {
+        name: rec
+        for name, rec in zenodo_assets.RECORDS.items()
+        if name not in zenodo_assets.ON_DEMAND
+    }
     for name, rec in zenodo_assets.RECORDS.items():
         for filename in rec.files:
             meta = zenodo_assets.file_pin(name, filename)
             entry = zenodo._entry_path(Path("/c"), filename, meta)
-            assert entry.name in names
-    assert len(names) == sum(
-        len(r.files) for r in zenodo_assets.RECORDS.values()
-    )
+            assert (entry.name in names) == (name in prefetched)
+    assert len(names) == sum(len(r.files) for r in prefetched.values())

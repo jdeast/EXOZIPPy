@@ -764,7 +764,10 @@ def fetch_every_record() -> None:
     Driven by ``zenodo_assets.RECORDS``: each record is fetched by the
     module ``zenodo_assets.OWNERS`` names for it, through that module's
     own ``fetch_all()`` -- the loader's own destination and checks, never a
-    second list of paths here. Through the machine cache when it is on, so
+    second list of paths here.  A record listed in
+    ``zenodo_assets.ON_DEMAND`` is SKIPPED (its owner is still checked):
+    it is fetched only by its loader, when a fit actually needs it, or by
+    calling the owner's ``fetch_all()`` by hand. Through the machine cache when it is on, so
     a warm machine (or a CI job that restored it) does this with no network
     access at all.
 
@@ -804,6 +807,8 @@ def fetch_every_record() -> None:
                 f"fetch_all(); add one that fetches every file its loader "
                 f"reads into the default destination."
             )
+        if name in zenodo_assets.ON_DEMAND:
+            continue
         fetchers.append((name, owner, fetch_all))
     stale = sorted(set(zenodo_assets.OWNERS) - set(zenodo_assets.RECORDS))
     if stale:

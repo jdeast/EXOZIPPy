@@ -26,6 +26,7 @@ README.md in this directory for the workflow):
 from __future__ import annotations
 
 import datetime
+import os
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Dict, List, Sequence
@@ -228,8 +229,10 @@ FILTER_SETS: Dict[str, List[str]] = {
         "CTIO/DECam.z",
         "CTIO/DECam.Y",
     ],
-    # BC-2026-10-26 item 6: every mulensinstrument band needs a BC column
-    # once an sed: block is on, and MOA-II's wide red band is the one SVO
+    # BC-2026-10-26 item 6: every mulensinstrument band needed a BC column
+    # once an sed: block was on (since 2026-11 only a band whose SED flux is
+    # read does, and a missing one is synthesized -- components/sed/sed.md),
+    # and MOA-II's wide red band is the one SVO
     # carries (MOA/MOA-II.R; there is no MOA-II.Red id).  IRAC.I1 for
     # OGLE-2017-BLG-1275's Spitzer source flux, UKIDSS H for catalog rows.
     "MOA": ["MOA/MOA-II.R"],
@@ -617,6 +620,8 @@ def generate_bc_tables(
     save: bool = True,
     overwrite: bool = False,
     raw_path: Path = SPECTRA_RAW_PATH_DEFAULT,
+    unavailable: Sequence[tuple] | None = None,
+    native_systems: Dict[str, str] | None = None,
 ) -> Dict[str, pd.DataFrame]:
     """
     Compute BCs for every filter set on the NextGen.grid.yaml axes from
@@ -653,6 +658,15 @@ def generate_bc_tables(
     -- pad_missing_nodes skips a node it padded before, so it cannot fill
     a column that did not exist then.  A node missing from the processed
     spectra that SVO DOES list is still an error (step 1 is unfinished).
+
+    `unavailable`, when given, is that set of (teff, logg, feh) nodes
+    stated by the caller instead of read from SVO's index: the on-the-fly
+    synthesis (bc_synthesis.py) derives it from the PUBLISHED step-1 bundle,
+    which is a complete step-1 product by construction (every node SVO lists
+    was processed), so a node it lacks is one SVO has no spectrum for -- and
+    a fit then needs no SVO index and no network beyond the bundle.
+    `native_systems` ({svo id: "Vega" | "AB" | ""}) extends NATIVE_SYSTEM
+    for filters outside FILTER_SETS (passed on to write_magsys_table).
 
     Returns {facility: DataFrame of the newly computed cells} (NaN where a
     cell was not computed).
@@ -693,7 +707,8 @@ def generate_bc_tables(
     # The padded nodes: SVO's index is the authority (read lazily, only
     # when a node is missing locally, so a complete run needs no index).
     key = lambda *v: tuple(round(float(x), _KEY_DECIMALS) for x in v)
-    unavailable = None
+    if unavailable is not None:
+        unavailable = {key(*n) for n in unavailable}
     padding = {}
     existing_alpha = {}
     for fac in plan:
@@ -814,7 +829,7 @@ def generate_bc_tables(
         # The offsets are a property of the columns just written (profile,
         # weighting, zeropoint), so they are rewritten with them -- a
         # regenerated column cannot keep a stale offset.
-        write_magsys_table(filter_sets, model_root)
+        write_magsys_table(filter_sets, model_root, native_systems)
     return {
         fac: pd.concat(frames, ignore_index=True)
         for fac, frames in out.items()
@@ -1051,6 +1066,7 @@ def _mist_native_systems() -> Dict[str, str]:
 
 def magsys_table(
     filter_sets: Dict[str, List[str]] = FILTER_SETS,
+    native_systems: Dict[str, str] | None = None,
 ) -> pd.DataFrame:
     """
     One row per BC column of `filter_sets`: its native magnitude system
@@ -1065,6 +1081,10 @@ def magsys_table(
     zeropoint and weighting are recorded with it so the SED can check the
     record against the column's filter_meta (components/sed/magsys.py).
 
+    `native_systems` ({svo id: system}) adds entries for filters outside
+    NATIVE_SYSTEM -- a column synthesized for one fit (bc_synthesis.py),
+    whose band states its system.  It may not contradict NATIVE_SYSTEM.
+
     Raises for a filter with no NATIVE_SYSTEM entry, and for one whose
     entry disagrees with MIST's filter_magsys.txt where MIST lists it.
     """
@@ -1075,9 +1095,21 @@ def magsys_table(
         )
     _check_filter_sets(filter_sets)
     mist_native = _mist_native_systems()
+    extra = dict(native_systems or {})
+    clash = {
+        f: (NATIVE_SYSTEM[f], s)
+        for f, s in extra.items()
+        if f in NATIVE_SYSTEM and NATIVE_SYSTEM[f] != s
+    }
+    if clash:
+        raise ValueError(
+            f"native_systems contradicts NATIVE_SYSTEM for {clash} "
+            f"(filter: (NATIVE_SYSTEM, given))."
+        )
+    natives = {**extra, **NATIVE_SYSTEM}
     rows = []
     for fac, filters in filter_sets.items():
-        missing = [f for f in filters if f not in NATIVE_SYSTEM]
+        missing = [f for f in filters if f not in natives]
         if missing:
             raise ValueError(
                 f"No NATIVE_SYSTEM entry for {missing} (facility '{fac}'). "
@@ -1087,11 +1119,12 @@ def magsys_table(
         data = _filter_set_data(tuple(filters), FLUX_WEIGHTING)
         for i, svo in enumerate(filters):
             col = data["filters_MIST"][i]
-            native = NATIVE_SYSTEM[svo]
+            native = natives[svo]
             if col in mist_native and native and mist_native[col] != native:
                 raise ValueError(
-                    f"NATIVE_SYSTEM says {svo} is {native}, but MIST's "
-                    f"filter_magsys.txt lists {col} as {mist_native[col]}."
+                    f"The native system of {svo} is given as {native}, but "
+                    f"MIST's filter_magsys.txt lists {col} as "
+                    f"{mist_native[col]}."
                 )
             rows.append(
                 {
@@ -1109,21 +1142,27 @@ def magsys_table(
 def write_magsys_table(
     filter_sets: Dict[str, List[str]] = FILTER_SETS,
     model_root: Path = DEFAULT_MODEL_ROOT,
+    native_systems: Dict[str, str] | None = None,
 ) -> Path:
     """
     Write (or update) the magnitude-system record beside the tables,
     `{model_root}/NextGen/BCs/NextGen.magsys.csv`, for the columns of
     `filter_sets`. Rows for other columns already in the file are kept, so
-    a partial regeneration updates only what it rewrote.
+    a partial regeneration updates only what it rewrote.  Written beside
+    and replaced, so a fit reading the record concurrently (the per-user
+    synthesized-column cache, bc_synthesis.py) never sees half a file.
+    `native_systems`: see magsys_table.
     """
     path = magsys_table_path(model_root, MODEL)
-    new = magsys_table(filter_sets)
+    new = magsys_table(filter_sets, native_systems)
     if path.is_file():
         old = pd.read_csv(path, comment="#", keep_default_na=False)
         old = old[~old["column"].isin(new["column"])]
         new = pd.concat([old, new], ignore_index=True)
     new = new.sort_values("column", kind="stable").reset_index(drop=True)
-    with open(path, "w") as f:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    with open(tmp, "w") as f:
         f.write(
             f"# Written by {GENERATOR} (write_magsys_table); do not edit.\n"
             "# One row per NextGen BC column: the filter's native magnitude\n"
@@ -1134,6 +1173,7 @@ def write_magsys_table(
             "# three against the column's filter_meta).\n"
         )
         new.to_csv(f, index=False, float_format="%.10g")
+    os.replace(tmp, path)
     print(f"Wrote {path}")
     return path
 

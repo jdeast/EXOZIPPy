@@ -131,7 +131,7 @@ def test_ab_row_to_vega_and_back_to_an_ab_zeropoint_round_trips(
     )
     sed = SED({"file": str(p), "model_root": str(DEFAULT_MODEL_ROOT)}, cm)
     star = SimpleNamespace(names=["A"], n_elements=1)
-    sed.load_data(SimpleNamespace(star=star))
+    sed.load_data(SimpleNamespace(star=star, active_components={}))
 
     off_g = float(record.loc["SDSS_g", "ab_minus_vega"])
     # The SED's forward conversion moved the row by the recorded offset ...

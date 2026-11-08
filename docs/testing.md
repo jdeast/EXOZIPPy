@@ -438,6 +438,14 @@ network. Offline with a cold cache, run it once with network first:
 python -c "from exozippy.utilities import zenodo; zenodo.fetch_every_record()"
 ```
 
+**On-demand records are the exception.** A record listed in `zenodo_assets.ON_DEMAND`
+-- today only the 3.3 GB R = 20000 NextGen spectra that synthesize a missing BC column
+(`models/NextGen/bc_synthesis.py`) -- is skipped by `fetch_every_record`, so neither the
+prewarm nor CI's cache step downloads it, and `zenodo_ci_cache.py prune` drops any copy
+of it from the CI cache entry. No test may fetch it: the synthesis tests build tiny fake
+processed-spectra parquets instead (`tests/test_bc_synthesis.py`). Its owner still has a
+`fetch_all()`, for pre-fetching it by hand on a machine that will run offline.
+
 **On CI** (`.github/workflows/tests.yml`) one `actions/cache` entry holds that machine
 cache directory (`EXOZIPPY_CACHE_DIR` is set in the job env), keyed on the OS and the
 hash of `zenodo_assets.py`, so a new pin is a new entry by construction; restore-keys

@@ -497,6 +497,30 @@ class Component(ABC):
         """
         return {}
 
+    def sed_flux_bands(self, system):
+        """The ``band:`` blocks whose SED-predicted flux this component reads.
+
+        Returns a set of band NAMES (as the band blocks spell them).  A band
+        is named here when some likelihood term or derived quantity of this
+        component reads the SED's predicted magnitude or flux IN THAT BAND
+        (a microlensing zeropoint tie, a transit dilution, a photocenter flux
+        fraction) -- not when the band is used only for its filter identity
+        or its limb darkening.
+
+        The SED asks every component at its stage 1 (``SED.load_data``),
+        before any other component's stage 1 may have run, so an override
+        must answer from what exists at CONSTRUCTION: its raw config, its
+        ``__init__`` bookkeeping and the params file (``user_wrote_field``,
+        ``config_manager.links``) -- never a stage-2 map.  The answer decides
+        which band filters must have a bolometric-correction column: a read
+        band without one is synthesized from the full-resolution spectra
+        (``components/sed/sed.md``, "Which band filters need a BC column"),
+        an unread one is simply left out of the grid.  Over-declaring costs a
+        synthesis; under-declaring would drop a constraint, so an override
+        that cannot tell answers conservatively.  The default reads nothing.
+        """
+        return set()
+
     def initial_logmass(self, system):
         """Stage 7: the BIRTH mass of each star whose mass loss this
         component models, ``{star index: log10(M_ini / solMass) tensor}``.
