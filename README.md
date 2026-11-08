@@ -117,6 +117,46 @@ modeling section with its citations.
 Open them with any PDF viewer, e.g. `xdg-open` on Linux, `open` on macOS, or
 `explorer.exe .` under WSL2 to browse the directory in Windows File Explorer.
 
+**Optional: LaTeX, only if you want the compiled `_paper.pdf`.** Everything
+else works without it. If `pdflatex` is not on your `PATH`, the fit prints a
+warning and still writes `_paper.tex` (with the AASTeX class, bibliography
+style and `references.bib` beside it), so you can compile it later. Any TeX
+Live works -- AASTeX itself is not needed -- as long as it has these packages:
+`amsmath amssymb amsfonts latexsym array epsf graphicx hyperref ifthen lineno
+longtable natbib rotating textcase times ulem url xcolor`.
+
+On **Linux** (including WSL2 -- install inside WSL, not on the Windows side):
+
+```bash
+sudo apt install texlive-latex-extra texlive-fonts-recommended texlive-plain-generic
+```
+
+On **macOS**, either the full MacTeX (about 5 GB, nothing else needed):
+
+```bash
+brew install --cask mactex-no-gui
+```
+
+or the small BasicTeX plus the packages it lacks:
+
+```bash
+brew install --cask basictex
+sudo tlmgr update --self
+sudo tlmgr install lineno ulem textcase natbib rotating psnfss epsf
+```
+
+then open a new terminal so `/Library/TeX/texbin` is on your `PATH`. To
+check either platform, every name here should print a path:
+
+```bash
+which pdflatex bibtex
+kpsewhich lineno.sty ulem.sty textcase.sty natbib.sty times.sty rotating.sty
+```
+
+To compile a draft by hand, in `fitresults/`:
+`pdflatex X_paper && bibtex X_paper && pdflatex X_paper && pdflatex X_paper`
+(with `X` the prefix, e.g. `HAT-P-3b`).
+
 ### Step 4 -- Fit your own system
 
 Most example directories (`examples/*/`) have a `README.md` explaining what
