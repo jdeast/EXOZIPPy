@@ -485,6 +485,42 @@ def test_an_escalation_that_cannot_settle_is_undone():
     assert cm._last_keep_report["escalated"] == []
 
 
+def test_an_escalated_tier_keeps_a_satisfied_relation_with_its_other_seed():
+    """
+    Given x = h + d with x pinned at 5 and d a DEFAULT seed bounded at 2,
+      and w = h - k with w pinned at 0, h and k both DATA hints at 1 (so
+      w = h - k holds at the hints),
+    When d runs into its bound and the residual escalates to DATA,
+    Then h takes the residual (to 3) and k follows it (to 3), keeping
+      w = h - k: the escalated tier settles with ALL its seeds movable, not
+      only h, the one upstream of the violated relation.  With h alone the
+      escalation could not keep w = h - k and was undone, leaving x = h + d
+      unsettled (OGLE-2016-BLG-1003: two sources sharing one theta_E).
+    """
+    cm = _toy(
+        {
+            "x": _blk(),
+            "w": _blk(),
+            "h": _blk(),
+            "k": _blk(),
+            "d": _blk(1.0, upper=2.0),
+        },
+        lambda S: [
+            sp.Eq(S("x"), S("h") + S("d")),
+            sp.Eq(S("w"), S("h") - S("k")),
+        ],
+        user={"x": 5.0, "w": 0.0},
+        hints={
+            "h": (1.0, PRECEDENCE_DERIVED_DATA),
+            "k": (1.0, PRECEDENCE_DERIVED_DATA),
+        },
+    )
+    assert _val(cm, "d") == pytest.approx(2.0)
+    assert _val(cm, "h") == pytest.approx(3.0, rel=1e-6)
+    assert _val(cm, "k") == pytest.approx(3.0, rel=1e-6)
+    assert _kinds(cm, "unsettled") == []
+
+
 def test_a_settle_never_moves_a_seed_no_check_sees():
     """
     Given x = a + b with x pinned at 5 by the user and a, b two DEFAULT

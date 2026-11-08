@@ -319,19 +319,25 @@ def test_a_user_lens_pm_seeds_the_source_and_keeps_the_lens():
     assert reduced < 2.5, f"chi2/N at the seed is {reduced:.3f}"
 
 
-def test_a_user_pi_e_still_turns_off_the_galactic_seeds():
-    """The one remaining gate: a user pi_E fixes the direction of mu_rel.
+def test_a_user_pi_e_seeds_the_source_and_turns_the_lens():
+    """The pi_E gate is retired: the lens proper motion absorbs pi_E's
+    direction on its own tier (JDE 2026-11-08, source before lens).
 
     Given ob08092 with a user pi_E and no user proper motion,
     When the model is built,
-    Then neither star's pm start comes from the galactic model, and the
-    user pi_E is delivered.
+    Then the source is seeded at the galactic model's bulge mean (a "data"
+    start), the user pi_E is delivered, and the lens proper motion -- the
+    one seed below the source's that can turn mu_rel -- stays a plausible
+    stellar motion.
 
-    Two seeded proper motions would fight a user pi_E over the DIRECTION of
-    mu_rel, and no distance can absorb a direction (#93).
+    The gate (#93) skipped all galactic seeding under a user pi_E because
+    two proper motions at ONE tier fought that pi_E over the direction of
+    mu_rel: ungated, the engine threw both to ~40 mas/yr (logp 6240.25 ->
+    5880.32).  With the source at DERIVED_DATA and the lens at
+    MULENS_LENS_PM, only the lens moves.
     """
     # Arrange / Act
-    _chi2, _reduced, _n, _pms, misses, system = _seed_chi2(
+    _chi2, reduced, _n, pms, misses, system = _seed_chi2(
         "ob08092",
         extra_params={
             "mulensevent.pi_E_N": {"initval": 0.3},
@@ -339,17 +345,21 @@ def test_a_user_pi_e_still_turns_off_the_galactic_seeds():
         },
     )
 
-    # Assert
+    # Assert: delivered, and the source at the bulge mean from the seed.
     assert misses == [], f"user starts not delivered: {misses}"
-    for i, name in enumerate(system.star.names):
-        for axis in ("pm_ra", "pm_dec"):
-            src = system.config_manager.initval_source(
-                "star", axis, element=i, name=name
-            )
-            assert src != "data", (
-                f"star.{name}.{axis} start came from a galactic-model seed "
-                f"despite a user pi_E"
-            )
+    want_ra, want_dec = _bulge_mean_at(system, 1)
+    assert pms["star.pm_ra"][1] == pytest.approx(want_ra, abs=1e-6)
+    assert pms["star.pm_dec"][1] == pytest.approx(want_dec, abs=1e-6)
+    for axis in ("pm_ra", "pm_dec"):
+        src = system.config_manager.initval_source(
+            "star", axis, element=1, name="Source"
+        )
+        assert src == "data", src
+
+    # Assert: the lens turned, not thrown (the ungated old engine: ~40).
+    lens = np.hypot(pms["star.pm_ra"][0], pms["star.pm_dec"][0])
+    assert lens < 20.0, f"lens proper motion {lens:.1f} mas/yr"
+    assert reduced < 2.5, f"chi2/N at the seed is {reduced:.3f}"
 
 
 def test_a_bounds_only_pm_entry_does_not_turn_off_the_seed():

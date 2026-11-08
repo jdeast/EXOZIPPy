@@ -207,6 +207,26 @@ element (-0.92) and the logit-uniform logmass prior one term (-1.65 to
 appearing its prior renormalizes onto the tables' 3500-10000 K (+2.82).
 Everything else moved by reassociation alone: the data term by <= 1e-9
 nats (3e-14 relative), the rest by <= 4.4e-16 nats.
+
+Four fixtures were re-recorded for the source-before-lens order of the
+microlensing guesses (config.md, "Source before lens"; JDE 2026-11-08).
+Every stored raw start is unchanged; the solved start they are relative to
+moved, so the physical point did.  OGLE_0383LD (rho seeded, no pi_E): the
+source radius now keeps its 1 Rsun start and the lens absorbs rho, so the
+lens moves from 7450 to 7985 pc and the source radius from 6.37 to 1.0
+Rsun -- `RV:mulensinstrument.model` +13.6951, `event_rate_prior` -3.7027,
+`kinematic_prior` +1.5729, `band.du1` +0.1517 (the source's Teff/logg
+moved with its radius), `logit_uniform_prior.star.distance` +0.0636,
+`source_behind_lens` -0.0106 (the lens now sits 15 pc in front of the
+source); total +11.7700.  The three KMT-2019-BLG-1806 configs (t_E and pi_E
+seeded): the pi_E gate on the galactic-model proper motions is retired, so
+both stars are seeded (the source at the bulge mean, the lens turned to
+pi_E's direction) instead of starting at the defaults.yaml -3.  The
+relative motion is pinned by t_E and pi_E either way, so the data term
+moves only by the heliocentric-to-geocentric frame shift at the new
+absolute motions, +3.7e-4 nats; `kinematic_prior` +0.2691, the three
+low-bound barriers (mu_rel_geo_mag, pi_rel, t_E) from up to 1e-3 to ~0,
+`event_rate_prior` -1e-6; total +0.2705 each.
 """
 
 import glob
