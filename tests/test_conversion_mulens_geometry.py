@@ -238,7 +238,7 @@ def test_earth_vperp_matches_astropy_velocity_projection(
 ):
     """
     Given the Earth's barycentric velocity at t0_par in AU/day (the form
-      MulensInstrument stores) and a line of sight,
+      MulensEvent.geocentric_frame returns) and a line of sight,
     When _earth_vperp_en projects it to (East, North) in AU/yr,
     Then it equals astropy's own decomposition of that velocity into
       (d lon cos lat, d lat) at unit distance -- the proper motion it would
@@ -249,15 +249,14 @@ def test_earth_vperp_matches_astropy_velocity_projection(
     _, vel = get_body_barycentric_posvel("earth", Time(t0_par, format="jd"))
     v_au_day = vel.xyz.to_value(u.au / u.day)
     ra, dec = np.radians(ra_deg), np.radians(dec_deg)
-    system = SimpleNamespace(
-        mulensinstrument=SimpleNamespace(
-            _earth_vel_ref=v_au_day, _source_radec_rad=(ra, dec)
-        )
+    event = SimpleNamespace(
+        prefix="mulensevent",
+        _has_mulens_data=lambda: True,
+        geocentric_frame=lambda: (t0_par, None, v_au_day),
+        _line_of_sight_rad=(ra, dec),
     )
 
-    v_e, v_n = MulensEvent._earth_vperp_en(
-        SimpleNamespace(prefix="mulensevent"), system
-    )
+    v_e, v_n = MulensEvent._earth_vperp_en(event)
 
     # astropy: a point 1 AU along the line of sight carrying the Earth's
     # velocity; its spherical differential is the angular rate.
