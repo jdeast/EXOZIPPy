@@ -2184,14 +2184,20 @@ class Instrument(TimeSystem, Component):
         "check_exposures",
     )
 
-    #: The optional column roles that describe each exposure PER ROW, all in
+    #: The optional column role that describes each exposure PER ROW, in
     #: SECONDS of the file's own time scale: ``exptime_s`` the duration of a
-    #: uniform-flux exposure (the FITS EXPTIME), ``t_rms`` the flux-weighted
-    #: RMS of the photon arrival times about the flux-weighted midpoint,
-    #: ``t_skew3`` (s^3) their third central moment (needs ``t_rms``).
-    #: Read by a child with ``reads_exposure_rows`` when ``columns:`` names
-    #: them (#565, folded into the base).
-    EXPOSURE_ROLES = ("exptime_s", "t_rms", "t_skew3")
+    #: uniform-flux exposure (the FITS EXPTIME).  Read by a child with
+    #: ``reads_exposure_rows`` when ``columns:`` names it (#565, folded into
+    #: the base).  The photon-time moment roles ``t_rms``/``t_skew3`` were
+    #: REMOVED (``REMOVED_EXPOSURE_ROLES``).
+    EXPOSURE_ROLES = ("exptime_s",)
+
+    #: Column roles that no longer exist; naming one RAISES.  The 2-node
+    #: moment description (#565) was removed: no pipeline publishes the
+    #: moments, the exposure-meter record is strictly better, and it was
+    #: the one description that could not take more nodes
+    #: (docs/raw_redshift_data.md).
+    REMOVED_EXPOSURE_ROLES = ("t_rms", "t_skew3")
 
     #: An exposure_meter: group's midpoint matches a data-file tag when the
     #: two differ by less than this (days, in the file's own units after
@@ -2242,6 +2248,16 @@ class Instrument(TimeSystem, Component):
                     f"'check_exposure: false'."
                 )
             spec = self.column_specs[i] or {}
+            removed = [r for r in self.REMOVED_EXPOSURE_ROLES if r in spec]
+            if removed:
+                raise ValueError(
+                    f"[{self.prefix}[{self.names[i]}]] columns: the "
+                    f"{'/'.join(removed)} role(s) were removed (the photon "
+                    f"arrival-time moment description, #565). Describe each "
+                    f"exposure with an exposure_meter: record (the "
+                    f"photon-weighted average, docs/raw_redshift_data.md) "
+                    f"or an exptime_s column (a uniform exposure)."
+                )
             if "exptime" in spec:
                 raise ValueError(
                     f"[{self.prefix}[{self.names[i]}]] columns: the "
@@ -2952,12 +2968,6 @@ class Instrument(TimeSystem, Component):
         are ``_read_data``'s."""
         spec = self.column_specs[i] or {}
         extra = tuple(r for r in self.EXPOSURE_ROLES if r in spec)
-        if "t_skew3" in extra and "t_rms" not in extra:
-            raise ValueError(
-                f"[{self.prefix}.{self.names[i]}] columns: t_skew3 (the "
-                f"third central moment of the photon arrival times) needs "
-                f"t_rms (their RMS) as well."
-            )
         read_roles = tuple(roles) + extra
         df, disk_rows = self._read_data(
             i, roles=read_roles, detrend=detrend, row_index=True, **kw
@@ -2992,16 +3002,13 @@ class Instrument(TimeSystem, Component):
         1. its ``exposure_meter:`` bins -> the n-node Gauss rule of the
            meter's photon distribution, each bin a uniform box
            (``exposure.weighted_exposure_rule``; exact to degree 2n - 1);
-        2. its ``t_rms`` (and ``t_skew3``) columns -> the 2-node rule with
-           exactly those moments about the tag (``exposure.moment_rule``;
-           exact to degree 3);
-        3. its ``exptime_s`` COLUMN -> n-node Gauss-Legendre over
+        2. its ``exptime_s`` COLUMN -> n-node Gauss-Legendre over
            ``[t - exptime/2, t + exptime/2]``, uniform flux;
-        4. the file's ``exptime_s:`` KEY -> ``exposure_nodes(i)`` (this
+        3. the file's ``exptime_s:`` KEY -> ``exposure_nodes(i)`` (this
            child's rule, the file's ``ninterp``);
-        5. nothing -> one node at the tag.
+        4. nothing -> one node at the tag.
 
-        n for rules 1 and 3 is the file's ``ninterp:`` when stated, else
+        n for rules 1 and 2 is the file's ``ninterp:`` when stated, else
         ``exposure.DEFAULT_ROW_NODES`` (3): a per-row description is written
         to be used, and three Gauss nodes converge a smooth hour-long
         exposure.  ``ninterp`` (optional) replaces the node count for this
@@ -3021,15 +3028,12 @@ class Instrument(TimeSystem, Component):
         n_rows = n if stated else exposure_rules.DEFAULT_ROW_NODES
         N = t.size
         for role, vals in moments.items():
-            ok = np.isfinite(vals)
-            if role != "t_skew3":
-                ok &= vals > 0.0
+            ok = np.isfinite(vals) & (vals > 0.0)
             if not ok.all():
                 raise ValueError(
-                    f"{where} {role} column: must be "
-                    + ("finite" if role == "t_skew3" else "positive (s)")
-                    + f"; data rows {sorted(int(r) for r in disk_rows[~ok])} "
-                    f"are not ({vals[~ok][:5].tolist()})."
+                    f"{where} {role} column: must be positive (s); data "
+                    f"rows {sorted(int(r) for r in disk_rows[~ok])} are not "
+                    f"({vals[~ok][:5].tolist()})."
                 )
         meter = self._read_exposure_meter(i, disk_rows, observer_time)
         x_u, w_u = exposure_rules.gauss_legendre_rule(n_rows)
@@ -3044,10 +3048,6 @@ class Instrument(TimeSystem, Component):
                 # The meter's photon-weighted mean time IS the flux-weighted
                 # midpoint the file's time column claims to be.
                 worst = max(worst, abs(float(np.sum(w_k * t_k)) - t[j]))
-            elif "t_rms" in moments:
-                skew = moments["t_skew3"][j] if "t_skew3" in moments else 0.0
-                x, w_k = exposure_rules.moment_rule(moments["t_rms"][j], skew)
-                t_k = t[j] + x / exposure_rules.SECONDS_PER_DAY
             elif "exptime_s" in moments:
                 t_k = t[j] + x_u * (
                     moments["exptime_s"][j] / exposure_rules.SECONDS_PER_DAY

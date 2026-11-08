@@ -278,20 +278,16 @@ EXPOSURE_FIXTURE = FIXTURE.parent / "barycorrpy_exposure.txt"
 def test_the_exposure_rules_reproduce_the_photon_moments():
     """
     Given a skewed, cloud-dipped exposure-meter record (500 samples),
-    When the three exposure rules are built,
+    When the two exposure rules are built,
     Then the meter's 3-node Gauss rule reproduces its photon-weighted mean
       of t^k for k <= 5 (relative 1e-12), with positive weights inside the
       record; the 3-node uniform rule integrates t^k exactly for k <= 5
-      over the exposure; and the 2-node moment rule has exactly the given
-      mean (0), RMS and third central moment.
+      over the exposure.
     """
     from exozippy.components.exposure import (
         gauss_legendre_rule as uniform_exposure_rule,
     )
-    from exozippy.components.exposure import (
-        moment_rule,
-        weighted_exposure_rule,
-    )
+    from exozippy.components.exposure import weighted_exposure_rule
 
     rng = np.random.default_rng(5)
     t = np.sort(rng.uniform(0.0, 1.0, 500))
@@ -308,11 +304,6 @@ def test_the_exposure_rules_reproduce_the_photon_moments():
     for k in range(6):
         exact = (0.5 ** (k + 1) - (-0.5) ** (k + 1)) / (k + 1)
         assert np.sum(wu * x**k) == pytest.approx(exact, abs=1e-15)
-    x, wm = moment_rule(300.0, 2.0e7)
-    assert np.sum(wm) == pytest.approx(1.0)
-    assert np.sum(wm * x) == pytest.approx(0.0, abs=1e-9)
-    assert np.sum(wm * x**2) == pytest.approx(300.0**2)
-    assert np.sum(wm * x**3) == pytest.approx(2.0e7)
 
 
 def _read_exposure_fixture():
@@ -344,26 +335,19 @@ def test_the_exposure_average_matches_barycorrpy_integrated_densely():
       sites x two stars x hour angles -5..+5 h x 10/30/60 min, for a
       uniform exposure and for one whose flux ramps linearly to zero,
     When the model's rules average the same correction --
-      the 3-node Gauss-Legendre rule (an exptime_s column) and the 2-node
-      moment rule (t_rms) for the uniform exposures; the exposure-meter
-      rule (2-s bins, 3 nodes) and the moment rule with and without the
-      third moment for the ramps --
+      the 3-node Gauss-Legendre rule (an exptime_s column) for the uniform
+      exposures; the exposure-meter rule (2-s bins, 3 nodes) for the
+      ramps --
     Then the averaging SHIFT (exposure mean minus midpoint, up to 1.13 m/s
       here) agrees with barycorrpy's to (measured): 0.0012 mm/s for
       Gauss-Legendre; 0.034 mm/s for the meter (the 2-s bins' box
-      assumption, ~dt^2); 0.43 mm/s at 60 min for the uniform moment rule
-      and 0.26 mm/s with t_skew3 on the ramps (the unknown 4th moment,
-      ~T^4); and the third moment is NOT negligible: without it the ramps
-      are off by 9.1 mm/s at 60 min (1.1 mm/s at 30 min).  The absolute
-      correction agrees to < 1 mm/s (the builtin ephemeris vs DE430).
+      assumption, ~dt^2).  The absolute correction agrees to < 1 mm/s (the
+      builtin ephemeris vs DE430).
     """
     from exozippy.components.exposure import (
         gauss_legendre_rule as uniform_exposure_rule,
     )
-    from exozippy.components.exposure import (
-        moment_rule,
-        weighted_exposure_rule,
-    )
+    from exozippy.components.exposure import weighted_exposure_rule
 
     stars, sites, _ = _read_fixture()
     worst = {}
@@ -375,8 +359,6 @@ def test_the_exposure_average_matches_barycorrpy_integrated_densely():
         if shape == "uniform":
             x, w = uniform_exposure_rule(3)
             rules = {"gl3": (tmid + x * d, w)}
-            x, w = moment_rule(T / np.sqrt(12.0))
-            rules["moments"] = (tmid + x / 86400.0, w)
         else:
             nb = int(T / 2.0)
             c = (np.arange(nb) + 0.5) / nb
@@ -384,25 +366,17 @@ def test_the_exposure_average_matches_barycorrpy_integrated_densely():
             sub = (c[:, None] + x3[None, :] / nb).ravel()
             cnt = ((1.0 - c)[:, None] * w3[None, :]).ravel()
             rules = {"meter": weighted_exposure_rule(start + sub * d, cnt, 3)}
-            x, w = moment_rule(T / np.sqrt(18.0), T**3 / 135.0)
-            rules["moments_skew"] = (tmid + x / 86400.0, w)
-            x, w = moment_rule(T / np.sqrt(18.0), 0.0)
-            rules["moments_noskew"] = (tmid + x / 86400.0, w)
         biggest_shift = max(biggest_shift, abs(beff - bmid))
         for name, (tt, w) in rules.items():
             e = _effective_cz_b(site, star, tt, w)
             shift_err = abs((e - mid) - (beff - bmid))
             key = (name, T)
             worst[key] = max(worst.get(key, 0.0), shift_err)
-            if name != "moments_noskew":
-                assert abs(e - beff) < 1e-3, (name, a, b, T, e - beff)
+            assert abs(e - beff) < 1e-3, (name, a, b, T, e - beff)
     assert biggest_shift > 1.0
     for T in (600.0, 1800.0, 3600.0):
         assert worst[("gl3", T)] < 1e-5
         assert worst[("meter", T)] < 5e-5
-        assert worst[("moments", T)] < 6e-4
-        assert worst[("moments_skew", T)] < 4e-4
-    assert worst[("moments_noskew", 3600.0)] > 5e-3
 
 
 def test_three_nodes_converge_with_a_fast_binary_on_top():
@@ -740,8 +714,8 @@ def test_the_likelihood_is_the_forward_model_at_the_truth(example):
       noise) to < 1 mm/s -- the residual is the start's logit round trip --
       with every spectrum the photon-weighted mean over its exposure
       (make_data.py integrates each 30-s flux step on its own 9-point
-      grid; the model reads an exptime_s column for HPF, t_rms/t_skew3 for
-      NEID and the exposure meter for FIES).
+      grid; the model reads an exptime_s column for HPF and NEID and the
+      exposure meter for FIES).
       The numpy model is handed the graph's TARGET-frame conjunction: a raw
       file retards the orbit, so the fitted `tc` is the OBSERVED (virtual
       transit) time, tc_target plus the planet's light travel
@@ -889,3 +863,27 @@ def test_a_map_fit_recovers_the_injected_planet_and_zero_points(example):
     for name, gi in zip(MD.SITES, g):
         assert abs(gi - MD.gamma_truth(name)) < 10.0, (name, gi)
     assert abs(rv - MD.TRUTH["rv"]) < 1500.0
+
+
+@pytest.mark.parametrize("roles", [("t_rms",), ("t_rms", "t_skew3")])
+def test_the_removed_moment_roles_raise_naming_the_alternatives(roles):
+    """
+    Given a file naming the removed photon-time moment column roles,
+    When the component is constructed,
+    Then it RAISES naming the removal and the two descriptions that remain
+      (an exposure_meter: record, an exptime_s column).
+    """
+    from exozippy.system import System
+
+    cols = {"time": 0, "rv": 1, "err": 2}
+    cols.update({r: 3 + k for k, r in enumerate(roles)})
+    config = {
+        "star": [{"name": "A", "mist": False}],
+        "planet": [{"name": "b"}],
+        "orbit": [{"name": "b"}],
+        "rvinstrument": [{"name": "Spec", "file": "rv.dat", "columns": cols}],
+    }
+    with pytest.raises(ValueError, match="removed") as err:
+        System(config, user_params={})
+    assert "exposure_meter" in str(err.value)
+    assert "exptime_s" in str(err.value)
