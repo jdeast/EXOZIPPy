@@ -389,6 +389,30 @@ class Plot:
         optical_depth_draws = np.zeros(
             (self.ndraws, self.nstars, len(self.df_wave))
         )
+        # The fitted-R_V mode reddens with CCM89 at each star's own R_V
+        # (sed.md, "The spectral mode"), so the figure must too, or it would
+        # draw a spectrum the fit never evaluated.  getattr: the plot classes
+        # are also driven from tests with a stubbed system (see model_root).
+        if getattr(self.system.sed, "fit_rv", False):
+            from .extinction import ccm89_ab
+            from .sed import RV_DUST
+
+            ccm_a, ccm_b = ccm89_ab(
+                np.asarray(self.df_wave["wavelength_micron"], float)
+            )
+            for d, draw in enumerate(self.draws):
+                av = np.asarray(draw.get("star.av"), float)
+                rv = np.asarray(draw.get(f"star.{RV_DUST}"), float)
+                optical_depth_draws[d, :] = (
+                    av[:, np.newaxis]
+                    * (
+                        ccm_a[np.newaxis]
+                        + ccm_b[np.newaxis] / rv[:, np.newaxis]
+                    )
+                    / 1.086
+                )
+            self.optical_depth_draws = optical_depth_draws
+            return
         for d, draw in enumerate(self.draws):
             av = draw.get("star.av")
             optical_depth = (

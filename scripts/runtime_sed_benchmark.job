@@ -1,0 +1,21 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 2
+#$ -q mThM.q
+#$ -l use_himem=TRUE
+#$ -cwd
+#$ -j y
+#$ -N rtsedbench
+#$ -o scripts/runtime_sed_benchmark.$JOB_ID.log
+# Speed half of the runtime-spectral-SED feasibility study (one thread).
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pt_bench_$JOB_ID"
+cd $HOME/python/EXOZIPPy
+echo "commit $(git rev-parse --short HEAD)   $(hostname)   $(date)"
+python -u scripts/runtime_sed_benchmark.py $HOME/runtime_sed/benchmark.json 400
+echo "exit $?   $(date)"

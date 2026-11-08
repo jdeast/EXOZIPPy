@@ -1,0 +1,37 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 2
+#$ -q mThM.q
+#$ -l use_himem=TRUE
+#$ -cwd
+#$ -j y
+#$ -N ngR3000
+#$ -o scripts/build_nextgen_runtime_grid.$JOB_ID.log
+# The R = 3000 runtime grid the SED's spectral mode reads
+# (models/NextGen/runtime_spectra.py), from the R = 20000 step-1 spectra,
+# plus a check that band fluxes from it match the R = 20000 integrals.
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export OMP_NUM_THREADS=2
+cd $HOME/python/EXOZIPPy
+echo "commit $(git rev-parse --short HEAD) on $(git branch --show-current)   $(date)"
+python -u - <<'PY'
+import numpy as np
+import json
+from pathlib import Path
+from exozippy.models.NextGen import runtime_spectra as rs
+out = Path.home() / "zenodo_bundles" / "nextgen_runtime_R3000"
+npy = rs.build_runtime_grid(
+    Path.home() / "spectra" / "BT-NextGen_AGSS2009_processed",
+    Path.home() / "spectra" / "BT-NextGen_AGSS2009",
+    out,
+)
+a = np.load(npy, mmap_mode="r")
+m = json.loads((out / rs.META_FILE).read_text())
+print("shape", a.shape, "padding", len(m["padding"]), "finite", bool(np.isfinite(np.asarray(a[:, :, :, ::50])).all()))
+print("DONE")
+PY
+echo "exit $?   $(date)"

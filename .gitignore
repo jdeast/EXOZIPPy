@@ -33,6 +33,9 @@ src/exozippy/models/NextGen/BCs/NextGen.wavelength.csv
 # tests/test_tracked_file_sizes.py is the second guard (size, not name).
 src/exozippy/models/NextGen/BCs/*.bc.parquet
 src/exozippy/models/NextGen/BCs/*.bc.parquet.*
+# The R = 3000 runtime grid of the SED's fitted-R_V mode (656 MB), fetched
+# from Zenodo on first use (models/NextGen/runtime_spectra.py).
+src/exozippy/models/NextGen/runtime/
 # The Claret limb-darkening tables, likewise on Zenodo: fetched into
 # ATLAS_L_vt2/ on first use (with fetch_assets' staging files); build/ is
 # where models/Claret/generate_claret_tables.py writes a rebuild, and

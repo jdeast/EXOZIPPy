@@ -253,6 +253,19 @@ star:
     upper: 100.
     init_scale: 0.1
     initval: 0.01
+  # R_V of the dust in front of the star, declared only under sed.fit_rv
+  # (sed.md, "The spectral mode").  Not `rv`: that is the systemic radial
+  # velocity.  Uniform on [2, 6]: the range the CCM89 family is fitted
+  # over (Galactic sight lines run ~2.2-5.5; the bulge ~2.5, Nataf+2013).
+  rv_dust:
+    unit: ""
+    internal_unit: ""
+    latex: "R_V"
+    description: "Total-to-selective extinction ratio"
+    lower: 2.0
+    upper: 6.0
+    init_scale: 0.05
+    initval: 3.1
   pm_ra:
     initval: -3.0
     init_scale: 0.05
