@@ -356,7 +356,7 @@ review 4.5.4 folded #565's machinery into it, #588; the rules are in `components
 **`ninterp:`** is read by rules 1, 3 and 4. Unstated, it is CHOSEN per file at the build
 start -- the smallest count whose smearing error is below Delta chi2 = 0.1 against the
 file's error bars -- and may be raised after the seed polish (`components/instrument.md`,
-"Choosing ninterp"; #PRNUM). The load-time SEEDS (the start-star correction) read a
+"Choosing ninterp"; #591). The load-time SEEDS (the start-star correction) read a
 per-row description with 3 nodes (`exposure.DEFAULT_ROW_NODES`) before that choice. Rule
 2's moment rule is always 2 nodes.
 Gaussian rules converge far faster than the transit component's midpoint grid, which is

@@ -707,7 +707,7 @@ def example():
         # The CONVERGED node count, stated: the forward-model pin below
         # tests the averaging to 1 mm/s, while the automatic count stops
         # where the smearing error is small against the error bars
-        # (Delta chi2 < 0.1, instrument.md "Choosing ninterp", #PRNUM).
+        # (Delta chi2 < 0.1, instrument.md "Choosing ninterp", #591).
         for entry in cfg["rvinstrument"]:
             entry["ninterp"] = 3
         params = yaml.safe_load(open(cfg["parameter_file"]))
