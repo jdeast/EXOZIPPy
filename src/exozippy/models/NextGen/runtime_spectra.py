@@ -99,6 +99,7 @@ def build_runtime_grid(
 ) -> Path:
     """Write the runtime grid from the step-1 spectra; returns the .npy."""
     from exozippy.models.NextGen import generate_NextGen_BC_Tables as gen
+    from exozippy.utilities import zenodo_assets
 
     grid = gen.read_grid_yaml()
     teffs = [float(t) for t in grid["teff"]]
@@ -168,7 +169,8 @@ def build_runtime_grid(
         "bin_edges_A": edges.tolist(),
         "padding": padding,
         "alpha": alphas,
-        "source": "R = 20000 step-1 spectra, Zenodo 10.5281/zenodo.24033825",
+        "source": "R = 20000 step-1 spectra, Zenodo "
+        + zenodo_assets.record("nextgen_spectra_r20000").doi,
         "generator": "exozippy.models.NextGen.runtime_spectra.build_runtime_grid",
         "generated": datetime.date.today().isoformat(),
     }
