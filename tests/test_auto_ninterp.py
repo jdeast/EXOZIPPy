@@ -59,7 +59,8 @@ def test_search_returns_the_smallest_passing_count_for_every_file():
         _scaling(coeffs, calls), {f: 0 for f in coeffs}
     )
     thr = exposure_rules.AUTO_DCHI2
-    for f, (n, d, capped) in found.items():
+    for f, (n, d, capped, need) in found.items():
+        assert need == n
         assert not capped
         assert d < thr
         assert d == pytest.approx(coeffs[f] / n**4)
@@ -81,6 +82,14 @@ def test_search_caps_and_says_so():
     found = exposure_rules.smallest_ninterp(_scaling({0: 1e9}), {0: 0}, cap=8)
     assert found[0][0] == 8
     assert found[0][2] is True
+    # The count it needs is ESTIMATED from the convergence between 4 and 8
+    # (C / n^4 < 0.1 first at n = 317), never evaluated there.
+    assert found[0][3] == 317
+
+
+def test_estimate_refuses_a_count_that_does_not_converge():
+    assert exposure_rules.estimate_needed({4: 1.0, 8: 2.0}) is None
+    assert exposure_rules.estimate_needed({8: 2.0}) is None
 
 
 def test_search_from_a_known_bracket_only_bisects():
@@ -268,3 +277,63 @@ def test_cap_warns_naming_the_file(tmp_path, caplog, monkeypatch):
         r.getMessage() for r in caplog.records if "even 2" in r.getMessage()
     ]
     assert len(msgs) == 1 and "inst0" in msgs[0]
+    # ... and names the count it needs, saying it is an estimate.
+    assert "would need ~" in msgs[0] and "ESTIMATED" in msgs[0]
+
+
+# ---------------------------------------------------------------------------
+# check_exposure: false -- the user's choice, not checked
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.slow
+def test_check_exposure_false_skips_the_user_check_entirely(
+    tmp_path, caplog, monkeypatch
+):
+    """
+    Given ninterp: 1 on a 30-min cadence (too coarse) with
+    check_exposure: false,
+    When built,
+    Then no check is compiled, no too-coarse warning is logged, the count
+      stays 1, and one INFO line says the check is off.
+    """
+    from exozippy.components.instrument import Instrument
+
+    calls = []
+    monkeypatch.setattr(
+        Instrument,
+        "_pairs_dchi2",
+        lambda self, *a, **k: calls.append(1) or [],
+    )
+    with caplog.at_level(logging.INFO, logger=LOGGER):
+        system, _ = _build(
+            tmp_path,
+            {"exptime_s": 1800.0, "ninterp": 1, "check_exposure": False},
+        )
+    assert system.transit.ninterp == [1]
+    assert calls == []
+    msgs = [r.getMessage() for r in caplog.records]
+    assert not [m for m in msgs if "too coarse" in m]
+    off = [m for m in msgs if "check_exposure: false" in m]
+    assert len(off) == 1 and "inst0" in off[0] and "ninterp: 1" in off[0]
+
+
+@pytest.mark.parametrize(
+    "extra, match",
+    [
+        ({"ninterp": 1, "check_ninterp": False}, "check_exposure: false"),
+        ({"ninterp": 1, "check_exposure": "no"}, "true or false"),
+        ({"check_exposure": False}, "does nothing"),
+    ],
+    ids=["variant-spelling", "not-a-boolean", "nothing-to-switch-off"],
+)
+def test_check_exposure_has_one_spelling_and_one_meaning(
+    tmp_path, extra, match
+):
+    t = np.linspace(TC - 0.8 * T14, TC + 0.8 * T14, 30)
+    lc = _write_lc(tmp_path / "lc.dat", t)
+    with pytest.raises(ValueError, match=match):
+        System(
+            _config([lc], [{"exptime_s": 1800.0, **extra}]),
+            user_params=_params(),
+        )

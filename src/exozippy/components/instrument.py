@@ -2167,7 +2167,22 @@ class Instrument(TimeSystem, Component):
     INERT_EXPTIME_S = 60.0
 
     #: The per-file keys the base parses.
-    EXPOSURE_KEYS = ("exptime_s", "ninterp", "exposure_meter")
+    EXPOSURE_KEYS = (
+        "exptime_s",
+        "ninterp",
+        "exposure_meter",
+        "check_exposure",
+    )
+
+    #: Spellings of ``check_exposure`` that are NOT it: each raises naming
+    #: the one spelling (config.md, the one-spelling rule).
+    CHECK_EXPOSURE_VARIANTS = (
+        "check_ninterp",
+        "ninterp_check",
+        "exposure_check",
+        "checkexposure",
+        "check_exposures",
+    )
 
     #: The optional column roles that describe each exposure PER ROW, all in
     #: SECONDS of the file's own time scale: ``exptime_s`` the duration of a
@@ -2218,6 +2233,14 @@ class Instrument(TimeSystem, Component):
                 raise ValueError(
                     self._retired_exptime_message(i, c["exptime"])
                 )
+            wrong = [k for k in self.CHECK_EXPOSURE_VARIANTS if k in c]
+            if wrong:
+                raise ValueError(
+                    f"[{self.prefix}[{self.names[i]}]] {wrong[0]!r} is not a "
+                    f"key; the switch that skips checking a user-stated "
+                    f"ninterp is spelled "
+                    f"'check_exposure: false'."
+                )
             spec = self.column_specs[i] or {}
             if "exptime" in spec:
                 raise ValueError(
@@ -2263,6 +2286,9 @@ class Instrument(TimeSystem, Component):
         self._exposure_checked = False
         #: The last check's per-file record, ``{file: (label, n, dchi2)}``.
         self.exposure_report = {}
+        # Whether the user switched off the checks of a ninterp THEY
+        # stated (check_exposure: false).
+        self.exposure_checks_on = [True] * n
         for i, c in enumerate(self.config):
             where = f"{self.prefix}[{self.names[i]}]"
             meter = self.exposure_meters[i]
@@ -2318,6 +2344,21 @@ class Instrument(TimeSystem, Component):
                 )
             self.exptime_s[i] = exptime
             self.ninterp[i] = ninterp
+            if "check_exposure" in c:
+                flag = c["check_exposure"]
+                if not isinstance(flag, bool):
+                    raise ValueError(
+                        f"[{where}] check_exposure: must be true or false; "
+                        f"got {flag!r}."
+                    )
+                if not self.ninterp_stated[i]:
+                    raise ValueError(
+                        f"[{where}] check_exposure: switches off the checks "
+                        f"of a user-stated ninterp; this file states none, "
+                        f"so its count is chosen automatically and the key "
+                        f"does nothing. Remove it, or state ninterp:."
+                    )
+                self.exposure_checks_on[i] = flag
 
     def _retired_exptime_message(self, i, value):
         """The migration message for the retired per-file ``exptime:``."""
@@ -2366,6 +2407,17 @@ class Instrument(TimeSystem, Component):
                     "after the polish if needed. Set: kept, and warned "
                     "about when too coarse or 2x finer than needed. Needs "
                     "exptime_s (or a per-row description) when > 1."
+                ),
+            },
+            {
+                "key": "check_exposure",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "true (default) or false; only with a stated ninterp. "
+                    "false skips checking that ninterp (too coarse / too "
+                    "fine) entirely: no compile and no warning."
                 ),
             },
         ]
@@ -2598,7 +2650,7 @@ class Instrument(TimeSystem, Component):
         one ``{file: dchi2}`` per trial.  One compile per call.
         """
         n_files = len(self.names)
-        outputs, layout = [], []
+        pairs = []
         for trial in trials:
             vec = np.ones(n_files, dtype=int)
             ref = np.ones(n_files, dtype=int)
@@ -2609,16 +2661,31 @@ class Instrument(TimeSystem, Component):
                 terms_n = self._exposure_check_terms(system)
             with self._ninterp_override(ref):
                 terms_r = self._exposure_check_terms(system)
-            if len(terms_n) != len(terms_r):
+            pairs.append((terms_n, terms_r))
+        totals = self._pairs_dchi2(model, point, pairs)
+        return [
+            {f: float(total[f]) for f in trial}
+            for trial, total in zip(trials, totals)
+        ]
+
+    def _pairs_dchi2(self, model, point, pairs):
+        """Per-file ``sum ((mu_a - mu_b) / sigma)^2`` for each pair of
+        ``_exposure_check_terms`` outputs, compiled together (one compile)
+        against the model's value variables and evaluated at ``point``.
+        Returns one ``(n_files,)`` array per pair."""
+        n_files = len(self.names)
+        outputs, layout = [], []
+        for terms_a, terms_b in pairs:
+            if len(terms_a) != len(terms_b):
                 raise RuntimeError(
                     f"{type(self).__name__}._exposure_check_terms returned "
-                    f"{len(terms_n)} entries at one node count and "
-                    f"{len(terms_r)} at another."
+                    f"{len(terms_a)} entries for one exposure description "
+                    f"and {len(terms_b)} for another."
                 )
             entries = []
-            for (files, mu_n, sigma), (_, mu_r, _) in zip(terms_n, terms_r):
+            for (files, mu_a, sigma), (_, mu_b, _) in zip(terms_a, terms_b):
                 entries.append(np.asarray(files, dtype=int))
-                outputs.append(pt.sqr((mu_n - mu_r) / sigma))
+                outputs.append(pt.sqr((mu_a - mu_b) / sigma))
             layout.append(entries)
         outputs = model.replace_rvs_by_values(outputs)
         fn = model.compile_fn(
@@ -2629,7 +2696,7 @@ class Instrument(TimeSystem, Component):
         )
         values = iter(fn(point))
         result = []
-        for trial, entries in zip(trials, layout):
+        for entries in layout:
             total = np.zeros(n_files)
             for files in entries:
                 z = np.asarray(next(values), dtype=float).reshape(-1)
@@ -2640,7 +2707,7 @@ class Instrument(TimeSystem, Component):
                         f"indices."
                     )
                 total += np.bincount(files, weights=z, minlength=n_files)
-            result.append({f: float(total[f]) for f in trial})
+            result.append(total)
         return result
 
     def check_exposure(self, system, model, point, where):
@@ -2663,11 +2730,24 @@ class Instrument(TimeSystem, Component):
         """
         if not self.supports_exposure:
             return False
-        files = [
+        described = [
             i for i in range(len(self.names)) if self.exposure_described[i]
         ]
-        if not files:
+        if not described:
             return False
+        # check_exposure: false -- a ninterp the USER stated is not checked
+        # at all: no compile, no warning; said once, at the start.  The key
+        # is accepted only on a stated ninterp, so an automatic count is
+        # always chosen.
+        if where == "start":
+            for i in described:
+                if not self.exposure_checks_on[i]:
+                    logger.info(
+                        f"[{self.prefix}[{self.names[i]}]] check_exposure: "
+                        f"false -- ninterp: {self.ninterp[i]} is not checked "
+                        f"against the smearing tolerance."
+                    )
+        files = [i for i in described if self.exposure_checks_on[i]]
         cap = exposure_rules.AUTO_NINTERP_CAP
         thr = exposure_rules.AUTO_DCHI2
         at = {
@@ -2721,20 +2801,28 @@ class Instrument(TimeSystem, Component):
             label = f"[{self.prefix}[{self.names[i]}]]"
             n_i = int(self.ninterp[i])
             if i in found:
-                n_new, d_new, capped = found[i]
+                n_new, d_new, capped, n_need = found[i]
             else:
-                n_new, d_new, capped = n_i, now[i], False
+                n_new, d_new, capped, n_need = n_i, now[i], False, n_i
+            need_text = (
+                f"it would need ~{n_need} (ESTIMATED by extrapolating the "
+                f"convergence of the largest counts evaluated; never built)"
+                if n_need is not None
+                else "its error does not converge with n, so no count can "
+                "be estimated"
+            )
             if self.ninterp_auto[i]:
                 old = n_i
                 if where == "start" or (where == "polished" and i in found):
-                    self.ninterp[i] = int(n_new)
+                    self.ninterp[i] = int(min(n_new, cap) if capped else n_new)
                     self._ninterp_chosen[i] = True
                 if capped:
                     logger.warning(
-                        f"{label} automatic ninterp: even {cap} sub-exposure "
+                        f"{label} automatic ninterp: even {n_new} sub-exposure "
                         f"nodes leave a smearing error of Delta chi2 = "
-                        f"{d_new:.3g} at {at} (threshold {thr}); using {cap}. "
-                        f"Set ninterp: to choose a count yourself."
+                        f"{d_new:.3g} at {at} (threshold {thr}); "
+                        f"{need_text}. Using the cap, {cap}. Set ninterp: "
+                        f"to choose a count yourself."
                     )
                 elif where == "start":
                     logger.info(
@@ -2766,11 +2854,15 @@ class Instrument(TimeSystem, Component):
             if i not in found:
                 continue
             if n_new > n_i or capped:
-                need = f"more than {cap}" if capped else f"ninterp: {n_new}"
+                need = (
+                    f"no count up to {max(cap, n_i)} meets it: {need_text}"
+                    if capped
+                    else f"ninterp: {n_new} would meet it"
+                )
                 logger.warning(
                     f"{label} ninterp: {n_i} is too coarse at {at}: its "
                     f"smearing error is Delta chi2 = {now[i]:.3g} (threshold "
-                    f"{thr}); {need} would meet it. Your value is kept."
+                    f"{thr}); {need}. Your value is kept."
                 )
             elif n_i >= exposure_rules.FINE_WARN_FACTOR * n_new:
                 logger.warning(

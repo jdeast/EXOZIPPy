@@ -215,9 +215,12 @@ def smallest_ninterp(evaluate, lo, hi=None, cap=AUTO_NINTERP_CAP):
     fails), then bisects, so on return the chosen n passed and n - 1 (when
     >= 1) was evaluated and failed.
 
-    Returns ``{file: (n, dchi2_at_n, capped)}``; ``capped`` is True when
-    even ``cap`` fails (n is then ``cap``).  A non-finite Delta chi2 counts
-    as a failure.
+    Returns ``{file: (n, dchi2_at_n, capped, n_needed)}``; ``capped`` is
+    True when even ``cap`` fails (n is then ``cap``), and ``n_needed`` is
+    then the count the file would need, ESTIMATED from the convergence of
+    the two largest counts evaluated (``estimate_needed``; None when they
+    do not converge) -- never built.  ``n_needed`` is n itself otherwise.
+    A non-finite Delta chi2 counts as a failure.
     """
     lo = {f: int(v) for f, v in lo.items()}
     hi = {f: int(v) for f, v in (hi or {}).items() if f in lo}
@@ -261,13 +264,38 @@ def smallest_ninterp(evaluate, lo, hi=None, cap=AUTO_NINTERP_CAP):
                 hi[f] = n
             else:
                 lo[f] = n
+    # A capped file needs two evaluated counts for its estimate: the top
+    # one and half of it (one more evaluation when the search had none).
+    for f in capped:
+        top = max(list(seen[f]) + [lo[f]])
+        for n in sorted({top, max(1, top // 2)} - set(seen[f])):
+            run({f: n})
     out = {}
     for f in lo:
         if f in hi:
             n = hi[f]
             if n not in seen[f]:
                 run({f: n})
-            out[f] = (n, seen[f][n], False)
+            out[f] = (n, seen[f][n], False, n)
         else:
-            out[f] = (cap, seen[f].get(cap, np.nan), True)
+            top = max(seen[f])
+            out[f] = (top, seen[f][top], True, estimate_needed(seen[f]))
     return out
+
+
+def estimate_needed(seen, thr=None):
+    """The node count a file would need, extrapolated from the two largest
+    counts evaluated, ``{n: dchi2}``: with ``dchi2 ~ n^-p`` between them
+    (p fitted, 4 for the midpoint rule's ``n^-2`` error on smooth data),
+    the smallest n with ``dchi2 < thr``.  None when the two do not show
+    convergence (p <= 0, or a non-finite or zero Delta chi2) -- an
+    estimate for a warning, never a count anything is built at."""
+    thr = AUTO_DCHI2 if thr is None else thr
+    pts = sorted((n, d) for n, d in seen.items() if np.isfinite(d) and d > 0.0)
+    if len(pts) < 2:
+        return None
+    (n1, d1), (n2, d2) = pts[-2], pts[-1]
+    if n2 <= n1 or d2 >= d1:
+        return None
+    p = np.log(d1 / d2) / np.log(n2 / n1)
+    return int(np.ceil(n2 * (d2 / thr) ** (1.0 / p)))

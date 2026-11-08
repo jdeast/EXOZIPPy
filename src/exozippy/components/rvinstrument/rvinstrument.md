@@ -358,7 +358,8 @@ start -- the smallest count whose smearing error is below Delta chi2 = 0.1 again
 file's error bars -- and may be raised after the seed polish (`components/instrument.md`,
 "Choosing ninterp"; #591). The load-time SEEDS (the start-star correction) read a
 per-row description with 3 nodes (`exposure.DEFAULT_ROW_NODES`) before that choice. Rule
-2's moment rule is always 2 nodes.
+2's moment rule is always 2 nodes. `check_exposure: false` switches off the check of a
+stated `ninterp`.
 Gaussian rules converge far faster than the transit component's midpoint grid, which is
 built for light curves with kinks at contact; the redshift is smooth. Against a
 4001-point Simpson reference, a 60-min exposure 5 h from the meridian is off by 1.2 m/s
