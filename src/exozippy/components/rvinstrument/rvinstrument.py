@@ -306,14 +306,12 @@ class RVInstrument(Instrument):
             cls._columns_config_schema(
                 ("time", "rv", "err"),
                 note=(
-                    "A file may also name exposure columns, "
+                    "A file may also name an exposure column, "
                     "in seconds of its own time scale: 'exptime_s' (a "
-                    "uniform-flux exposure's duration), 't_rms' (the "
-                    "flux-weighted RMS of the photon arrival times about "
-                    "the midpoint) and 't_skew3' (their third central "
-                    "moment, s^3; needs t_rms); the model is averaged over "
-                    "the exposure they describe (a raw file's predicted "
-                    "redshift, a corrected file's reflex velocity)."
+                    "uniform-flux exposure's duration); the model is "
+                    "averaged over the exposure it describes (a raw file's "
+                    "predicted redshift, a corrected file's reflex "
+                    "velocity). The removed 't_rms'/'t_skew3' roles raise."
                 ),
             ),
             *cls._time_config_schema(),

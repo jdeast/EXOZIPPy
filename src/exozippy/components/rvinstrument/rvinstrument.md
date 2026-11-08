@@ -137,9 +137,9 @@ rvinstrument:
   2457389.0, Gaia DR3's J2016.0). One star, one set of astrometric parameters, one epoch:
   with absolute astrometry in the system the astrometry's reference epoch is used and a
   raw file's `epoch:` that disagrees raises; without it every raw file must name it.
-- **The exposure**: optional columns named in `columns:` (`exptime_s`, `t_rms`,
-  `t_skew3`, in seconds of the file's own time scale), an optional `exposure_meter:`
-  file, and `ninterp:` for the nodes ("The exposure average", below).
+- **The exposure**: an optional `exptime_s` column named in `columns:` (seconds of the
+  file's own time scale), an optional `exposure_meter:` file, and `ninterp:` for the
+  nodes ("The exposure average", below).
 - **`star.rv` must carry a prior** (next section). `observer_location` and `epoch` on a
   corrected file raise. Corrected and raw files may be mixed in one system; the raw rows
   are written into the likelihood's model with `pt.set_subtensor` on their concrete rows.
@@ -337,29 +337,25 @@ review 4.5.4 folded #565's machinery into it, #588; the rules are in `components
    gradient inside a bin moves the mean time by ~`dt^2 f' / (12 f)`. For a linear ramp to
    zero over a 10-min exposure that is 1 s (3 cm/s) in 60-s bins and 0.03 mm/s in 2-s
    bins.
-2. **`t_rms` (and `t_skew3`) columns**: the flux-weighted RMS of the photon arrival times
-   about the flux-weighted midpoint (s) and their third central moment (s^3; needs
-   `t_rms`). The 2-node rule with exactly those moments (`exposure.moment_rule`) is
-   exact for every cubic in time, which covers the curvature and the skew terms. What it
-   cannot know is the 4th moment: 0.43 mm/s at 60 min for a uniform exposure and 0.26
-   mm/s for the ramp, scaling as T^4.
-3. **`exptime_s` column** (s): uniform flux over `[t - exptime/2, t + exptime/2]`,
-   `ninterp`-node Gauss-Legendre. (Its `t_rms` is `exptime / sqrt(12)`; the column adds
-   the shape.)
-4. **The file's `exptime_s:` key** (s): the same Gauss-Legendre rule for every exposure,
+2. **`exptime_s` column** (s): uniform flux over `[t - exptime/2, t + exptime/2]`,
+   `ninterp`-node Gauss-Legendre.
+3. **The file's `exptime_s:` key** (s): the same Gauss-Legendre rule for every exposure,
    with the file's `ninterp` (chosen when unstated, as for every component:
    `components/instrument.md`, "Choosing ninterp").
-5. **Nothing**: one node at the tag, the model at the midpoint, wrong by the Tronsgaard
+4. **Nothing**: one node at the tag, the model at the midpoint, wrong by the Tronsgaard
    term above. That is what corrected-RV practice does, and the reason
    `docs/raw_redshift_data.md` asks a release for the meter record.
 
-**`ninterp:`** is read by rules 1, 3 and 4. Unstated, it is CHOSEN per file at the build
+A photon-time MOMENT description (`t_rms`/`t_skew3` columns, a 2-node rule) existed from
+#565 and was removed in #PR2; naming either role now raises, pointing at the meter record
+or an `exptime_s` column (`docs/raw_redshift_data.md` says why and how to revive it).
+
+**`ninterp:`** is read by rules 1, 2 and 3. Unstated, it is CHOSEN per file at the build
 start -- the smallest count whose smearing error is below Delta chi2 = 0.1 against the
 file's error bars -- and may be raised after the seed polish (`components/instrument.md`,
 "Choosing ninterp"; #591). The load-time SEEDS (the start-star correction) read a
-per-row description with 3 nodes (`exposure.DEFAULT_ROW_NODES`) before that choice. Rule
-2's moment rule is always 2 nodes. `check_exposure: false` switches off the check of a
-stated `ninterp`.
+per-row description with 3 nodes (`exposure.DEFAULT_ROW_NODES`) before that choice.
+`check_exposure: false` switches off the check of a stated `ninterp`.
 Gaussian rules converge far faster than the transit component's midpoint grid, which is
 built for light curves with kinks at contact; the redshift is smooth. Against a
 4001-point Simpson reference, a 60-min exposure 5 h from the meridian is off by 1.2 m/s
@@ -373,14 +369,14 @@ seconds and the one spelling of the per-file key; the old `exptime` role raises.
 read the tag: `self.time` is the start star's BJD_TDB of the midpoint. The seed
 correction is photon-averaged like the model.
 
-Tests (`tests/test_raw_redshift.py`): the rules' moment exactness; the averaged
+Tests (`tests/test_raw_redshift.py`): the rules' exactness; the averaged
 correction against barycorrpy integrated densely
 (`tests/fixtures/raw_redshift/barycorrpy_exposure.txt`: two sites x two stars x hour
 angles -5..+5 h x 10/30/60 min, uniform and ramp exposures), where the averaging shift,
-up to 1.13 m/s, agrees to 0.0012 mm/s with Gauss-Legendre, 0.034 mm/s with a 2-s meter
-and 0.43/0.26 mm/s with the moment rules; convergence with a fast binary; and the
-example's likelihood against `make_data.py`'s 9-point-per-step integration, for all
-three kinds of input.
+up to 1.13 m/s, agrees to 0.0012 mm/s with Gauss-Legendre and 0.034 mm/s with a 2-s
+meter; convergence with a fast binary; the removed moment roles raising; and the
+example's likelihood against `make_data.py`'s 9-point-per-step integration, for both
+kinds of input.
 
 ### Corrected velocities are exposure-averaged too
 
@@ -388,7 +384,7 @@ The same description averages a CORRECTED file (`data_format: rv`): its model is
 `gamma + <reflex>`, the star's velocity -- every orbit, and an `rm:` file's anomaly --
 evaluated at each node by the one builder (`_rv_model`) and averaged with the node weights
 (`RVInstrument._smear_corrected`, `Instrument.node_mean`). The star's flux is constant over
-an exposure, so the weights are the exposure's own (uniform, its moments, or its meter).
+an exposure, so the weights are the exposure's own (uniform, or its meter).
 EXOFASTv2 never averaged RVs; the target here is correctness, not parity. The size: a
 uniform exposure T of a sinusoid of period P is attenuated by `sinc(pi T / P)`, so a
 K = 200 m/s, P = 1 d orbit loses ~0.6 m/s at the extremes in a 1-hour exposure

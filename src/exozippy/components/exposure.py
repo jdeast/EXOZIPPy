@@ -72,23 +72,6 @@ def gauss_legendre_rule(n):
 DEFAULT_ROW_NODES = 3
 
 
-def moment_rule(t_rms, t_skew3=0.0):
-    """``(offsets, weights)`` of the 2-node rule whose photon distribution
-    has mean 0, RMS ``t_rms`` and third central moment ``t_skew3`` (s,
-    s^3; offsets in s about the flux-weighted midpoint): exact for every
-    cubic in time, i.e. for the ``v2 Var/2`` curvature term (Tronsgaard
-    et al. 2019; ``v2`` the second time derivative of the velocity) and
-    the ``v3 mu_3/6`` skew term.  With ``g = t_skew3 / t_rms^3`` the nodes
-    are ``t_rms (g/2 +/- sqrt(1 + g^2/4))``.  What it cannot know is the
-    4th moment; for a uniform exposure the rule's is 1.8x too small, which
-    is 0.47 mm/s at 1 hour, 5 h from the meridian, scaling as T^4."""
-    s = float(t_rms)
-    g = float(t_skew3) / s**3
-    root = np.sqrt(1.0 + 0.25 * g * g)
-    xp, xm = s * (0.5 * g + root), s * (0.5 * g - root)
-    return np.array([xm, xp]), np.array([xp, -xm]) / (xp - xm)
-
-
 def weighted_exposure_rule(t, counts, n):
     """The n-node Gauss rule of an exposure meter's photon distribution.
 

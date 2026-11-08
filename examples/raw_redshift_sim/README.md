@@ -29,13 +29,12 @@ redshifts constrain only each instrument's `(1 + z0_i)(1 + rv/c)`, which the fit
 as that instrument's `gamma`.
 
 Every spectrum is an exposure (10-30 min, its flux on 30-s steps, with passing clouds
-on NEID and FIES), and its `c z_meas` is the photon-weighted mean of the instantaneous
+on FIES), and its `c z_meas` is the photon-weighted mean of the instantaneous
 model over it (Tronsgaard et al. 2019): averaging moves these data by up to 0.2 m/s from
-the model at each midpoint. The three files carry the three kinds of exposure
-information the model reads (`rvinstrument.md`, "The exposure average"): HPF an
-`exptime_s` column (uniform flux), NEID the photon arrival times' `t_rms` and `t_skew3`
-columns, and FIES the full exposure-meter record in `Gaia4like.FIES.expmeter` (which
-overrides its `exptime_s` column).
+the model at each midpoint. The files carry the two kinds of exposure information the
+model reads (`rvinstrument.md`, "The exposure average"): HPF and NEID an `exptime_s`
+column (uniform flux), and FIES the full exposure-meter record in
+`Gaia4like.FIES.expmeter` (which overrides its `exptime_s` column).
 
 The model, its validation against barycorrpy and what a corrected-RV fit would miss on
 this system are in `src/exozippy/components/rvinstrument/rvinstrument.md`; why to publish

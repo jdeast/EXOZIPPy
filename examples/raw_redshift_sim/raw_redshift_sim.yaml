@@ -36,8 +36,8 @@ rvinstrument:
     time_frame: jd
     time_scale: utc
     epoch: 2457389.0
-    # The photon arrival times' RMS (s) and third central moment (s^3).
-    columns: {time: 0, rv: 1, err: 2, t_rms: 3, t_skew3: 4}
+    # A clear sky: uniform flux, the exposure time in s.
+    columns: {time: 0, rv: 1, err: 2, exptime_s: 3}
   - name: "FIES"
     file: "Gaia4like.FIES.rv"
     data_format: raw_redshift

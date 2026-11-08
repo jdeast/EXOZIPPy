@@ -29,12 +29,10 @@ Every spectrum is an EXPOSURE, not an instant: 10-30 min long, its photon
 flux piecewise constant on 30-s steps, and its c*z_meas the photon-weighted
 mean of the instantaneous forward model (Tronsgaard et al. 2019), integrated
 on a 9-point midpoint grid per step (``exposures`` / ``predict``).  The
-three files carry the three levels of exposure information the model reads
+files carry the two kinds of exposure information the model reads
 (rvinstrument.md, "The exposure average"):
 
-* HPF  -- uniform flux, an ``exptime_s`` column (s);
-* NEID -- passing clouds, the photon arrival times' RMS ``t_rms`` (s) and
-          third central moment ``t_skew3`` (s^3) as columns;
+* HPF, NEID -- uniform flux, an ``exptime_s`` column (s);
 * FIES -- passing clouds, the full exposure-meter record in
           ``Gaia4like.FIES.expmeter`` (t_mid, bin center t, dt [s], counts),
           plus the ``exptime_s`` column a release carries anyway.
@@ -76,10 +74,12 @@ N_PER_SITE = 25
 ERR = 10.0  # m/s
 SEED = 7
 SPAN = (2459950.0, 2460700.0)  # JD_UTC
-#: Exposures: lengths 10-30 min on 30-s flux steps; clouds on NEID and FIES.
+#: Exposures: lengths 10-30 min on 30-s flux steps; clouds on FIES.  (NEID
+#: was cloudy and carried the photon-time moments until that description
+#: was removed; it now carries an exptime_s column under a clear sky.)
 STEP_S = 30.0
 EXPOSURE_SEED = {"HPF": 11, "NEID": 12, "FIES": 13}
-CLOUDY = {"HPF": False, "NEID": True, "FIES": True}
+CLOUDY = {"HPF": False, "NEID": False, "FIES": True}
 
 
 def gamma_truth(name):
@@ -243,19 +243,9 @@ def exposures(name, jd_mid):
     return out
 
 
-def exposure_moments(exp):
-    """``(exptime, t_rms, t_skew3)`` in s, s, s^3 of one ``exposures``
-    entry: the photon distribution of boxes of width STEP_S."""
-    starts, flux = exp
-    c = (starts - starts[0]) * 86400.0 + 0.5 * STEP_S
-    p = flux / np.sum(flux)
-    mu = np.sum(p * c)
-    d = c - mu
-    # Box moments about mu: E[(d + u)^k], u uniform on +/- STEP_S/2.
-    h2 = STEP_S**2 / 12.0
-    var = np.sum(p * (d**2 + h2))
-    m3 = np.sum(p * (d**3 + 3.0 * d * h2))
-    return len(flux) * STEP_S, np.sqrt(var), m3
+def exposure_length(exp):
+    """The duration (s) of one ``exposures`` entry."""
+    return len(exp[1]) * STEP_S
 
 
 def predict(name, jd_utc, reflex=True, star=None, tc=None, exps=None):
@@ -338,20 +328,15 @@ def main():
         exps = exposures(name, jd)
         cz, _, _, _ = predict(name, jd, exps=exps)
         cz = cz + rng.normal(0.0, ERR, cz.size)
-        mom = np.array([exposure_moments(e) for e in exps])
+        exptime = np.array([exposure_length(e) for e in exps])
         head = (
             "SIMULATED raw redshifts -- NOT REAL DATA (make_data.py).\n"
             "JD_UTC (flux-weighted exposure midpoint)  c*z_meas [m/s]  "
             "err [m/s]  "
         )
-        if name == "NEID":
-            cols = [jd, cz, np.full(cz.size, ERR), mom[:, 1], mom[:, 2]]
-            fmt = "%.8f %.4f %.2f %.3f %.6e"
-            head += "t_rms [s]  t_skew3 [s^3]"
-        else:
-            cols = [jd, cz, np.full(cz.size, ERR), mom[:, 0]]
-            fmt = "%.8f %.4f %.2f %.1f"
-            head += "exptime [s]"
+        cols = [jd, cz, np.full(cz.size, ERR), exptime]
+        fmt = "%.8f %.4f %.2f %.1f"
+        head += "exptime [s]"
         np.savetxt(
             f"Gaia4like.{name}.rv",
             np.column_stack(cols),

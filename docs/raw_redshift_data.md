@@ -116,9 +116,8 @@ own ephemeris.
    the WGS84 ellipsoid to ~10 m, or ITRF XYZ. For a spacecraft, give the ephemeris it used
    (a NAIF id, or the Horizons query).
 3. **The exposure itself, not just its midpoint** (see "The exposure: what to release
-   and why" below). In order of preference: the exposure-meter record (a side file); the
-   RMS and third moment of the photon arrival times; at the very least the exposure
-   time.
+   and why" below). In order of preference: the exposure-meter record (a side file); at
+   the very least the exposure time.
 4. **`c * z_meas` and its uncertainty**, in m/s, defined as `c (lambda_obs / lambda_ref -
    1)`. This is NOT the output of a log or relativistic "velocity" formula, which differ
    by `c z^2 / 2` (1.5 m/s at 30 km/s). If the pipeline works in `ln(lambda)`, convert
@@ -162,15 +161,12 @@ What a release can carry, best first:
 | what is released | what EXOZIPPy does | residual (1-hour exposure, worst geometry) |
 |---|---|---|
 | the exposure-meter record (side file, below) | the Gauss rule of the recorded photon distribution | < 0.001 mm/s from the rule; the meter's bins add ~`dt^2 f' / (12 f)` of mean time (0.03 mm/s for 2-s bins on a ramp) |
-| `t_rms` and `t_skew3` columns (photon-time RMS and third central moment) | a 2-node rule with exactly those moments | 0.3-0.4 mm/s (the unknown 4th moment; scales as T^4) |
-| `t_rms` alone | the same rule, symmetric | up to 9 mm/s on a strongly skewed exposure (1 mm/s at 30 min) |
 | `exptime_s` alone | uniform flux over the exposure | exact on a clear night; under clouds the true `Var(t)` can differ from `T^2/12` by tens of percent, which is tens of cm/s |
 | nothing | the model at the midpoint | the full term, 1.3 m/s x (T / 1 h)^2 |
 
 The exposure-meter record is the standard to aim for. It is small (one line per meter
 bin), it makes the average exact to well below 1 mm/s, and nothing in it depends on a
-model. The two moment columns are the compact minimum. The exposure time is the fallback
-for an archive that kept nothing else.
+model. The exposure time is the fallback for an archive that kept nothing else.
 
 **The exposure-meter side file** is in long format, one per data file, named with
 `exposure_meter:`:
@@ -189,10 +185,14 @@ d (0.09 s). A `t_mid` that matches no exposure, or two, is an error. Use bins as
 the meter allows: each bin is taken to be uniform inside, which moves the mean time by
 about `dt^2 f' / (12 f)` when the flux changes within it.
 
-**The moment columns**: `t_rms` [s] is the photon-weighted RMS of the arrival times about
-the photon-weighted midpoint, `sqrt(sum_j N_j (t_j - t_mid)^2 / sum_j N_j)` over the
-meter's bins (plus `dt_j^2 / 12` for the spread inside each bin). `t_skew3` [s^3] is the
-photon-weighted third central moment. Both are in the file's own time scale.
+**A moment description existed and was removed.** From #565 a file could give each
+exposure's photon-time RMS and third central moment (`t_rms`, `t_skew3` columns), modeled
+with the 2-node rule that has exactly those moments -- to leading order the exposure
+average depends on the variance of the photon arrival times, then on the third moment
+(Tronsgaard et al. 2019, MNRAS 489, 2395). #PR2 removed it: no pipeline publishes the
+moments, the meter record above is strictly better, and it was the one description that
+could not take more nodes. Naming either column now raises; it can be revived from #565
+if a pipeline ever publishes the moments.
 
 ## A file layout EXOZIPPy reads directly
 
@@ -208,8 +208,8 @@ carry the metadata as `key: value` pairs. The data columns follow, in this order
 # zero_point: template = co-added observed spectrum of this star (relative)
 # corrections_applied: simultaneous LFC drift; CTI
 # corrections_not_applied: barycentric (none of it), telluric
-# columns: JD_UTC  cz[m/s]  cz_err[m/s]  exptime[s]  t_rms[s]  t_skew3[s^3]
-2460401.732514 -24103.112 0.31 900 251.8 -1.2e6
+# columns: JD_UTC  cz[m/s]  cz_err[m/s]  exptime[s]
+2460401.732514 -24103.112 0.31 900
 ...
 ```
 
@@ -224,12 +224,12 @@ rvinstrument:
     time_frame: jd
     time_scale: utc
     epoch: 2457389.0          # the epoch of the star.ra/dec/pm you give
-    columns: {time: 0, rv: 1, err: 2, exptime_s: 3, t_rms: 4, t_skew3: 5}
+    columns: {time: 0, rv: 1, err: 2, exptime_s: 3}
     exposure_meter: "star.GCLEF.expmeter"   # overrides the columns where present
 ```
 
 Each exposure uses the most complete description it has: its meter bins, else its
-moment columns, else its exposure time, else (none of them) the model at the midpoint.
+exposure time, else (neither) the model at the midpoint.
 
 The `#` lines are ignored by the reader, which is the point of putting the metadata
 there: the file stays the document of record. If a release interleaves several
