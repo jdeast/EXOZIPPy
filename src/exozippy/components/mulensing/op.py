@@ -186,6 +186,108 @@ RHO_CEILING = 1e3
 VBM_TOL_DEFAULT = 1e-3
 VBM_RELTOL_DEFAULT = 0.0
 
+# The N-lens finite-source shortcut (review 8.6.43; mulensing.md, "N-lens
+# finite source: the hexadecapole shortcut").  Inside the far-field radius
+# an epoch takes the Gould (2008) hexadecapole value, built from 13 point-
+# source MultiMag0 calls, instead of MultiMag2 when all three hold, with
+# goal = max(Tol, RelTol * A0) -- VBM's own stopping rule, so the shortcut
+# answers to the accuracy the event asked for (`vbm_tol` / `vbm_reltol`):
+#   |quadrupole term|   <= goal
+#   |hexadecapole term| <= HEXADECAPOLE_HEX_FRACTION * goal
+#   every caustic       >= HEXADECAPOLE_CAUSTIC_CLEARANCE * rho from the
+#                          source center, beyond the caustic's own sampling
+#                          step (caustic_table)
+# The first says the whole finite-source correction is no larger than the
+# accuracy MultiMag2 is asked for; the second that the series is
+# converging; the third that no caustic -- the only singularities of the
+# point-source magnification, so what bounds the expansion's radius of
+# convergence -- lies where the 13 samples could straddle or miss it.
+HEXADECAPOLE_HEX_FRACTION = 0.1
+HEXADECAPOLE_CAUSTIC_CLEARANCE = 3.0
+# The 12 off-center sample points of Gould (2008) sec. 2, in units of rho:
+# 4 at rho/2 on the axes, 4 at rho on the axes, 4 at rho on the diagonals.
+_HEX_OFFSETS = np.array(
+    [(0.5 * np.cos(a), 0.5 * np.sin(a)) for a in np.arange(4) * np.pi / 2]
+    + [(np.cos(a), np.sin(a)) for a in np.arange(4) * np.pi / 2]
+    + [(np.cos(a), np.sin(a)) for a in np.arange(4) * np.pi / 2 + np.pi / 4]
+)
+_HEX_OFFSETS_LIST = _HEX_OFFSETS.tolist()
+
+
+def _hexadecapole(f0, samples, m1, m2, goal):
+    """Gould's (2008) disk average of a smooth f from its center value
+    ``f0`` and the 12 ``samples`` at ``_HEX_OFFSETS``: the ring-average
+    coefficients ``a2r = A2 rho^2`` and ``a4r = A4 rho^4`` from the rho/2
+    and rho rings (the axis/diagonal pair cancels the cos(4 theta)
+    harmonic), weighted by the disk moments ``m1 = <r^2>``,
+    ``m2 = <r^4>`` (``ld_disk_moments``).  Returns ``(value, ok)``, ok the
+    first two acceptance conditions (module comment) -- False for a NaN."""
+    half = float(samples[0:4].mean()) - f0
+    plus = float(samples[4:8].mean()) - f0
+    cross = float(samples[8:12].mean()) - f0
+    a2r = (16.0 * half - plus) / 3.0
+    a4r = 0.5 * (plus + cross) - a2r
+    quad = a2r * m1
+    hexa = a4r * m2
+    ok = abs(quad) <= goal and abs(hexa) <= HEXADECAPOLE_HEX_FRACTION * goal
+    return f0 + quad + hexa, ok
+
+
+def ld_disk_moments(a1, a2=0.0):
+    """Surface-brightness-weighted ``<r^2>`` and ``<r^4>`` over the source
+    disk (r in units of rho) for VBM's limb-darkening profile
+    ``I(mu) = 1 - a1 (1 - mu) - a2 (1 - mu)^2``, ``mu = sqrt(1 - r^2)``
+    (LDlinear is ``a2 = 0``).  The disk average of a magnification whose
+    ring average at radius ``r rho`` is ``A0 + a2r r^2 + a4r r^4`` is
+    ``A0 + a2r <r^2> + a4r <r^4>``: 1/2 and 1/3 for a uniform disk, and
+    Gould's (2008) factors (1 - Gamma/5)/2 and (1 - 11 Gamma/35)/3 for the
+    linear law, ``Gamma = 2 a1 / (3 - a1)`` (pinned in
+    tests/test_vbm_hexadecapole.py).  Exact: written in mu, with
+    ``d(r^2) = -2 mu dmu``, every integrand is a polynomial."""
+    P = np.polynomial.Polynomial
+    one_minus_mu = P([1.0, -1.0])
+    intensity = 1.0 - a1 * one_minus_mu - a2 * one_minus_mu**2
+    two_mu = P([0.0, 2.0])
+    r2 = P([1.0, 0.0, -1.0])  # r^2 = 1 - mu^2
+
+    def disk(poly):
+        f = (poly * two_mu).integ()
+        return f(1.0) - f(0.0)
+
+    norm = disk(intensity)
+    return disk(intensity * r2) / norm, disk(intensity * r2 * r2) / norm
+
+
+def caustic_table(curves):
+    """VBM ``Multicaustics()`` curves as flat vertex arrays ``(cx, cy, h)``,
+    ``h`` the largest step between adjacent vertices of the vertex's own
+    curve.  The true curve between two samples lies within about one step
+    of either, so ``hypot(x - cx, y - cy) - h`` bounds the distance from
+    (x, y) to the caustic from below.  VBM samples the critical curves at
+    uniform phase, so a tiny caustic is sampled as finely as a large one is
+    coarsely -- hence a step per curve, not one global step."""
+    xs, ys, hs = [], [], []
+    for curve in curves:
+        cx = np.asarray(curve[0], dtype=float)
+        cy = np.asarray(curve[1], dtype=float)
+        if cx.size < 2:
+            raise RuntimeError(
+                "VBMicrolensing Multicaustics() returned a caustic curve "
+                f"of {cx.size} point(s); the hexadecapole guard needs "
+                "sampled curves (op.caustic_table)."
+            )
+        xs.append(cx)
+        ys.append(cy)
+        hs.append(
+            np.full(cx.size, float(np.max(np.hypot(np.diff(cx), np.diff(cy)))))
+        )
+    if not xs:
+        raise RuntimeError(
+            "VBMicrolensing Multicaustics() returned no caustic for an "
+            "N-lens geometry, which always has at least one."
+        )
+    return np.concatenate(xs), np.concatenate(ys), np.concatenate(hs)
+
 
 def _safe_rho(value):
     """Floor the source radius at physics.RHO_FLOOR.
@@ -683,6 +785,12 @@ class VBMDirectMagOp(Op):
         # copy-on-write copy, so per-instance scratch state is never shared.
         self._vbm = self._build_vbm()
         self._delta_cache = {}
+        # The hexadecapole shortcut's per-call state (_multi_epoch): the
+        # limb-darkened disk moments, set in _magnify, and the current N-lens
+        # geometry's caustics, computed on first need and dropped by
+        # _set_geometry.
+        self._hex_moments = None
+        self._caustics = None
         # Warn-once flags, mirroring _MagOpBase._warned.  TWO of them, because
         # the two failure modes have different fixes and must not silence each
         # other: `_warned` covers a non-finite parameter vector reaching
@@ -737,6 +845,7 @@ class VBMDirectMagOp(Op):
         state = self.__dict__.copy()
         del state["_vbm"]
         state["_delta_cache"] = {}
+        state["_caustics"] = None
         return state
 
     def __setstate__(self, state):
@@ -792,12 +901,24 @@ class VBMDirectMagOp(Op):
         binary path it routes every far epoch to BinaryMag0 before
         BinaryMag2's (new) shortcut is ever consulted, so the 5.5 -> 5.6
         upgrade does not move a far-field magnification.
+
+        Inside that radius an N-lens epoch is ``_multi_epoch``'s: the
+        Gould (2008) hexadecapole where it is accurate to the requested
+        goal and no caustic is within 3 rho, MultiMag2 elsewhere (review
+        8.6.43) -- because a tight pair inflates R_inf to ~1/s and MultiMag2
+        is slow and wrong on such a geometry far from its caustics.
         """
         vbm = self._vbm
         vbm.a1 = 0.0 if u1 is None else u1
         if self.quadratic_ld:
             vbm.a2 = 0.0 if u2 is None else u2
         astro = self.astrometry
+        if self.n_companions >= 2 and self.use_rho:
+            # The disk moments the hexadecapole shortcut weights its terms
+            # with (_multi_epoch), for this call's limb darkening.
+            self._hex_moments = ld_disk_moments(
+                vbm.a1, vbm.a2 if self.quadratic_ld else 0.0
+            )
 
         if self.n_companions == 0:
             return self._single_lens(x, y, rho)
@@ -911,8 +1032,8 @@ class VBMDirectMagOp(Op):
             return self._magnify_geometry(
                 *merge_lens_groups(pos, m, groups), x, y, rho
             )
-        vbm.SetLensGeometry(np.column_stack([pos, m]).ravel().tolist())
-        mag2, mag0 = vbm.MultiMag2, vbm.MultiMag0
+        self._set_geometry(pos, m)
+        mag0 = vbm.MultiMag0
         if not self.use_rho:
             if not astro:
                 return np.array(
@@ -923,21 +1044,7 @@ class VBMDirectMagOp(Op):
             )
         r_inf = max(s + 1.0 / s for (s, _, _) in companions) + 2.0
         far = (x * x + y * y) > (r_inf + 2.0 * rho) ** 2
-        if not astro:
-            return np.array(
-                [
-                    mag0(xi, yi) if isfar else mag2(xi, yi, rho)
-                    for xi, yi, isfar in zip(
-                        x.tolist(), y.tolist(), far.tolist()
-                    )
-                ]
-            )
-        return self._collect(
-            [
-                (mag0, (xi, yi)) if isfar else (mag2, (xi, yi, rho))
-                for xi, yi, isfar in zip(x.tolist(), y.tolist(), far.tolist())
-            ]
-        )
+        return self._multi_lens(x, y, rho, far)
 
     def _magnify_moving(self, companions, m, x, y, rho):
         """N-lens magnification with PER-EPOCH geometry (review 8.6.33).
@@ -991,24 +1098,25 @@ class VBMDirectMagOp(Op):
                 else:
                     A[i] = out[0]
                 continue
-            vbm.SetLensGeometry(np.column_stack([p_com, m]).ravel().tolist())
+            self._set_geometry(p_com, m)
             if not self.use_rho:
                 A[i] = vbm.MultiMag0(xi, yi)
-            else:
-                r_inf = (
-                    max(
-                        float(S[j][i]) + 1.0 / float(S[j][i])
-                        for j in range(self.n_companions)
-                    )
-                    + 2.0
+                if self.astrometry:
+                    cx[i] = vbm.astrox1
+                    cy[i] = vbm.astrox2
+                continue
+            r_inf = (
+                max(
+                    float(S[j][i]) + 1.0 / float(S[j][i])
+                    for j in range(self.n_companions)
                 )
-                if xi * xi + yi * yi > (r_inf + 2.0 * rho) ** 2:
-                    A[i] = vbm.MultiMag0(xi, yi)
-                else:
-                    A[i] = vbm.MultiMag2(xi, yi, rho)
+                + 2.0
+            )
+            isfar = xi * xi + yi * yi > (r_inf + 2.0 * rho) ** 2
             if self.astrometry:
-                cx[i] = vbm.astrox1
-                cy[i] = vbm.astrox2
+                A[i], cx[i], cy[i] = self._multi_epoch(xi, yi, rho, isfar)
+            else:
+                A[i] = self._multi_epoch(xi, yi, rho, isfar)
         if not self.astrometry:
             return A
         return A, cx, cy
@@ -1129,24 +1237,103 @@ class VBMDirectMagOp(Op):
                 com[0] + ax * ex - ay * ey,
                 com[1] + ax * ey + ay * ex,
             )
-        vbm.SetLensGeometry(np.column_stack([pos, m]).ravel().tolist())
+        self._set_geometry(pos, m)
         if self.use_rho:
             sep = np.hypot(*(pos[1:] - pos[0]).T)
             r_inf = float(np.max(sep + 1.0 / sep)) + 2.0
             far = (x * x + y * y) > (r_inf + 2.0 * rho) ** 2
         else:
             far = np.ones(np.shape(x), dtype=bool)
-        calls = [
-            (
-                (vbm.MultiMag0, (xi, yi))
-                if isfar
-                else (vbm.MultiMag2, (xi, yi, rho))
+        return self._multi_lens(x, y, rho, far)
+
+    def _set_geometry(self, pos, m):
+        """Hand VBM an N-lens geometry (positions ``pos`` (n, 2) in the
+        trajectory frame, mass fractions ``m``) and drop the previous one's
+        caustics, which the hexadecapole guard computes lazily."""
+        self._vbm.SetLensGeometry(np.column_stack([pos, m]).ravel().tolist())
+        self._caustics = None
+
+    def _multi_lens(self, x, y, rho, far):
+        """N-lens magnification on the current geometry at every (x, y),
+        one ``_multi_epoch`` per epoch (``far``: the far-field guard).
+        Returns A, or ``(A, cx, cy)`` with astrometry."""
+        n = int(np.size(x))
+        A = np.empty(n)
+        if not self.astrometry:
+            for i, (xi, yi, isfar) in enumerate(
+                zip(x.tolist(), y.tolist(), far.tolist())
+            ):
+                A[i] = self._multi_epoch(xi, yi, rho, isfar)
+            return A
+        cx, cy = np.empty(n), np.empty(n)
+        for i, (xi, yi, isfar) in enumerate(
+            zip(x.tolist(), y.tolist(), far.tolist())
+        ):
+            A[i], cx[i], cy[i] = self._multi_epoch(xi, yi, rho, isfar)
+        return A, cx, cy
+
+    def _multi_epoch(self, xi, yi, rho, isfar):
+        """One finite-source epoch on the current N-lens geometry (review
+        8.6.43): MultiMag0 beyond the far-field radius (``isfar``); inside
+        it the Gould (2008) hexadecapole from 13 point-source MultiMag0
+        calls where the module's acceptance rule holds (HEXADECAPOLE_*
+        above; mulensing.md, "N-lens finite source: the hexadecapole
+        shortcut"); MultiMag2 everywhere else.  Returns A, or
+        ``(A, cx, cy)`` with astrometry: the hexadecapole centroid is the
+        same expansion of the flux-weighted centroid ``A c`` divided by the
+        expanded A, its convergence tested on the shift ``A (c - p)``
+        (p the sample's source position), which is what the data see.
+
+        Why MultiMag2 is not simply called: a tight pair inflates the
+        far-field radius ``max(s + 1/s) + 2`` to tens of Einstein radii, and
+        inside it MultiMag2 on such a geometry is slow and wrong where
+        nothing is happening -- OGLE-2013-BLG-0341's close seeds (the
+        stellar pair at s ~ 0.03) sent epochs 25-28 theta_E from every
+        caustic to it at 140-290 s each, for A = 0.99-1.34 where the
+        point-source value is 1.000004."""
+        vbm = self._vbm
+        astro = self.astrometry
+        mag0 = vbm.MultiMag0
+        a0 = mag0(xi, yi)
+        if isfar:
+            return (a0, vbm.astrox1, vbm.astrox2) if astro else a0
+        n_s = len(_HEX_OFFSETS)
+        samp = np.empty(n_s)
+        if astro:
+            c0x, c0y = vbm.astrox1, vbm.astrox2
+            scx, scy = np.empty(n_s), np.empty(n_s)
+            px = xi + rho * _HEX_OFFSETS[:, 0]
+            py = yi + rho * _HEX_OFFSETS[:, 1]
+        for k, (ox, oy) in enumerate(_HEX_OFFSETS_LIST):
+            samp[k] = mag0(xi + rho * ox, yi + rho * oy)
+            if astro:
+                scx[k], scy[k] = vbm.astrox1, vbm.astrox2
+        m1, m2 = self._hex_moments
+        goal = max(vbm.Tol, vbm.RelTol * a0)
+        a_fs, ok = _hexadecapole(a0, samp, m1, m2, goal)
+        if astro and ok:
+            ok = (
+                _hexadecapole(
+                    a0 * (c0x - xi), samp * (scx - px), m1, m2, goal
+                )[1]
+                and _hexadecapole(
+                    a0 * (c0y - yi), samp * (scy - py), m1, m2, goal
+                )[1]
             )
-            for xi, yi, isfar in zip(x.tolist(), y.tolist(), far.tolist())
-        ]
-        if not astro:
-            return np.array([fn(*args) for fn, args in calls])
-        return self._collect(calls)
+        if ok:
+            if self._caustics is None:
+                self._caustics = caustic_table(vbm.Multicaustics())
+            ccx, ccy, step = self._caustics
+            clearance = float(np.min(np.hypot(ccx - xi, ccy - yi) - step))
+            ok = clearance >= HEXADECAPOLE_CAUSTIC_CLEARANCE * rho
+        if ok:
+            if not astro:
+                return a_fs
+            nx = _hexadecapole(a0 * c0x, samp * scx, m1, m2, goal)[0]
+            ny = _hexadecapole(a0 * c0y, samp * scy, m1, m2, goal)[0]
+            return a_fs, nx / a_fs, ny / a_fs
+        a = vbm.MultiMag2(xi, yi, rho)
+        return (a, vbm.astrox1, vbm.astrox2) if astro else a
 
     def _collect(self, calls):
         """Run one VBM call per epoch and read the astrox pair after EACH

@@ -17,8 +17,10 @@ separation below S_MERGE inside the data span.  Pinned here:
 4. The merged path carries the astrometric centroid in the caller's frame.
 5. The Op still refuses a gradient on both sides (it never had one), and
    the curve's finite-difference slope in s is finite on both sides.
-6. The warning fires for a linear orbit whose s(t) crosses zero inside the
-   span, naming the seed, and not for one that does not.
+6. The warning fires for a uniform_rotation orbit whose s(t) crosses zero
+   inside the span, naming the seed, and not for one that does not -- and
+   it COUNTS what the Op does there (review 8.6.44): merged only within
+   S_MERGE of the primary, the far side unmerged at |s(t)|.
 """
 
 import logging
@@ -319,6 +321,8 @@ def test_gradient_is_refused_loudly_on_both_sides(s_star):
 # ---------------------------------------------------------------------------
 
 _T0_PAR = 2458554.89
+# The warning's fixed opening (Lens._warn_linear_separation_collapse).
+_COLLAPSE = "uniform_rotation orbit's separation s_0 + ds_dt"
 
 
 def _write_lc(path, n=120):
@@ -385,13 +389,16 @@ def test_warning_names_the_seed_whose_linear_orbit_crosses_zero(
            and 6 /yr (s crosses zero 30 d before t0_par),
     When:  the model is built,
     Then:  ONE warning names the companion, the orbit and seed 1 -- with
-           the crossing epoch -- and not seed 0.
+           the crossing epoch -- and not seed 0, and its counts are what the
+           Op evaluates: merged where |s(t)| < S_MERGE, unmerged on the far
+           side past the crossing (review 8.6.44: it used to say every
+           s(t) < S_MERGE epoch was merged, false since #557).
     """
     system = _linear_system(tmp_path, [0.1, 6.0])
     with caplog.at_level(logging.WARNING):
         system.build_model()
     msgs = [
-        r.getMessage() for r in caplog.records if "LINEAR" in r.getMessage()
+        r.getMessage() for r in caplog.records if _COLLAPSE in r.getMessage()
     ]
     assert len(msgs) == 1
     msg = msgs[0]
@@ -399,6 +406,16 @@ def test_warning_names_the_seed_whose_linear_orbit_crosses_zero(
     assert "seed 1" in msg and "seed 0" not in msg
     t_cross = _T0_PAR - 0.5 / 6.0 * 365.25
     assert f"through zero at BJD {t_cross:.1f}" in msg
+    t = np.asarray(system.mulensinstrument.time, dtype=float)
+    s_line = 0.5 + 6.0 * (t - _T0_PAR) / 365.25
+    n_merged = int(np.sum(np.abs(s_line) < S_MERGE))
+    n_far = int(np.sum(s_line <= -S_MERGE))
+    assert n_far > 0
+    assert f"{n_merged} with |s(t)| < {S_MERGE:g} (the pair merged" in msg
+    assert f"{n_far} past the crossing (the pair unmerged" in msg
+    assert (
+        "evaluated with the pair merged into one lens of the summed" not in msg
+    )
 
 
 @pytest.mark.slow
@@ -406,9 +423,9 @@ def test_no_warning_when_the_separation_stays_open(tmp_path, caplog):
     """
     Given: the same binary with ds_dt = 0.1 /yr only,
     When:  the model is built,
-    Then:  no linear-orbit collapse warning.
+    Then:  no collapse warning.
     """
     system = _linear_system(tmp_path, 0.1)
     with caplog.at_level(logging.WARNING):
         system.build_model()
-    assert not any("LINEAR" in r.getMessage() for r in caplog.records)
+    assert not any(_COLLAPSE in r.getMessage() for r in caplog.records)
