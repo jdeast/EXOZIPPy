@@ -356,5 +356,12 @@ def _at(model, outs, point):
     """Evaluate ``outs`` at a point dict of the model's value variables."""
     import pytensor
 
-    fn = pytensor.function(model.value_vars, outs, on_unused_input="ignore")
-    return fn(*[point[v.name] for v in model.value_vars])
+    fn = pytensor.function(
+        model.value_vars,
+        model.replace_rvs_by_values(
+            outs if isinstance(outs, list) else [outs]
+        ),
+        on_unused_input="ignore",
+    )
+    got = fn(*[point[v.name] for v in model.value_vars])
+    return got if isinstance(outs, list) else got[0]

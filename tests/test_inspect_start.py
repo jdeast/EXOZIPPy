@@ -403,8 +403,10 @@ def test_orbit_n_is_the_only_shipped_not_for_tables_parameter():
     """
     Given the shipped defaults.yaml tree,
     When print_to_table: false is counted,
-    Then orbit.n is the only user -- so wiring the flag into the startup
-      table changes no shipped table today.
+    Then orbit.n and star.rv_dust are the only users -- so wiring the flag
+      into the startup table changes no shipped table today (star.rv_dust
+      exists only under sed.fit_rv_dust, which no shipped example uses; it
+      repeats sed.rv_dust per star until PR 3's near/far split).
 
     The item named orbit.n as the LIVE case for 3.14.9; it is not, because
     orbit.n is derived and the sampled-only default already excluded it.
@@ -420,7 +422,7 @@ def test_orbit_n_is_the_only_shipped_not_for_tables_parameter():
         if "print_to_table: false" in path.read_text()
     )
 
-    assert users == ["orbit"]
+    assert users == ["orbit", "star"]
 
 
 # ---------------------------------------------------------------------------

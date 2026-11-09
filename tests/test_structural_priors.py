@@ -98,8 +98,8 @@ def test_the_flags_are_declared_in_defaults_yaml_not_in_code():
     """
     Given the merged defaults.yaml tree,
     When the structural flags are read,
-    Then exactly the RULED set carries them (the six direction latents and
-    ks_offset), each closing mu/sigma only, and eta_* is untouched.
+    Then exactly the RULED set carries them (the six direction latents,
+    ks_offset and star.rv_dust), each closing mu/sigma only, and eta_* is untouched.
     """
     defaults = ConfigManager({}).base_defaults
     found = {}
@@ -122,6 +122,8 @@ def test_the_flags_are_declared_in_defaults_yaml_not_in_code():
         "lens.xalpha": direction,
         "lens.yalpha": direction,
         "mann.ks_offset": direction,
+        # one sight line, one R_V: the prior goes on sed.rv_dust (sed.md)
+        "star.rv_dust": direction,
     }
 
 

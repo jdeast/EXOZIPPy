@@ -315,17 +315,10 @@ class RedClump(Component):
         self._check_read(system, sed, where)
         self._seed_av(system, sed, where)
         if not sed.fit_rv_dust:
+            # JDE 2026-11-09: a warning, kept short (redclump.md says why).
             logger.warning(
-                f"{where} the SED uses its tabulated bolometric corrections "
-                f"(fit_rv_dust: false), whose extinction law is FIXED: the "
-                f"clump's two measurements, A_I and E(V-I), then face one "
-                f"knob (A_V), and their ratio is forced to the table law's "
-                f"(A_I/E(V-I) ~ 1.7 for a clump) where bulge fields measure "
-                f"~1.2 (Nataf et al. 2013) -- tens of percent apart.  A_V "
-                f"settles where it fits neither, and the tension leaks into "
-                f"the source's Teff and radius (theta_star).  Set sed: "
-                f"{{fit_rv_dust: true}} to fit the sight line's R_V "
-                f"(redclump.md)."
+                f"{where} redclump without sed.fit_rv_dust: a fixed R_V may "
+                f"bias Teff/R_star (redclump.md)."
             )
 
     @staticmethod
@@ -632,16 +625,36 @@ class RedClump(Component):
         Gaussians (vi0, av_ratio, any extinction prior) and the distance
         prior are the clump's terms.  Here: the luminosity-function
         mismatch check and the draft's sentences."""
+        self._ai_check = self._uses_static_ai_rc(system)
         self._check_source_ai_rc(system)
         self._add_prose(system)
 
-    def _check_source_ai_rc(self, system):
+    def _uses_static_ai_rc(self, system):
+        gm = getattr(system, "galacticmodel", None)
+        return getattr(gm, "source_selection", None) == "luminosity_function"
+
+    def _warn_ai_rc(self, system, a_i, when):
         """galacticmodel's luminosity-function source selection carries a
-        STATIC A_I to the red clump; with a clump in the fit that is also a
-        fitted quantity.  The selection stays static; warn when the two
-        disagree at the start by more than 0.2 mag (pending JDE)."""
+        STATIC A_I to the red clump (``source_ai_rc``); with a clump in the
+        fit that is also a fitted quantity.  The selection stays static
+        (JDE 2026-11-09); the remedy is the user's -- update it and rerun --
+        so the warning gives the clump's own A_I as the value to use."""
         gm = system.galacticmodel
-        if getattr(gm, "source_selection", None) != "luminosity_function":
+        if abs(a_i - gm.source_ai_rc) <= SOURCE_AI_RC_TOLERANCE_MAG:
+            return
+        logger.warning(
+            f"[{self.prefix}] the clump's {when} A_I = {a_i:.3f} differs from "
+            f"galacticmodel.source_ai_rc = {gm.source_ai_rc:.3f} by "
+            f"{a_i - gm.source_ai_rc:+.3f} mag (> "
+            f"{SOURCE_AI_RC_TOLERANCE_MAG} mag).  The luminosity-function "
+            f"source selection uses the static value: set "
+            f"galacticmodel.source_ai_rc: {a_i:.3f} and rerun."
+        )
+
+    def _check_source_ai_rc(self, system):
+        """The start check (``_warn_ai_rc``); the posterior-median one is
+        ``check_at_point``."""
+        if not self._uses_static_ai_rc(system):
             return
         sed = system.sed
         teff, logg, feh, av = (
@@ -656,14 +669,40 @@ class RedClump(Component):
         a_i = sed.bc_np(I_FILTER, teff, logg, feh, 0.0, rv) - sed.bc_np(
             I_FILTER, teff, logg, feh, av, rv
         )
-        if abs(a_i - gm.source_ai_rc) > SOURCE_AI_RC_TOLERANCE_MAG:
-            logger.warning(
-                f"[{self.prefix}] the clump's start A_I = {a_i:.3f} differs "
-                f"from galacticmodel.source_ai_rc = {gm.source_ai_rc:.3f} by "
-                f"{a_i - gm.source_ai_rc:+.3f} mag.  The luminosity-function "
-                f"source selection uses the static value; set source_ai_rc "
-                f"to the clump's A_I."
-            )
+        self._warn_ai_rc(system, a_i, "start")
+
+    def checks_at_point(self):
+        return bool(getattr(self, "_ai_check", False))
+
+    def check_at_point(self, model, system, point, where):
+        """At the posterior median, the source_ai_rc check again with the
+        FITTED clump A_I (warn only; nothing is rebuilt)."""
+        if where != "median" or not self.checks_at_point():
+            return False
+        import pytensor
+
+        sed = system.sed
+        rv = None
+        if sed.fit_rv_dust:
+            from exozippy.components.sed.sed import RV_DUST
+
+            rv = getattr(sed, RV_DUST).value[:1]
+        teff, logg, feh, av = (
+            getattr(self, p).value for p in ("teff", "logg", "feh", "av")
+        )
+        col = sed.filter_column(I_FILTER)
+        a_i = (
+            sed.bc_node(teff, logg, feh, pt.zeros_like(teff), rv)[0, col]
+            - sed.bc_node(teff, logg, feh, av, rv)[0, col]
+        )
+        fn = pytensor.function(
+            model.value_vars,
+            model.replace_rvs_by_values([a_i]),
+            on_unused_input="ignore",
+        )
+        val = float(fn(*[point[v.name] for v in model.value_vars])[0])
+        self._warn_ai_rc(system, val, "fitted (posterior median)")
+        return False
 
     def _add_prose(self, system):
         mean_mu, sd_mu, _mode = self.bar_moments

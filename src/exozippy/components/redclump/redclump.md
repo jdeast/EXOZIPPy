@@ -131,7 +131,8 @@ caveat, not a feature).
 
 ## Interactions
 
-- **fit_rv_dust: false (tables) WARNS** (JDE 2026-11-09), and the warning says why: on the
+- **fit_rv_dust: false (tables) WARNS** (JDE 2026-11-09; the message is kept short, "a
+  fixed R_V may bias Teff/R_star"), and this is why: on the
   table path the law is fixed, so the clump's two measurements (A_I and E(V-I)) face one knob
   (A_V) and their ratio is forced to the table law's (~1.7 at the clump, against the ~1.2
   bulge fields measure, Nataf et al. 2013); A_V settles where it fits neither and the tension
@@ -143,9 +144,11 @@ caveat, not a feature).
   with V, I, J and Ks clump rows the residual lands in errscale and the stars' Teff.
 - **No R_V map prior beside a clump**: Nataf's R_I map is built from clump colors, so a sight-
   line prior from it on `sed.rv_dust` counts the clump twice.
-- **galacticmodel `source_selection: luminosity_function`** keeps its static `source_ai_rc`;
-  with a clump the clump's A_I is also fitted, and a start mismatch above 0.2 mag warns, naming
-  both (pending JDE).
+- **galacticmodel `source_selection: luminosity_function`** keeps its static `source_ai_rc`
+  (JDE 2026-11-09); with a clump the clump's A_I is also fitted, and a mismatch above 0.2 mag
+  warns at the start and again at the posterior median (`check_at_point`), giving the clump's
+  A_I as the value to put in `galacticmodel.source_ai_rc` before rerunning -- the remedy is the
+  user's.
 - PHOENIX limb darkening reads `star.av`, the mulensing zeropoint and the background read star
   predictions only: unaffected.
 
