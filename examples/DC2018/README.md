@@ -187,12 +187,11 @@ The `sweep/`, `sweep_v7_avW149/` and `ab194/` configs were converted, with
 start logp bit-identical to the JSON path; their seed JSONs became
 `events/<NNN>/DC2018_<NNN>_seed.params.yaml` fragments, which
 `dc18_seed.py` now writes and `dc18_sweep_config.py` merges into the params
-file it generates. Twelve configs name a `*_mmexofast.json` that exists
+file it generates. Seven configs name a `*_mmexofast.json` that exists
 only on the cluster (those caches are gitignored); they still name the key,
 carry a "REMOVED KEY" comment above it, and raise until the converter is run
 there:
 
-    configs/DC2018_128_severed_v3.yaml ... configs/DC2018_128_severed_v7.yaml
     configs/DC2018_128_tightpriors.yaml
     events/062/DC2018_062.yaml
     events/152/DC2018_152.yaml
