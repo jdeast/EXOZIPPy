@@ -205,49 +205,19 @@ def test_no_star_opting_in_declares_no_track_coordinates():
     assert not {"age", "initfeh", "eep"} & set(manifest)
 
 
-def test_a_backed_block_does_not_warn_that_nothing_reads_the_track(
-    caplog, model_root
-):
-    """
-    Given an evolutionarymodel block that a registered component DOES back,
-    When the star component registers its parameters,
-    Then it does not warn that nothing reads the track coordinates.
-
-    Review 3.8.2 added that warning for a PREMATURE block: the branch is
-    driven by the config KEY, so it fired before any component existed, and
-    the coordinates were then sampled with nothing reading them.  The
-    component has landed, so the warning is gated on
-    `hasattr(system, "evolutionarymodel")` and this is the live branch --
-    pinning it here is what keeps the gate from being dropped as dead code
-    and reintroducing a warning on every ordinary fit.
-    """
-    with caplog.at_level("WARNING", logger="exozippy"):
-        _prepared(
-            [{"name": "A"}, {"name": "B", "mist": False}],
-            model_root=model_root,
-        )
-
-    hits = [
-        r.getMessage()
-        for r in caplog.records
-        if "no such component is registered" in r.getMessage()
-    ]
-    assert hits == []
-
-
-def test_an_unbacked_block_warns_that_nothing_reads_the_track(
-    caplog, monkeypatch
-):
+def test_an_unbacked_block_raises_before_anything_is_sampled(monkeypatch):
     """
     Given an evolutionarymodel block that NO registered component backs (the
       component's module withheld from discovery, as when it fails to load
       or predates the block),
-    When the star component registers its parameters,
-    Then it warns that the opted-in stars' track coordinates are sampled
-      with nothing reading them, naming those stars.
+    When the System is constructed,
+    Then it raises naming the key -- so the opted-in stars' track
+      coordinates can never be sampled with nothing reading them.
 
-    The positive half of the test above (review 7.8.1 (e)): with only the
-    negative one, deleting the warning outright stayed green.
+    This used to be a star-component WARNING (review 3.8.2, positive half
+    pinned by review 7.8.1 (e)); since JDE's 2026-11-08 ruling an unknown
+    top-level key raises in System.__init__, which covers this case before
+    the star component is built.
     """
     import exozippy.system as system_module
     from exozippy.components.factory import discover_components
@@ -262,16 +232,9 @@ def test_an_unbacked_block_warns_that_nothing_reads_the_track(
         [{"name": "A"}, {"name": "B", "mist": False}], evolutionary=True
     )
 
-    with caplog.at_level("WARNING", logger="exozippy"):
-        System(config, {}).prepare()
-
-    hits = [
-        r.getMessage()
-        for r in caplog.records
-        if "no such component is registered" in r.getMessage()
-    ]
-    assert len(hits) == 1
-    assert "track coordinates of A (initfeh, eep)" in hits[0]
+    with pytest.raises(ValueError) as err:
+        System(config, {})
+    assert "'evolutionarymodel'" in " ".join(str(err.value).split())
 
 
 @pytest.mark.parametrize("name", sorted(TRACK_DEFAULTS))

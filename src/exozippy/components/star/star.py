@@ -1624,13 +1624,12 @@ class Star(Component):
         # nowhere), so every piece the component needs from the star side is in
         # place and landing one requires no edit here.
         #
-        # The branch is driven by the CONFIG KEY, so it also fires for a
-        # premature `evolutionarymodel:` block that no component backs -- which
-        # is why the claim this comment used to make ("today the branch never
-        # fires") was false (review 3.8.2).  With no component to read them the
-        # track coordinates of an opted-in star are sampled with nothing
-        # constraining them, so say so rather than leaving it to be noticed in
-        # a posterior.
+        # The branch is driven by the CONFIG KEY.  A premature
+        # `evolutionarymodel:` block that no component backs (review 3.8.2)
+        # used to reach here and warn that the track coordinates were sampled
+        # with nothing reading them; since 2026-11-08 System.__init__ raises
+        # on any top-level key that is not a registered component, so that
+        # case never gets this far (tests/test_star_evolutionary_model.py).
         if in_system("evolutionarymodel"):
             mask = [m or p for m, p in zip(self.mist, self.parsec)]
             if any(mask):
@@ -1641,18 +1640,6 @@ class Star(Component):
                         "eep": {"mask": mask},
                     }
                 )
-                if not hasattr(system, "evolutionarymodel"):
-                    opted = [nm for nm, on in zip(self.names, mask) if on]
-                    logger.warning(
-                        f"[{self.prefix}] the config names an "
-                        f"'evolutionarymodel' block but no such component is "
-                        f"registered, so the track coordinates of "
-                        f"{', '.join(opted)} (initfeh, eep) and the age they "
-                        f"index are sampled with NOTHING reading them -- "
-                        f"likelihood-free dimensions that only widen the "
-                        f"posterior. Remove the block, or set 'mist: False' on "
-                        f"those stars, until the component exists."
-                    )
 
         # The Mann relations key on absolute Ks, so they need the distance
         # modulus. The apparent/absolute Ks themselves live on the mann
