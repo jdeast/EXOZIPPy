@@ -399,3 +399,20 @@ def _at(model, outs, point):
     )
     got = fn(*[point[v.name] for v in model.value_vars])
     return got if isinstance(outs, list) else got[0]
+
+
+def test_an_extinction_prior_is_recognized_in_both_spellings(clump_model):
+    """A second stage-3 pass (a topology revision, the microlensing flux
+    re-read) sees the prior AFTER adopt_element_owners translated it to the
+    internal element form, so the "is anything reading the clump" check
+    must know both (DC2018's generated configs hit exactly this)."""
+    rc = clump_model[0].redclump
+    for key in (
+        "redclump.RedClump.color_excess_0",
+        "redclump.0.extinction_1",
+        "redclump.0.color_excess",
+        "redclump.1.extinction",
+    ):
+        assert rc._is_extinction_key(key), key
+    for key in ("redclump.0.av", "redclump.0.vi0", "star.0.extinction_0"):
+        assert not rc._is_extinction_key(key), key

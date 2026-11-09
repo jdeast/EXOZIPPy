@@ -14,6 +14,7 @@ through each passband at the fit's own law.
 """
 
 import logging
+import re
 
 import numpy as np
 import pytensor.tensor as pt
@@ -404,27 +405,33 @@ class RedClump(Component):
             f"turns it off)."
         )
 
+    #: A prior on one of these reads the clump (a published extinction).
+    _READ_BY_PRIOR = ("extinction", "color_excess")
+
+    def _is_extinction_key(self, key):
+        """``redclump.<owner|i>.extinction_<k>`` (the params-file owner
+        spelling, before ``adopt_element_owners``) or
+        ``redclump.<e>.extinction`` (the internal element form after it: a
+        second stage-3 pass reads the translated keys)."""
+        parts = str(key).split(".")
+        if len(parts) != 3 or parts[0] != self.prefix:
+            return False
+        param = re.sub(r"_\d+$", "", parts[2])
+        return param in self._READ_BY_PRIOR
+
     def _extinction_priors(self):
-        """Params-file priors (mu/sigma) on the clump's extinction or
-        color-excess elements -- a published clump extinction."""
-        out = []
-        prefix = f"{self.prefix}."
-        for key, entry in (self.config_manager.user_params or {}).items():
-            if not (isinstance(entry, dict) and key.startswith(prefix)):
-                continue
-            param = key.split(".")[-1]
-            base = param.rsplit("_", 1)[0]
-            if base in ("extinction", "color_excess") and (
-                "mu" in entry or "sigma" in entry
-            ):
-                out.append(key)
-        for key in getattr(self.config_manager, "links", {}) or {}:
-            param = key.split(".")[-1]
-            if key.startswith(prefix) and param.rsplit("_", 1)[0] in (
-                "extinction",
-                "color_excess",
-            ):
-                out.append(key)
+        """Params-file priors (mu/sigma, or a link) on the clump's
+        extinction or color-excess elements -- a published clump
+        extinction."""
+        cm = self.config_manager
+        out = [
+            key
+            for key, entry in (cm.user_params or {}).items()
+            if isinstance(entry, dict)
+            and ("mu" in entry or "sigma" in entry)
+            and self._is_extinction_key(key)
+        ]
+        out += [k for k in (cm.links or {}) if self._is_extinction_key(k)]
         return out
 
     def _clump_rows(self, sed):
