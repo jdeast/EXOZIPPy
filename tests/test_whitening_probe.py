@@ -269,6 +269,8 @@ def test_gradient_dominated_start_warns_by_name(caplog):
         pytest.approx(40.0, rel=0.1)
     )
     assert any(
-        "gradient-dominated start" in r.message and "x[0]" in r.message
+        r.levelname == "WARNING"
+        and "far from its conditional optimum" in r.message
+        and "x[0] (~" in r.message
         for r in caplog.records
     )

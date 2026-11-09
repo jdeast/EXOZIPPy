@@ -1,4 +1,5 @@
 import functools
+import logging
 import warnings
 
 import astropy.units as u
@@ -22,6 +23,8 @@ from .physics import (
     floor_u_0_value,
     require_mm_number,
 )
+
+logger = logging.getLogger(__name__)
 
 # MulensModel dispatches magnification methods in PYTHONHASHSEED order, and
 # the VBMicrolensing backends are not order-independent, so identical inputs
@@ -415,14 +418,12 @@ class _MagOpBase(Op):
             # exactly how the point-source-binary "VBBL" bug stayed hidden).
             if not self._warned:
                 self._warned = True
-                warnings.warn(
+                logger.warning(
                     f"{type(self).__name__}: MulensModel raised "
                     f"{type(exc).__name__}: {exc} -- returning NaN "
                     "magnifications (logp = -inf) for this proposal. "
                     "If this repeats for every proposal the backend is "
-                    "misconfigured, not merely exploring bad parameters.",
-                    RuntimeWarning,
-                    stacklevel=2,
+                    "misconfigured, not merely exploring bad parameters."
                 )
             A = np.full(len(times_np), np.nan)
         outputs[0][0] = np.asarray(A)
@@ -1188,14 +1189,12 @@ class VBMDirectMagOp(Op):
             # Op's inputs are pre-validated.
             if not self._warned_backend:
                 self._warned_backend = True
-                warnings.warn(
+                logger.warning(
                     f"{type(self).__name__}: VBMicrolensing raised "
                     f"{type(exc).__name__}: {exc} -- returning NaN "
                     "magnifications (logp = -inf) for this proposal. "
                     "If this repeats for every proposal the backend is "
-                    "misconfigured, not merely exploring bad parameters.",
-                    RuntimeWarning,
-                    stacklevel=2,
+                    "misconfigured, not merely exploring bad parameters."
                 )
             res = self._nan_out(len(times_np))
         if self.astrometry:
@@ -1250,13 +1249,11 @@ class VBMDirectMagOp(Op):
         ):
             if not self._warned:
                 self._warned = True
-                warnings.warn(
+                logger.warning(
                     f"{type(self).__name__}: non-finite per-epoch orbital-"
                     "motion geometry (s_t/alpha_t) -- returning NaN "
                     "magnifications (logp = -inf) for this proposal.  "
-                    f"{_MM_NAN_ADVICE}",
-                    RuntimeWarning,
-                    stacklevel=2,
+                    f"{_MM_NAN_ADVICE}"
                 )
             return self._nan_out(len(times_np))
         bad = ~np.isfinite(np.asarray(p, dtype=float))
@@ -1269,14 +1266,12 @@ class VBMDirectMagOp(Op):
                     f" = {float(p[i])!r}"
                     for i in np.flatnonzero(bad)
                 )
-                warnings.warn(
+                logger.warning(
                     f"{type(self).__name__}: non-finite magnification "
                     f"parameter(s) {named} -- returning NaN magnifications "
                     "(logp = -inf) for this proposal.  If this repeats for "
                     "every proposal the model is misconfigured, not merely "
-                    f"exploring bad parameters.  {_MM_NAN_ADVICE}",
-                    RuntimeWarning,
-                    stacklevel=2,
+                    f"exploring bad parameters.  {_MM_NAN_ADVICE}"
                 )
             return self._nan_out(len(times_np))
 
@@ -1303,16 +1298,14 @@ class VBMDirectMagOp(Op):
         if base["t_E"] < T_E_FLOOR or rho > RHO_CEILING:
             if not self._warned:
                 self._warned = True
-                warnings.warn(
+                logger.warning(
                     f"{type(self).__name__}: degenerate event (t_E = "
                     f"{base['t_E']!r} d, rho = {rho!r}) -- theta_E has "
                     "collapsed (the source at or inside the lens distance); "
                     "returning NaN magnifications (logp = -inf) for this "
                     "proposal without calling the kernel.  If this repeats "
                     "for every proposal the model is misconfigured, not "
-                    f"merely exploring bad parameters.  {_MM_NAN_ADVICE}",
-                    RuntimeWarning,
-                    stacklevel=2,
+                    f"merely exploring bad parameters.  {_MM_NAN_ADVICE}"
                 )
             return self._nan_out(len(times_np))
         companions = []

@@ -464,13 +464,11 @@ class Orbit(Component):
             return False
         if not log:
             return True
-        name = self.names[index] if index < len(self.names) else index
-        logger.info(
-            "[%s.%s] keeping the conventional coordinates: %s %s pinned "
+        logger.debug(
+            "%s keeping the conventional coordinates: %s %s pinned "
             "(sigma: 0), and the %s parameterization would make %s derived, "
             "which drops the pin.  Set '%s: true' explicitly to override.",
-            self.prefix,
-            name,
+            self.log_tag(index),
             ", ".join(pinned),
             "is" if len(pinned) == 1 else "are",
             "V_c/V_e" if switch == "fitvcve" else "transit-chord",
@@ -550,10 +548,11 @@ class Orbit(Component):
         """Say which orbits the topology moved off the conventional
         coordinates.
 
-        A default that changes the sampled coordinates is exactly the kind of
-        thing that should not be discovered by reading a table of unfamiliar
-        parameter names, so it is logged per orbit, with the reason and the
-        key that turns it off.
+        A default that changes the sampled coordinates should not have to be
+        reverse-engineered from a table of unfamiliar parameter names, so it
+        is logged, with the reason and the key that turns it off -- at DEBUG,
+        as a default taking effect (docs/logging.md), so it is in the file
+        log rather than on the console.
         """
         if system is None:
             return
@@ -565,7 +564,7 @@ class Orbit(Component):
         ]
         if not flipped:
             return
-        logger.info(
+        logger.debug(
             "[%s] %s measured by transits alone: sampling V_c/V_e and the "
             "transit chord instead of sqrt(e)cos(omega)/sqrt(e)sin(omega) and "
             "cos i (Eastman 2024), which is what a transit duration "
@@ -638,15 +637,12 @@ class Orbit(Component):
             if not self.fitvcve[i] or not datasets[i]:
                 continue
             logger.warning(
-                "[%s] orbit '%s' samples V_c/V_e (fitvcve), but %s also "
-                "measure(s) its eccentricity and argument of periastron "
-                "directly.  V_c/V_e is the parameterization for a transit "
-                "duration alone; with these data sqrt(e)cos(omega)/"
-                "sqrt(e)sin(omega) is the better one -- set 'fitvcve: false' "
-                "on the orbit (it mixes slowly along the (V_c/V_e, omega) "
-                "ridge otherwise).",
-                self.prefix,
-                self.names[i],
+                "%s samples V_c/V_e (fitvcve), but %s also measure(s) its "
+                "eccentricity and argument of periastron directly, so it "
+                "mixes slowly along the (V_c/V_e, omega) ridge.  Set "
+                "'fitvcve: false' on the orbit to sample "
+                "sqrt(e)cos(omega)/sqrt(e)sin(omega) instead.",
+                self.log_tag(i),
                 "; ".join(datasets[i]),
             )
 
@@ -1020,6 +1016,17 @@ class Orbit(Component):
                     "measure (together with fitchord), off otherwise.  "
                     "'fitvcve: false' also turns fitchord off unless fitchord "
                     "is set explicitly."
+                ),
+            },
+            {
+                "key": "fitchord",
+                "kind": "option",
+                "accepts": [True, False],
+                "required": False,
+                "doc": (
+                    "Sample the transit chord (b and the duration) instead of "
+                    "cos i.  Default: on for an orbit that only transits "
+                    "measure (with fitvcve), off otherwise."
                 ),
             },
         ]
@@ -1710,13 +1717,12 @@ class Orbit(Component):
             self.config_manager.add_hint(
                 f"{self.prefix}.{i}.tc_sampled", float(tc_sampled_init[i])
             )
-            logger.info(
-                "[%s.%s] tc is sampled %d period(s) from the seeded epoch, "
+            logger.debug(
+                "%s tc is sampled %d period(s) from the seeded epoch, "
                 "at %.6f (the data's information-weighted epoch is %.6f); tc is reported "
                 "at the seeded epoch and t0 at the epoch the posterior "
                 "prefers.",
-                self.prefix,
-                self.names[i],
+                self.log_tag(i),
                 int(self.tc_epoch[i]),
                 float(tc_sampled_init[i]),
                 float(self.data_time_center[i]),
@@ -2019,12 +2025,12 @@ class Orbit(Component):
             ]
             if chord_orbits:
                 logger.warning(
-                    "[%s] 'fitchord: true' on %s, but this system has "
-                    "astrometry, which measures the SIGN of cos i -- and the "
-                    "transit chord is even in it, so the fit is restricted to "
-                    "the %s branch (set 'i180: true' to select the other). "
-                    "Sample 'cosi' instead to let the astrometry choose.",
-                    self.prefix,
+                    "%s 'fitchord: true' on %s restricts the fit to the %s "
+                    "branch: the astrometry measures the sign of cos i, but "
+                    "the transit chord is even in it.  Set 'fitchord: false' "
+                    "to sample cosi and let the astrometry choose (or "
+                    "'i180: true' to select the other branch).",
+                    self.log_tag(),
                     ", ".join(chord_orbits),
                     "i > 90 deg" if own_i180.any() else "i < 90 deg",
                 )
@@ -2284,16 +2290,18 @@ class Orbit(Component):
             }
         )
         if touched:
+            star_names = components["star"].names
             logger.warning(
-                "[%s] the galactic model's kinematic prior reads the proper "
-                "motion of star(s) %s on Taylor orbit(s) %s as BARYCENTRIC, "
-                "but with an outer Taylor orbit pm_ra/pm_dec are the inner "
-                "system's at the astrometric epoch, which includes the "
-                "unseen companion's reflex velocity (orbit.md, 'Taylor "
-                "orbits').",
-                self.prefix,
-                sorted({idx for _, idx in touched}),
-                sorted({n for n, _ in touched}),
+                "%s the galactic model's kinematic prior reads the proper "
+                "motion of star(s) %s as barycentric, but on Taylor orbit(s) "
+                "%s it includes the unseen companion's reflex velocity.  "
+                "Usually negligible (m/s to a few km/s against a 20-100 km/s "
+                "dispersion); see orbit.md, 'Taylor orbits'.",
+                self.log_tag(),
+                ", ".join(
+                    star_names[idx] for idx in sorted({i for _, i in touched})
+                ),
+                ", ".join(sorted({n for n, _ in touched})),
             )
 
     def _taylor_astrometry_consumers(self, ast, consumers):
@@ -2485,11 +2493,10 @@ class Orbit(Component):
             else:
                 epochs[o] = midpoint
                 why = "the midpoint of its RVs"
-            logger.info(
-                "[%s] Taylor orbit '%s': reference epoch %.6f BJD_TDB, %s "
+            logger.debug(
+                "%s Taylor orbit reference epoch %.6f BJD_TDB, %s "
                 "(set 'epoch:' to choose another).",
-                self.prefix,
-                self.names[o],
+                self.log_tag(o),
                 epochs[o],
                 why,
             )
@@ -3219,12 +3226,11 @@ class Orbit(Component):
             # construction: there is nothing to fold, and its latents do not
             # exist to flip.
             if self.bigomega.element_is_sampled(i):
-                logger.info(
-                    "[%s.%s] ascending-node fold not needed: bigomega is "
+                logger.debug(
+                    "%s ascending-node fold not needed: bigomega is "
                     "sampled directly on a half-turn window, which holds one "
                     "label.",
-                    self.prefix,
-                    self.names[i] if i < len(self.names) else i,
+                    self.log_tag(i),
                 )
                 continue
             # The conjunction that moves is the SAMPLED one: `tc` itself on
@@ -3243,11 +3249,10 @@ class Orbit(Component):
                 params["tc" if name == tc_name else name] = (param, key)
             if skip is not None:
                 logger.warning(
-                    "[%s.%s] the ascending-node fold needs %s to be sampled; "
+                    "%s the ascending-node fold needs %s to be sampled; "
                     "leaving this orbit's draws unfolded, so its Rhat and any "
                     "mode count are computed on the unfolded coordinate.",
-                    self.prefix,
-                    self.names[i] if i < len(self.names) else i,
+                    self.log_tag(i),
                     skip,
                 )
                 continue
@@ -3261,9 +3266,9 @@ class Orbit(Component):
                 }
             except ValueError as exc:  # an element that is not sampled
                 logger.warning(
-                    "[%s.%s] ascending-node fold skipped: %s",
-                    self.prefix,
-                    self.names[i] if i < len(self.names) else i,
+                    "%s ascending-node fold skipped, so its Rhat and any "
+                    "mode count are computed on the unfolded coordinate: %s",
+                    self.log_tag(i),
                     exc,
                 )
                 continue
@@ -3358,11 +3363,10 @@ class Orbit(Component):
                 posterior[key] = posterior[key].copy(data=raw)
 
             if verbose:
-                logger.info(
-                    "[%s.%s] ascending-node fold: %.1f%% of draws mapped to "
+                logger.debug(
+                    "%s ascending-node fold: %.1f%% of draws mapped to "
                     "the degenerate (bigomega-180, omega+180) partner.",
-                    self.prefix,
-                    self.names[i] if i < len(self.names) else i,
+                    self.log_tag(i),
                     100.0 * float(flip.mean()),
                 )
         return moved
@@ -3425,8 +3429,8 @@ class Orbit(Component):
                         f"{n} '{ctype}' instance(s)."
                     )
                 if bad:
-                    logger.info(
-                        f"[{self.prefix}.{self.names[i]}] implicit body "
+                    logger.debug(
+                        f"{self.log_tag(i)} implicit body "
                         f"'{ctype}.{idx}' is not in the system; orbit "
                         f"mass/scale parameters (m_total, a, K) are "
                         f"disabled."
@@ -3478,10 +3482,12 @@ class Orbit(Component):
                         mask[o_idx] = 1.0
             if len(set(transit_flags)) > 1:
                 logger.warning(
-                    "orbit: transit files disagree on light_travel_time; "
-                    "tc_target and the observed ts/tp treat every orbit touched by an active "
-                    "file as fully retarded, an approximation where they "
-                    "mix on the same orbit's data."
+                    "%s transit files disagree on light_travel_time, so "
+                    "tc_target and the observed ts/tp treat every orbit an "
+                    "active file touches as fully retarded, an approximation "
+                    "where they mix on one orbit's data.  Set the same "
+                    "light_travel_time on every transit file.",
+                    self.log_tag(),
                 )
 
         rv_cfg = cfg.get("rvinstrument", []) or []
@@ -3503,10 +3509,12 @@ class Orbit(Component):
                     mask[int(o_idx)] = 1.0
             if len(set(rv_flags)) > 1:
                 logger.warning(
-                    "orbit: rvinstrument files disagree on "
-                    "light_travel_time; tc_target and the observed ts/tp "
-                    "treat every orbit of the observed star as retarded, "
-                    "an approximation where they mix on one orbit's data."
+                    "%s rvinstrument files disagree on light_travel_time, so "
+                    "tc_target and the observed ts/tp treat every orbit of "
+                    "the observed star as retarded, an approximation where "
+                    "they mix on one orbit's data.  Set the same "
+                    "light_travel_time on every rvinstrument file.",
+                    self.log_tag(),
                 )
         for entry in rv_cfg:
             o_name = entry.get("rm")

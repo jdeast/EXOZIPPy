@@ -329,7 +329,7 @@ def test_ptde_async_freezes_gamma_when_first_chain_starts_recording(caplog):
     """
     model = _simple_model()
     system = _MinimalSystem()
-    with caplog.at_level("INFO", logger="exozippy.samplers.ptde_async"):
+    with caplog.at_level("DEBUG", logger="exozippy.samplers.ptde_async"):
         ptde_async_sample(
             model,
             system,
@@ -526,9 +526,7 @@ def test_eval_timeout_writes_off_a_wholly_stalled_pool_and_resubmits(caplog):
     model.compile_logp = lambda *a, **k: _logp_frozen_until(release_at)
 
     # ACT
-    with caplog.at_level(
-        logging.WARNING, logger="exozippy.samplers.ptde_async"
-    ):
+    with caplog.at_level(logging.DEBUG, logger="exozippy.samplers.ptde_async"):
         idata = ptde_async_sample(
             model,
             _MinimalSystem(),

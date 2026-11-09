@@ -14,6 +14,8 @@ NextGen table -- what is under test is the bracketing/interpolation logic,
 which does not care how many nodes there are.
 """
 
+import logging
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -88,7 +90,7 @@ def test_on_grid_draw_interpolates_between_the_bracketing_nodes():
     )
 
 
-def test_off_grid_draw_extrapolates_and_says_so_instead_of_raising():
+def test_off_grid_draw_extrapolates_and_says_so_instead_of_raising(caplog):
     """
     Given a draw whose logg is above the whole spectra grid (the derived
       loggsed carries only a SOFT barrier, so this is a legal draw),
@@ -103,8 +105,13 @@ def test_off_grid_draw_extrapolates_and_says_so_instead_of_raising():
     plot = _plot_stub(teff=3500.0, logg=6.0, feh=0.25)
 
     # ACT
-    with pytest.warns(UserWarning, match="logg=6"):
+    with caplog.at_level(logging.WARNING, logger="exozippy"):
         plot._interp_spectra()
+    # One WARNING for the figure (docs/logging.md), naming the axis.
+    (warning,) = [
+        r.getMessage() for r in caplog.records if r.levelname == "WARNING"
+    ]
+    assert "logg" in warning and "outside the model spectra grid" in warning
 
     # ASSERT
     flux = plot.model_spectrum_flux_draws[0, 0]

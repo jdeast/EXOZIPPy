@@ -165,7 +165,7 @@ def test_pooled_build_is_bit_identical_and_makes_no_main_process_call(caplog):
 
     # ACT
     try:
-        with caplog.at_level(logging.INFO):
+        with caplog.at_level(logging.DEBUG, logger="exozippy"):
             pooled = _build(logp, evaluator=evaluator)[2]
     finally:
         _common._shutdown_pool(evaluator.pool)

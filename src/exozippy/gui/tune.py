@@ -633,14 +633,16 @@ class TuneSession:
         compile cache, so recycling too eagerly would undo the reuse.
         """
         if self._solves >= _RECYCLE_AFTER_SOLVES:
-            logger.info(
+            logger.debug(
                 "tune: recycling evaluator worker after %d solves",
                 self._solves,
             )
             return True
         rss = _worker_rss_mb(worker)
         if rss is not None and rss >= _RECYCLE_RSS_MB:
-            logger.info("tune: recycling evaluator worker at %.0f MB RSS", rss)
+            logger.debug(
+                "tune: recycling evaluator worker at %.0f MB RSS", rss
+            )
             return True
         return False
 

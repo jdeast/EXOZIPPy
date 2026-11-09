@@ -287,7 +287,7 @@ def build_seed_ledger(
         for i in range(val.size)
     ]
     if centers:
-        logger.info(
+        logger.debug(
             f"Seed ledger: probing {len(elems)} element(s) across "
             f"{len(centers)} seed(s) for their curvature widths..."
         )
@@ -593,7 +593,7 @@ def append_ledger_csv(ledger, csv_filename):
                             f"{sigs[i]:.3g}",
                         ]
                     )
-    logger.info(
+    logger.debug(
         f"Ledger: appended {len(rej)} rejected mode(s) to {csv_filename}"
     )
 
@@ -690,7 +690,7 @@ def write_rejected_latex(ledger, filename, hot_status=None):
     lines.append(r"\end{table}")
     with open(filename, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
-    logger.info(f"Ledger: wrote rejected-mode table {filename}")
+    logger.debug(f"Ledger: wrote rejected-mode table {filename}")
     return True
 
 
@@ -778,10 +778,13 @@ def run_hot_mode_discovery(system, model, idata, seed_ledger=None, **kwargs):
             "detail": f"{type(exc).__name__}: {exc}",
         }
         logger.warning(
-            "Hot-chain mode discovery failed; the final report will record "
-            "that the suppressed-mode search did NOT complete",
-            exc_info=True,
+            "Hot-chain mode discovery failed (%s: %s); the final report "
+            "records that the suppressed-mode search did NOT complete. The "
+            "traceback is in the log file.",
+            type(exc).__name__,
+            exc,
         )
+        logger.debug("Hot-chain mode discovery traceback", exc_info=True)
     return seed_ledger, status
 
 
@@ -965,7 +968,8 @@ def _dedup_by_midpoint(candidates, lp_of_row, cores, eval_timeout, status):
             f"Hot-chain discovery: {evaluator.n_timed_out} of {n_mid} "
             f"midpoint logp call(s) exceeded eval_timeout="
             f"{float(eval_timeout):g}s and were read as a valley, so those "
-            f"candidates were kept rather than merged."
+            f"candidates were kept rather than merged; raise the sampler's "
+            f"eval_timeout if they are duplicates."
         )
     return kept
 
@@ -1104,7 +1108,7 @@ def discover_hot_modes(
     if n_viable < min_points:
         # Genuinely searched: the hot rungs simply never came near the best
         # solution, which IS the "nothing else is competitive" answer.
-        logger.info(
+        logger.debug(
             f"Hot-chain discovery: only {n_viable} near-viable hot draws "
             f"(need {min_points}); nothing to cluster."
         )
@@ -1216,7 +1220,7 @@ def discover_hot_modes(
         candidates, _lp_of_row, cores, eval_timeout, status
     )
     status["n_clusters"] = int(len(kept))
-    logger.info(
+    logger.debug(
         "Hot-chain discovery (level ladder): "
         + "; ".join(
             f"margin {lv:g}: {nv} viable -> {nc} cluster(s)"
@@ -1248,7 +1252,7 @@ def discover_hot_modes(
             ofs += n
         cands.append(cand)
     if cands:
-        logger.info(
+        logger.debug(
             f"Hot-chain discovery: polishing {len(cands)} candidate(s) to "
             f"their basin optima (at most {int(polish_steps)} steps each)."
         )
@@ -1300,7 +1304,7 @@ def discover_hot_modes(
                 break
         if dup:
             continue
-        logger.info(
+        logger.debug(
             f"Hot-chain discovery: new basin at lp={rec.lp_max:.2f} "
             f"recorded as ledger entry {rec.seed_index} (hot-chain)."
         )

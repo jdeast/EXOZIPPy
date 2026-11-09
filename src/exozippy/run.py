@@ -59,7 +59,7 @@ from .diagnostics import (
     log_bound_pileups,
     log_cap_alarms,
 )
-from .logger import fmt_duration, setup_logging
+from .logger import bullets, fmt_duration, log_warning_recap, setup_logging
 from .mkparam import write_param_file
 from .outputs.ledger import (
     HOT_FAILED,
@@ -331,6 +331,23 @@ def _wrapup_interrupt_note(config):
 # Every `method:` value _run_fit dispatches on, in the order the dispatch
 # tests them.  This is the universe METHOD_ONLY_SAMPLER_KEYS is scored
 # against, so a new sampler branch belongs here in the same edit.
+LARGE_POLISH_MOVE_SIGMA = 3.0
+"""A seed-polish move of a user's start value larger than this many of the
+element's own 1-sigma widths at the start (``Parameter.start_width``: the
+startup probe's measured 0.5-nat step) is a WARNING after the startup table;
+smaller moves are the polish doing its job and are logged at DEBUG
+(docs/logging.md, JDE 2026-11-08).
+
+Why a multiple of the uncertainty and not a percentage: a percentage is right
+only by coincidence of units -- a 10% move of a noise variance is irrelevant
+while a 1% move of a t_0 can be hundreds of sigma.  Why 3: the width is the
+CONDITIONAL one (curvature along one axis, the others held), which is at most
+the marginal width, so a seed fitted to the same data can sit a sigma or two
+off in this unit through ordinary correlations alone; a move past 3 sigma
+costs at least ~4.5 nats along that axis alone (k**2 / 2), which a seed from
+the same model and data does not do -- it is stale, from a different model,
+or a different solution."""
+
 SAMPLER_METHODS = (
     "nuts",
     "numpyro",
@@ -724,11 +741,28 @@ def warn_unknown_sampler_keys(sampler_cfg):
     )
     if unknown:
         logger.warning(
-            f"Unrecognized key(s) in the sampler block will be ignored: "
-            f"{unknown}. "
-            f"Did you mean 'method'? Valid sampler keys: {sorted(KNOWN_SAMPLER_KEYS)}"
+            f"Unrecognized key(s) {', '.join(map(repr, unknown))} in the "
+            f"sampler block will be ignored.{_did_you_mean(unknown, KNOWN_SAMPLER_KEYS)}"
+            f"\nCorrect or remove them; valid sampler keys: "
+            f"{', '.join(sorted(KNOWN_SAMPLER_KEYS))}."
         )
     return unknown
+
+
+def _did_you_mean(unknown, known):
+    """' Did you mean ...?' for the unknown keys with a near-miss among the
+    known ones (case is never folded: a case variant is suggested, never
+    accepted); empty when none is close."""
+    import difflib
+
+    hints = []
+    for key in unknown:
+        close = difflib.get_close_matches(
+            str(key), sorted(map(str, known)), n=1, cutoff=0.75
+        )
+        if close:
+            hints.append(f"'{key}' -> '{close[0]}'")
+    return f"  Did you mean: {', '.join(hints)}?" if hints else ""
 
 
 def warn_unknown_block_keys(block_cfg, known, name):
@@ -753,8 +787,10 @@ def warn_unknown_block_keys(block_cfg, known, name):
     unknown = sorted(set(block_cfg) - set(known))
     if unknown:
         logger.warning(
-            f"Unrecognized key(s) in the {name} block will be ignored: "
-            f"{unknown}. Valid {name} keys: {sorted(known)}"
+            f"Unrecognized key(s) {', '.join(map(repr, unknown))} in the "
+            f"{name} block will be ignored.{_did_you_mean(unknown, known)}"
+            f"\nCorrect or remove them; valid {name} keys: "
+            f"{', '.join(sorted(known))}."
         )
     return unknown
 
@@ -796,13 +832,12 @@ def run_fit(config, user_params=None):
     extra.
     """
     from exozippy.gui.status import GuiReporter
-    from exozippy.pytensor_fallback import ensure_usable_backend
-
     # Probe the C toolchain before anything compiles: a missing g++ or
     # missing Python.h otherwise surfaces as a CompileError deep inside the
     # first pytensor.function call. Falls back to the (much slower)
-    # pure-Python backend with a loud banner naming the fix.
-    ensure_usable_backend()
+    # pure-Python backend with a WARNING naming the fix.  Called by
+    # _run_fit right after setup_logging, so that warning reaches
+    # <prefix>.log and the recap (it was printed to stderr only).
 
     gui = GuiReporter.from_config(config)
     gui.phase("preparing")
@@ -843,6 +878,9 @@ def _run_fit(config, gui, user_params=None):
     parent_dir.mkdir(parents=True, exist_ok=True)
 
     setup_logging(prefix, config.get("logger_level", "INFO"))
+    from exozippy.pytensor_fallback import ensure_usable_backend
+
+    ensure_usable_backend()
 
     # 1b. The credible-interval width every report is written in.  Applied
     # HERE, before anything can summarize a posterior, because the setting is
@@ -1039,8 +1077,11 @@ def _run_fit(config, gui, user_params=None):
         build_modeling_output(system, prefix)
     except Exception:
         logger.warning(
-            "modeling-draft generation failed (non-fatal)", exc_info=True
+            f"The paper draft {prefix}_paper.tex could not be written (an "
+            f"internal error; the traceback is in the log file).  The fit "
+            f"continues; the draft is regenerated at wrap-up."
         )
+        logger.debug("modeling-draft generation failed", exc_info=True)
 
     # 4. Sample
     #
@@ -1432,6 +1473,13 @@ def _run_fit(config, gui, user_params=None):
             trace_stamp[UNITS_ATTR] = POSTERIOR_UNITS_UNFINISHED
             trace_stamp[SEED_LEDGER_ATTR] = ledger_to_json(seed_ledger)
 
+            # The setup's warnings, repeated as one short recap right where
+            # the user is looking before a long sampling phase begins: the
+            # originals are scattered through the setup log, and the one
+            # that matters can sit among dozens of narrative lines
+            # (docs/logging.md, "Warnings must not be buried").
+            log_warning_recap("during setup", logfile=f"{prefix}.log")
+
             # do the sampling and save the results
             gui.phase("sampling")
             if method in ("numpyro", "blackjax", "nutpie"):
@@ -1439,7 +1487,7 @@ def _run_fit(config, gui, user_params=None):
                     importlib.import_module(method)
                 except ImportError:
                     logger.warning(
-                        f"{method} is not installed — falling back to PyMC NUTS. "
+                        f"{method} is not installed -- falling back to PyMC NUTS. "
                         f"Install with: poetry install --extras jax"
                     )
                     method = "nuts"
@@ -1561,7 +1609,7 @@ def _run_fit(config, gui, user_params=None):
                 from exozippy.samplers.nested import nested_sample
 
                 if raw_starts is not None and len(raw_starts) > 1:
-                    logger.info(
+                    logger.debug(
                         "nested: multi-seed starts are ignored -- the "
                         "search is prior-driven by construction"
                     )
@@ -1811,7 +1859,14 @@ def _run_fit(config, gui, user_params=None):
         )
     except Exception as exc:
         _record_wrapup_failure(exc, wrapup.current, prefix, trace_path)
+        log_warning_recap(
+            "during this run, which stopped with an error",
+            logfile=f"{prefix}.log",
+        )
         raise
+    # Every warning of the run, setup and sampling and wrap-up, once more at
+    # the end, where a user who walked away from the fit looks first.
+    log_warning_recap("during this run", logfile=f"{prefix}.log")
 
 
 def _median_raw_point(system, model, idata):
@@ -1908,7 +1963,7 @@ def _wrap_up(
         # A reused trace: run.py rewrote it resolved when it was sampled, so
         # its draws ARE the assigned branches (JDE 2026-10-01: the trace on
         # disk is the branch-resolved posterior).  Read, never re-resolved.
-        logger.info(
+        logger.debug(
             "trace is already branch-resolved (sample_stats"
             "['branch_combination']); reusing its per-draw branches."
         )
@@ -2458,23 +2513,27 @@ def inspect_start(
         line = f"-----   {text}"
         return line + " " * max(table_width - len(line) - 5, 1) + "-----"
 
-    logger.info("-" * table_width)
-    logger.info(
+    # The table is ONE log record (docs/logging.md): it is the deliberate
+    # table of the startup narrative, and one record keeps it in one block
+    # in the file log's timestamps and in any handler that counts records.
+    table = []
+    table.append("-" * table_width)
+    table.append(
         _banner(
             "Starting points and penalties (Physical Space) with measured whitening scales"
         )
     )
-    logger.info(
+    table.append(
         _banner(
             "Scale is the data-driven 1-sigma step measured from the start (the 0.5-nat logp contour);"
         )
     )
-    logger.info(
+    table.append(
         _banner(
             "the sampler steps in units of it.  N/A marks parameters that are not sampled (fixed/derived)."
         )
     )
-    logger.info(
+    table.append(
         _banner(
             "Log-Prob for parameters includes summed penalties from bounds and priors."
         )
@@ -2487,10 +2546,10 @@ def inspect_start(
         for line in textwrap.wrap(
             f"TOPOLOGY REVISED: {message}", max(table_width - 13, 40)
         ):
-            logger.warning(_banner(line))
-    logger.info("-" * table_width)
-    logger.info(header)
-    logger.info("-" * table_width)
+            table.append(_banner(line))
+    table.append("-" * table_width)
+    table.append(header)
+    table.append("-" * table_width)
 
     # --- PART 1: CORE PARAMETERS ---
     for p in auditor.all_params:
@@ -2640,7 +2699,7 @@ def inspect_start(
 
             prior_str = p.get_prior_str(i, latex=False)
 
-            logger.info(
+            table.append(
                 f"{row_label:>{max_label_len}} | {val_str} | {scale_str} | {p.get_unit_str(i):>12} | {param_logps.get(p.label, 0.0):10.2f} | {prior_str}{user_flag}"
             )
 
@@ -2693,10 +2752,11 @@ def inspect_start(
                 elif parent:
                     p_info = parent.get_prior_str(latex=False)
 
-            logger.info(
+            table.append(
                 f"{node:>{max_label_len}} | {'N/A':>15} | {'N/A':>10} | {'---':>12} | {lp:10.2f} | {p_info}{' *' if is_user else ''}"
             )
-    logger.info("-" * table_width)
+    table.append("-" * table_width)
+    logger.info("\n".join(table))
 
     # --- 3. THE FATAL CHECK ---
     bad_params = {k: v for k, v in param_logps.items() if not np.isfinite(v)}
@@ -2709,13 +2769,11 @@ def inspect_start(
             f"  -> {k}: {v}" for k, v in {**bad_params, **bad_nodes}.items()
         )
         logger.error(
-            "!" * 40 + "\n"
-            "Fatal error: the starting model returned an infinite/NaN penalty!\n"
-            "The following nodes have Infinite or NaN Log-Probability:\n"
+            "The starting model has an infinite or NaN log-probability, so "
+            "the fit cannot start.  Non-finite terms:\n"
             f"{bad_list}\n"
-            "Check your initial values against your bounds/priors!\n"
-            + "!"
-            * 40
+            "Check those start values against their bounds and priors in "
+            "the params file."
         )
         raise ValueError(
             "Initialization failed due to non-finite Log-Probability."
@@ -2723,12 +2781,11 @@ def inspect_start(
 
     if flat_warnings:
         logger.warning(
-            "?" * 60 + "\n"
-            f"WARNING: logp is flat along: {flat_warnings}. Check your bounds/initialization.\n"
-            "These parameters keep their preliminary whitening scale.\n"
-            "Even a single unconstrained parameter will destroy HMC efficiency.\n"
-            + "?"
-            * 60
+            f"logp is flat along {flat_warnings}: the start does not "
+            "constrain them, so they keep their preliminary whitening scale "
+            "and even one unconstrained parameter destroys HMC efficiency.\n"
+            "Give each a prior or tighter bounds in the params file, or "
+            "check its start value."
         )
 
     # The unmatched-params-key warning used to be emitted here, from this
@@ -2756,28 +2813,34 @@ def inspect_start(
         else auditor.check_user_starts()
     )
     if start_misses:
-        lines = []
-        # The component's own seeding recipe (Parameter.seed_remedy, review
-        # 8.6.15), once per distinct sentence, naming the keys it answers:
-        # mulensevent.t_E, pi_E_N and pi_E_E share one and miss together.
+        # One WARNING: the headline names every key, then the remedies
+        # (the component's own seeding recipe, Parameter.seed_remedy, review
+        # 8.6.15, once per distinct sentence -- mulensevent.t_E, pi_E_N and
+        # pi_E_E share one and miss together).  The per-key detail is DEBUG.
         remedies = {}
         for f in start_misses:
-            lines.append(
+            logger.debug(
                 f"  {f['key']}: you set {f['requested']:.6g}, the model "
                 f"is built at {f['produced']:.6g} ({f['rel']:+.2%}) -- "
                 f"{f['detail']}"
             )
             if f["remedy"]:
                 remedies.setdefault(f["remedy"], []).append(f["key"])
-        for remedy, keys in remedies.items():
-            lines.append(f"  For {', '.join(keys)}: {remedy}")
+        named = bullets(
+            f"{f['key']}: you set {f['requested']:.6g}, the model is built "
+            f"at {f['produced']:.6g} ({f['rel']:+.1%})"
+            for f in start_misses
+        )
+        remedy_text = "".join(
+            f"\nFor {', '.join(keys)}: {remedy}"
+            for remedy, keys in remedies.items()
+        )
         logger.warning(
-            "?" * 60 + "\n"
-            "WARNING: the model is not built at every value you set:\n"
-            + "\n".join(lines)
-            + "\nThese are START values, so the fit can still move to the "
-            "right answer -- but if a value above is one you meant to "
-            "pin, the model is not starting where you think.\n" + "?" * 60
+            f"The model is not built at every value you set "
+            f"({len(start_misses)}).  They are start values, so the fit can "
+            f"still move, but a "
+            f"value you meant to pin is not where the model starts "
+            f"(per-key detail in the log file).\n{named}" + remedy_text
         )
 
     # THE SEED POLISH'S OWN ACCOUNT.  A value the derivation delivered and
@@ -2787,27 +2850,64 @@ def inspect_start(
     # the seeds are stale or the model is not the one they were fitted
     # with, and that is the reader's cue to refresh them -- so the report
     # names the seed, not the derivation.
+    #
+    # Every move is listed at DEBUG; only a LARGE move -- more than
+    # LARGE_POLISH_MOVE_SIGMA of the element's own 1-sigma width at the
+    # start -- is a WARNING: the polish exists to move the start to the
+    # optimum, and a move inside the parameter's uncertainty is the polish
+    # working, not news (docs/logging.md).  An element the sampler does not
+    # move (derived, pinned) has no width; its move follows from the sampled
+    # elements it is computed from, which are judged themselves.
     if build_start_values:
-        moves = auditor.polish_moves(build_start_values)
-        if moves:
-            lines = [
-                f"  {m['key']}: you set {m['requested']:.6g}, the polish "
-                f"moved the start to {m['polished']:.6g} ({m['rel']:+.2%})"
-                for m in moves
-            ]
-            logger.warning(
-                "?" * 60 + "\n"
-                f"NOTE: the seed polish moved {len(moves)} of the start "
-                "values you set (it promotes the start to its basin "
-                "optimum, and it left these seeds behind):\n"
-                + "\n".join(lines)
-                + "\nA large move means the seed is not near this model's "
-                "optimum -- a stale seed, or a different solution.  To hold "
-                "a value fixed through the polish, pin it (sigma: 0); to "
-                "keep the seeds as the start, set seed_polish: false.\n"
-                + "?"
-                * 60
+        report_polish_moves(auditor.polish_moves(build_start_values))
+
+
+def report_polish_moves(moves):
+    """Log the seed polish's moves of the user's start values: every move at
+    DEBUG, and ONE WARNING listing the moves larger than
+    LARGE_POLISH_MOVE_SIGMA of the element's own width (``n_sigma`` from
+    ``ModelAuditor.polish_moves``; None for an element the sampler does not
+    move, which never warns).  Returns the list of moves that warned."""
+
+    def _move_str(m):
+        rel = (
+            f"{m['rel']:+.3g} from 0"
+            if m.get("absolute")
+            else f"{m['rel']:+.0%}"
+        )
+        if m["n_sigma"] is None:
+            return f"{rel}; not sampled"
+        return f"{rel}, {m['n_sigma']:.3g} sigma"
+
+    for m in moves:
+        logger.debug(
+            f"  seed polish: {m['key']}: you set {m['requested']:.6g}, "
+            f"the polish moved the start to {m['polished']:.6g} "
+            f"({_move_str(m)})"
+        )
+    large = [
+        m
+        for m in moves
+        if m["n_sigma"] is not None and m["n_sigma"] > LARGE_POLISH_MOVE_SIGMA
+    ]
+    if large:
+        logger.warning(
+            f"The seed polish moved {len(large)} of your start values by "
+            f"more than {LARGE_POLISH_MOVE_SIGMA:g} sigma:\n"
+            + bullets(
+                f"{m['key']}: {m['requested']:.6g} -> {m['polished']:.6g} "
+                f"({m['n_sigma']:.3g} sigma)"
+                for m in large
             )
+            + '\nSet "sampler: {seed_polish: false}" to start at the seeds or '
+            '"sigma: 0" in the params file to fix it throughout the fit.'
+        )
+    elif moves:
+        logger.debug(
+            f"seed polish moved {len(moves)} start value(s) you set, none by "
+            f"more than {LARGE_POLISH_MOVE_SIGMA:g} sigma."
+        )
+    return large
 
 
 def _add_sampler_prose(system, method, swap_schedule="deo"):
@@ -3304,7 +3404,7 @@ def _hot_search_from_trace(idata, modes_cfg):
     """
     if modes_cfg.get("rerun_hot_search", False):
         if HOT_SEARCH_ATTR in idata.attrs:
-            logger.info(
+            logger.debug(
                 "hot-chain suppressed-mode search: the trace carries a "
                 "completed search, but modes: {rerun_hot_search: true} asks "
                 "for a fresh one; searching again."
@@ -3346,7 +3446,7 @@ def _persist_hot_search(trace_path, idata, seed_ledger, hot_status):
     blob = hot_search_to_json(seed_ledger, hot_status)
     stamp_trace_attr(trace_path, HOT_SEARCH_ATTR, blob)
     idata.attrs[HOT_SEARCH_ATTR] = blob
-    logger.info(
+    logger.debug(
         "hot-chain suppressed-mode search stamped on %s (%s); a "
         "recompute_trace: false rerun reuses it.",
         trace_path,
@@ -3429,7 +3529,7 @@ def _ensure_lp(
     if model is None:
         return False
 
-    logger.info("lp is not in the trace -- computing it from the model")
+    logger.debug("lp is not in the trace -- computing it from the model")
     lp_vals, n_timed_out = _compute_lp_from_model(
         model,
         idata,
@@ -3500,8 +3600,8 @@ def _compute_lp_from_model(
                 f"trace's posterior"
             )
 
-        logger.info(
-            f"Computing lp for {n_chains}×{n_draws} draws "
+        logger.debug(
+            f"Computing lp for {n_chains}x{n_draws} draws "
             f"({len(point_map)} unconstrained vars)"
         )
 
@@ -3573,7 +3673,7 @@ def _compute_lp_from_model(
             chain_lp = lp_vals[chain_idx]
             seen = chain_lp[~np.isnan(chain_lp)]
             lo, hi = (seen.min(), seen.max()) if seen.size else (np.nan,) * 2
-            logger.info(f"  chain {chain_idx}: lp range [{lo:.1f}, {hi:.1f}]")
+            logger.debug(f"  chain {chain_idx}: lp range [{lo:.1f}, {hi:.1f}]")
 
         return lp_vals, len(timed_out)
 
@@ -3757,7 +3857,7 @@ def _split_degenerate_vars(idata, var_names, group="posterior"):
         for i in bad:
             _, label, vals = rows[i]
             reason = _dist_degeneracy(vals)
-            logger.warning(
+            logger.debug(
                 f"trace plot: no density for {label} ({reason}); its trace "
                 "panel is still drawn"
             )

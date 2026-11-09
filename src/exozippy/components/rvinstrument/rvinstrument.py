@@ -320,6 +320,42 @@ class RVInstrument(Instrument):
             cls._gp_config_schema(),
             cls._likelihood_config_schema(),
             cls._out_frac_prior_config_schema(),
+            {
+                "key": "rm",
+                "kind": "ref",
+                "accepts": ["orbit"],
+                "required": False,
+                "doc": (
+                    "Name of the orbit whose in-transit Rossiter-McLaughlin "
+                    "distortion is added to this file's RV model (off by "
+                    "default)."
+                ),
+            },
+            {
+                "key": "rm_band",
+                "kind": "ref",
+                "accepts": ["band"],
+                "required": False,
+                "doc": "Band whose limb darkening the RM model uses.",
+            },
+            {
+                "key": "rm_model",
+                "kind": "option",
+                "accepts": ["hirano2010", "hirano2011"],
+                "required": False,
+                "doc": (
+                    "RM model: 'hirano2011' (default, the disk integral) or 'hirano2010' (the fast closed-form series)."
+                ),
+            },
+            {
+                "key": "light_travel_time",
+                "kind": "option",
+                "accepts": [True, False],
+                "required": False,
+                "doc": (
+                    "Per file, on by default: include the star's light-travel time across its orbits in this file's model (components/ltt.py). false turns it off."
+                ),
+            },
         ]
 
     def load_data(self, system):
@@ -935,11 +971,11 @@ class RVInstrument(Instrument):
         if not self._ltt_unsupported_warned:
             self._ltt_unsupported_warned = True
             logger.warning(
-                "[%s] light-travel-time correction of the RV reflex "
-                "disabled for the Keplerian orbits -- the orbit component "
-                "does not define %s (its bodies did not resolve). Set "
+                "%s light-travel-time correction of the RV reflex disabled "
+                "for the Keplerian orbits: the orbit component does not "
+                "define %s (its bodies did not resolve).  Set "
                 "light_travel_time: false on the RV files to silence this.",
-                self.prefix,
+                self.log_tag(),
                 ", ".join(ltt.REQUIRED_ORBIT_PARAMS + ("sini",)),
             )
         return False
@@ -1326,7 +1362,7 @@ class RVInstrument(Instrument):
                 )
             )
         if np.isfinite(signal.amplitude) and signal.amplitude > 0.0:
-            logger.info(
+            logger.debug(
                 "[%s] RV semi-amplitude estimate moved from %.4g to %.4g m/s (the "
                 "Lomb-Scargle sinusoid's semi-amplitude replaces "
                 "sqrt(2) x scatter).",
@@ -1387,16 +1423,17 @@ class RVInstrument(Instrument):
         if np.isfinite(median_err) and median_err > 0.0:
             logger.warning(
                 "[%s] the RVs carry no scatter about their per-instrument "
-                "means; seeding K from the median error bar (%.3g m/s) "
-                "instead.",
+                "means, so K starts at the median error bar (%.3g m/s).  "
+                "Check the RV files' velocity column.",
                 self.prefix,
                 median_err,
             )
             return median_err
 
         logger.warning(
-            "[%s] the RVs carry neither scatter nor usable error bars; "
-            "seeding K at 1 m/s.",
+            "[%s] the RVs carry neither scatter nor usable error bars, so K "
+            "starts at 1 m/s.  Check the RV files' velocity and error "
+            "columns.",
             self.prefix,
         )
         return 1.0

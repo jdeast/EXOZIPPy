@@ -437,7 +437,7 @@ def test_a_flat_logit_probe_is_booked_at_the_reach_and_escalates(
     monkeypatch.setattr(wmod, "probe_scales", spy)
 
     # Act
-    with caplog.at_level(logging.WARNING, logger="exozippy.whitening"):
+    with caplog.at_level(logging.DEBUG, logger="exozippy.whitening"):
         report = apply_measured_whitening(
             system, model, raw_start, logp_fn=logp
         )
@@ -484,7 +484,7 @@ def test_escalation_iterates_past_two_rounds(caplog):
     raw_start = model.initial_point()
 
     # Act
-    with caplog.at_level(logging.WARNING, logger="exozippy.whitening"):
+    with caplog.at_level(logging.DEBUG, logger="exozippy.whitening"):
         apply_measured_whitening(system, model, raw_start, logp_fn=logp)
 
     # Assert

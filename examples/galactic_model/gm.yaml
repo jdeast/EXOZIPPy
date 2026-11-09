@@ -9,7 +9,6 @@ star:
 
 galacticmodel:
   - name: "MW_Prior"
-    star_ndx: 0
 
 parameter_file: "gm.params.yaml"
 

@@ -368,34 +368,45 @@ def test_honored_global_blocks_are_not_warned_about(caplog):
     assert ignored == [], f"honored keys reported as ignored: {ignored}"
 
 
-def test_an_unreserved_top_level_key_is_still_reported(caplog):
+def test_an_unreserved_top_level_key_raises_with_a_suggestion():
     """
     Given a config with a top-level key that is neither a component nor
       reserved (here a plausible typo of `mkparam:`),
     When a System is constructed from it,
-    Then it is warned about by name as "will be ignored", and nothing on the
-      System answers to it.
+    Then it RAISES, naming the key and suggesting `mkparam`, before any
+      component is built.
 
     The mirror of the test above, and the top-level counterpart of
     test_a_genuine_typo_is_still_reported: widening RESERVED_CONFIG_KEYS to
-    silence the false warnings must not silence the true ones. Both halves
-    matter -- the warning is only worth reading if the key really is inert,
-    which is asserted here too.
+    silence the false reports must not silence the true ones.  Until
+    2026-11-08 this was a "will be ignored" WARNING; JDE ruled that an
+    unknown top-level key raises like an unknown key inside a component
+    block (docs/logging.md, "User input is never silently ignored").
     """
     # ARRANGE
     config = {"star": [{"name": "A"}], "mkparm": {"n_seeds": 4}}
 
     # ACT
-    with caplog.at_level("WARNING", logger="exozippy.system"):
-        system = System(config, user_params={})
+    with pytest.raises(ValueError) as err:
+        System(config, user_params={})
 
     # ASSERT
-    assert any(
-        "mkparm" in r.getMessage() and "will be ignored" in r.getMessage()
-        for r in caplog.records
-    ), [r.getMessage() for r in caplog.records]
-    assert "mkparm" not in system.active_components
-    assert not hasattr(system, "mkparm")
+    msg = " ".join(str(err.value).split())
+    assert "'mkparm'" in msg
+    assert "did you mean 'mkparam'?" in msg
+
+
+def test_a_case_variant_of_a_top_level_key_raises_and_is_not_folded():
+    """
+    Given `Star:` where the component is `star:`,
+    When a System is constructed,
+    Then it raises suggesting `star` -- user-facing names are case-sensitive
+      and a case variant is never accepted (CLAUDE.md).
+    """
+    with pytest.raises(ValueError) as err:
+        System({"Star": [{"name": "A"}]}, user_params={})
+    msg = " ".join(str(err.value).split())
+    assert "'Star'" in msg and "did you mean 'star'?" in msg
 
 
 def test_jitter_is_a_recognized_sampler_key(caplog):

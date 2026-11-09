@@ -1,5 +1,5 @@
+import logging
 import re
-import warnings
 from pathlib import Path
 from typing import Literal
 
@@ -11,6 +11,8 @@ from exozippy.models.MIST.parse_MIST_EEP_filenames import (
     _generate_MIST_EEP_url,
     _parse_initfeh_alpha_vvcrit_from_name,
 )
+
+logger = logging.getLogger(__name__)
 
 try:
     from tqdm.auto import tqdm
@@ -428,7 +430,7 @@ def process_eep_directory(
     )
 
     if not filepaths:
-        warnings.warn(f"No files matching '{pattern}' found in {eep_dir}")
+        logger.warning(f"No files matching '{pattern}' found in {eep_dir}")
         return pd.DataFrame()
 
     iterator = (

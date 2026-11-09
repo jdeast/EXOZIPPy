@@ -147,7 +147,7 @@ def test_the_reuse_path_takes_the_stamp_and_the_rerun_key_declines_it(caplog):
     idata.attrs[HOT_SEARCH_ATTR] = hot_search_to_json(ledger, _FOUND_STATUS)
 
     # ACT
-    with caplog.at_level(logging.INFO, logger="exozippy.run"):
+    with caplog.at_level(logging.DEBUG, logger="exozippy.run"):
         reused = run_module._hot_search_from_trace(idata, {})
         fresh = run_module._hot_search_from_trace(
             idata, {"rerun_hot_search": True}

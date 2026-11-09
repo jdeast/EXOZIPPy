@@ -21,6 +21,8 @@ bare ``except`` around the compile returns [] by design, so a unit test
 asserting "no findings" could never distinguish the two.
 """
 
+import logging
+
 import numpy as np
 import pytest
 
@@ -42,8 +44,10 @@ class _FakeParam:
         sampled=True,
         value=None,
         seed_remedy=None,
+        width=1.0,
     ):
         self.label = label
+        self._width = width  # start_width, INTERNAL units
         self.seed_remedy = seed_remedy
         self.names = names or []
         self.unit = unit
@@ -80,6 +84,9 @@ class _FakeParam:
 
     def from_internal(self, val, index=None):
         return float(val) / self._factor
+
+    def start_width(self, index=0):
+        return self._width if self.element_is_sampled(index) else None
 
     def seed_remedy_suffix(self):
         # The real Parameter's method, not a restatement: the fake carries
@@ -580,6 +587,93 @@ def test_polish_moves_reports_a_moved_seed_and_not_a_kept_one(monkeypatch):
     assert m["build"] == pytest.approx(1.03)
     assert m["polished"] == pytest.approx(92.06)
     assert m["rel"] == pytest.approx((92.06 - 1.03) / 1.03)
+    assert m["n_sigma"] == pytest.approx(92.06 - 1.03)  # width 1.0
+
+
+def test_polish_moves_measures_a_move_in_the_elements_own_width(monkeypatch):
+    """
+    Given a converted parameter (internal = 1000 x user) whose start width is
+      20 internal units (0.02 user units), and a derived one that moved,
+    When the moves are computed,
+    Then the sampled move is in units of its width converted to user units
+      (0.1 / 0.02 = 5 sigma), the derived one has no width (n_sigma None:
+      it follows from what it is computed from), and the sampled move sorts
+      first.
+    """
+    p_m = _FakeParam(
+        "planet.mass", unit="jupiterMass", factor=1000.0, width=20.0
+    )
+    p_d = _FakeParam("mulensevent.t_E", unit="d", derived=True)
+    a = _auditor(
+        [p_m, p_d],
+        {
+            "planet.mass": {"initval": 1.0},
+            "mulensevent.t_E": {"initval": 50.0},
+        },
+    )
+    _with_produced(monkeypatch, [1100.0, 80.0])  # internal units
+
+    moves = a.polish_moves({"planet.mass": 1.0, "mulensevent.t_E": 50.0})
+
+    assert [m["key"] for m in moves] == ["planet.mass", "mulensevent.t_E"]
+    assert moves[0]["n_sigma"] == pytest.approx(5.0)
+    assert moves[1]["n_sigma"] is None
+
+
+def _move(key, before, after, n_sigma):
+    return {
+        "key": key,
+        "requested": before,
+        "build": before,
+        "polished": after,
+        "rel": (after - before) / before,
+        "absolute": False,
+        "n_sigma": n_sigma,
+    }
+
+
+def test_the_polish_move_warning_is_judged_in_sigma_not_percent(caplog):
+    """
+    Given three moves -- a 1% move of t_0 that is 50 of its sigma, a 40%
+      move of a noise variance inside one sigma, and a derived element's
+      large move (no width) --
+    When they are reported,
+    Then exactly the t_0 move warns (JDE 2026-11-08: a percentage is right
+      only by coincidence; the threshold is LARGE_POLISH_MOVE_SIGMA of the
+      element's own width), and every move is still logged at DEBUG.
+    """
+    from exozippy.run import LARGE_POLISH_MOVE_SIGMA, report_polish_moves
+
+    moves = [
+        _move("source.t_0", 9000.0, 9090.0, 50.0),
+        _move("transit.TESS.jitter_variance", 1.0e-6, 1.4e-6, 0.8),
+        _move("mulensevent.t_E", 50.0, 80.0, None),
+    ]
+    with caplog.at_level(logging.DEBUG, logger="exozippy.run"):
+        large = report_polish_moves(moves)
+
+    assert [m["key"] for m in large] == ["source.t_0"]
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    text = warnings[0].getMessage()
+    assert "source.t_0" in text and "jitter_variance" not in text
+    assert f"{LARGE_POLISH_MOVE_SIGMA:g} sigma" in text
+    debug = [
+        r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG
+    ]
+    assert sum("seed polish:" in m for m in debug) == 3
+
+
+def test_moves_inside_the_threshold_do_not_warn(caplog):
+    """A move at exactly LARGE_POLISH_MOVE_SIGMA is not above it."""
+    from exozippy.run import LARGE_POLISH_MOVE_SIGMA, report_polish_moves
+
+    with caplog.at_level(logging.DEBUG, logger="exozippy.run"):
+        large = report_polish_moves(
+            [_move("star.teff", 5000.0, 5600.0, LARGE_POLISH_MOVE_SIGMA)]
+        )
+    assert large == []
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
 
 def test_polish_moves_wraps_angles_and_is_empty_without_build_values(

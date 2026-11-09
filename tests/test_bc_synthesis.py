@@ -289,7 +289,7 @@ def test_an_unread_band_without_a_column_is_left_out_with_info(
     sed = _sed_stub(
         [{"name": "g", "filter": "CFHT/MegaCam.g"}], bc_grid.DEFAULT_MODEL_ROOT
     )
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.DEBUG, logger="exozippy"):
         extra = sed._collect_band_filters({})
     assert extra == []
     assert sed._to_synthesize == {}

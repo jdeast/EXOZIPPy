@@ -169,7 +169,7 @@ def patch_blackjax_progress_bar():
     setattr(_inference_loop, _PATCH_FLAG, True)
     pmjax._blackjax_inference_loop = _inference_loop
 
-    logger.info(
+    logger.debug(
         "Applied the pymc/blackjax compatibility patch "
         "(exozippy.compat.blackjax_progressbar): blackjax runs without a "
         "progress bar."

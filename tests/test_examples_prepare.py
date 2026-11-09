@@ -237,12 +237,10 @@ def test_shipped_example_prepares(path, rel, monkeypatch, caplog):
             f"{rel}: component '{key}' registered no manifest in stage 3"
         )
 
-    ignored = [
-        r.getMessage()
-        for r in caplog.records
-        if "does not match any registered component" in r.getMessage()
-    ]
-    assert not ignored, f"{rel} has stale top-level YAML key(s): {ignored}"
+    # A stale top-level YAML key no longer needs a check here: System()
+    # above RAISES on one (docs/logging.md, "User input is never silently
+    # ignored"), so reaching this line means every key is a component or a
+    # reserved block.
 
     # Every instrument that concatenates its files must hand each element ONE
     # contiguous row range, in config order, in every concatenated array at

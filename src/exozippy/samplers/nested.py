@@ -219,7 +219,7 @@ class UnitCubeBridge:
                 )
         self.lower, self.span, self.c, self.s = lower, span, c, s_arr
         n_logit = int(self.is_logit.sum())
-        logger.info(
+        logger.debug(
             f"UnitCubeBridge: {n_logit} logit-bounded and "
             f"{self.ndim - n_logit} raw-Normal-prior element(s)"
         )
@@ -530,7 +530,7 @@ def nested_sample(
             sampler.run_nested(
                 **dy_kwargs, dlogz=dlogz, maxiter=maxiter, print_progress=False
             )
-            logger.info(
+            logger.debug(
                 "dynesty: ndim=%d nlive=%d sample=%s bound=%s walks=%s",
                 bridge.ndim,
                 nlive,

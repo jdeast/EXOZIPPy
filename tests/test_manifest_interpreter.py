@@ -377,9 +377,7 @@ def unread_linear_band_system(tmp_path_factory):
         ],
         "lens": [{"body": "star.Lens"}],
         "source": [{"body": "star.Source"}],
-        "mulensinstrument": [
-            {"name": "OGLE", "file": str(path), "filter": "I", "band": "I"}
-        ],
+        "mulensinstrument": [{"name": "OGLE", "file": str(path), "band": "I"}],
         # "I" is read (finite source); "V" is read by nothing at all.
         "band": [
             {"name": "I", "filter": "I", "ld_law": "linear"},
@@ -478,9 +476,7 @@ def pspl_system(tmp_path_factory):
         "mulensevent": [{"t0_par": T0, "use_op": False}],
         "lens": [{"body": "star.Lens"}],
         "source": [{"body": "star.Source"}],
-        "mulensinstrument": [
-            {"name": "OGLE", "file": str(path), "filter": "I"}
-        ],
+        "mulensinstrument": [{"name": "OGLE", "file": str(path)}],
     }
     params = {
         "source.Source.t_0": {"initval": T0},

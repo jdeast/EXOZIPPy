@@ -360,7 +360,7 @@ def synthesize_column(svo_id: str, native_system: str, where: str) -> Path:
         tables / f".{fac}.{col}.synth.lock", f"the BC column {col} ({svo_id})"
     ):
         if cached_column_is_current(final, col):
-            logger.info(
+            logger.debug(
                 f"{where}: BC column {col} ({svo_id}) was synthesized by "
                 f"another fit while this one waited; reading it from {final}."
             )

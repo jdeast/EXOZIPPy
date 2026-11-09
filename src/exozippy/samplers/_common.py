@@ -62,6 +62,7 @@ for _tvar in (
 # import that spins up a native thread pool, and isort treats a statement as
 # a wall, so an import moved above it would be silently hoisted past it.
 from exozippy.constants import CORE_FRACTION
+from exozippy.logger import ProgressCadence
 
 logger = logging.getLogger(__name__)
 
@@ -564,7 +565,7 @@ class StepAlarm:
             if len(self._history) > self._history_len:
                 self._history.pop(0)
         if alarmed:
-            self.log.warning(
+            self.log.debug(
                 f"{self.label}: slow step {step} finished after "
                 f"{total:.0f} s -- " + self._split(phases, total) + "."
             )
@@ -769,7 +770,7 @@ def resolve_n_chains(n_chains, n_params, label, log):
     if n_chains is None:
         n_chains = max(2 * n_params, MIN_DE_CHAINS)
         if n_chains > 2 * n_params:
-            log.info(
+            log.debug(
                 f"{label}: default n_chains = 2 x n_params = "
                 f"{2 * n_params} is below the DE minimum; using "
                 f"{n_chains} chains/rung."
@@ -1042,9 +1043,11 @@ def resolve_store_hot_chains(
 
     if n_temps < 2:
         if hot_thin:
-            log.info(
+            log.log(
+                logging.DEBUG if auto else logging.WARNING,
                 f"{label}: store_hot_chains is set but n_temps={n_temps} "
-                f"leaves no hot rungs; nothing will be stored."
+                f"leaves no hot rungs, so nothing will be stored.  Raise "
+                f"n_temps, or remove store_hot_chains.",
             )
         return 0
 
@@ -1052,7 +1055,7 @@ def resolve_store_hot_chains(
         n_temps, hot_thin, n_raw_elements, n_out_elements
     )
     if auto and hot_thin:
-        log.info(
+        log.debug(
             f"{label}: store_hot_chains: auto -> ON (thin {hot_thin}). "
             f"Component(s) {named} expect posterior-suppressed modes, so "
             f"thinned draws from the {n_temps - 1} hot rungs are kept to "
@@ -1062,7 +1065,7 @@ def resolve_store_hot_chains(
             f"`store_hot_chains: false` to opt out."
         )
     elif auto:
-        log.info(
+        log.debug(
             f"{label}: store_hot_chains: auto -> OFF. No active component "
             f"expects posterior-suppressed modes, so hot-rung draws are not "
             f"kept and NO search for suppressed modes will run. Set "
@@ -1071,12 +1074,12 @@ def resolve_store_hot_chains(
             f"to the trace file)."
         )
     elif hot_thin:
-        log.info(
+        log.debug(
             f"{label}: store_hot_chains set explicitly -> ON (thin "
             f"{hot_thin}), roughly {100 * share:.0f}% of the trace file."
         )
     else:
-        log.info(
+        log.debug(
             f"{label}: store_hot_chains set explicitly -> OFF; no search "
             f"for posterior-suppressed modes will run."
         )
@@ -1236,7 +1239,7 @@ def resolve_start_dispersion(spec, temperatures, n_params, log=None):
         disp = base * np.sqrt(temps)
         desc = f"auto ({base:g}*sqrt(T))"
         if log is not None and not np.isclose(legacy, base):
-            log.warning(
+            log.debug(
                 f"PTDE start dispersion: T=1 is now {base:g} (absolute, "
                 f"review 8.4.7) where the previous rule min(sqrt(500/D), 3) "
                 f"gave {legacy:.3f} for D={int(n_params)}. This model starts "
@@ -1316,7 +1319,7 @@ def report_rung_dispersion(populations, scales, temperatures, rung_lps, log):
                 )
                 spread_txt = f", median spread {med:.2f} probe-sigma"
         if finite.size:
-            log.info(
+            log.debug(
                 f"PTDE rung {k} (T={T:.3g}): start lp median "
                 f"{np.median(finite):.1f} [min {finite.min():.1f}, max "
                 f"{finite.max():.1f}]{spread_txt}"
@@ -1841,7 +1844,7 @@ def map_draws(worker, n_items, *, cores, eval_timeout, label, log=None):
     timed_out = []
     t_start = time.monotonic()
     state = {"done": 0, "last": t_start}
-    log.info(
+    log.debug(
         f"{label}: {n_items} draw(s) on {n_proc} worker(s), "
         + (
             f"each logp call under eval_timeout={float(eval_timeout):g}s"
@@ -1850,11 +1853,16 @@ def map_draws(worker, n_items, *, cores, eval_timeout, label, log=None):
         )
     )
 
+    cadence = ProgressCadence()
+
     def _progress(force=False):
         now = time.monotonic()
         if not force and now - state["last"] < DRAW_PROGRESS_S:
             return
         state["last"] = now
+        # Every line to the file log; one per INFO_PROGRESS_S (and the
+        # closing one) to the console (docs/logging.md).
+        level = cadence.level(force=force)
         done = state["done"]
         el = now - t_start
         eta = (
@@ -1862,9 +1870,10 @@ def map_draws(worker, n_items, *, cores, eval_timeout, label, log=None):
             if 0 < done < n_items
             else ""
         )
-        log.info(
+        log.log(
+            level,
             f"{label}: {done}/{n_items} draw(s) evaluated, "
-            f"{len(timed_out)} timed out, {el:.0f} s{eta}"
+            f"{len(timed_out)} timed out, {el:.0f} s{eta}",
         )
 
     def _batches(ranges, timeout):
@@ -1894,7 +1903,7 @@ def map_draws(worker, n_items, *, cores, eval_timeout, label, log=None):
                 per_draw.append(dt / (hi - lo))
                 state["done"] += hi - lo
             if to:
-                log.warning(
+                log.debug(
                     f"{label}: {len(to)} task(s) exceeded their deadline "
                     f"({timeout:.0f} s); recycling the worker pool."
                 )
@@ -1938,7 +1947,7 @@ def map_draws(worker, n_items, *, cores, eval_timeout, label, log=None):
                 else:
                     singles.extend((i, i + 1) for i in range(lo, hi))
             if singles:
-                log.warning(
+                log.debug(
                     f"{label}: re-running the {len(singles)} draw(s) of "
                     f"{len(lost)} timed-out range(s) one per task, so only "
                     f"the draws that hang are lost."
@@ -2143,7 +2152,7 @@ def _make_starts(
         if system is not None
         else None
     )
-    logger.info(
+    logger.debug(
         f"{label}: MAP lp={map_lp:.1f}, n_params={n_params}, factor={factor:.2f}, "
         f"jitter={'physical (truncated)' if _jitter else 'raw (fallback)'}"
         + (
@@ -2167,7 +2176,7 @@ def _make_starts(
     first_nan = None
     if overdisperse:
         if K > max_exact:
-            logger.info(
+            logger.debug(
                 f"PTDE init: {K} seeds > {max_exact} exact-start budget "
                 f"(half the {n_chains} chains); the rest start jittered around "
                 f"their seed to keep restart overdispersion."
@@ -2177,7 +2186,7 @@ def _make_starts(
         # above does not apply: EVERY chain starts exactly at its round-robin
         # seed.  The population's affine hull is therefore the hull of the
         # UNIQUE seeds, which is what the two-tier warning measures.
-        logger.info(
+        logger.debug(
             f"PTDE init: `overdisperse: false` -- all {n_chains} chains start "
             f"exactly at their round-robin seed (no jitter), from {K} seeds."
         )
@@ -2501,7 +2510,7 @@ def build_rung_populations(
             desc + " (initvals: one start per chain, replicated)",
         )
 
-    log.info(
+    log.debug(
         f"PTDE start dispersion: {desc}, {n_rungs} rung(s), "
         f"T=1 {dispersions[0]:.3g} -> T={temps[-1]:.3g} {dispersions[-1]:.3g} "
         f"(probe-scale units)"
@@ -2567,7 +2576,7 @@ def plot_start_ensemble(
     batched fn). No-op when plot_prefix is None."""
     if plot_prefix is None:
         return
-    log.info("Generating ensemble start plots...")
+    log.debug("Generating ensemble start plots...")
     batched_vals = raw_to_phys_batched(
         *[np.stack([s[k] for s in t1_starts], axis=0) for k in raw_var_names]
     )
@@ -2691,7 +2700,7 @@ def assemble_inference_data(
     batched converter in chunks (bounds memory for large n_params/draws;
     chunk_size is independent of param count/shape, only of sample count).
     """
-    log.info(
+    log.debug(
         f"{label}: converting {n_chains} x {actual_draws} draws to "
         f"physical space..."
     )
@@ -2743,7 +2752,7 @@ def assemble_inference_data(
     # attribution is wired; for now the per-chain attr is the source of truth.
     idata.posterior.attrs["chain_seed_index"] = list(chain_seed_index)
     if len(set(chain_seed_index)) > 1:
-        log.info(
+        log.debug(
             f"{label} multi-seed provenance (chain -> seed): "
             f"{list(chain_seed_index)}"
         )
@@ -3250,7 +3259,7 @@ def prepare_ptde_run(
     n_chains = resolve_n_chains(n_chains, n_params, label, log)
     if gamma is None:
         gamma = 2.38 / np.sqrt(2 * n_params)
-    log.info(
+    log.debug(
         f"{label}: {n_params} params, {n_chains} chains/rung, "
         f"gamma={gamma:.4f}"
     )
@@ -3575,7 +3584,7 @@ class HotChainRecorder:
                 ),
             },
         )
-        log.info(
+        log.debug(
             f"{self.label}: stored {n_hot} thinned hot draws/chain from "
             f"{self.n_temps - 1} rungs x {self.n_chains} chains "
             f"(store_hot_chains={self.spec}, thin={self.thin})"
@@ -3677,7 +3686,7 @@ def log_mode_hop_summary(label, log, de_mode_hop, n_hop_accept, n_hop_propose):
         return
     n_accept = int(n_hop_accept)
     n_propose = int(n_hop_propose)
-    log.info(
+    log.debug(
         f"{label} DE mode hops (gamma=1, p={de_mode_hop:g}): "
         f"{n_accept}/{n_propose} accepted "
         f"({n_accept / max(n_propose, 1):.4f}); excluded "

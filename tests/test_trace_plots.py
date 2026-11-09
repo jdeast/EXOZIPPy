@@ -348,7 +348,7 @@ def test_degenerate_variable_is_reported_not_swallowed(caplog, tmp_path):
     idata = _idata_with(np.full((2, 60), 3.5))
 
     # ACT
-    with caplog.at_level("WARNING", logger="exozippy.run"):
+    with caplog.at_level("DEBUG", logger="exozippy.run"):
         save_multipage_trace(idata, ["a", "b"], str(tmp_path / "t.pdf"))
 
     # ASSERT

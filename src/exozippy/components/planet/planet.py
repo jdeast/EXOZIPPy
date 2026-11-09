@@ -595,15 +595,18 @@ class Planet(Component):
             len(set(self.fitbeam)) > 1
             or len(set(self.beam_constrains_mass)) > 1
         ):
+            resolved = (
+                "derived from K"
+                if any_beam_constrains_mass
+                else "free-fit"
+                if any_fitbeam
+                else "pinned at 0"
+            )
             logger.warning(
-                f"[{self.prefix}] fitbeam/beam_constrains_mass differ "
-                f"across planets (fitbeam={self.fitbeam}, "
-                f"beam_constrains_mass={self.beam_constrains_mass}); beam "
-                f"is a whole-component mode, not per-planet (see the "
-                f"comment above), so the resolved mode applies to every "
-                f"planet -- derived-from-K if any planet set "
-                f"beam_constrains_mass, else free-fit if any set "
-                f"fitbeam, else pinned at 0."
+                f"{self.log_tag()} fitbeam/beam_constrains_mass differ "
+                f"across planets, but beam is one whole-component mode, so "
+                f"every planet's beam is {resolved}.  Set the same "
+                f"fitbeam/beam_constrains_mass on every planet."
             )
         if any_beam_constrains_mass:
             self.manifest["beam"] = "default"
@@ -703,8 +706,8 @@ class Planet(Component):
                 )
                 continue
             if self.mass_parameterizations[i] == "log_q":
-                logger.info(
-                    f"[{self.prefix}.{nm}] the RV semi-amplitude estimate "
+                logger.debug(
+                    f"{self.log_tag(i)} the RV semi-amplitude estimate "
                     f"({k_ms:.4g} m/s) is not used as a start: this planet "
                     "samples log_q, whose default start would share the "
                     "correction with the orbit's cos i.  Seed planet.mass "
@@ -864,8 +867,8 @@ class Planet(Component):
             for nm, m, r in zip(self.names, modes, reasons)
         )
         if any(m != "linear" for m in modes):
-            logger.info(
-                f"[{self.prefix}] mass coordinate per planet: {detail} "
+            logger.debug(
+                f"{self.log_tag()} mass coordinate per planet: {detail} "
                 "(override per planet with 'fitlogq:' / 'fitmsini:'; both "
                 "false samples the signed linear mass)."
             )
@@ -994,8 +997,9 @@ class Planet(Component):
 
         for i in np.nonzero(self._mass_pin_on_log_q)[0]:
             name = self.names[i]
-            logger.info(
-                f"'{self.prefix}.{name}.mass' sigma: 0 -- planet '{name}' "
+            logger.debug(
+                f"{self.log_tag(i)} '{self.prefix}.{name}.mass' sigma: 0 -- "
+                f"planet '{name}' "
                 f"samples log_q = log10(m_p/m_host) and its host's logmass "
                 f"is pinned too, so the pin is applied to "
                 f"'{self.prefix}.{name}.log_q' (solved from the two masses). "
@@ -1193,8 +1197,8 @@ class Planet(Component):
                         if radius_side
                         else "radius from mass"
                     )
-                    logger.info(
-                        f"planet '{nm}': applying the Chen & Kipping (2017) "
+                    logger.debug(
+                        f"[{self.prefix} {nm}] applying the Chen & Kipping (2017) "
                         f"mass-radius relation to constrain the {constrained} "
                         f"(override with 'chen: false' on the planet)."
                     )
@@ -1617,10 +1621,10 @@ class Planet(Component):
                     self.allow_orbit_crossing[i]
                     or self.allow_orbit_crossing[j]
                 ):
-                    logger.info(
-                        "[%s] orbit-crossing barrier skipped for the "
+                    logger.debug(
+                        "%s orbit-crossing barrier skipped for the "
                         "%s/%s pair (allow_orbit_crossing).",
-                        self.prefix,
+                        self.log_tag(),
                         self.names[i],
                         self.names[j],
                     )
@@ -1808,17 +1812,15 @@ class Planet(Component):
         for p, rpearth in self.chen_only_mass_planets(system).items():
             nm = self.names[p]
             logger.warning(
-                f"[{self.prefix}.{nm}] the mass is constrained ONLY by the "
-                f"Chen & Kipping (2017) mass-radius relation (no RV, "
-                f"astrometry or prior measures it), and the radius start "
-                f"({rpearth / RJUP_TO_REARTH:.2f} RJ) reaches the relation's "
-                f"degenerate Jovian regime (>= "
-                f"{physics.CHEN_DEGENERATE_RPEARTH / RJUP_TO_REARTH:.2f} RJ), "
-                f"where nearly every mass from Saturn to the hydrogen-burning "
-                f"limit predicts the same radius and the regime breaks are "
-                f"kinks.  The mass, and everything derived from it, is "
-                f"unlikely to mix under NUTS.  {self._chen_pin_advice(p)} "
-                f"or give the mass a prior (mu/sigma)."
+                f"{self.log_tag(p)} the mass is constrained only by the "
+                f"Chen & Kipping (2017) relation, and the radius start "
+                f"({rpearth / RJUP_TO_REARTH:.2f} RJ) is in its degenerate "
+                f"Jovian regime (>= "
+                f"{physics.CHEN_DEGENERATE_RPEARTH / RJUP_TO_REARTH:.2f} RJ, "
+                f"where nearly every mass predicts the same radius), so the "
+                f"mass and everything derived from it is unlikely to mix "
+                f"under NUTS.  {self._chen_pin_advice(p)} or give the mass a "
+                f"prior (mu/sigma)."
             )
 
     def _chen_pin_advice(self, index):

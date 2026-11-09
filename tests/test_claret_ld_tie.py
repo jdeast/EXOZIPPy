@@ -251,9 +251,7 @@ def _prepared_fspl(tmp_path, band, galactic=False):
         "lens": [{"body": "star.Lens"}],
         "source": [{"body": "star.Source"}],
         "band": [band],
-        "mulensinstrument": [
-            {"name": "OGLE", "file": lc, "filter": "I", "band": "I"}
-        ],
+        "mulensinstrument": [{"name": "OGLE", "file": lc, "band": "I"}],
     }
     if galactic:
         config["galacticmodel"] = [{"name": "gm", "anchor_idx": 1}]

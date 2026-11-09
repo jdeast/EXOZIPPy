@@ -507,7 +507,7 @@ def test_the_auto_decision_and_its_cost_are_logged(caplog):
     import logging
 
     # ON: names the component that asked for it and quotes the cost
-    with caplog.at_level(logging.INFO, logger="exozippy.test.hot"):
+    with caplog.at_level(logging.DEBUG, logger="exozippy.test.hot"):
         _resolve("auto", _TopologySystem(lens=True))
     assert "auto -> ON" in caplog.text
     assert "lens" in caplog.text
@@ -515,7 +515,7 @@ def test_the_auto_decision_and_its_cost_are_logged(caplog):
 
     # OFF: says no search will run, and what enabling it would cost
     caplog.clear()
-    with caplog.at_level(logging.INFO, logger="exozippy.test.hot"):
+    with caplog.at_level(logging.DEBUG, logger="exozippy.test.hot"):
         _resolve("auto", _TopologySystem(transit=False))
     assert "auto -> OFF" in caplog.text
     assert "NO search for suppressed modes will run" in caplog.text

@@ -240,7 +240,7 @@ def resolve_branch_draws(
     n_comb = len(system._branch_combination_terms)
     n_dets = len(dets)
     labels = [b["label"] for b in system._branch_alternatives]
-    logger.info(
+    logger.debug(
         "[branches] drawing the branch combination of %d x %d draws from the "
         "mixture's own per-combination weights (%d combination(s): %s)",
         n_chains,

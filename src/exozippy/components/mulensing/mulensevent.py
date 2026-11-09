@@ -919,7 +919,8 @@ class MulensEvent(Component):
                             )
             if reason is not None:
                 logger.warning(
-                    f"mulensevent: fitthetae is set but {reason}; ignoring it."
+                    f"[mulensevent] fitthetae is set but {reason}, so it is "
+                    f"IGNORED; remove it from the mulensevent block."
                 )
                 fitthetae = False
         self._fitthetae = fitthetae
@@ -1405,7 +1406,7 @@ class MulensEvent(Component):
             return
         user_keys = self._user_pm_keys(system, star_idx)
         if user_keys:
-            logger.info(
+            logger.debug(
                 f"[{self.prefix}] star.{star_idx} proper motion given "
                 f"({', '.join(user_keys)}); not seeding it from the "
                 f"galactic model."
@@ -1436,7 +1437,7 @@ class MulensEvent(Component):
         self.config_manager.add_hint(
             f"star.{star_idx}.pm_dec", pm_dec, rank=rank
         )
-        logger.info(
+        logger.debug(
             f"[{self.prefix}] star.{star_idx} proper motion seeded at the "
             f"{population} prior mean for {dist_pc:.0f} pc: "
             f"pm_ra={pm_ra:+.3f}, pm_dec={pm_dec:+.3f} mas/yr."
@@ -2176,13 +2177,13 @@ class MulensEvent(Component):
             )
             if self.finite_source:
                 what += ", finite source"
-            logger.info(
+            logger.debug(
                 f"[{where}] astrometric centroid shift through "
                 f"VBMicrolensing's astrox accumulators ({what}; "
                 f"VBMDirectMagOp(astrometry=True), gradient-free)."
             )
         else:
-            logger.info(
+            logger.debug(
                 f"[{where}] astrometric centroid shift from the symbolic "
                 f"point-lens closed form (differentiable)."
             )

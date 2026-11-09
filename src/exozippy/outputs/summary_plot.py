@@ -513,7 +513,7 @@ def _draw_model_traces(system, panels, draws):
             logger.warning(
                 "summary figure: %d of %d draw(s) of %s exceeded "
                 "eval_timeout in plot_data and are left out of the "
-                "spaghetti.",
+                "spaghetti; raise the sampler's eval_timeout to draw them.",
                 n_timeout,
                 len(draws),
                 key,
@@ -571,7 +571,7 @@ def _panels(charts):
         else:
             by_kind[kind].append(chart)
     if owners - drawn:
-        logger.info(
+        logger.debug(
             "summary plot: no summary panel for component(s) %s; their "
             "charts are in their own PDFs.",
             ", ".join(sorted(owners - drawn)),
@@ -1482,7 +1482,7 @@ def _contours(ax, contours):
         x, y = np.asarray(x, dtype=float), np.asarray(y, dtype=float)
         why = _degeneracy(x, y)
         if why is not None:
-            logger.info(
+            logger.debug(
                 "summary plot: no %s contour -- its posterior has no 2-D "
                 "density (%s).",
                 label,
@@ -1914,7 +1914,7 @@ def write_summary_plot(
             "declares a summary chart."
         )
         return None
-    logger.info(
+    logger.debug(
         f"summary plot: median draw chain {chain}, draw {draw} of the "
         f"post-burn-in trace ({distance:.1f} posterior widths from the "
         "median, summed in quadrature over the sampled coordinates)."

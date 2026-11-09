@@ -870,7 +870,8 @@ def estimate_mode_evidences(
             status["n_eval_timeout"] = n_to
             logger.warning(
                 "evidence: mode %d: %d of %d bridge logp call(s) exceeded "
-                "eval_timeout=%gs and count as failed evaluations",
+                "eval_timeout=%gs and count as failed evaluations; raise the "
+                "sampler's eval_timeout to evaluate them",
                 k + 1,
                 n_to,
                 n1 + n2,
@@ -957,11 +958,13 @@ def estimate_mode_evidences(
             )
         )
         if refused:
-            logger.warning(
+            # DEBUG: apply_evidence_weighting warns ONCE, naming every
+            # refused mode; the reasons are in the mode report's notes.
+            logger.debug(
                 "evidence: mode %d refused [%s] (%s)", k + 1, state, reason
             )
         else:
-            logger.info(
+            logger.debug(
                 "evidence: mode %d lnZ=%.3f +/- %.3f (re2=%.3g, "
                 "N_post=%d, N_prop=%d of which %d unsupported)",
                 k + 1,
@@ -1066,8 +1069,8 @@ def apply_evidence_weighting(
             f"[{refused[0].state}]: " + refused[0].reason + "; see notes)"
         )
         logger.warning(
-            "evidence weighting refused for mode(s) %s; "
-            "falling back to occupancy",
+            "evidence weighting refused for mode(s) %s, so the mode weights "
+            "are occupancy weights; the reasons are in the modes report.",
             ids,
         )
         if idata is not None:
@@ -1147,7 +1150,8 @@ def apply_evidence_weighting(
         )
     if idata is not None:
         mode_report.attach(idata)
-    logger.info(
-        "evidence weighting applied: weights=%s", [f"{x:.3f}" for x in w]
+    logger.debug(
+        "evidence weighting applied: weights %s",
+        ", ".join(f"{x:.3f}" for x in w),
     )
     return True

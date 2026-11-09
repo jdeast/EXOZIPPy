@@ -44,7 +44,7 @@ def _system(tmp_path, params):
         "mulensevent": [{"name": "EV"}],
         "lens": [{"body": "star.L1"}],
         "source": [{"body": "star.Source"}],
-        "mulensinstrument": [{"name": "OGLE", "file": lc, "filter": "I"}],
+        "mulensinstrument": [{"name": "OGLE", "file": lc}],
     }
     base = {
         "star.L1.mass": {"initval": 0.6},
