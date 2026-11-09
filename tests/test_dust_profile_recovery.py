@@ -11,8 +11,10 @@ scipy's interpolator on the tables, not the graph): the clump's calibrated
 I and (V-I), and resolved (HST-like) V, I and H of the lens and the source,
 with every stellar parameter but the extinction pinned at the truth -- the
 question is the extinction alone.  The MAP of the default profile (K = 3
-bins) recovers A_V(d_L) and A_V(d_S); the smooth layer (dust_bins: 1) misses
-the lens by the cloud.
+bins) recovers A_V(d_L) and A_V(d_S) with every object's scatter coordinate
+at ~0 (measured: lens 2.9784 vs truth 2.9785, source 3.5129 vs 3.5129); the
+smooth layer (dust_bins: 1) reaches the same A_V values only by pulling each
+object's av_frac ~2.3 sigma (+/-0.07 against 0.03).
 """
 
 import numpy as np
@@ -171,18 +173,25 @@ def map_avs(tmp_path, sed=None):
     fn = pytensor.function(
         vv,
         model.replace_rvs_by_values(
-            [system.star.av.value, system.redclump.av.value]
+            [
+                system.star.av.value,
+                system.redclump.av.value,
+                system.star.av_frac.value,
+                system.redclump.av_frac.value,
+                system.sed.dust_anchor.value,
+            ]
         ),
         on_unused_input="ignore",
     )
-    av, av_rc = fn(*[unpack(res.x)[v.name] for v in vv])
+    av, av_rc, frac, frac_rc, anchor = fn(*[unpack(res.x)[v.name] for v in vv])
     names = list(system.star.names)
     _, d_rc = _sight()
     truth = {n: float(true_av(STARS[n][3])) for n in STARS}
     truth["RedClump"] = float(true_av(d_rc))
     got = {n: float(av[names.index(n)]) for n in STARS}
     got["RedClump"] = float(av_rc[0])
-    return got, truth, float(-res.fun)
+    fracs = np.concatenate([np.ravel(frac), np.ravel(frac_rc)])
+    return got, truth, float(-res.fun), fracs
 
 
 def test_the_profile_recovers_a_cloud_in_front_of_the_lens(tmp_path):
@@ -192,7 +201,8 @@ def test_the_profile_recovers_a_cloud_in_front_of_the_lens(tmp_path):
     Then A_V(lens) and A_V(source) are recovered to 0.1 mag, and the lens's
       A_V is below the source's (monotone by construction).
     """
-    got, truth, _ = map_avs(tmp_path)
+    got, truth, _, fracs = map_avs(tmp_path)
+    assert np.all(np.abs(fracs) < 0.01)  # the bins hold the cloud
     assert got["Lens"] == pytest.approx(truth["Lens"], abs=0.1)
     assert got["Source"] == pytest.approx(truth["Source"], abs=0.1)
     assert got["Lens"] < got["Source"]
@@ -203,14 +213,14 @@ def test_the_smooth_layer_cannot_put_the_cloud_there(tmp_path):
     Given the same data and the smooth layer alone (dust_bins: 1, the
     Bennett et al. 2015 form normalized at the clump),
     When the MAP is found,
-    Then the lens's A_V misses the truth by more than the profile's does:
-      the layer's fixed A_L/A_S cannot hold a cloud in front of the lens.
+    Then the layer reaches the lens's A_V only by pulling every object's
+      own scatter coordinate av_frac about 2 sigma off zero (|av_frac| >
+      0.05 against its 0.03 prior; measured +/-0.07): its fixed A_L/A_S
+      cannot hold a cloud in front of the lens, and a larger cloud than the
+      scatter can absorb is simply missed.
     """
-    got1, truth, _ = map_avs(tmp_path / "k1", sed={"dust_bins": 1})
-    got3, _, _ = map_avs(tmp_path / "k3")
-    assert abs(got1["Lens"] - truth["Lens"]) > 2 * abs(
-        got3["Lens"] - truth["Lens"]
-    )
+    _got, _truth, _, fracs = map_avs(tmp_path, sed={"dust_bins": 1})
+    assert np.max(np.abs(fracs)) > 0.05
 
 
 if __name__ == "__main__":  # the numbers for the PR body
@@ -223,5 +233,5 @@ if __name__ == "__main__":  # the numbers for the PR body
     )
     for tag, sed in (("K=3 profile", None), ("K=1 layer", {"dust_bins": 1})):
         (root / tag[:3]).mkdir()
-        got, truth, lp = map_avs(root / tag[:3], sed)
-        print(tag, "got", got, "truth", truth, "MAP logp", lp, flush=True)
+        got, truth, lp, fracs = map_avs(root / tag[:3], sed)
+        print(tag, got, truth, lp, fracs, flush=True)
