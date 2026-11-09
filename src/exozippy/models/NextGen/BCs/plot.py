@@ -39,7 +39,7 @@ class NextGenPlot(Plot):
         Created Class Attributes
         -------
             self.logg_vals_draws     :  np.ndarray, shape (ndraws, nstars)
-            self.mag_pred_draws      :  np.ndarray, shape (ndraws, nstars, nfilters)
+            self.mag_pred_draws      :  np.ndarray, shape (ndraws, nstars, n_row_columns)
             self.combined_pred_draws :  np.ndarray, shape (ndraws, nfilters)
         """
         # grab compiled functions
@@ -52,7 +52,9 @@ class NextGenPlot(Plot):
         )
 
         logg_vals_draws = np.zeros((self.ndraws, self.nstars))
-        mag_pred_draws = np.zeros((self.ndraws, self.nstars, self.nfilters))
+        mag_pred_draws = np.zeros(
+            (self.ndraws, self.nstars, self.n_row_columns)
+        )
         combined_pred_draws = np.zeros((self.ndraws, self.nfilters))
 
         for d, draw in enumerate(self.draws):

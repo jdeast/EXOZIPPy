@@ -1205,8 +1205,9 @@ def test_load_data_builds_blend_matrix_from_photType(multistar_sed_file):
     names), a differential row (pos by name, neg by index), and a row
     with no photType,
     When load_data runs,
-    Then blend_matrix holds +1/-1/0 coefficients per the EXOFASTv2
-    convention, defaulting to an all-star blend when photType is absent,
+    Then pos_matrix / neg_matrix hold each side's 0/1 star membership per
+    the EXOFASTv2 convention, defaulting to an all-star blend when
+    photType is absent,
     and combo_labels describe each combination.
     """
     # ARRANGE
@@ -1217,10 +1218,16 @@ def test_load_data_builds_blend_matrix_from_photType(multistar_sed_file):
     sed.load_data(system)
 
     # ASSERT
-    assert sed.blend_matrix.shape == (3, 2)
-    assert sed.blend_matrix[0].tolist() == [1, 1]  # Lens+Source blend
-    assert sed.blend_matrix[1].tolist() == [-1, 1]  # Source - Lens
-    assert sed.blend_matrix[2].tolist() == [1, 1]  # default: all stars
+    assert sed.pos_matrix.shape == sed.neg_matrix.shape == (3, 2)
+    assert sed.pos_matrix[0].tolist() == [1, 1]  # Lens+Source blend
+    assert sed.neg_matrix[0].tolist() == [0, 0]
+    assert sed.pos_matrix[1].tolist() == [0, 1]  # Source - Lens
+    assert sed.neg_matrix[1].tolist() == [1, 0]
+    assert sed.pos_matrix[2].tolist() == [1, 1]  # default: all stars
+    assert sed.neg_matrix[2].tolist() == [0, 0]
+    # no color row: every neg side reads its row's own column
+    assert sed.neg_col.tolist() == [0, 1, 2]
+    assert sed.row_filters == sed.filters
     assert sed.combo_labels == ["Lens+Source", "Source-Lens", "Lens+Source"]
     # one observation per row, not per star
     assert sed.mag.shape == (3,)
@@ -1250,7 +1257,8 @@ def test_load_data_accepts_blend_alias_for_pos(tmp_path):
     sed.load_data(_stub_system(star_names=("A", "B")))
 
     # ASSERT
-    assert sed.blend_matrix[0].tolist() == [0, 1]
+    assert sed.pos_matrix[0].tolist() == [0, 1]
+    assert sed.neg_matrix[0].tolist() == [0, 0]
     assert sed.combo_labels == ["B"]
 
 
