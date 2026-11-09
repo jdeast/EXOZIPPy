@@ -540,6 +540,39 @@ class GalacticModel(Component):
         self.manifest = {}
 
     # ------------------------------------------------------------------
+    # Public sight-line queries (numpy, stage 1-3 safe; galacticmodel.md,
+    # "The sight-line queries").  Not part of the port: what a component
+    # outside the galactic prior (the red clump) needs to know about the
+    # sight line, computed from the port's own functions so there is ONE
+    # definition of "the sight line" and of "the bar".
+    # ------------------------------------------------------------------
+    def sight_line(self, system):
+        """``(l_deg, b_deg)`` of the galactic model's line of sight: the
+        anchor star's POSITION ROOT (a lens whose position derives from its
+        source reads the source's), at its informed start, through the
+        port's own ``line_of_sight_basis``.  Read the stage 1-3 way
+        (``require_star_radec``: the params file's position, never a probed
+        placeholder), and through the pure root query
+        ``star.position_root_of``, so the answer does not depend on whether
+        Star's stage 3 has run."""
+        from exozippy.components.star.position import require_star_radec
+        from exozippy.components.star.star import position_root_of
+
+        root = position_root_of(system, int(self.anchor_idx))
+        ra, dec = require_star_radec(
+            self.config_manager,
+            root,
+            f"[{self.prefix}] the line of sight (anchor star {self.anchor_idx})",
+        )
+        l_deg, b_deg, _m, _v0 = k21.line_of_sight_basis(ra, dec)
+        return float(l_deg), float(b_deg)
+
+    def bar_distance_moments(self, system):
+        """``(mean_mu, sd_mu, mode_mu)`` of the bar's stars on the sight
+        line (``koshimoto21.bar_distance_moments``)."""
+        return k21.bar_distance_moments(*self.sight_line(system))
+
+    # ------------------------------------------------------------------
     # Reporting: tell the tables what these potentials are.
     #
     # Both potentials below act on parameters this component does not own

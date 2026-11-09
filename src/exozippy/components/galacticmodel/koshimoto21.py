@@ -1128,6 +1128,43 @@ def red_clump_distance_modulus(l_deg, b_deg):
     return 14.3955 - 0.0239 * l_signed + 0.0122 * abs(b_deg) + 0.128
 
 
+#: the bar's components on a sight line (COMPONENTS indices): the E+E_X
+#: bar, plus the nuclear stellar disk where genulens switches it on
+_BAR_COMPONENT = 8
+_NSD_COMPONENT = 9
+
+
+def bar_distance_moments(l_deg, b_deg, lower_pc=1000.0, upper_pc=20000.0):
+    """``(mean_mu, sd_mu, mode_mu)``: the distance modulus of the bar's
+    stars on this sight line -- moments of n_bar(d) d^2 dd over the bar
+    branch (plus the NSD inside genulens's box), i.e. stars per unit mu in
+    the cone, from the port's own positions and densities.  NOT a genulens
+    function: an EXOZIPPy query of the ported model (galacticmodel.md, "The
+    sight-line queries"), whose regression test is genulens's own coded
+    red-clump formula (``red_clump_distance_modulus``, within ~0.08 mag on
+    six bulge sight lines).  The red clump's CENTROID distance is the mean;
+    ``sd_mu`` is the bar's depth (the spread of individual clump stars, not
+    the centroid's uncertainty); off the plane the mean and the mode split
+    (the X-shaped double clump).  numpy, trapezoid in ln d."""
+    lnd = np.linspace(
+        np.log(lower_pc), np.log(upper_pc), _POSITION_QUAD_POINTS
+    )
+    d = np.exp(lnd)
+    x, y, z = dlb_to_xyz(d, l_deg, b_deg)
+    dens = log_number_densities(x, y, z)
+    br = [_BAR_COMPONENT] + (
+        [_NSD_COMPONENT] if nsd_active(l_deg, b_deg) else []
+    )
+    f = np.logaddexp.reduce(np.stack([dens[i] for i in br]), axis=0)
+    f = f + 3.0 * lnd  # n d^2 dd = n d^3 dln d
+    w = np.exp(f - np.max(f))
+    mu = 5.0 * np.log10(d) - 5.0
+    norm = np.trapezoid(w, lnd)
+    mean = float(np.trapezoid(w * mu, lnd) / norm)
+    sd = float(np.sqrt(np.trapezoid(w * (mu - mean) ** 2, lnd) / norm))
+    return mean, sd, float(mu[np.argmax(w)])
+
+
 def log_source_weight_sqrt(d_pc, xp=np):
     """genulens's default (gammaDs = 0.5, no luminosity function): a source
     at distance D weighs n_MS(D) sqrt(D / 8 kpc) -- with NO D^2 volume

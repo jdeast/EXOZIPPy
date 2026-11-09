@@ -23,6 +23,13 @@ The mirror puts the frame in genulens's orientation (Koshimoto, Baba & Bennett 2
 
 **Do not build a position or a velocity by hand.** Until 2026-10 (review 1.7.1) the position was built by hand in genulens's orientation (`x = R0 - d cos l cos b`) while the velocity was astropy's unmirrored one, so `v_x` entered `v_r` and `v_phi` with the wrong sign: an exactly circular orbit at 4 kpc toward ob140939 got `v_r = +47 km/s`, at `l = 90 deg`, 4 kpc `+172 km/s`, and the Sun itself moved outward at `+10 km/s`. The mismatch was born when the model was integrated (it kept the reference script's positions and took astropy's velocities); the 2026-08 fix that moved the rotation onto `v_phi` and the later matching of the two frames' `R0`/`z_sun`/`v_sun` both left the sign of `x` alone, because the tests of the time compared log-density margins through the mixture, whose hotter branches absorbed the error.
 
+## The sight-line queries (`GalacticModel.sight_line`, `bar_distance_moments`)
+
+Two numpy queries for a component outside the galactic prior that needs to know about the sight line -- the red clump (`components/redclump/redclump.md`) -- so there is ONE definition of "the sight line" and of "the bar". They are NOT part of the port (no genulens function computes them); they are built only from the port's own functions.
+
+- `sight_line(system)` -> `(l, b)`: the anchor star's POSITION ROOT (a lens whose position derives from its source reads the source's; the pure query `star.position_root_of`, so the answer does not depend on component order), at its informed start read the stage 1-3 way (`require_star_radec`, never a probed placeholder), through `koshimoto21.line_of_sight_basis`.
+- `bar_distance_moments(system)` -> `(mean_mu, sd_mu, mode_mu)` (`koshimoto21.bar_distance_moments`): moments in distance modulus of n_bar(d) d^2 dd -- stars per unit mu in the cone -- over the E+E_X bar branch, plus the NSD inside genulens's box, by an ln-d trapezoid like `log_position_norm`. Its validation is genulens's own coded clump formula (`red_clump_distance_modulus`, Nataf+2016 as genulens codes it): on Baade's window (1.0, -3.9) the mean is 14.528 against 14.547, and over six bulge sight lines the two agree to <= 0.08 mag ((-5, -3) +0.074, (0.5, -6) -0.076). The depth (0.17-0.30 mag) is the spread of individual clump stars, not the uncertainty of the clump CENTROID; off the plane (b = -6) the mean and the mode split by 0.17 mag, the X-shaped double clump, and the mean is the defensible single number. Tests: `tests/test_redclump.py::test_bar_distance_moments_reproduce_the_ports_bar_and_genulens`.
+
 ## Tests
 
 `tests/test_galactic_frame.py` checks computed QUANTITIES against astropy, not margins:
