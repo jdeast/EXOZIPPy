@@ -1,0 +1,19 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 2
+#$ -q mThM.q
+#$ -l use_himem=TRUE
+#$ -cwd
+#$ -j y
+#$ -N valR3000
+#$ -o scripts/validate_runtime_grid.$JOB_ID.log
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export OMP_NUM_THREADS=2
+cd $HOME/python/EXOZIPPy
+echo "commit $(git rev-parse --short HEAD) on $(git branch --show-current)   $(date)"
+python -u scripts/validate_runtime_grid.py $HOME/zenodo_bundles/nextgen_runtime_R3000
+echo "exit $?   $(date)"

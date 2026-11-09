@@ -715,6 +715,35 @@ RECORDS: Mapping[str, ZenodoRecord] = MappingProxyType(
                 }
             ),
         ),
+        # The R = 3000 runtime grid of the SED's fitted-R_V mode
+        # (sed.fit_rv_dust; models/NextGen/runtime_spectra.py).  ON DEMAND:
+        # 656 MB that only a fit_rv_dust fit reads.
+        "nextgen_runtime_spectra": ZenodoRecord(
+            record_id=24060411,
+            concept_record_id=24060410,
+            title=(
+                "BT-NextGen (AGSS2009) Runtime Spectral Grid at R = 3000 for "
+                "EXOZIPPy"
+            ),
+            creators=("Eastman, Jason", "Sandhaus, Phoebe"),
+            citation_key=None,
+            files=_pins(
+                {
+                    "MANIFEST.txt": (
+                        133,
+                        "23c9b27c624c6ad825cb9620b3159c50",
+                    ),
+                    "NextGen.R3000.logflux.npy": (
+                        656473088,
+                        "048992f8c51d37c00a6a549b542e61b8",
+                    ),
+                    "NextGen.R3000.meta.json": (
+                        583655,
+                        "841a32da36cb5659d1ef1357f488a901",
+                    ),
+                }
+            ),
+        ),
     }
 )
 
@@ -726,7 +755,9 @@ RECORDS: Mapping[str, ZenodoRecord] = MappingProxyType(
 # published tables lack, which most fits never do.  An on-demand record still
 # has an owner with a ``fetch_all()`` (the explicit pre-fetch for a machine
 # that will run offline); only the automatic pre-fetch skips it.
-ON_DEMAND: frozenset[str] = frozenset({"nextgen_spectra_r20000"})
+ON_DEMAND: frozenset[str] = frozenset(
+    {"nextgen_spectra_r20000", "nextgen_runtime_spectra"}
+)
 
 # The module that OWNS each record: the one whose loader reads its files, and
 # whose module-level ``fetch_all()`` puts every file that loader reads into
@@ -743,6 +774,7 @@ OWNERS: Mapping[str, str] = MappingProxyType(
         "claret_ld_tables": "exozippy.models.Claret.claret_tables",
         "phoenix_ld_tables": "exozippy.models.PHOENIX.ld_tables",
         "nextgen_spectra_r20000": "exozippy.models.NextGen.bc_synthesis",
+        "nextgen_runtime_spectra": "exozippy.models.NextGen.runtime_spectra",
     }
 )
 
