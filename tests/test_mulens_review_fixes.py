@@ -1315,7 +1315,7 @@ def test_bootstrap_skips_a_file_whose_flux_starts_the_user_gave(
     _user_flux(inst, **entries)
 
     # Act
-    with caplog.at_level("DEBUG"):
+    with caplog.at_level("DEBUG", logger="exozippy"):
         f_total, q_source, q_flux = inst._estimate_flux_components(
             t, flux, xyz, 0.0, 0.0, 0, inst.geometry
         )
@@ -1346,7 +1346,7 @@ def test_bootstrap_still_runs_and_warns_without_every_user_flux_start(
     _user_flux(inst, **entries)
 
     # Act
-    with caplog.at_level("DEBUG"):
+    with caplog.at_level("DEBUG", logger="exozippy"):
         inst._estimate_flux_components(
             t, flux, xyz, 0.0, 0.0, 0, inst.geometry
         )
