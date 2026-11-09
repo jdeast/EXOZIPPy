@@ -597,16 +597,19 @@ class ModelAuditor:
         polish moved them by up to +8800%).  A move is a fact about the
         seed's distance from THIS model's optimum, and is reported as one.
 
-        Returns [{key, requested, build, polished, rel}] sorted worst-first
-        (``rel`` relative to the build value), skipping moves inside the
-        same tolerance the contract check uses.
+        Returns [{key, requested, build, polished, rel, absolute, n_sigma}]
+        sorted worst-first by ``n_sigma`` (the move in units of the element's
+        1-sigma width at the start, ``Parameter.start_width``; None for an
+        element the sampler does not move), ``rel`` relative to the build
+        value, skipping moves inside the same tolerance the contract check
+        uses.
         """
         targets = self._user_start_targets()
         if not targets or not build_values:
             return []
         polished = self.user_start_values()
         moves = []
-        for key, p, _i, requested in targets:
+        for key, p, i, requested in targets:
             before = build_values.get(key)
             after = polished.get(key)
             if before is None or after is None:
@@ -622,6 +625,16 @@ class ModelAuditor:
             rel = diff / denom
             if abs(diff) <= USER_START_ATOL or abs(rel) <= USER_START_RTOL:
                 continue
+            # The move in units of the element's own 1-sigma width at the
+            # start (Parameter.start_width, internal units -> user units the
+            # way the startup table converts its Scale column), or None for
+            # an element the sampler does not move (derived, pinned): its
+            # move follows from the elements it is computed from.
+            width = p.start_width(i)
+            n_sigma = None
+            if width is not None:
+                width_user = abs(float(p.from_internal(width, index=i)))
+                n_sigma = abs(diff) / width_user
             moves.append(
                 {
                     "key": key,
@@ -630,9 +643,15 @@ class ModelAuditor:
                     "polished": after,
                     "rel": rel,
                     "absolute": absolute,
+                    "n_sigma": n_sigma,
                 }
             )
-        moves.sort(key=lambda m: -abs(m["rel"]))
+        moves.sort(
+            key=lambda m: (
+                -(m["n_sigma"] if m["n_sigma"] is not None else -1.0),
+                -abs(m["rel"]),
+            )
+        )
         return moves
 
     def check_user_starts(self):

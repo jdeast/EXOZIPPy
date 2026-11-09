@@ -53,7 +53,7 @@ def _config(files, model_root, orbits, stars=("A", "B")):
     cfg = {
         "star": [{"name": s} for s in stars],
         "orbit": orbits,
-        "galacticmodel": [{"star_ndx": 0}],
+        "galacticmodel": [{}],
         "evolutionarymodel": [
             {"star": s, "model_root": model_root} for s in stars
         ],
@@ -256,7 +256,9 @@ def test_a_second_pass_does_not_repeat_the_first_passs_log_lines(
         return [("start re-read for the test", [])] if calls["n"] == 1 else []
 
     monkeypatch.setattr(Star, "reread_after_starts", reread_once)
-    with caplog.at_level(logging.INFO, logger="exozippy"):
+    # DEBUG: the link line is a decision that follows from the config
+    # (docs/logging.md); the dedup it checks is level-blind.
+    with caplog.at_level(logging.DEBUG, logger="exozippy"):
         _prepare(_config(files, model_root, [ORBITS["static"]]), _params())
     assert calls["n"] == 2, "the second pass did not run"
     link_lines = [
@@ -318,13 +320,14 @@ def test_an_identical_hand_link_is_redundant_not_doubled(
     KELT-4 params file writes),
     When the system is prepared,
     Then the user's link is kept as the only link on that element, and a
-    warning says it is redundant.
+    DEBUG line says it is redundant (it changes nothing in the model, so it
+    is not a WARNING: docs/logging.md).
     """
     params = _params(
         {"star.B.distance": {"initval": "star.A.distance", "sigma": 0}}
     )
     with caplog.at_level(
-        logging.WARNING, logger="exozippy.components.star.star"
+        logging.DEBUG, logger="exozippy.components.star.star"
     ):
         system = _prepare(
             _config(files, model_root, [ORBITS["static"]]), params
@@ -420,15 +423,21 @@ def test_a_bare_rv_initval_on_the_member_is_reported_unused(
     """
     Given a bare initval on B's rv (a start, not a statement),
     When the system is prepared,
-    Then B's rv is still orbit-linked and an INFO line says the initval is
-    unused.
+    Then B's rv is still orbit-linked and a WARNING says the initval is
+    ignored, with the remedy (a value the user wrote that the model does not
+    use: docs/logging.md).
     """
     params = _params({"star.B.rv": {"initval": 5000.0}})
-    with caplog.at_level(logging.INFO, logger="exozippy.components.star.star"):
+    with caplog.at_level(
+        logging.WARNING, logger="exozippy.components.star.star"
+    ):
         system = _prepare(
             _config(files, model_root, [ORBITS["static"]]), params
         )
     assert _orbit_links(system)["star.1.rv"] == "star.0.rv"
     assert any(
-        "unused" in r.message and "B.rv" in r.message for r in caplog.records
+        r.levelno == logging.WARNING
+        and "IGNORED" in r.message
+        and "B.rv" in r.message
+        for r in caplog.records
     )

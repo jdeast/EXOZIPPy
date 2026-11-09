@@ -71,7 +71,7 @@ from exozippy.components.parameter import Parameter, SeedBoundViolation, to_vec
 from exozippy.config import ConfigManager
 from exozippy.evaluator import structural_hash, structural_payload
 from exozippy.graph import determine_pymc_build_order
-from exozippy.logger import reset_first_time
+from exozippy.logger import bullets, reset_first_time, wrap_message
 from exozippy.manifest import interpret_manifest_entry, normalize_selector
 from exozippy.outputs.prose import ProseCollector
 from exozippy.yamlio import load_yaml
@@ -289,49 +289,36 @@ class System(Component):
         # normalize_config_block could run first.
         self.active_components = {}
 
+        # 0. Every top-level key is a component or a reserved block, checked
+        # BEFORE any component is built so a typo costs nothing.  An unknown
+        # key RAISES, like an unknown key inside a component block (JDE
+        # 2026-11-08; docs/logging.md, "User input is never silently
+        # ignored"): it used to warn "will be ignored" and fit a model missing
+        # whatever the user meant by it.
+        self._check_top_level_keys()
+
         # 1. AGNOSTIC INSTANTIATION
-        reserved_keys = RESERVED_CONFIG_KEYS
         for key in self.config.keys():
-            if key in self.registry:
-                CompClass = self.registry[key]
-                # The keys the USER wrote, taken before construction: a
-                # component may normalize its own block in __init__.
-                user_block = [
-                    dict(e) if isinstance(e, dict) else e
-                    for e in (
-                        self.config[key]
-                        if isinstance(self.config[key], list)
-                        else [self.config[key]]
-                    )
-                ]
-                inst = CompClass(self.config[key], self.config_manager)
-                # After construction, so a component's own refusal of a
-                # retired key comes first; then every key nobody reads
-                # raises (docs/logging.md).
-                CompClass.validate_config_keys(key, user_block)
-                self.active_components[key] = inst
-                setattr(self, key, inst)
-            elif key not in reserved_keys:
-                # Distinguish "you typo'd a key" from "the component you
-                # asked for failed to import".  The old code said the
-                # former for both and then fitted a model missing an
-                # entire component and its data, quietly.
-                failed = import_failures().get(key)
-                if failed is not None:
-                    module_path, exc = failed
-                    raise ImportError(
-                        f"YAML key '{key}' names the component module "
-                        f"{module_path}, which failed to import: "
-                        f"{type(exc).__name__}: {exc}.  A missing optional "
-                        f"dependency is the usual cause.  Fix the import or "
-                        f"remove the '{key}' block -- continuing would fit a "
-                        f"model without it."
-                    ) from exc
-                logger.warning(
-                    f"YAML key '{key}' does not match any registered "
-                    f"component and will be ignored.  Check its spelling; "
-                    f"components: {', '.join(sorted(self.registry))}."
+            if key not in self.registry:
+                continue  # a reserved block; _check_top_level_keys vetted it
+            CompClass = self.registry[key]
+            # The keys the USER wrote, taken before construction: a
+            # component may normalize its own block in __init__.
+            user_block = [
+                dict(e) if isinstance(e, dict) else e
+                for e in (
+                    self.config[key]
+                    if isinstance(self.config[key], list)
+                    else [self.config[key]]
                 )
+            ]
+            inst = CompClass(self.config[key], self.config_manager)
+            # After construction, so a component's own refusal of a
+            # retired key comes first; then every key nobody reads
+            # raises (docs/logging.md).
+            CompClass.validate_config_keys(key, user_block)
+            self.active_components[key] = inst
+            setattr(self, key, inst)
 
         # ONE line for the model (docs/logging.md): "Model: star (3), lens
         # (2), ...", in config order, the count being the instances.
@@ -366,6 +353,55 @@ class System(Component):
             self.config, self.user_params
         )
         self._structural_hash = structural_hash(self.config, self.user_params)
+
+    def _check_top_level_keys(self):
+        """Raise on a top-level config key that is neither a registered
+        component nor one of RESERVED_CONFIG_KEYS.
+
+        A key naming a component module that failed to import raises that
+        ImportError instead ("you typo'd a key" and "the component you asked
+        for failed to import" are different fixes).  Otherwise the message
+        names every unknown key, suggests a near miss among the components
+        and reserved blocks (never case-folded: a case variant is a near miss
+        to suggest, not a spelling to accept), and lists what is valid.
+        """
+        import difflib
+
+        known = set(self.registry) | set(RESERVED_CONFIG_KEYS)
+        unknown = [str(k) for k in self.config.keys() if k not in known]
+        if not unknown:
+            return
+        failures = import_failures()
+        for key in unknown:
+            failed = failures.get(key)
+            if failed is not None:
+                module_path, exc = failed
+                raise ImportError(
+                    f"YAML key '{key}' names the component module "
+                    f"{module_path}, which failed to import: "
+                    f"{type(exc).__name__}: {exc}.  A missing optional "
+                    f"dependency is the usual cause.  Fix the import or "
+                    f"remove the '{key}' block -- continuing would fit a "
+                    f"model without it."
+                ) from exc
+        hints = []
+        for key in unknown:
+            close = difflib.get_close_matches(
+                key, sorted(known), n=1, cutoff=0.75
+            )
+            if close:
+                hints.append(f"'{key}': did you mean '{close[0]}'?")
+        raise ValueError(
+            wrap_message(
+                f"Unknown top-level config key(s) "
+                f"{', '.join(repr(k) for k in unknown)}: neither a component "
+                f"nor a reserved block, so nothing would read them."
+                + ("\n" + bullets(hints) if hints else "")
+                + "\nCorrect the spelling or delete the block.  Components: "
+                f"{', '.join(sorted(self.registry))}.  Reserved blocks: "
+                f"{', '.join(sorted(RESERVED_CONFIG_KEYS))}."
+            )
+        )
 
     def structural_fingerprint(self):
         """``(hash, payload)`` of the config + params this System was built from.

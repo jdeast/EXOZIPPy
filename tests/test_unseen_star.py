@@ -113,7 +113,7 @@ def test_unseen_lens_keeps_what_mann_reads_and_loses_the_rest(
 ):
     monkeypatch.chdir(EXAMPLE_DIR)
     config, user_params = _inputs(tmp_path)
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.DEBUG, logger="exozippy"):
         system, model = _build(config, user_params)
     for p in SED_SIDE:
         assert not _sampled(system, p, 0), f"Lens {p} should be pinned"

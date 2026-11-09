@@ -1070,6 +1070,11 @@ class Parameter:
     # barrier): the shared barrier-scale vector plus the pinned/needs masks
     # set_barrier_scales consults. See set_barrier_scales.
     _barrier_state: Optional[dict] = field(default=None, init=False)
+    # The startup probe's measured width of each GAUSSIAN-prior sampled
+    # element, in units of its prior sigma ({element index: factor}); the
+    # probe never rescales those elements, so this is the only record of
+    # what it measured.  Reset by every build_pymc.  See start_width.
+    _probed_width_factor: dict = field(default_factory=dict, init=False)
     # REPORTED elements awaiting their second build phase (set in build_pymc,
     # consumed by finalize_deferred): the expressions to patch in and the shape
     # to broadcast to.  None for every parameter without role-3 elements, which
@@ -1395,6 +1400,39 @@ class Parameter:
         self.lower = put(self.lower, center - half)
         self.upper = put(self.upper, center + half)
         self.init_scale = put(self.init_scale, scale)
+
+    def start_width(self, index=0):
+        """The best per-element width (1 sigma, INTERNAL units) known at the
+        start, or None for an element the sampler does not move.
+
+        For a bounded (logit) element it is ``init_scale``, which after the
+        startup probe is the measured 0.5-nat step, i.e. the 1-sigma
+        conditional width at the start (whitening.md).  For a Gaussian-prior
+        element ``init_scale`` stays the PRIOR sigma (the probe never
+        rescales it), so the probe's measured factor, when there is one, is
+        applied here.  Before any probe (``measure_scales: false``) both are
+        the preliminary scale -- still the best width available then.
+
+        Read by run.inspect_start to judge how far the seed polish moved a
+        user's start in units of the parameter's own uncertainty
+        (docs/logging.md).
+        """
+        if not self.element_is_sampled(index):
+            return None
+        n = self._n_elements()
+        width = to_vec(
+            self.init_scale, n, fill=np.nan, where=f"{self.label}.init_scale"
+        )[index]
+        factor = self._probed_width_factor.get(index)
+        if factor is not None:
+            width = width * factor
+        width = abs(float(width))
+        if not np.isfinite(width) or width <= 0.0:
+            raise ValueError(
+                f"Parameter '{self.label}': sampled element {index} has no "
+                f"finite positive start width (init_scale {width!r})."
+            )
+        return width
 
     def element_is_sampled(self, index=0):
         """True if element ``index`` is a FREE sampled element of this vector.
@@ -2694,6 +2732,7 @@ class Parameter:
                     name=f"{self.label}_gaussian_scale",
                     shape=gaussian_scales.shape,
                 )
+                self._probed_width_factor = {}
                 self._whiten_state = {
                     "sv_logit_q_inits": sv_logit_q_inits,
                     "sv_scale_logits": sv_scale_logits,
@@ -3882,6 +3921,11 @@ class Parameter:
                 scale_logits[i] *= m
                 rescaled[j] = True
             else:
+                # Not a rescale: the probe's own measurement of this
+                # element's width, in units of its (prior) sigma, kept for
+                # start_width() -- the posterior width the data imply, which
+                # the prior sigma alone overstates.
+                self._probed_width_factor[i] = m
                 # NON-LOGIT elements are never rescaled.  Their raw N(0,1)
                 # is kept (only logit raws are flat, _raw_logp), so
                 # the raw prior IS this element's prior, N(mu, sigma) (a

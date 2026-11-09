@@ -6,6 +6,7 @@ import numpy as np
 import pytensor.tensor as pt
 
 from ..config import NUMERIC_KEYS, user_entry
+from ..logger import bullets, wrap_message
 from ..manifest import interpret_manifest_entry
 from ..physics_registry import PHYSICS_REGISTRY
 from .parameter import ElementExpression, OwnPrePatchRef, Parameter
@@ -440,14 +441,17 @@ class Component(ABC):
                     hints.append(f"'{skey}': did you mean '{close[0]}'?")
             msg = (
                 f"[{yaml_key} {label}] unknown config key(s) "
-                f"{sorted(map(str, unknown))}: {yaml_key} does not read "
-                f"them, so they would be silently ignored.  Remove or "
-                f"correct them."
+                f"{', '.join(repr(str(k)) for k in sorted(map(str, unknown)))}"
+                f": {yaml_key} does not read them, so they would be "
+                f"silently ignored."
             )
             if hints:
-                msg += "  " + "  ".join(hints)
-            msg += f"  Config keys {yaml_key} reads: {sorted(known)}."
-            raise ValueError(msg)
+                msg += "\n" + bullets(hints)
+            msg += (
+                f"\nRemove or correct them.  Config keys {yaml_key} reads: "
+                f"{', '.join(sorted(known))}."
+            )
+            raise ValueError(wrap_message(msg))
 
     @classmethod
     def _parameter_names_for_suggestion(cls, yaml_key):

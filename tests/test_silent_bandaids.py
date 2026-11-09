@@ -68,23 +68,24 @@ def test_config_naming_an_unimportable_component_raises(monkeypatch):
     )
 
 
-def test_unknown_yaml_key_still_only_warns(caplog):
+def test_unknown_yaml_key_raises_a_valueerror_not_the_import_error():
     """
     Given a YAML key that matches no component and never failed to import,
     When System is constructed,
-    Then it still only warns -- the raise above must not swallow the
-    ordinary typo case.
+    Then it raises a ValueError naming the key (an unknown top-level key
+    raises since JDE's 2026-11-08 ruling) -- distinct from the ImportError
+    above, so the ordinary typo case and the failed import keep different
+    messages.
     """
     # ARRANGE / ACT
     from exozippy.system import System
 
-    with caplog.at_level(logging.WARNING):
+    with pytest.raises(ValueError) as exc:
         System({"star": [{"name": "A"}], "not_a_component": [{}]}, {})
 
     # ASSERT
-    assert any("not_a_component" in r.message for r in caplog.records), (
-        "the typo case must still warn"
-    )
+    assert "not_a_component" in str(exc.value)
+    assert not isinstance(exc.value, ImportError)
 
 
 # ---------------------------------------------------------------------------

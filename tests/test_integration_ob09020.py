@@ -168,10 +168,11 @@ def ob09020_result(tmp_path_factory):
 
 
 # One row of run.inspect_start's startup table, as the file log handler
-# writes it (same parser as test_integration_kelt4.read_start_table):
-#   ... exozippy.run:   star.L1.logmass |     -0.05158703 |  0.015 | dex(solMass) | ...
+# writes it, one bare continuation line per row of the one-record table (same
+# parser as test_integration_kelt4.read_start_table):
+#      star.L1.logmass |     -0.05158703 |  0.015 | dex(solMass) | ...
 _START_ROW = re.compile(
-    r"exozippy\.run:\s+(?P<label>[A-Za-z_][\w.]*)\s+\|"
+    r"^\s*(?P<label>[A-Za-z_][\w.]*)\s+\|"
     r"\s+(?P<value>\S+)\s+\|"
     r"\s+(?P<scale>\S+)\s+\|"
     r"\s+(?P<units>[^|]*?)\s*\|"

@@ -59,7 +59,7 @@ from .diagnostics import (
     log_bound_pileups,
     log_cap_alarms,
 )
-from .logger import fmt_duration, log_warning_recap, setup_logging
+from .logger import bullets, fmt_duration, log_warning_recap, setup_logging
 from .mkparam import write_param_file
 from .outputs.ledger import (
     HOT_FAILED,
@@ -331,11 +331,22 @@ def _wrapup_interrupt_note(config):
 # Every `method:` value _run_fit dispatches on, in the order the dispatch
 # tests them.  This is the universe METHOD_ONLY_SAMPLER_KEYS is scored
 # against, so a new sampler branch belongs here in the same edit.
-LARGE_POLISH_MOVE = 0.10
-"""A seed-polish move of a user's start value above this fraction (or this
-much absolute, for a seed of zero) is a WARNING after the startup table;
+LARGE_POLISH_MOVE_SIGMA = 3.0
+"""A seed-polish move of a user's start value larger than this many of the
+element's own 1-sigma widths at the start (``Parameter.start_width``: the
+startup probe's measured 0.5-nat step) is a WARNING after the startup table;
 smaller moves are the polish doing its job and are logged at DEBUG
-(docs/logging.md)."""
+(docs/logging.md, JDE 2026-11-08).
+
+Why a multiple of the uncertainty and not a percentage: a percentage is right
+only by coincidence of units -- a 10% move of a noise variance is irrelevant
+while a 1% move of a t_0 can be hundreds of sigma.  Why 3: the width is the
+CONDITIONAL one (curvature along one axis, the others held), which is at most
+the marginal width, so a seed fitted to the same data can sit a sigma or two
+off in this unit through ordinary correlations alone; a move past 3 sigma
+costs at least ~4.5 nats along that axis alone (k**2 / 2), which a seed from
+the same model and data does not do -- it is stale, from a different model,
+or a different solution."""
 
 SAMPLER_METHODS = (
     "nuts",
@@ -2815,7 +2826,7 @@ def inspect_start(
             )
             if f["remedy"]:
                 remedies.setdefault(f["remedy"], []).append(f["key"])
-        named = "; ".join(
+        named = bullets(
             f"{f['key']}: you set {f['requested']:.6g}, the model is built "
             f"at {f['produced']:.6g} ({f['rel']:+.1%})"
             for f in start_misses
@@ -2826,9 +2837,10 @@ def inspect_start(
         )
         logger.warning(
             f"The model is not built at every value you set "
-            f"({len(start_misses)}): {named}.  They are start values, so the fit can still "
-            f"move, but a value you meant to pin is not where the model "
-            f"starts (per-key detail in the log file)." + remedy_text
+            f"({len(start_misses)}).  They are start values, so the fit can "
+            f"still move, but a "
+            f"value you meant to pin is not where the model starts "
+            f"(per-key detail in the log file).\n{named}" + remedy_text
         )
 
     # THE SEED POLISH'S OWN ACCOUNT.  A value the derivation delivered and
@@ -2839,43 +2851,66 @@ def inspect_start(
     # with, and that is the reader's cue to refresh them -- so the report
     # names the seed, not the derivation.
     #
-    # Every move is listed at DEBUG; only a LARGE move (> LARGE_POLISH_MOVE,
-    # relative, or absolute for a seed of zero) is a WARNING: the polish
-    # exists to move the start to the optimum, and a 0.02% move of a teff
-    # seed is the polish working, not news (docs/logging.md).
+    # Every move is listed at DEBUG; only a LARGE move -- more than
+    # LARGE_POLISH_MOVE_SIGMA of the element's own 1-sigma width at the
+    # start -- is a WARNING: the polish exists to move the start to the
+    # optimum, and a move inside the parameter's uncertainty is the polish
+    # working, not news (docs/logging.md).  An element the sampler does not
+    # move (derived, pinned) has no width; its move follows from the sampled
+    # elements it is computed from, which are judged themselves.
     if build_start_values:
-        moves = auditor.polish_moves(build_start_values)
+        report_polish_moves(auditor.polish_moves(build_start_values))
 
-        def _move_str(m):
-            if m.get("absolute"):
-                return f"{m['rel']:+.3g} from 0"
-            return f"{m['rel']:+.0%}"
 
-        for m in moves:
-            logger.debug(
-                f"  seed polish: {m['key']}: you set {m['requested']:.6g}, "
-                f"the polish moved the start to {m['polished']:.6g} "
-                f"({_move_str(m)})"
-            )
-        large = [m for m in moves if abs(m["rel"]) > LARGE_POLISH_MOVE]
-        if large:
-            named = ", ".join(
-                f"{m['key']} ({m['requested']:.6g} -> {m['polished']:.6g})"
+def report_polish_moves(moves):
+    """Log the seed polish's moves of the user's start values: every move at
+    DEBUG, and ONE WARNING listing the moves larger than
+    LARGE_POLISH_MOVE_SIGMA of the element's own width (``n_sigma`` from
+    ``ModelAuditor.polish_moves``; None for an element the sampler does not
+    move, which never warns).  Returns the list of moves that warned."""
+
+    def _move_str(m):
+        rel = (
+            f"{m['rel']:+.3g} from 0"
+            if m.get("absolute")
+            else f"{m['rel']:+.0%}"
+        )
+        if m["n_sigma"] is None:
+            return f"{rel}; not sampled"
+        return f"{rel}, {m['n_sigma']:.3g} sigma"
+
+    for m in moves:
+        logger.debug(
+            f"  seed polish: {m['key']}: you set {m['requested']:.6g}, "
+            f"the polish moved the start to {m['polished']:.6g} "
+            f"({_move_str(m)})"
+        )
+    large = [
+        m
+        for m in moves
+        if m["n_sigma"] is not None and m["n_sigma"] > LARGE_POLISH_MOVE_SIGMA
+    ]
+    if large:
+        logger.warning(
+            f"The seed polish moved {len(large)} of your start values by "
+            f"more than {LARGE_POLISH_MOVE_SIGMA:g} sigma (each one's "
+            f"measured 1-sigma width at the start): those seeds are not near "
+            f"this model's optimum -- stale, or a different solution.\n"
+            + bullets(
+                f"{m['key']}: {m['requested']:.6g} -> {m['polished']:.6g} "
+                f"({m['n_sigma']:.3g} sigma)"
                 for m in large
             )
-            logger.warning(
-                f"The seed polish moved {len(large)} of your start values by "
-                f"more than {LARGE_POLISH_MOVE:.0%}: {named}.  Those seeds "
-                f"are not near this model's optimum -- stale, or a different "
-                f"solution.\nRefresh them in the params file; to hold one "
-                f"fixed through the polish pin it (sigma: 0), or set "
-                f"sampler: {{seed_polish: false}} to start at the seeds."
-            )
-        elif moves:
-            logger.debug(
-                f"seed polish moved {len(moves)} start value(s) you set, "
-                f"none by more than {LARGE_POLISH_MOVE:.0%}."
-            )
+            + "\nRefresh them in the params file; to hold one fixed through "
+            "the polish pin it (sigma: 0), or set sampler: {seed_polish: "
+            "false} to start at the seeds."
+        )
+    elif moves:
+        logger.debug(
+            f"seed polish moved {len(moves)} start value(s) you set, none by "
+            f"more than {LARGE_POLISH_MOVE_SIGMA:g} sigma."
+        )
+    return large
 
 
 def _add_sampler_prose(system, method, swap_schedule="deo"):

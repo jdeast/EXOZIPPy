@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import sys
+import textwrap
 import time
 
 _OWNER_ATTR = "_exozippy_role"
@@ -21,7 +22,88 @@ on the exozippy logger is somebody else's file, not ours to close.
 """
 
 
-class _ColorFormatter(logging.Formatter):
+# ---------------------------------------------------------------------------
+# Wrapping (docs/logging.md, "Format": every WARNING/ERROR wraps at 80 columns)
+# ---------------------------------------------------------------------------
+
+WRAP_COLUMNS = 80
+"""Width every user-facing WARNING/ERROR text is wrapped to."""
+
+_BULLET = re.compile(r"^\s*([-*])\s+")
+
+
+def wrap_message(message, width=WRAP_COLUMNS):
+    """Wrap a user-facing message at ``width`` columns, with real line breaks.
+
+    The layout is ONE rule, applied here rather than by hand at each call
+    site (JDE 2026-11-08):
+
+    - the first line of the message (the headline) wraps flush left, its
+      continuation lines indented two spaces;
+    - every later line the message breaks explicitly (the remedy, a second
+      paragraph) is indented two spaces, and wraps at the same indent;
+    - a later line starting with ``- `` (or ``* ``) is a bullet: ``  - ``,
+      wrapping under its own text (four spaces);
+    - an empty line is kept.
+
+    Words are never split, so a path or key longer than the width stays on
+    one line of its own.  Idempotent: wrapping an already-wrapped message
+    gives the same text, so a caller may wrap a message (an exception's
+    text) that a formatter wraps again.
+    """
+    out = []
+    for n, line in enumerate(str(message).splitlines() or [""]):
+        if not line.strip():
+            out.append("")
+            continue
+        bullet = _BULLET.match(line) if n else None
+        if bullet:
+            text = line[bullet.end() :]
+            first, rest = "  - ", "    "
+        elif n == 0:
+            text = line.strip()
+            first, rest = "", "  "
+        else:
+            # A line already indented deeper (a bullet's continuation, a
+            # preformatted block) keeps its indent, which is also what
+            # makes a second wrap a no-op.
+            text = line.strip()
+            lead = line[: len(line) - len(line.lstrip())]
+            first = rest = lead if len(lead) > 2 else "  "
+        out.extend(
+            textwrap.wrap(
+                text,
+                width=width,
+                initial_indent=first,
+                subsequent_indent=rest,
+                break_long_words=False,
+                break_on_hyphens=False,
+            )
+            or [first.rstrip()]
+        )
+    return "\n".join(out)
+
+
+def bullets(items):
+    """``items`` as bullet lines (``- item``), for a WARNING that lists
+    several things; `wrap_message` indents and wraps them."""
+    return "\n".join(f"- {item}" for item in items)
+
+
+class WrappingFormatter(logging.Formatter):
+    """A formatter that wraps every WARNING-or-worse message with
+    `wrap_message`; INFO and DEBUG (the startup table, progress lines) are
+    left exactly as written."""
+
+    def format(self, record):
+        if record.levelno >= logging.WARNING:
+            record = logging.makeLogRecord(record.__dict__)
+            record.msg = wrap_message(record.getMessage())
+            record.args = None
+        return super().format(record)
+
+
+class _ColorFormatter(WrappingFormatter):
     _COLORS = {
         logging.WARNING: "\033[93m",
         logging.ERROR: "\033[91m",
@@ -102,7 +184,7 @@ def setup_logging(prefix, level="INFO"):
     fh = logging.FileHandler(path, mode="w", encoding="utf-8")
     fh.setLevel(logging.DEBUG)
     fh.setFormatter(
-        logging.Formatter("%(asctime)s %(levelname)-8s %(name)s: %(message)s")
+        WrappingFormatter("%(asctime)s %(levelname)-8s %(name)s: %(message)s")
     )
     setattr(fh, _OWNER_ATTR, "file")
     log.addHandler(fh)
