@@ -1114,10 +1114,12 @@ other.
 `F146`'s tabulated centres alone span 1.305 - 1.538 micron, an 18% spread in wavelength before
 any physics, mapping to 24% in `k/k_V`. So when comparing a published band extinction for a
 wide filter: **ask which convention, and which wavelength.** For real Roman data the
-integrated treatment is the correct one and this arithmetic does not arise; note that
-`utilities/mkticsed.py`'s clump path inverts a band extinction MONOCHROMATICALLY (via
-`components.sed.extinction.av_from_band_extinction`) and so carries this same ~15% error for
-W149-width filters -- tolerable in a prior a magnitude wide, not as a measurement.
+integrated treatment is the correct one and this arithmetic does not arise. A published clump
+extinction is not inverted into an `A_V` prior at all any more: it is a prior on the red
+clump's own band extinction, `redclump.<name>.extinction_<k>`, which the forward model
+integrates through the passband on the clump's spectrum at the fit's law
+(`components/redclump/redclump.md`). The monochromatic inversions that carried the ~15% W149
+error (`av_from_band_extinction`, mkticsed's `band_extinction`) were removed with it.
 
 ### C23 -- the discrete degeneracies, and what they do to the signs
 

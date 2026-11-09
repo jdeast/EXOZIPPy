@@ -1,12 +1,13 @@
-"""The extinction law, and inverting it to an A_V prior.
+"""The extinction laws: the shipped table and CCM89 + O'Donnell 94.
 
 ONE READER OF models/extinction_law.ascii, because there were three and
 they had already started to differ in convention.  make_bc.py applies it
-to spectra, sed/plot.py draws it, and mkticsed.py needs to run it BACKWARDS
--- turn a measured extinction into the `star.av` prior the SED samples.
-Getting the direction or the convention wrong is silent: the fit simply
-resolves the Teff-extinction degeneracy somewhere else and reports a
-confident wrong star.
+to spectra and sed/plot.py draws it.  It is no longer run BACKWARDS: the
+monochromatic inversions of a measured band extinction into an A_V prior
+(av_from_band_extinction, av_from_colour_excess) were removed with review
+2.9.16(b) -- a published clump extinction is a prior on the red clump's
+integrated band extinction (components/redclump/redclump.md), which the
+forward model computes.
 
 THE CONVENTION THAT MATTERS, measured 2026-09-16.  A band's extinction must
 be evaluated at the band's EFFECTIVE WAVELENGTH, not by integrating k(lam)
@@ -119,51 +120,3 @@ def a_lambda_over_av_ccm(wavelength_micron, rv):
     """A(lambda)/A_V of the CCM89 + O'Donnell 94 law at R_V = ``rv``."""
     a, b = ccm89_ab(wavelength_micron)
     return a + b / float(rv)
-
-
-def av_from_band_extinction(
-    a_band, wavelength_micron, sigma=None, model_root=None
-):
-    """Invert the law: a measured A_band -> A_V, with sigma carried through.
-
-    ``wavelength_micron`` must be the band's EFFECTIVE wavelength -- see the
-    module docstring for why the passband integral is the wrong quantity.
-    Returns ``(av, sigma_av)``, with ``sigma_av`` None if no sigma was given.
-
-    This is what a Roman bulge field will actually supply: the red clump's
-    extinction measured IN THE OBSERVED BANDS from the same images (the
-    DC2018 challenge ships exactly that in event_info.txt, as A_W149 and
-    A_Z087).  There are no reliable 3-D dust maps toward the bulge, so the
-    clump is the anchor, and it is an observable rather than a model.
-    """
-    ratio = float(a_lambda_over_av(wavelength_micron, model_root))
-    av = float(a_band) / ratio
-    return av, (None if sigma is None else float(sigma) / ratio)
-
-
-def av_from_colour_excess(
-    excess,
-    wavelength_blue_micron,
-    wavelength_red_micron,
-    sigma=None,
-    model_root=None,
-):
-    """Invert the law from a REDDENING E(blue - red) -> A_V.
-
-    Law-dependent in the same way as the single-band inversion and no more:
-    both divide a measurement by a ratio this table supplies.  On DC2018
-    event 194 the two routes agree to 0.2% (A_V = 9.88 from A_W149 = 2.75,
-    9.90 from E(Z087-W149) = 2.54), which is the check worth repeating on
-    any new field -- a DISAGREEMENT between them is the law's shape being
-    wrong, and is the one diagnostic available without truth.
-    """
-    rb = float(a_lambda_over_av(wavelength_blue_micron, model_root))
-    rr = float(a_lambda_over_av(wavelength_red_micron, model_root))
-    denom = rb - rr
-    if denom <= 0:
-        raise ValueError(
-            "wavelength_blue_micron must be the SHORTER wavelength; got "
-            f"{wavelength_blue_micron} and {wavelength_red_micron}"
-        )
-    av = float(excess) / denom
-    return av, (None if sigma is None else float(sigma) / denom)

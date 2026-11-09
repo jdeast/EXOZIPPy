@@ -102,7 +102,9 @@ from dc18_sweep_config import (  # noqa: E402
     AV_COLS,
     AZ_COLS,
     BANDS,
-    av_from_clump_colour,
+    c29_grey_budget,
+    clump_block,
+    clump_priors,
     t0_bounds,
 )
 
@@ -153,12 +155,17 @@ class Event:
         self.data_format, self.zp_ab = C.LAYOUT_FORMAT[self.layout]
         row = event_info_row(self.data_dir, self.event)
         self.ra, self.dec = float(row[2]), float(row[3])
-        self.av_mu, self.av_sd, self.av_grey = av_from_clump_colour(
+        # The challenge's clump extinctions, as a prior on the red clump's
+        # colour excess (dc18_sweep_config.clump_priors), and the C29 grey
+        # budget for the zeropoint width.
+        clump = (
             float(row[AV_COLS[0]]),
             float(row[AV_COLS[1]]),
             float(row[AZ_COLS[0]]),
             float(row[AZ_COLS[1]]),
         )
+        self.clump_priors = clump_priors(*clump)
+        self.av_grey = c29_grey_budget(clump[0], clump[2])
         self.files = C.light_curve_files(
             self.data_dir, self.event, bands=[b for b, _ in BANDS]
         )
@@ -234,6 +241,7 @@ def shared_config(ev, run):
             }
         ],
         "galacticmodel": [{"name": ev.name, "anchor_idx": 1}],
+        "redclump": clump_block(),
         "band": (
             # No Claret table for either Roman filter: the tie is stated
             # explicitly (it raises otherwise); false is what these fits
@@ -294,7 +302,7 @@ def shared_priors(ev, run):
         "star.Source.ra": {"initval": ev.ra, "sigma": 0},
         "star.Source.dec": {"initval": ev.dec, "sigma": 0},
         "star.Lens.feh": {"mu": 0.0, "sigma": 0.5},
-        "star.Source.av": {"mu": ev.av_mu, "sigma": ev.av_sd},
+        **ev.clump_priors,
         "band.W149.u1": {"initval": 0.0, "sigma": 0},
         "band.Z087.u1": {"initval": 0.0, "sigma": 0},
         "sed.errscale": {"initval": 1.0, "sigma": 0},

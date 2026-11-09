@@ -803,7 +803,7 @@ def plot_pit(path, rows, subset=None, subset_label=None, title=None):
 # Grey band-extinction residual per event, in magnitudes: what our INTEGRATED
 # band extinction still misses at the colour-anchored av, because the
 # simulation reddened monochromatically (conventions.md C29).  Computed in
-# dc18_sweep_config.av_from_clump_colour; hardcoded here so scoring a trace
+# dc18_sweep_config.c29_grey_budget; hardcoded here so scoring a trace
 # never needs the BC grid.
 C29_GREY = {
     "008": -0.0658,
