@@ -99,7 +99,7 @@ sed:
     unit: ""
     internal_unit: ""
     latex: "R_{V,\\rm near}"
-    description: "R_V of the dust in front of the near/far boundary"
+    description: "$R_V$ of the dust in front of the near/far boundary"
   # The near/far boundary: where disk dust gives way to inner-Galaxy dust
   # (JDE 2026-11-09: sampled, broad, ~3-6 kpc).
   dust_boundary:

@@ -215,13 +215,6 @@ def _system(
         "sed": {
             "file": str(sed),
             **({"fit_rv_dust": True} if fit_rv_dust else {}),
-            # two stars with no position and no orbit would turn the
-            # sight-line dust profile on; these tests are about R_V alone
-            **(
-                {"distance_constrains_av": False}
-                if len(stars) > 1 and pos and "," in pos
-                else {}
-            ),
         },
     }
     system = System(config, params or {})

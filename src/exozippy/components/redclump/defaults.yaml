@@ -115,7 +115,7 @@ redclump:
     unit: ""
     internal_unit: ""
     latex: "R_{V,{\\rm RC}}"
-    description: "R_V of the dust in front of the red clump"
+    description: "$R_V$ of the dust in front of the red clump"
     print_to_table: false
     expressions:
       from_sightline:

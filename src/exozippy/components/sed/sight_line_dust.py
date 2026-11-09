@@ -155,29 +155,28 @@ class SightLineDust:
 
     def _sight_line_lb(self, system, stars):
         """(l, b) in degrees: the galactic model's sight line when there is
-        one (its anchor star), else the read stars' own stated positions,
-        which must agree to SIGHT_LINE_TOLERANCE_ARCSEC."""
+        one (its anchor star's position root), else the read stars' own
+        stated positions, which must agree to SIGHT_LINE_TOLERANCE_ARCSEC.
+        None when a position it needs is not stated (``probe_star_radec``:
+        the user's own numbers, never a placeholder)."""
         from exozippy.components.galacticmodel import koshimoto21 as k21
+        from exozippy.components.star.position import probe_star_radec
 
+        cm = self.config_manager
         gm = in_topology(system, "galacticmodel")
         if isinstance(gm, Component):
-            return gm.sight_line(system)
-        from exozippy.components.star.position import require_star_radec
+            from exozippy.components.star.star import position_root_of
 
+            root = position_root_of(system, int(gm.anchor_idx))
+            if probe_star_radec(cm, [root])[root] is None:
+                return None
+            return gm.sight_line(system)
         star = system.star
-        pos = []
-        for i in stars:
-            pos.append(
-                require_star_radec(
-                    self.config_manager,
-                    int(i),
-                    f"[{self.prefix}] the sight line of the dust profile "
-                    f"(star {star.names[int(i)]}; set "
-                    f"sed.distance_constrains_av: false to fit each A_V "
-                    f"freely instead)",
-                )
-            )
-        ra0, dec0 = pos[0]  # radians (require_star_radec)
+        got = probe_star_radec(cm, [int(i) for i in stars])
+        if any(got[int(i)] is None for i in stars):
+            return None
+        pos = [got[int(i)] for i in stars]
+        ra0, dec0 = pos[0]  # radians
         for (ra, dec), i in zip(pos[1:], stars[1:]):
             c = math.sin(dec0) * math.sin(dec) + math.cos(dec0) * math.cos(
                 dec
@@ -242,7 +241,25 @@ class SightLineDust:
                 f"{[p.name for p in anchors]} each claim to anchor the "
                 f"sight line's extinction; one sight line has one anchor."
             )
-        l_deg, b_deg = self._sight_line_lb(system, read)
+        lb = self._sight_line_lb(system, read)
+        if lb is None:
+            # No stated sky position, so no Galactic latitude and no layer:
+            # the profile cannot be placed.  Off by default (a transit
+            # blend with no positions keeps its free A_V values); asked for
+            # explicitly, it raises.
+            if explicit:
+                raise ValueError(
+                    f"[{self.prefix}] distance_constrains_av: true needs the "
+                    f"sight line's sky position (the Galactic latitude sets "
+                    f"the dust layer): give the read stars' ra/dec (or the "
+                    f"galactic model's anchor's) in the params file."
+                )
+            return dp.DustPlan(
+                False,
+                "no sky position is stated for the read stars, so the "
+                "sight line's Galactic latitude (the dust layer) is unknown",
+            )
+        l_deg, b_deg = lb
         sinb = dp.sinb_of(b_deg)
         if sinb < MIN_SINB:
             raise ValueError(
@@ -524,7 +541,7 @@ class SightLineDust:
                 ]
             )
 
-        av = a_band / a_of(pt.as_tensor_variable(1.0))
+        av = a_band / a_of(pt.as_tensor_variable(np.float64(1.0)))
         for _ in range(dp.ANCHOR_ITERATIONS):
             av = av * a_band / a_of(av)
         return av

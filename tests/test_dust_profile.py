@@ -543,3 +543,34 @@ def test_a_cone_of_field_stars_shares_one_profile(tmp_path):
     ip = model.initial_point()
     assert np.isfinite(model.compile_logp()(ip))
     assert np.all(np.isfinite(model.compile_dlogp()(ip)))
+
+
+def test_no_stated_position_leaves_the_profile_off_unless_asked(tmp_path):
+    """
+    Given two read stars with no stated sky position and no galactic model
+      (a transit blend), so no Galactic latitude for the dust layer,
+    When the plan is asked,
+    Then the profile is off (each A_V free), and distance_constrains_av:
+      true raises naming the missing position.
+    """
+    import yaml
+
+    rows = [
+        {"name": I, "mag": 12.0, "err": 0.05, "photType": {"pos": [n]}}
+        for n in ("A", "B")
+    ]
+    path = tmp_path / "ab.sed"
+    path.write_text(yaml.safe_dump({"model": "NextGen", "filters": rows}))
+
+    def build(sed):
+        cfg = {
+            "star": [{"name": n, "mist": False} for n in ("A", "B")],
+            "sed": {"file": str(path), **sed},
+        }
+        system = System(cfg, {})
+        system.prepare()
+        return system
+
+    assert not build({}).sed._dust_plan.on
+    with pytest.raises(ValueError, match="sky position"):
+        build({"distance_constrains_av": True})
