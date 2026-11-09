@@ -280,7 +280,9 @@ def test_guard_sends_an_epoch_beside_a_tiny_caustic_to_multimag2(offset_rho):
     times, u_0 = _at([(sx, sy)])
     A = f(_params(s_star, u_0), times, np.zeros((1, 3)))
     assert len(counter.mag2_xy) == 1
-    np.testing.assert_allclose(A[0], v.MultiMag2(sx, sy, _RHO), rtol=1e-9)
+    # The Op's VBM instance and this fresh one differed by 1.2e-9 on macOS CI;
+    # both are converged to Tol=1e-3, so rtol=1e-6 still pins the routing.
+    np.testing.assert_allclose(A[0], v.MultiMag2(sx, sy, _RHO), rtol=1e-6)
 
 
 def test_guard_clears_an_epoch_beyond_the_clearance():
