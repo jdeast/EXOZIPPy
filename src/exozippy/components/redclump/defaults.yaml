@@ -1,0 +1,156 @@
+redclump:
+  # The red clump of the event's sight line, as ONE reference object: the
+  # CENTROID of the field clump, with a known intrinsic color and
+  # luminosity (redclump.md).  Internal units are the user units.
+  #
+  # Effective temperature.  Flat on the bounds; the color prior acts
+  # through vi0 below, (V-I)_0 = 1.06 +/- 0.06 through OUR bolometric
+  # corrections, which at logg 2.5 and [Fe/H] 0 is Teff ~ N(4684, 124) K.
+  # The SED's grid extent is overlaid at stage 3.
+  teff:
+    lower: 4000.0
+    upper: 5500.0
+    initval: 4684.0
+    init_scale: 20.0
+    unit: "K"
+    internal_unit: "K"
+    latex: "T_{\\rm eff,RC}"
+    description: "Red clump effective temperature"
+  # Surface gravity: pinned.  It moves (V-I)_0 by 0.002 mag per 0.5 dex, so
+  # sampling it would be a pure-prior dimension; a params entry frees it.
+  logg:
+    lower: 1.5
+    upper: 3.5
+    initval: 2.5
+    sigma: 0.0
+    init_scale: 0.05
+    unit: "dex(cm/s2)"
+    internal_unit: "dex(cm/s2)"
+    latex: "\\log g_{\\rm RC}"
+    description: "Red clump surface gravity"
+  # Metallicity of the clump centroid: the bulge clump giants' MDF in
+  # Baade's window is bimodal, two roughly equal Gaussians near -0.3 and
+  # +0.3 dex (Hill et al. 2011), so mean ~0 with ~0.3 dex spread.  It moves
+  # the Teff that reproduces (V-I)_0 by ~140 K per dex, nothing else.
+  feh:
+    mu: 0.0
+    sigma: 0.3
+    lower: -1.0
+    upper: 0.5
+    initval: 0.0
+    init_scale: 0.05
+    unit: "dex"
+    internal_unit: "dex"
+    latex: "[{\\rm Fe/H}]_{\\rm RC}"
+    description: "Red clump metallicity"
+  # Absolute I (Cousins) magnitude of the clump centroid, M_I,RC = -0.12
+  # (Nataf et al. 2013, abstract; 0.09 there is the clump's INTRINSIC
+  # star-to-star dispersion, not a centroid uncertainty, which the paper
+  # does not quote).  sigma 0.10 is a provisional centroid systematic.
+  # TODO (JDE 2026-11-09): verify -0.12 +/- 0.10 against the Nataf et al.
+  # (2013, ApJ 769, 88) TEXT once the dust stack (8.9.8) is done; only the
+  # abstract's -0.12 has been checked so far.
+  mi:
+    mu: -0.12
+    sigma: 0.10
+    lower: -2.0
+    upper: 2.0
+    initval: -0.12
+    init_scale: 0.02
+    unit: "mag"
+    internal_unit: "mag"
+    latex: "M_{I,{\\rm RC}}"
+    description: "Red clump absolute I magnitude"
+  # Distance of the clump centroid.  Its prior is the galactic model's bar
+  # on this sight line (RedClump.register_parameters: mean and 0.1 mag of
+  # distance modulus, through the overrides channel, so a params entry
+  # replaces it).  mi + distance is the only combination the photometry
+  # sees; both are kept because they are independent statements.
+  distance:
+    lower: 4000.0
+    upper: 14000.0
+    initval: 8160.0
+    init_scale: 50.0
+    unit: "pc"
+    internal_unit: "pc"
+    latex: "d_{\\rm RC}"
+    description: "Red clump distance"
+  # V-band extinction to the clump.  The lower bound is STRICTLY positive
+  # (CLAUDE.md's floor rule): the av_ratio tie divides by it.
+  av:
+    lower: 0.05
+    upper: 20.0
+    initval: 2.0
+    init_scale: 0.1
+    unit: "mag"
+    internal_unit: "mag"
+    latex: "A_{V,{\\rm RC}}"
+    description: "Red clump V-band extinction"
+  # DERIVED: the radius that makes M_I = mi at A_V = 0 through the SED's
+  # own bolometric correction -- what the SED's forward model reads.
+  radius:
+    unit: "R_sun"
+    internal_unit: "R_sun"
+    latex: "R_{\\rm RC}"
+    description: "Red clump radius"
+    expressions:
+      default:
+        # bc_i0 is a context node RedClump.add_parameter injects: the SED's
+        # Cousins I bolometric correction at the clump's (teff, logg, feh)
+        # and A_V = 0.
+        func_name: "calc_rc_radius"
+        deps: ["mi", "teff", "bc_i0"]
+  # DERIVED: the intrinsic color (V-I)_0 = BC_I - BC_V at A_V = 0 (Johnson
+  # V, Cousins I), and its Gaussian IS the clump's color prior: 1.06 +/-
+  # 0.06 (Bensby et al. 2013; the value Nataf et al. 2013 adopt), stated in
+  # the observable, so it comes out of OUR tables by construction.
+  vi0:
+    mu: 1.06
+    sigma: 0.06
+    unit: "mag"
+    internal_unit: "mag"
+    latex: "(V-I)_{0,{\\rm RC}}"
+    description: "Red clump intrinsic V-I color"
+    expressions:
+      default:
+        func_name: "calc_rc_vi0"
+        deps: ["bc_v0", "bc_i0"]
+  # DERIVED, one element per `bands:` entry (redclump.<name>.extinction_<k>):
+  # the clump's extinction in that band, integrated through the passband on
+  # the clump's own spectrum at the fit's law.  A published clump extinction
+  # is a params-file prior HERE, with its citation.
+  extinction:
+    unit: "mag"
+    internal_unit: "mag"
+    latex: "A_{\\rm RC}"
+    description: "Red clump extinction in a band"
+    expressions:
+      default:
+        func_name: "calc_rc_identity"
+        deps: ["ext_band"]
+  # DERIVED, one element per `colors:` pair: E(a - b) of the clump.
+  color_excess:
+    unit: "mag"
+    internal_unit: "mag"
+    latex: "E_{\\rm RC}"
+    description: "Red clump color excess"
+    expressions:
+      default:
+        func_name: "calc_rc_identity"
+        deps: ["ext_color"]
+  # DERIVED, one element per tied star (redclump.<name>.av_ratio_<k>): the
+  # interim soft tie A_V(source) = A_V(clump) (1 +/- 9%), Nataf et al.
+  # (2013)'s field-scale extinction granularity -- the derived element's
+  # own Gaussian, so the width is an ordinary params field.  PR 3's dust
+  # profile replaces it.
+  av_ratio:
+    mu: 1.0
+    sigma: 0.09
+    unit: ""
+    internal_unit: ""
+    latex: "A_{V}/A_{V,{\\rm RC}}"
+    description: "Extinction of a tied star relative to the red clump"
+    expressions:
+      default:
+        func_name: "calc_rc_av_ratio"
+        deps: ["star.av[tied_map]", "av"]
