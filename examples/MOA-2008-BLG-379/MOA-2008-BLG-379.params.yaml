@@ -97,12 +97,15 @@ star.Source.av:
     initval: 3.006
     citation: Bennett:2024
 
-# Lens extinction: Bennett+2024 Eq. for A_L, a dust layer of scale height
-# h_dust = 0.10 kpc (Drimmel & Spergel 2001) at b = -3.1129 deg
-# (sin|b| = 0.054304): A_L = A_S (1 - exp(-D_L sin|b| / h)) /
-# (1 - exp(-D_S sin|b| / h)), distances in pc.  A hard link.
-star.Lens.av:
-    initval: "star.Source.av * (1 - exp(-star.Lens.distance * 0.054304 / 100.0)) / (1 - exp(-star.Source.distance * 0.054304 / 100.0))"
+# Lens extinction: Bennett+2024's A_L = A_S (1 - exp(-D_L sin|b| / h)) /
+# (1 - exp(-D_S sin|b| / h)), a dust layer of scale height h = 0.10 kpc
+# (Drimmel & Spergel 2001), is the SED's sight-line dust profile with one
+# bin (sed: dust_bins: 1, dust_scale_height: 100 in the config; sed.md, "The
+# sight-line dust profile").  Pinning each star's scatter about the profile
+# at 0 reproduces their hard link exactly (it used to be written here as a
+# link on star.Lens.av, which the profile replaces).
+star.av_frac:
+    initval: 0.0
     sigma: 0
 
 # A planet radius means nothing to a lens.

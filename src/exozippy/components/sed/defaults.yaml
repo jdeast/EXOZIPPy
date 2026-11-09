@@ -29,3 +29,85 @@ sed:
     upper: 6.0
     init_scale: 0.05
     initval: 3.1
+  # ---------------------------------------------------------------------
+  # The sight-line dust profile (review 8.9.8; sed.md, "The sight-line dust
+  # profile"), declared only when SED.dust_plan is on.
+  #
+  # The anchored total: the extinction in sed.dust_anchor_band (default A_V
+  # itself) at the anchor -- the red clump's distance when a clump is in the
+  # fit, else the whole column.  It carries the AMOUNT; the bins only the
+  # shape.  A 2D map's value is a prior HERE (mu/sigma + citation), in the
+  # map's own band (dust_anchor_band), with no law conversion by hand.
+  # DEFAULT_WEAK: a user's A_V start on a star seeds it (a hint), and this
+  # default yields to any other start.  Lower bound strictly positive (the
+  # anchor-band inversion divides by the band extinction).
+  dust_anchor:
+    lower: 0.001
+    upper: 20.0
+    initval: 1.0
+    init_scale: 0.1
+    rank: DEFAULT_WEAK
+    unit: "mag"
+    internal_unit: "mag"
+    latex: "A_{\\rm anchor}"
+    description: "Extinction at the dust profile's anchor"
+  # DERIVED, only under a dust_anchor_band: A_V at the anchor, on the
+  # reference spectrum (Teff 4700 K, logg 2.5, [Fe/H] 0: the clump giants
+  # the 2D maps are built from), the band-integrated A_band(A_V) inverted
+  # on the SED's own grid at the fit's law.
+  av_anchor:
+    unit: "mag"
+    internal_unit: "mag"
+    latex: "A_{V,\\rm anchor}"
+    description: "V-band extinction at the dust profile's anchor"
+    expressions:
+      default:
+        func_name: "calc_sed_anchor_av"
+        deps: ["anchor_av"]
+  # The profile's SHAPE: bin k's dust is 10**z_k times the smooth layer's
+  # share (the bins are equal shares of the H = dust_scale_height layer),
+  # log-normal about it with 0.8 dex (Green et al. 2014's increments;
+  # JDE's 0.7-1 dex).  Their common shift cancels in the anchored ratio.
+  # Bounds +/-6 dex: validity limits far outside the Gaussian.  Not a table
+  # row (results.csv only); the figure <prefix>_dust_profile shows A_V(d).
+  dust_z:
+    mu: 0.0
+    sigma: 0.8
+    lower: -6.0
+    upper: 6.0
+    initval: 0.0
+    init_scale: 0.8
+    unit: "dex"
+    internal_unit: "dex"
+    latex: "z_{\\rm dust}"
+    description: "Log dust increment of a profile bin relative to the smooth layer"
+    print_to_table: false
+  # Under the near/far split (sed.fit_rv_dust_near): the R_V of the dust in
+  # front of dust_boundary.  Prior: the diffuse ISM, Schlafly et al.
+  # (2016)'s R'(V) = 3.32 +/- 0.18 (their eq. 8 proxy, calibrated on
+  # Fitzpatrick 1999), mapped into THIS band-integrated CCM89 + O'Donnell
+  # family through the same proxy computed on their reference giant (4500 K,
+  # logg 2.5, [Fe/H] 0) at A_V = 2: R_V = 2.88 +/- 0.19 (sed.md).  The far
+  # dust's R_V is sed.rv_dust.
+  rv_dust_near:
+    mu: 2.88
+    sigma: 0.19
+    lower: 1.5
+    upper: 6.0
+    initval: 2.88
+    init_scale: 0.05
+    unit: ""
+    internal_unit: ""
+    latex: "R_{V,\\rm near}"
+    description: "R_V of the dust in front of the near/far boundary"
+  # The near/far boundary: where disk dust gives way to inner-Galaxy dust
+  # (JDE 2026-11-09: sampled, broad, ~3-6 kpc).
+  dust_boundary:
+    lower: 3000.0
+    upper: 6000.0
+    initval: 4500.0
+    init_scale: 100.0
+    unit: "pc"
+    internal_unit: "pc"
+    latex: "d_{\\rm near/far}"
+    description: "Distance of the near/far dust boundary"

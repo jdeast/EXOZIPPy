@@ -253,6 +253,31 @@ star:
     upper: 100.
     init_scale: 0.1
     initval: 0.01
+    expressions:
+      # Under the SED's sight-line dust profile (sed.md, "The sight-line
+      # dust profile"), on every star the SED reads: the profile A(d) at the
+      # star's distance (profile_av, a context node Star.add_parameter
+      # injects) times the star's own scatter about it.
+      from_dust_profile:
+        func_name: "calc_av_from_profile"
+        deps: ["profile_av", "av_frac"]
+  # Declared only under the dust profile: a read star's arcsec-scale
+  # extinction scatter about the sight line's A(d), star.av = A(d) (1 +
+  # av_frac) -- Sale (2012)'s per-star differential term; 0.03 inside JDE's
+  # 0.02-0.05.  THE one spelling of that width is this parameter's sigma
+  # (star.<name>.av_frac: {sigma: 0.05}).  The bounds are validity limits
+  # far outside the Gaussian: -0.9 keeps A_V strictly positive.
+  av_frac:
+    mu: 0.0
+    sigma: 0.03
+    lower: -0.9
+    upper: 10.0
+    initval: 0.0
+    init_scale: 0.03
+    unit: ""
+    internal_unit: ""
+    latex: "\\delta A_V/A_V"
+    description: "Fractional extinction scatter about the sight-line dust profile"
   # R_V of the dust in front of the star, declared only under sed.fit_rv_dust
   # (sed.md, "The spectral mode").  Not `rv`: that is the systemic radial
   # velocity.  DERIVED: the sight line has ONE R_V, sampled as sed.rv_dust,
@@ -282,6 +307,12 @@ star:
         # sed.rv_dust broadcast to one entry per star (aligned).
         func_name: "calc_rv_dust_from_sightline"
         deps: ["sightline_rv_dust"]
+      # Under the dust profile's near/far split (sed.fit_rv_dust_near): the
+      # R_V mixed in front of the star, 1/R = f/R_near + (1 - f)/R_far.  A
+      # table row then (the manifest turns print_to_table on).
+      from_dust_profile:
+        func_name: "calc_rv_dust_from_profile"
+        deps: ["profile_rv_dust"]
   pm_ra:
     initval: -3.0
     init_scale: 0.05

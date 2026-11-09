@@ -114,6 +114,11 @@ def _params(ra=RA, dec=DEC, **extra):
 
 
 def _prepared(tmp_path, params=None, **kw):
+    # PR 2's model (one free A_V per object, the interim tie): these tests
+    # pin it, so the sight-line dust profile (on by default for a source and
+    # a clump at two distances) is turned off; tests/test_dust_profile.py
+    # covers the clump under the profile.
+    kw.setdefault("sed", {"distance_constrains_av": False})
     system = System(_config(tmp_path, **kw), params or _params())
     system.prepare()
     return system

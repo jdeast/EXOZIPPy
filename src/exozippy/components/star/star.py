@@ -25,6 +25,9 @@ from exozippy.outputs.prose import get_collector
 
 from . import physics
 
+#: star.rv_dust's name (sed.RV_DUST, not imported: star loads before sed).
+RV_DUST_KEY = "rv_dust"
+
 logger = logging.getLogger(__name__)
 
 # Lowest mass Sumi et al. 2023 actually fit, in dex(solMass): 0.33 M_Earth,
@@ -156,8 +159,17 @@ class Star(Component):
     # (derived on read stars, inactive on the rest), so the expression is
     # sliced per element, and a bare cross-component scalar cannot be
     # proven aligned (parameter.md) -- this one is, by construction.
-    context_dep_names = frozenset({"sightline_rv_dust"})
-    aligned_context_deps = frozenset({"sightline_rv_dust"})
+    #
+    # Under the sight-line dust profile (sed.md, "The sight-line dust
+    # profile") a read star's av is A(d) at its distance and, under the
+    # near/far split, its rv_dust the mix in front of it: ``profile_av`` and
+    # ``profile_rv_dust``, one entry per star, for the same reason.
+    context_dep_names = frozenset(
+        {"sightline_rv_dust", "profile_av", "profile_rv_dust"}
+    )
+    aligned_context_deps = frozenset(
+        {"sightline_rv_dust", "profile_av", "profile_rv_dust"}
+    )
 
     # Sub-keys of the dict form, `mass_function: {kind: ffp, alpha: ...}`.
     # Deliberately short.  The support's lower edge is NOT here: it is
@@ -991,7 +1003,7 @@ class Star(Component):
         cm = self.config_manager
         n = self.n_elements
         added, redundant, broken, superseded = {}, [], [], []
-        for param in self.ORBIT_LINKED_PARAMS:
+        for param in self.orbit_linked_params(system):
             if param not in self.manifest:
                 continue
             parsed = interpret_manifest_entry(self.manifest[param])
@@ -1543,19 +1555,141 @@ class Star(Component):
             return {"mask": seen}
         return {"expr_key": {"from_sightline": seen}, "mask": seen}
 
+    def _uses_expression(self, param_name, block):
+        """Does this build's manifest select expression ``block`` for
+        ``param_name`` on any element?"""
+        entry = (getattr(self, "manifest", None) or {}).get(param_name)
+        if entry is None:
+            return False
+        parsed = interpret_manifest_entry(entry)
+        return parsed.expr_key == block or block in (
+            parsed.expr_selectors or {}
+        )
+
     def add_parameter(self, model, param_name, system, context_nodes=None):
-        """Inject ``sightline_rv_dust`` -- sed.rv_dust, one entry per star
-        -- for star.rv_dust's ``from_sightline`` expression."""
+        """Inject the SED's sight-line context nodes, one entry per star:
+        ``sightline_rv_dust`` (sed.rv_dust) for star.rv_dust's
+        ``from_sightline``; under the dust profile ``profile_av`` (A(d) at
+        each star's distance) for av and ``profile_rv_dust`` (the near/far
+        mix) for rv_dust's ``from_dust_profile``."""
         if param_name == "rv_dust" and not context_nodes:
             sed = system.sed
-            if not Component._parameter_is_current(sed, "rv_dust", model):
-                sed.add_parameter(model, "rv_dust", system)
+            if self._uses_expression("rv_dust", "from_dust_profile"):
+                context_nodes = {
+                    "profile_rv_dust": sed.profile_rv_node(
+                        system, self._local_value(model, system, "distance")
+                    )
+                }
+            else:
+                if not Component._parameter_is_current(sed, "rv_dust", model):
+                    sed.add_parameter(model, "rv_dust", system)
+                context_nodes = {
+                    "sightline_rv_dust": pt.repeat(
+                        sed.rv_dust.value, self.n_elements
+                    )
+                }
+        if (
+            param_name == "av"
+            and not context_nodes
+            and self._uses_expression("av", "from_dust_profile")
+        ):
             context_nodes = {
-                "sightline_rv_dust": pt.repeat(
-                    sed.rv_dust.value, self.n_elements
+                "profile_av": system.sed.profile_av_node(
+                    system, self._local_value(model, system, "distance")
                 )
             }
         return super().add_parameter(model, param_name, system, context_nodes)
+
+    def _local_value(self, model, system, name):
+        if not Component._parameter_is_current(self, name, model):
+            self.add_parameter(model, name, system)
+        return getattr(self, name).value
+
+    def orbit_linked_params(self, system):
+        """``ORBIT_LINKED_PARAMS`` for this build: under the sight-line dust
+        profile a star's av is DERIVED (A(d) at the linked distance, the
+        same for a bound system automatically), so the link moves to its
+        sampled coordinate, av_frac (``_link_orbit_members`` raises on a
+        derived member)."""
+        plan = self._dust_plan(system)
+        if plan is None or not plan.on:
+            return self.ORBIT_LINKED_PARAMS
+        return tuple(
+            "av_frac" if p == "av" else p for p in self.ORBIT_LINKED_PARAMS
+        )
+
+    @staticmethod
+    def _dust_plan(system):
+        sed = in_topology(system, "sed")
+        if not isinstance(sed, Component):
+            return None
+        return sed.dust_plan(system)
+
+    def _dust_profile_entries(self, system, plan, seen):
+        """Under the dust profile: av DERIVED from it on every read star
+        (``from_dust_profile``: A(d) (1 + av_frac)), av_frac the star's own
+        sampled scatter about it, and under the near/far split rv_dust the
+        R_V mixed in front of the star (a table row then: it differs from
+        star to star).  The user's own statements on a read star's av are
+        checked here (review 8.9.8, the role flip): a Gaussian prior and
+        bounds are kept on the derived value (a prior, a soft barrier);
+        a pin (sigma: 0) and a link RAISE, naming the remedy."""
+        n = self.n_elements
+        cm = self.config_manager
+        for i in range(n):
+            if not seen[i]:
+                continue
+            entry = self._user_entry_for(i, "av") or {}
+            linked = [
+                k
+                for k in (
+                    f"{self.prefix}.{i}.av",
+                    f"{self.prefix}.{self.names[i]}.av",
+                    f"{self.prefix}.av",
+                )
+                if k in (cm.links or {})
+            ]
+            if linked:
+                raise ValueError(
+                    f"[{self.prefix}] {linked[0]} is a link, but under the "
+                    f"sight-line dust profile star.{self.names[i]}.av is "
+                    f"DERIVED from it (A(d) at the star's distance), which "
+                    f"already relates every star on the sight line.  Remove "
+                    f"the link; a smooth-layer link (Bennett et al. 2015) is "
+                    f"'sed: {{dust_bins: 1, dust_scale_height: <pc>}}'.  Or "
+                    f"set 'sed: {{distance_constrains_av: false}}' to keep "
+                    f"it.  (sed.md, 'The sight-line dust profile')"
+                )
+            if entry.get("sigma") == 0:
+                raise ValueError(
+                    f"[{self.prefix}] star.{self.names[i]}.av: {{sigma: 0}} "
+                    f"pins a DERIVED element under the sight-line dust "
+                    f"profile (its value is A(d) (1 + av_frac)), which does "
+                    f"nothing.  Pin sed.dust_anchor and "
+                    f"star.{self.names[i]}.av_frac instead, or set 'sed: "
+                    f"{{distance_constrains_av: false}}'."
+                )
+        read = [bool(x) for x in seen]
+        wrote_lower = self.user_wrote_field("av", "lower")
+        # The grid's lower bound (A_V = 0) is no barrier on a derived av:
+        # A(d) > 0 by construction, and a barrier at 0 would tax a nearby
+        # lens's small A_V.  The upper (the grid's 20) stays, as the
+        # loggsed barrier does.  A user lower bound is kept (the gap).
+        lower = [float("nan") if wrote_lower[i] else -np.inf for i in range(n)]
+        out = {
+            "av": {
+                "expr_key": {"from_dust_profile": read},
+                "lower": lower,
+            },
+            "av_frac": None,
+        }
+        if plan.split:
+            out[RV_DUST_KEY] = {
+                "expr_key": {"from_dust_profile": read},
+                "mask": read,
+                "print_to_table": True,
+            }
+        return out
 
     def register_parameters(self, system):
         """Stage 3: Declare the manifest and push to ConfigManager."""
@@ -1617,6 +1751,17 @@ class Star(Component):
 
             if sed_fits_rv_dust(system):
                 self.manifest[RV_DUST] = self._rv_dust_manifest_entry(system)
+            # The sight-line dust profile (sed.md): av derived from A(d),
+            # av_frac the star's own coordinate (the inventory below then
+            # pins and inactivates both on unread stars, as it does av).
+            sed_obj = in_topology(system, "sed")
+            if isinstance(sed_obj, Component):
+                plan = sed_obj.dust_plan(system)
+                if plan.on:
+                    seen_mask = sed_obj.seen_star_mask(system)
+                    self.manifest.update(
+                        self._dust_profile_entries(system, plan, seen_mask)
+                    )
             # The SED-side parameters of a star whose SED flux nothing reads
             # (see `structure_consumers` and `SED.data_free_inventory`):
             # the SED's STAR_KNOBS (av, teffsed, radiussed) are read by

@@ -31,6 +31,10 @@ logger = logging.getLogger(__name__)
 V_FILTER = "Generic/Johnson.V"
 I_FILTER = "Generic/Cousins.I"
 
+#: The clump's R_V parameter (sed.RV_DUST; not imported at module level,
+#: the SED imports the component layer).
+RV_DUST_KEY = "rv_dust"
+
 #: Off the bulge there is no clump (background.py's bulge box).
 BULGE_BOX_DEG = 10.0
 
@@ -61,10 +65,18 @@ class RedClump(Component):
     """The red-clump reference of one sight line (redclump.md)."""
 
     CONFIG_KEYS = ("name", "clump_constrains_source_av", "bands", "colors")
-    context_dep_names = frozenset({"bc_v0", "bc_i0", "ext_band", "ext_color"})
-    aligned_context_deps = frozenset(
-        {"bc_v0", "bc_i0", "ext_band", "ext_color"}
+    context_dep_names = frozenset(
+        {
+            "bc_v0",
+            "bc_i0",
+            "ext_band",
+            "ext_color",
+            "profile_av",
+            "profile_rv_dust",
+            "sightline_rv_dust",
+        }
     )
+    aligned_context_deps = context_dep_names
     per_build_caches = ("_context_cache",)
 
     def __init__(self, config, config_manager):
@@ -217,11 +229,20 @@ class RedClump(Component):
             "distance": self._path("distance"),
         }
         if sed_fits_rv_dust(system):
-            # One sight line, one R_V (sed.rv_dust); PR 3's profile gives the
-            # clump its own effective R_V.
-            paths[RV_DUST] = f"sed.0.{RV_DUST}"
+            # The clump's own R_V: the sight line's sed.rv_dust, or under
+            # the dust profile's near/far split the mix in front of it.
+            paths[RV_DUST] = self._path(RV_DUST)
         # teff, feh, av and one flux scale (mi + distance): a star's count.
-        return [SEDFluxSource(self.source_name, paths, photometric_dof=4)]
+        # The clump's distance is where the sight-line dust profile is
+        # anchored: its extinction is the measured one (sed.md).
+        return [
+            SEDFluxSource(
+                self.source_name,
+                paths,
+                photometric_dof=4,
+                extinction_anchor=True,
+            )
+        ]
 
     def sed_flux_filters(self, system):
         return {V_FILTER, I_FILTER}
@@ -282,6 +303,27 @@ class RedClump(Component):
             "radius": "default",
             "vi0": "default",
         }
+        # Under the SED's sight-line dust profile the clump's A_V is the
+        # profile at its distance -- the anchor -- times its field-scale
+        # granularity, 1 + av_frac (Nataf et al. 2013's 9%: the clump
+        # CENTROID measures the pencil-beam profile to that; sed.md).
+        self.dust_plan = sed.dust_plan(system)
+        if self.dust_plan.on:
+            self.manifest["av"] = {
+                "expr_key": "from_dust_profile",
+                "lower": [
+                    float("nan")
+                    if self.user_wrote_field("av", "lower")[0]
+                    else -np.inf
+                ],
+            }
+            self.manifest["av_frac"] = None
+        if sed.fit_rv_dust:
+            self.manifest[RV_DUST_KEY] = (
+                {"expr_key": "from_dust_profile", "print_to_table": True}
+                if self.dust_plan.on and self.dust_plan.split
+                else "from_sightline"
+            )
         cm.add_hint(self._path("distance"), d_bar)
         n_b, n_c = len(self.bands), len(self.colors)
         owner = self.names[0]
@@ -309,7 +351,8 @@ class RedClump(Component):
 
         # The coordinates the clump's rows pin decide at
         # PRECEDENCE_LIKELIHOOD_BACKED (components.md, item 5).
-        cm.declare_likelihood_backed(self._path("av"))
+        if not self.dust_plan.on:
+            cm.declare_likelihood_backed(self._path("av"))
         cm.declare_likelihood_backed(self._path("teff"))
 
         self._check_read(system, sed, where)
@@ -335,6 +378,20 @@ class RedClump(Component):
         sed = system.sed
         flag = self.tie_requested
         self.tied = []
+        if self.dust_plan.on:
+            if flag is True:
+                raise ValueError(
+                    f"{where} clump_constrains_source_av: true is the interim "
+                    f"tie the SED's sight-line dust profile replaces (every "
+                    f"star's A_V is A(d) anchored at the clump).  Remove the "
+                    f"key, or set 'sed: {{distance_constrains_av: false}}' "
+                    f"to use the tie instead of the profile."
+                )
+            logger.info(
+                f"{where} the sight-line dust profile ties every object's "
+                f"A_V to the clump's anchor; no interim av_ratio tie."
+            )
+            return
         if flag is False:
             logger.info(
                 f"{where} clump_constrains_source_av: false -- no source's "
@@ -481,6 +538,13 @@ class RedClump(Component):
 
         if self.user_wrote_field("av", "initval").any():
             return
+        if self.dust_plan.on and (
+            sed.user_wrote_field("dust_anchor", "initval").any()
+            # a user's A_V start on a star already seeded the anchor (a
+            # higher-precedence hint; the last add_hint would win)
+            or getattr(sed, "_dust_seed", None)
+        ):
+            return
         rows, col = self._clump_rows(sed)
         pos, neg = np.asarray(sed.pos_matrix), np.asarray(sed.neg_matrix)
         only = np.zeros(pos.shape[1], dtype=int)
@@ -552,6 +616,21 @@ class RedClump(Component):
             )
             return
         av = float(brentq(resid, lo, hi, xtol=1e-6))
+        if self.dust_plan.on:
+            # The clump's A_V is derived from the profile's anchor, which IS
+            # A(d_clump) (av_frac starts at 0): seed the anchor, in its band.
+            band = self.dust_plan.anchor_band
+            value = (
+                av
+                if band is None
+                else sed.reference_band_extinction_np(band, av, system, rv)
+            )
+            self.config_manager.add_hint("sed.dust_anchor", value)
+            logger.info(
+                f"{where} the dust anchor starts at {value:.3f} mag (clump "
+                f"A_V {av:.3f}), from {what}."
+            )
+            return
         self.config_manager.add_hint(self._path("av"), av)
         logger.info(f"{where} A_V starts at {av:.3f} mag, from {what}.")
 
@@ -570,7 +649,28 @@ class RedClump(Component):
         if param_name in ("radius", "vi0", "extinction", "color_excess"):
             if not context_nodes:
                 context_nodes = self._context(model, system)
+        if not context_nodes and param_name in ("av", RV_DUST_KEY):
+            context_nodes = self._sight_line_context(model, system, param_name)
         return super().add_parameter(model, param_name, system, context_nodes)
+
+    def _sight_line_context(self, model, system, param_name):
+        """The clump's A_V and R_V from the SED's sight line: under the dust
+        profile A(d_clump) (``profile_av``) and, under its near/far split,
+        the R_V mixed in front of the clump; else sed.rv_dust itself."""
+        sed = system.sed
+        if param_name == "av":
+            if not self.dust_plan.on:
+                return None
+            d = self._local_node(model, system, "distance")
+            return {"profile_av": sed.profile_av_node(system, d)}
+        if self.dust_plan.on and self.dust_plan.split:
+            d = self._local_node(model, system, "distance")
+            return {"profile_rv_dust": sed.profile_rv_node(system, d)}
+        return {
+            "sightline_rv_dust": sed.source_input_node(
+                system, f"sed.0.{RV_DUST_KEY}"
+            )[None]
+        }
 
     def _local_node(self, model, system, name):
         if not Component._parameter_is_current(self, name, model):
@@ -591,9 +691,7 @@ class RedClump(Component):
         )
         rv = None
         if sed.fit_rv_dust:
-            from exozippy.components.sed.sed import RV_DUST
-
-            rv = sed.source_input_node(system, f"sed.0.{RV_DUST}")[None]
+            rv = self._local_node(model, system, RV_DUST_KEY)
         bc0 = sed.bc_node(teff, logg, feh, pt.zeros_like(teff), rv)[0]
         out = {
             "bc_v0": bc0[sed.filter_column(V_FILTER)][None],
@@ -657,15 +755,39 @@ class RedClump(Component):
         if not self._uses_static_ai_rc(system):
             return
         sed = system.sed
-        teff, logg, feh, av = (
+        teff, logg, feh = (
             float(np.atleast_1d(getattr(self, p).initval)[0])
-            for p in ("teff", "logg", "feh", "av")
+            for p in ("teff", "logg", "feh")
         )
         rv = None
         if sed.fit_rv_dust:
-            from exozippy.components.sed.sed import RV_DUST
+            # The sight line's start R_V (the clump's own is derived; under
+            # the split it differs from this by the near mix -- a start
+            # check, warn-only).
+            rv = float(np.atleast_1d(sed.rv_dust.initval)[0])
+        if self.dust_plan.on:
+            # Derived: A(d_clump) = the anchor at the start (av_frac 0).
+            anchor = float(np.atleast_1d(sed.dust_anchor.initval)[0])
+            band = self.dust_plan.anchor_band
+            if band is None:
+                av = anchor
+            else:
+                from scipy.optimize import brentq
 
-            rv = float(np.atleast_1d(getattr(sed, RV_DUST).initval)[0])
+                av = float(
+                    brentq(
+                        lambda x: (
+                            sed.reference_band_extinction_np(
+                                band, x, system, rv
+                            )
+                            - anchor
+                        ),
+                        1e-6,
+                        float(sed.grid_axes["av_pts"].max()),
+                    )
+                )
+        else:
+            av = float(np.atleast_1d(self.av.initval)[0])
         a_i = sed.bc_np(I_FILTER, teff, logg, feh, 0.0, rv) - sed.bc_np(
             I_FILTER, teff, logg, feh, av, rv
         )
@@ -684,9 +806,7 @@ class RedClump(Component):
         sed = system.sed
         rv = None
         if sed.fit_rv_dust:
-            from exozippy.components.sed.sed import RV_DUST
-
-            rv = getattr(sed, RV_DUST).value[:1]
+            rv = getattr(self, RV_DUST_KEY).value
         teff, logg, feh, av = (
             getattr(self, p).value for p in ("teff", "logg", "feh", "av")
         )
