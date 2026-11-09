@@ -187,7 +187,13 @@ ROWS = [
 
 
 def _system(
-    tmp_path, monkeypatch, fit_rv_dust, n_rows=6, stars=("A",), pos=None
+    tmp_path,
+    monkeypatch,
+    fit_rv_dust,
+    n_rows=6,
+    stars=("A",),
+    pos=None,
+    params=None,
 ):
     monkeypatch.setattr(
         rs, "load_runtime_grid", lambda model_root=None: _bb_grid()
@@ -211,7 +217,7 @@ def _system(
             **({"fit_rv_dust": True} if fit_rv_dust else {}),
         },
     }
-    system = System(config, {})
+    system = System(config, params or {})
     system.prepare()
     return system
 
@@ -243,26 +249,112 @@ def test_fit_rv_declares_rv_dust_and_table_mode_does_not(
     assert system.star.rv_dust.value in pytensor.graph.traversal.ancestors([m])
 
 
-def test_rv_dust_is_counted_toward_errscale_and_pinned_on_an_unread_star(
+def test_one_sight_line_rv_is_counted_once_and_inactive_on_an_unread_star(
     tmp_path, monkeypatch
 ):
     """
     Given fit_rv_dust on a two-star system whose rows name only A,
-    When the inventory is taken,
-    Then rv_dust is one of A's free photometric coordinates (six rows now
-      leave errscale free only because 1 + 5 = 6) and B's rv_dust is pinned
-      with B's other SED knobs.
+    When the inventory is taken and the model built,
+    Then R_V is ONE free coordinate, sed.rv_dust (counted once toward the
+      errscale pin: 1 + 4 + 1 = 6 rows leave errscale free), not a per-star
+      knob; A's star.rv_dust is derived from it and B's is inactive.
     """
     system = _system(
         tmp_path, monkeypatch, fit_rv_dust=True, stars=("A", "B"), pos="A"
     )
     inv = system.sed.data_free_inventory(system)
-    assert "rv_dust" in inv.star_knobs
-    assert inv.n_free == 1 + 5
+    assert "rv_dust" not in inv.star_knobs
+    assert inv.n_free == 1 + 4 + 1
     assert not inv.pin_errscale
     assert inv.unread_stars == (1,)
     model = system.build_model()
-    free = {v.name for v in model.free_RVs}
-    assert any("rv_dust" in n for n in free)
-    # B's element is pinned: rv_dust is sampled for A alone
-    assert system.star.rv_dust.value is not None
+    free = [v.name for v in model.free_RVs if "rv_dust" in v.name]
+    assert free == ["sed.rv_dust_raw"]
+    rv = system.star.rv_dust
+    assert rv.element_is_derived(0) and not rv.element_is_active(1)
+    assert system.sed.manifest["rv_dust"] is None  # sampled, on the SED
+
+
+def test_two_read_stars_share_one_rv(tmp_path, monkeypatch):
+    """Two stars the rows read: still exactly one R_V dimension, and both
+    stars' star.rv_dust equal it."""
+    system = _system(
+        tmp_path, monkeypatch, fit_rv_dust=True, stars=("A", "B"), pos="A, B"
+    )
+    model = system.build_model()
+    assert [v.name for v in model.free_RVs if "rv_dust" in v.name] == [
+        "sed.rv_dust_raw"
+    ]
+    star_rv, sight = _at(
+        model,
+        [system.star.rv_dust.value, system.sed.rv_dust.value],
+        model.initial_point(),
+    )
+    np.testing.assert_array_equal(star_rv, np.repeat(sight, 2))
+
+
+def test_a_prior_on_star_rv_dust_raises_naming_sed_rv_dust(
+    tmp_path, monkeypatch
+):
+    with pytest.raises(ValueError, match="sed.rv_dust"):
+        _system(
+            tmp_path,
+            monkeypatch,
+            fit_rv_dust=True,
+            params={"star.A.rv_dust": {"mu": 2.5, "sigma": 0.2}},
+        )
+
+
+def test_an_initval_on_a_star_seeds_the_sight_line(tmp_path, monkeypatch):
+    system = _system(
+        tmp_path,
+        monkeypatch,
+        fit_rv_dust=True,
+        params={"star.A.rv_dust": {"initval": 2.2}},
+    )
+    cfg = system.config_manager.resolve("sed", "rv_dust", element=0)
+    assert float(np.atleast_1d(cfg["initval"])[0]) == pytest.approx(2.2)
+
+
+def test_a_repeated_filter_builds_and_reads_one_spectral_column(
+    tmp_path, monkeypatch
+):
+    """
+    Given fit_rv_dust and two rows in the SAME filter (a color row's second
+    filter repeats a row's, the common clump case),
+    When the model is built,
+    Then the spectral BCs are integrated once per distinct filter and both
+    rows read that one column (it used to raise: "names the same SVO
+    filter twice").
+    """
+    monkeypatch.setattr(
+        rs, "load_runtime_grid", lambda model_root=None: _bb_grid()
+    )
+    rows = [(n, m, e) for n, m, e in ROWS] + [("2MASS/2MASS.J", 8.01, 0.03)]
+    lines = ["model: NextGen", "filters:"]
+    for name, mag, err in rows:
+        lines += [f"  - name: {name}", f"    mag: {mag}", f"    err: {err}"]
+    sed = tmp_path / "rep.sed"
+    sed.write_text("\n".join(lines) + "\n")
+    system = System(
+        {
+            "star": [{"name": "A", "mist": False}],
+            "sed": {"file": str(sed), "fit_rv_dust": True},
+        },
+        {},
+    )
+    system.prepare()
+    assert system.sed._spectral_take is not None
+    model = system.build_model()
+    with model:
+        m = system.sed._predicted_appmag_node(system)
+    got = _at(model, m, model.initial_point())
+    np.testing.assert_array_equal(got[:, 0], got[:, len(ROWS)])
+
+
+def _at(model, outs, point):
+    """Evaluate ``outs`` at a point dict of the model's value variables."""
+    import pytensor
+
+    fn = pytensor.function(model.value_vars, outs, on_unused_input="ignore")
+    return fn(*[point[v.name] for v in model.value_vars])

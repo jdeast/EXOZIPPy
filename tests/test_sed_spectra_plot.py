@@ -60,8 +60,8 @@ def _plot_stub(teff, logg, feh, drop_node=None):
     obj.grid_axes = {"teff", "logg", "feh"}
     obj.nstars = 1
     obj.ndraws = 1
-    obj.draws = [
-        {"star.teffsed": np.array([teff]), "star.feh": np.array([feh])}
+    obj.source_input_draws = [
+        {"teffsed": np.array([teff]), "feh": np.array([feh])}
     ]
     obj.logg_vals_draws = np.array([[logg]])
     return obj

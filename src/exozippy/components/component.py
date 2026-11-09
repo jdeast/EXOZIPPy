@@ -1,6 +1,7 @@
 import logging
 import weakref
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 
 import numpy as np
 import pytensor.tensor as pt
@@ -11,6 +12,31 @@ from ..physics_registry import PHYSICS_REGISTRY
 from .parameter import ElementExpression, OwnPrePatchRef, Parameter
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class SEDFluxSource:
+    """One SED flux source a component provides (``Component.sed_flux_sources``).
+
+    The SED evaluates it exactly as it evaluates a star -- one bolometric
+    correction per filter from (teffsed, loggsed, feh, av[, rv_dust]) and a
+    flux scale from (radiussed, distance) -- reading each input from the
+    parameter PATH ``paths`` names (``"comp.<i>.param"``), so the provider
+    writes no SED code (components/sed/sed.md, "SED flux sources").
+
+    ``name``             the spelling an SED row's photType uses for it; it
+                         must not be a star's name.
+    ``paths``            SED input -> parameter path, covering
+                         ``SED.SOURCE_INPUTS`` (plus ``rv_dust`` under
+                         ``sed.fit_rv_dust``).
+    ``photometric_dof``  its free photometric coordinates, counted toward the
+                         SED's errscale pin when a row reads it (a star's
+                         count is ``len(SED.PHOTOMETRIC_DOF)``).
+    """
+
+    name: str
+    paths: dict
+    photometric_dof: int
 
 
 def layer_options(cfg, options):
@@ -521,6 +547,30 @@ class Component(ABC):
         """
         return set()
 
+    def sed_flux_sources(self, system):
+        """The SED flux sources this component provides: a list of
+        ``SEDFluxSource``, default empty.
+
+        A flux source is something the SED evaluates the way it evaluates a
+        star -- an SED row may name it in its photType, and its predicted
+        magnitudes come out of the same bolometric-correction evaluation as
+        the stars' -- without being a Star (the red clump's centroid,
+        ``components/redclump``).  The SED asks every component at ITS
+        stage 1 (``SED.load_data``), so the answer must come from
+        construction-time state: raw config and ``__init__`` bookkeeping.
+        The paths are read lazily, at stage 3 (bounds) and stage 6 (nodes).
+        """
+        return []
+
+    def sed_flux_filters(self, system):
+        """FILTER labels (any alias-table spelling) whose bolometric
+        correction this component reads directly from the SED's grid
+        (``SED.bc_node``), default empty.  Asked at the SED's stage 1, like
+        ``sed_flux_bands``, and for the same reason: the grid is built there,
+        and a filter nobody declared has no column in it.  A label must
+        have a published column (no synthesis, which is for band filters)."""
+        return set()
+
     def initial_logmass(self, system):
         """Stage 7: the BIRTH mass of each star whose mass loss this
         component models, ``{star index: log10(M_ini / solMass) tensor}``.
@@ -541,9 +591,11 @@ class Component(ABC):
         return {}
 
     def selected_sources(self, system):
-        """Stage 7: the indices of the stars this component OBSERVED
-        through a flux-limited selection (a survey's source stars), as a
-        list.  A population prior that models the selection (galacticmodel's
+        """From stage 3 on (an implementation answers from its stage-2
+        maps): the indices of the stars this component OBSERVED through a
+        flux-limited selection (a survey's source stars), as a list.  The
+        galactic prior asks at stage 7, the red clump's source-extinction
+        tie at stage 3.  A population prior that models the selection (galacticmodel's
         genulens port weights a source by its main-sequence count and the
         survey's detection fraction, as genulens does) applies it to these
         stars only; every other star is a field object.  The default

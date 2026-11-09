@@ -116,6 +116,22 @@ def _mass_reader_star_indices(system):
 StarConsumer = namedtuple("StarConsumer", "label param star")
 
 
+def position_root_of(system, i):
+    """The star whose own ra/dec define star ``i``'s line of sight, as a
+    PURE query (``Star.position_root`` answers the same from what stage 3
+    recorded): ``i`` itself, or the primary source for the lens star whose
+    position the event derives from it (``MulensEvent.lens_track_star``,
+    stage-safe from stage 1).  A pure function so a reader running before
+    or after Star's stage 3 gets the same answer (the
+    ``Band._ld_star_resolution`` precedent)."""
+    event = getattr(system, "mulensevent", None)
+    if event is not None and event.lens_track_star(system) == int(i):
+        s_type, s_idx = event.source_bodies[0]
+        if s_type == "star":
+            return int(s_idx)
+    return int(i)
+
+
 class Star(Component):
     # Which mass prior each star draws from.  "imf" (the default, and what
     # every config written before this key existed gets) means the stellar
@@ -133,6 +149,15 @@ class Star(Component):
     # second place the star topology is spelled out, and would have to
     # re-implement name resolution that Component already does.
     MASS_FUNCTIONS = ("imf", "ffp")
+
+    # sed.rv_dust broadcast to one entry per star: star.rv_dust's
+    # from_sightline expression reads it (sed.md, "The spectral mode").  A
+    # context node, not a manifest dep: the element roles are mixed
+    # (derived on read stars, inactive on the rest), so the expression is
+    # sliced per element, and a bare cross-component scalar cannot be
+    # proven aligned (parameter.md) -- this one is, by construction.
+    context_dep_names = frozenset({"sightline_rv_dust"})
+    aligned_context_deps = frozenset({"sightline_rv_dust"})
 
     # Sub-keys of the dict form, `mass_function: {kind: ffp, alpha: ...}`.
     # Deliberately short.  The support's lower edge is NOT here: it is
@@ -861,7 +886,6 @@ class Star(Component):
         "initfeh",
         "age",
         "av",
-        "rv_dust",
     )
 
     def orbit_anchors(self, system):
@@ -1503,6 +1527,36 @@ class Star(Component):
             return {"expr_key": {"from_mulens_thetae_binary": [int(l_idx)]}}
         return {"expr_key": {"from_mulens_thetae": [int(l_idx)]}}
 
+    def _rv_dust_manifest_entry(self, system):
+        """star.rv_dust under sed.fit_rv_dust: DERIVED from the sight line
+        (``from_sightline``) on every star the SED reads, INACTIVE on the
+        rest.  Which stars are read is the SED's one readership answer
+        (``seen_star_mask``); a premature ``sed:`` block with no component
+        behind it reads every star."""
+        n = self.n_elements
+        sed_comp = in_topology(system, "sed")
+        if isinstance(sed_comp, Component):
+            seen = [bool(x) for x in sed_comp.seen_star_mask(system)]
+        else:
+            seen = [True] * n
+        if not any(seen):
+            return {"mask": seen}
+        return {"expr_key": {"from_sightline": seen}, "mask": seen}
+
+    def add_parameter(self, model, param_name, system, context_nodes=None):
+        """Inject ``sightline_rv_dust`` -- sed.rv_dust, one entry per star
+        -- for star.rv_dust's ``from_sightline`` expression."""
+        if param_name == "rv_dust" and not context_nodes:
+            sed = system.sed
+            if not Component._parameter_is_current(sed, "rv_dust", model):
+                sed.add_parameter(model, "rv_dust", system)
+            context_nodes = {
+                "sightline_rv_dust": pt.repeat(
+                    sed.rv_dust.value, self.n_elements
+                )
+            }
+        return super().add_parameter(model, param_name, system, context_nodes)
+
     def register_parameters(self, system):
         """Stage 3: Declare the manifest and push to ConfigManager."""
         # Reset per build (System may prepare more than once).
@@ -1555,13 +1609,14 @@ class Star(Component):
                     "fbolsed": "default",
                 }
             )
-            # The fitted-R_V mode's dust law parameter: one more SED knob,
-            # in the SED's STAR_KNOBS, so the unread-star pin below covers
-            # it with av.
+            # The fitted-R_V mode's dust law: ONE sight-line R_V, sampled as
+            # sed.rv_dust; each star the SED reads DERIVES star.rv_dust from
+            # it, and on a star nothing reads it is inactive (sed.md, "The
+            # spectral mode").
             from exozippy.components.sed.sed import RV_DUST, sed_fits_rv_dust
 
             if sed_fits_rv_dust(system):
-                self.manifest[RV_DUST] = None
+                self.manifest[RV_DUST] = self._rv_dust_manifest_entry(system)
             # The SED-side parameters of a star whose SED flux nothing reads
             # (see `structure_consumers` and `SED.data_free_inventory`):
             # the SED's STAR_KNOBS (av, teffsed, radiussed) are read by

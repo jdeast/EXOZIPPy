@@ -8,3 +8,24 @@ sed:
     internal_unit: ""
     latex: "\\sigma_{\\rm SED}"
     description: "SED photometric error scaling"
+  # THE sight line's R_V, declared only under sed.fit_rv_dust (sed.md, "The
+  # spectral mode"): one parameter for every star the SED reads (each
+  # star.rv_dust is derived from it) and for an SED flux source such as the
+  # red clump.  Uniform on [1.5, 6.0] with NO default Gaussian.  The lower
+  # bound is 1.5, not CCM's fitted 2.6: in this band-integrated CCM89 +
+  # O'Donnell (1994) family the bulge's mean A_I/E(V-I) = 1.217 (Nataf et
+  # al. 2013) is R_V ~ 1.98, so 2.0 put the bulge at the wall; a + b/R_V
+  # stays positive at every filter wavelength down to R_V ~ 1.0.  "R_V ~ 2.5
+  # (Nataf)" is R_V in Nataf's mapping, NOT this family's -- as a prior here
+  # it would bias A_I/E(V-I) ~23% high.  State a sight-line prior here, with
+  # its citation; with a red clump in the fit, not one from a map built from
+  # clump colors (that counts the clump twice).
+  rv_dust:
+    unit: ""
+    internal_unit: ""
+    latex: "R_V"
+    description: "Total-to-selective extinction ratio of the sight line"
+    lower: 1.5
+    upper: 6.0
+    init_scale: 0.05
+    initval: 3.1

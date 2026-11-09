@@ -168,8 +168,15 @@ class Plot:
             getattr(system.sed, "model_root", DEFAULT_MODEL_ROOT)
         )
         self.ndraws = len(draws)
-        self.nstars = self.system.sed.nstars
-        self.star_names = self.system.star.names
+        # The SOURCES the SED evaluates: the stars, then the flux sources
+        # other components provide (sed.md, "SED flux sources") -- each
+        # drawn as its own spectrum.  `nstars`/`star_names` keep their
+        # names for the model plot classes; they count sources.
+        self.nstars = self.system.sed.nsources
+        self.star_names = list(self.system.sed.source_names)
+        # ...of which the first n_stars_only are stars (the blended total
+        # and the "all stars" combination are over these only).
+        self.n_stars_only = self.system.sed.nstars
         self.filters = self.system.sed.filters
         self.nfilters = len(self.filters)
         # one observation per filter row (blended or differential mags;
@@ -187,6 +194,15 @@ class Plot:
         # columns the rows read (the compiled per-star magnitudes' width).
         self.neg_filters = self.system.sed.neg_filters
         self.neg_col = self.system.sed.neg_col
+        # A DIFFERENTIAL color row (color_filter) is four fluxes in two
+        # filters with no flux of its own at any one wavelength: it plots
+        # no photometry point, only its residual, between its two filters
+        # (row_wave_eff), styled by its row label (row_only_labels).
+        self.color_filters = self.system.sed.color_filters
+        self.dcolor_rows = np.asarray(self.system.sed.dcolor_rows, bool)
+        self.row_only_labels = [
+            self.combo_labels[r] for r in np.flatnonzero(self.dcolor_rows)
+        ]
         self.n_row_columns = len(self.system.sed.row_filters)
 
         # Expand each filter row into one "plot point" per side: a blended
@@ -203,6 +219,8 @@ class Plot:
         point_row, point_side, point_label = [], [], []
         point_filter, point_col = [], []
         for row in range(len(self.combo_labels)):
+            if self.dcolor_rows[row]:
+                continue
             pos_idx = np.flatnonzero(self.pos_matrix[row])
             neg_idx = np.flatnonzero(self.neg_matrix[row])
             point_row.append(row)
@@ -344,9 +362,11 @@ class Plot:
 
         """
         filter_dict = {}
-        for filter in list(self.filters) + [
-            f for f in self.neg_filters if f is not None
-        ]:
+        for filter in (
+            list(self.filters)
+            + [f for f in self.neg_filters if f is not None]
+            + [f for f in self.color_filters if f is not None]
+        ):
             if filter in filter_dict:
                 continue
             SVO_name = resolve_filter_name(filter, self.filter_alias_df, "SVO")
@@ -388,6 +408,53 @@ class Plot:
         """
         pass
 
+    def _calc_source_inputs(self):
+        """Per draw, each source's spectrum inputs -- {key: (nsources,)}
+        for teffsed, feh, av, radiussed, distance (and rv_dust under
+        fit_rv_dust) -- from the SED's compiled ``_compiled_source_inputs``,
+        i.e. off the very nodes the forward model reads.
+
+        Created Class Attribute
+        -------
+            self.source_input_draws  :  list of dict, one per draw
+        """
+        sed = self.system.sed
+        fn = sed._compiled_source_inputs
+        keys = sed._source_input_keys
+        out = []
+        for params in self._plot_param_values():
+            vals = fn(*params)
+            out.append(
+                {
+                    k: np.atleast_1d(np.asarray(v, float))
+                    for k, v in zip(keys, vals)
+                }
+            )
+        self.source_input_draws = out
+
+    def _plot_param_values(self):
+        """Per draw, the plot-parameter bundle the compiled functions take
+        (vectors stay vectors)."""
+        out = []
+        for draw in self.draws:
+            out.append(
+                [
+                    (
+                        float(
+                            np.squeeze(
+                                np.asarray(draw.get(p.label, p.initval))
+                            )
+                        )
+                        if getattr(p.value, "ndim", 0) == 0
+                        else np.atleast_1d(
+                            draw.get(p.label, p.initval)
+                        ).astype(np.float64)
+                    )
+                    for p in self.system.plot_params
+                ]
+            )
+        return out
+
     ######## functions used in calculating flux ########
 
     def _normalize_optical_depth(self):
@@ -426,9 +493,9 @@ class Plot:
             ccm_a, ccm_b = ccm89_ab(
                 np.asarray(self.df_wave["wavelength_micron"], float)
             )
-            for d, draw in enumerate(self.draws):
-                av = np.asarray(draw.get("star.av"), float)
-                rv = np.asarray(draw.get(f"star.{RV_DUST}"), float)
+            for d in range(self.ndraws):
+                av = self.source_input_draws[d]["av"]
+                rv = self.source_input_draws[d][RV_DUST]
                 optical_depth_draws[d, :] = (
                     av[:, np.newaxis]
                     * (
@@ -439,8 +506,8 @@ class Plot:
                 )
             self.optical_depth_draws = optical_depth_draws
             return
-        for d, draw in enumerate(self.draws):
-            av = draw.get("star.av")
+        for d in range(self.ndraws):
+            av = self.source_input_draws[d]["av"]
             optical_depth = (
                 (extinction_modeled / V_band_extinction)
                 * av[:, np.newaxis]
@@ -462,9 +529,9 @@ class Plot:
         flux_model_draws = np.zeros(
             (self.ndraws, self.nstars, len(self.df_wave))
         )
-        for d, draw in enumerate(self.draws):
-            radiussed = draw.get("star.radiussed")
-            distance = draw.get("star.distance")
+        for d in range(self.ndraws):
+            radiussed = self.source_input_draws[d]["radiussed"]
+            distance = self.source_input_draws[d]["distance"]
             f_model = (
                 self.model_spectrum_flux_draws[d, :]
                 * np.exp(-self.optical_depth_draws[d, :])
@@ -576,6 +643,8 @@ class Plot:
         for row, f in enumerate(self.filters):
             w = self.filter_params[f]["wave_eff"]
             nf = self.neg_filters[row]
+            if nf is None:
+                nf = self.color_filters[row]
             if nf is not None:
                 w = np.sqrt(w * self.filter_params[nf]["wave_eff"])
             waves.append(w)
