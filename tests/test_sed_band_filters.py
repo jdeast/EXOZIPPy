@@ -38,6 +38,7 @@ def _sed_stub(bands, tmp_path):
     sed = object.__new__(SED)
     sed.config_manager = _StubConfigManager(bands)
     sed.filters = []
+    sed.row_filters = []
     sed.sedmodel = "NextGen"
     # An empty model root: every facility is "missing", which is the
     # situation under test -- and an explicit model_root, so no column is
@@ -112,6 +113,7 @@ def test_a_filter_already_in_the_sed_file_is_not_added_twice(tmp_path):
     # ARRANGE
     sed = _sed_stub([{"filter": "2MASS.J"}], tmp_path)
     sed.filters = ["2MASS/2MASS.J"]
+    sed.row_filters = ["2MASS/2MASS.J"]
 
     # ACT
     extra = sed._collect_band_filters(_READ)
