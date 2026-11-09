@@ -864,7 +864,7 @@ def choose_direct_angles(system, model, raw_start, logp_fn=None):
     marginal = None
     for slot in auto:
         if slot.user_bounded:
-            logger.info(
+            logger.debug(
                 "[%s] %s keeps its direction latents: the params file bounds "
                 "it, and the direct coordinate's support would replace that "
                 "bound with its own window.",
@@ -877,7 +877,7 @@ def choose_direct_angles(system, model, raw_start, logp_fn=None):
                 slot, raw_start, logp_fn, threshold(slot.halfwidth)
             )
         except FloatingPointError as exc:
-            logger.warning(
+            logger.debug(
                 "[%s] %s keeps its direction latents: the automatic "
                 "coordinate probe could not evaluate the model (%s).",
                 slot.where,
@@ -896,7 +896,7 @@ def choose_direct_angles(system, model, raw_start, logp_fn=None):
         seeds = _seed_angles(system, slot, theta0)
         spread = max(abs(_wrap(a, theta0) - theta0) for a in seeds)
         if spread > SEED_SPREAD_FRACTION * slot.halfwidth:
-            logger.warning(
+            logger.debug(
                 "[%s] %s is measured to %s at the start, below the %s "
                 "threshold for sampling it directly, but the starting seeds "
                 "disagree about it by up to %s -- a window centered on seed 0 "
@@ -919,7 +919,7 @@ def choose_direct_angles(system, model, raw_start, logp_fn=None):
             )
         sigma_m = marginal.angle_sigma(slot)
         if sigma_m is None:
-            logger.warning(
+            logger.debug(
                 "[%s] %s is measured to %s at the start conditionally, but "
                 "its MARGINAL sigma cannot be measured (%s), so it keeps its "
                 "direction latents. Set '%s: true' on its block to force the "
@@ -932,7 +932,7 @@ def choose_direct_angles(system, model, raw_start, logp_fn=None):
             )
             continue
         if sigma_m >= threshold(slot.halfwidth):
-            logger.info(
+            logger.debug(
                 "[%s] %s is measured to %s conditionally but %s marginally "
                 "(%s), above the %s threshold -- it is degenerate with "
                 "another coordinate, so it keeps its direction latents.",
@@ -986,29 +986,36 @@ def _fmt_window(slot, center, half):
 
 
 def _warn_switch(slot, theta0, sigma, sigma_m, method):
+    # A WARNING because the model that runs is not the one the user wrote
+    # (parameter.md, "The warning"); headline + remedy, the measurement
+    # detail at DEBUG (docs/logging.md).
     aspect = 0.523 / sigma
     logger.warning(
-        "[%s] %s is measured to %s at the start conditionally and %s "
-        "marginally (%s; threshold %s), so it is "
-        "sampled DIRECTLY, uniform on the window %s centered on the start, "
-        "instead of through its direction latents %s/%s, whose posterior "
-        "would be a narrow ray from the origin (~%.0f:1) that a diagonal "
-        "metric cannot straighten. The prior is unchanged. Set '%s: false' "
-        "on the '%s' block to keep the latents ('%s: true' forces the direct "
-        "coordinate).",
+        "[%s] %s is sampled DIRECTLY, uniform on %s centered on the start, "
+        "instead of through its direction latents %s/%s: it is measured to "
+        "%s (marginally %s), below the %s threshold.  The prior is "
+        "unchanged.\nSet '%s: false' on the '%s' block to keep the latents "
+        "('%s: true' forces the direct coordinate).",
         slot.where,
         slot.angle,
-        _fmt(slot, sigma),
-        _fmt(slot, sigma_m),
-        method,
-        _fmt(slot, threshold(slot.halfwidth)),
         _fmt_window(slot, theta0, slot.halfwidth),
         slot.x,
         slot.y,
-        aspect,
+        _fmt(slot, sigma),
+        _fmt(slot, sigma_m),
+        _fmt(slot, threshold(slot.halfwidth)),
         slot.flag,
         slot.where,
         slot.flag,
+    )
+    logger.debug(
+        "[%s] %s: marginal sigma from %s; the latents' posterior would be a "
+        "narrow ray from the origin (~%.0f:1) that a diagonal metric cannot "
+        "straighten.",
+        slot.where,
+        slot.angle,
+        method,
+        aspect,
     )
 
 
@@ -1023,7 +1030,7 @@ def _log_forced(system, choices):
             slot = slots.get((key, i))
             if slot is None:
                 continue
-            logger.info(
+            logger.debug(
                 "[%s] %s is sampled directly ('%s: true'), uniform on %s "
                 "centered on its start.",
                 slot.where,

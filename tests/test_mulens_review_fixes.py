@@ -262,12 +262,12 @@ def test_finite_source_binary_model_yields_finite_magnifications():
     assert np.max(np.abs(out_fs[0][0] / out_ps[0][0] - 1.0)) > 1e-5
 
 
-def test_mag_op_warns_once_when_falling_back_to_nan():
+def test_mag_op_warns_once_when_falling_back_to_nan(caplog):
     """
     Given an Op configured with a magnification method MulensModel rejects,
     When perform() is called twice,
     Then both calls return NaN (so the sampler rejects the proposal) but a
-      single RuntimeWarning naming the underlying error is emitted -- the
+      single WARNING naming the underlying error is logged -- the
       silent all-NaN fallback is what hid the point-source binary bug.
     """
     # Arrange
@@ -277,17 +277,16 @@ def test_mag_op_warns_once_when_falling_back_to_nan():
     first, second = [[None]], [[None]]
 
     # Act
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
+    with caplog.at_level(logging.WARNING, logger="exozippy"):
         op.perform(None, [_P_BINARY_PS, times, obs_pos], first)
         op.perform(None, [_P_BINARY_PS, times, obs_pos], second)
 
     # Assert
     assert np.all(np.isnan(first[0][0]))
     assert np.all(np.isnan(second[0][0]))
-    runtime = [w for w in caught if issubclass(w.category, RuntimeWarning)]
+    runtime = [r for r in caplog.records if r.levelname == "WARNING"]
     assert len(runtime) == 1
-    assert "VBBL" in str(runtime[0].message)
+    assert "VBBL" in runtime[0].getMessage()
 
 
 class _RaisingVBM:
@@ -307,13 +306,13 @@ class _RaisingVBM:
     SetLensGeometry = _boom
 
 
-def test_vbm_direct_op_warns_once_when_the_backend_raises():
+def test_vbm_direct_op_warns_once_when_the_backend_raises(caplog):
     """
     Given a VBMDirectMagOp whose VBMicrolensing backend raises on every call
       (a misconfigured/broken backend, not a bad proposal),
     When perform() is called twice with a perfectly ordinary parameter vector,
     Then both calls return NaN (so the proposal is rejected) AND a single
-      RuntimeWarning naming the underlying error is emitted -- silently
+      WARNING naming the underlying error is logged -- silently
       returning all-NaN forever is how a default-backend binary fit runs to a
       garbage posterior with no message (review 2.6.1).
     """
@@ -325,21 +324,22 @@ def test_vbm_direct_op_warns_once_when_the_backend_raises():
     first, second = [[None]], [[None]]
 
     # Act
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
+    with caplog.at_level(logging.WARNING, logger="exozippy"):
         op.perform(None, [_P_BINARY_PS, times, obs_pos], first)
         op.perform(None, [_P_BINARY_PS, times, obs_pos], second)
 
     # Assert
     assert np.all(np.isnan(first[0][0]))
     assert np.all(np.isnan(second[0][0]))
-    runtime = [w for w in caught if issubclass(w.category, RuntimeWarning)]
+    runtime = [r for r in caplog.records if r.levelname == "WARNING"]
     assert len(runtime) == 1
-    assert "SetLensGeometry" in str(runtime[0].message)
-    assert "VBMDirectMagOp" in str(runtime[0].message)
+    assert "SetLensGeometry" in runtime[0].getMessage()
+    assert "VBMDirectMagOp" in runtime[0].getMessage()
 
 
-def test_vbm_direct_op_nonfinite_warning_does_not_silence_the_backend_one():
+def test_vbm_direct_op_nonfinite_warning_does_not_silence_the_backend_one(
+    caplog,
+):
     """
     Given a VBMDirectMagOp that first sees a non-finite parameter vector and
       then hits a raising backend,
@@ -357,17 +357,14 @@ def test_vbm_direct_op_nonfinite_warning_does_not_silence_the_backend_one():
     out = [[None]]
 
     # Act
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
+    with caplog.at_level(logging.WARNING, logger="exozippy"):
         op.perform(None, [nonfinite, times, obs_pos], out)
         op._vbm = _RaisingVBM()
         op.perform(None, [_P_BINARY_PS, times, obs_pos], out)
 
     # Assert
     messages = [
-        str(w.message)
-        for w in caught
-        if issubclass(w.category, RuntimeWarning)
+        r.getMessage() for r in caplog.records if r.levelname == "WARNING"
     ]
     assert len(messages) == 2
     assert any("non-finite" in m for m in messages)
@@ -1318,7 +1315,7 @@ def test_bootstrap_skips_a_file_whose_flux_starts_the_user_gave(
     _user_flux(inst, **entries)
 
     # Act
-    with caplog.at_level("DEBUG"):
+    with caplog.at_level("DEBUG", logger="exozippy"):
         f_total, q_source, q_flux = inst._estimate_flux_components(
             t, flux, xyz, 0.0, 0.0, 0, inst.geometry
         )
@@ -1349,7 +1346,7 @@ def test_bootstrap_still_runs_and_warns_without_every_user_flux_start(
     _user_flux(inst, **entries)
 
     # Act
-    with caplog.at_level("DEBUG"):
+    with caplog.at_level("DEBUG", logger="exozippy"):
         inst._estimate_flux_components(
             t, flux, xyz, 0.0, 0.0, 0, inst.geometry
         )
@@ -2011,7 +2008,7 @@ def test_an_underivable_t_E_skips_rather_than_inventing_30_days(caplog):
 
     # Act
     text = _run_check(_geometry(no_te), caplog)
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.DEBUG, logger="exozippy"):
         f_total, q_source, _q_flux = inst._estimate_flux_components(
             t, flux, xyz, 0.0, 0.0, 0, inst.geometry
         )

@@ -35,6 +35,8 @@ import pytensor.tensor as pt
 from . import ltt
 from .limbdark import quad_limb_darkened_flux
 
+logger = logging.getLogger(__name__)
+
 
 # ==========================================================================
 # Differentiable Bessel J0  (Dong capsule; Numerical Recipes bessj0).
@@ -398,10 +400,12 @@ def compute_rm_rv(
     # them unguarded would crash a config that built fine before this
     # existed.
     if light_travel_time_active and not ltt.orbit_supports_ltt(orbit):
-        logging.warning(
-            "rm: light-travel-time correction disabled -- the orbit does "
-            "not define %s (its bodies did not resolve). Set "
-            "light_travel_time: false on the RV file to silence this.",
+        logger.warning(
+            "[rvinstrument] RM light-travel-time correction disabled for "
+            "orbit %s: the orbit does not define %s (its bodies did not "
+            "resolve).  Set light_travel_time: false on the RV file to "
+            "silence this.",
+            orbit.names[orbit_idx],
             ", ".join(ltt.REQUIRED_ORBIT_PARAMS),
         )
         light_travel_time_active = False

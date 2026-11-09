@@ -87,7 +87,7 @@ def _xal_system(tmp_path, finite_source=False, binary_lens=False):
         ],
         "lens": lens_bodies,
         "source": [{"body": "star.Source", "orbit": "S"}],
-        "mulensinstrument": [{"name": "OGLE", "file": lc, "filter": "I"}],
+        "mulensinstrument": [{"name": "OGLE", "file": lc}],
     }
     params = {
         "source.Source.t_0": {"initval": _T0_PAR},

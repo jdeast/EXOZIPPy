@@ -284,7 +284,7 @@ def test_splinespace_without_fitspline_warns(tmp_path, caplog):
     """
     with caplog.at_level(logging.WARNING):
         _transit(tmp_path, [{"splinespace": 0.5}])
-    assert "splinespace is set but fitspline is not true" in caplog.text
+    assert "splinespace is ignored: fitspline is not true" in caplog.text
 
 
 # ---------------------------------------------------------------------------

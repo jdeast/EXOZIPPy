@@ -7,6 +7,7 @@ import numpy as np
 import pytensor.tensor as pt
 
 from ..config import NUMERIC_KEYS, user_entry
+from ..logger import bullets, wrap_message
 from ..manifest import interpret_manifest_entry
 from ..physics_registry import PHYSICS_REGISTRY
 from .parameter import ElementExpression, OwnPrePatchRef, Parameter
@@ -298,6 +299,18 @@ class Component(ABC):
         """Naming prefix for the model (e.g., 'star', 'planet', 'inst')."""
         pass
 
+    def log_tag(self, i=None):
+        """The prefix of a log message from this component (docs/logging.md).
+
+        ``[<component>]`` for a message about the component as a whole,
+        ``[<component> <instance name>]`` for one about element ``i`` -- the
+        name the user wrote in the config (or its index when unnamed), so a
+        warning points at the block to edit.
+        """
+        if i is None:
+            return f"[{self.prefix}]"
+        return f"[{self.prefix} {self.names[int(i)]}]"
+
     def user_wrote_field(self, param_name, field):
         """Per element: did the USER write ``field`` for this parameter?
 
@@ -393,6 +406,86 @@ class Component(ABC):
         such keys override this.
         """
         return []
+
+    @classmethod
+    def validate_config_keys(cls, yaml_key, block):
+        """Raise for a key in this component's config block it does not read.
+
+        The vocabulary is ``config_schema()`` plus ``name``.  An unknown key
+        is a typo or a setting in the wrong file, and ignoring it would fit
+        something other than what the user wrote with no message (CLAUDE.md,
+        no fallbacks; docs/logging.md, "User input is never silently
+        ignored") -- a ``zero_point: {mu: 0, sigma: 0.05}`` in a
+        ``mulensinstrument`` block left f_source untied from the SED for a
+        whole fit.  The message names the key and the instance, and suggests
+        the right spelling where there is an obvious one: a parameter of this
+        component (which belongs in the params file), or a near-miss of a
+        known key.  Case is never folded: a case variant is reported as
+        unknown, with the right spelling suggested.
+
+        Called by ``System.__init__`` after the component is constructed, so
+        a component's own, more specific refusal of a RETIRED key (e.g.
+        ``Instrument``'s ``exptime``) is raised first.
+        """
+        import difflib
+
+        if isinstance(block, dict):
+            block = [block]
+        if not isinstance(block, list):
+            return
+        known = {e["key"] for e in (cls.config_schema() or [])} | {"name"}
+        params = cls._parameter_names_for_suggestion(yaml_key)
+        squashed = {p.replace("_", ""): p for p in params}
+        for i, entry in enumerate(block):
+            if not isinstance(entry, dict):
+                continue
+            unknown = [k for k in entry if k not in known]
+            if not unknown:
+                continue
+            label = entry.get("name", i)
+            hints = []
+            for key in unknown:
+                skey = str(key)
+                param = (
+                    skey
+                    if skey in params
+                    else squashed.get(skey.replace("_", ""))
+                )
+                if param is not None:
+                    hints.append(
+                        f"'{skey}': {param} is a PARAMETER of {yaml_key}, "
+                        f"set in the params file, not the config -- e.g. "
+                        f"`{yaml_key}.{label}.{param}: {{mu: ..., sigma: "
+                        f"...}}` for a prior, or `{{initval: ...}}` for a "
+                        f"start."
+                    )
+                    continue
+                close = difflib.get_close_matches(
+                    skey, sorted(known), n=1, cutoff=0.75
+                )
+                if close:
+                    hints.append(f"'{skey}': did you mean '{close[0]}'?")
+            msg = (
+                f"[{yaml_key} {label}] unknown config key(s) "
+                f"{', '.join(repr(str(k)) for k in sorted(map(str, unknown)))}"
+                f": {yaml_key} does not read them, so they would be "
+                f"silently ignored."
+            )
+            if hints:
+                msg += "\n" + bullets(hints)
+            msg += (
+                f"\nRemove or correct them.  Config keys {yaml_key} reads: "
+                f"{', '.join(sorted(known))}."
+            )
+            raise ValueError(wrap_message(msg))
+
+    @classmethod
+    def _parameter_names_for_suggestion(cls, yaml_key):
+        """The parameter names in this component's defaults.yaml block, for
+        `validate_config_keys`'s "this belongs in the params file" hint."""
+        from exozippy.introspect import _merged_param_block
+
+        return set(_merged_param_block(cls, yaml_key))
 
     @classmethod
     def shared_parameter_names(cls):

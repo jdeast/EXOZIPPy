@@ -262,10 +262,10 @@ class TimeSystem:
                     coord, kind="barycentric", ephemeris=ephemeris
                 ).jd
             )
-        logger.info(
-            "[%s] converted %d times from %s_%s to BJD_TDB "
+        logger.debug(
+            "%s converted %d times from %s_%s to BJD_TDB "
             "(median shift %+.3f s).",
-            label,
+            self.log_tag(i),
             t.size,
             spec["frame"].upper(),
             spec["scale"].upper(),
@@ -336,10 +336,10 @@ class TimeSystem:
                 f"spectrum; use jd (the observer's own clock) or bjd "
                 f"(barycentric tags)."
             )
-        logger.info(
-            "[%s] converted %d times from %s_%s to the observer's JD_TDB "
+        logger.debug(
+            "%s converted %d times from %s_%s to the observer's JD_TDB "
             "(median shift %+.3f s).",
-            label,
+            self.log_tag(i),
             t.size,
             spec["frame"].upper(),
             spec["scale"].upper(),

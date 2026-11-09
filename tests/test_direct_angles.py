@@ -158,13 +158,21 @@ def switched(tight):
     handler = _Records()
     log = logging.getLogger("exozippy")
     log.addHandler(handler)
+    saved_level = log.level
+    log.setLevel(logging.DEBUG)  # the measurement detail is a DEBUG line
     try:
         choices, _ = angles.choose_direct_angles(
             system, latent_model, raw, lpf
         )
     finally:
         log.removeHandler(handler)
+        log.setLevel(saved_level)
     out["warnings"] = [m for m in handler.messages if "DIRECTLY" in m]
+    # The measurement detail (how the marginal sigma was taken) is the
+    # DEBUG line beside the warning (docs/logging.md: headline + remedy).
+    out["details"] = [
+        m for m in handler.messages if "marginal sigma from" in m
+    ]
     out["choices"] = choices
     model = angles.adopt_direct_angles(system, latent_model, raw, choices)
     system.recenter_whitening_anchor(model)
@@ -492,7 +500,9 @@ def test_seeds_that_disagree_by_a_half_turn_keep_the_latents(tmp_path, caplog):
     )
     model = system.build_model()
     raw = system.get_raw_start(model)
-    with caplog.at_level(logging.WARNING, logger="exozippy"):
+    # DEBUG: keeping the latents is the model the user wrote, so the
+    # decision is not a WARNING (docs/logging.md).
+    with caplog.at_level(logging.DEBUG, logger="exozippy"):
         choices, _ = angles.choose_direct_angles(
             system, model, raw, model.compile_logp()
         )
@@ -553,12 +563,15 @@ def test_the_marginal_sigma_is_recorded_and_matches_the_prior(switched):
       correlated with it),
     When the switch is decided,
     Then the Laplace MARGINAL sigma it records is the same 0.1 deg (to 2%),
-      and the warning reports it beside the conditional one.
+      and the warning reports it beside the conditional one, with how it
+      was measured in the DEBUG detail line.
     """
     rec = switched["choices"]["orbit.bigomega"]
     assert rec["marginal_sigma"][0] == pytest.approx(0.1 * _DEG, rel=0.02)
     (msg,) = switched["warnings"]
-    assert "marginally" in msg and "gradient calls" in msg
+    assert "marginally" in msg
+    (detail,) = switched["details"]
+    assert "gradient calls" in detail
 
 
 def test_a_conditionally_tight_but_degenerate_angle_keeps_its_latents(
@@ -592,7 +605,7 @@ def test_a_conditionally_tight_but_degenerate_angle_keeps_its_latents(
     (slot,) = angles.find_slots(system)
     assert angles.measure_angle_sigma(slot, raw, logp)[1] is not None
 
-    with caplog.at_level(logging.INFO, logger="exozippy"):
+    with caplog.at_level(logging.DEBUG, logger="exozippy"):
         choices, _ = angles.choose_direct_angles(system, model, raw, logp)
 
     assert choices == {}

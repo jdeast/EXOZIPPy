@@ -314,7 +314,7 @@ def test_galactic_anchor_on_a_derived_lens_reads_the_source(files, caplog):
     """
     cfg = _config(files)
     cfg["galacticmodel"] = [{"anchor_idx": 0}]
-    caplog.set_level(logging.INFO)
+    caplog.set_level(logging.DEBUG, logger="exozippy")
     system, model = _build(cfg)
     assert any(
         "line of sight is read from star 1" in r.getMessage()

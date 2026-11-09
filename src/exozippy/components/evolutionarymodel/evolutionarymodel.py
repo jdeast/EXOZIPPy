@@ -434,7 +434,7 @@ class EvolutionaryModel(StellarRelation, Component):
                     f"star.{star_name}.{param}", sigma=0.0
                 )
             if system.star.mist[si] or system.star.parsec[si]:
-                logger.info(
+                logger.warning(
                     f"[{self.prefix}] star '{star_name}' has an evolutionary "
                     f"model switch set but no {self.prefix} block names it, "
                     f"so nothing reads its initfeh/eep/age; pinning all three. "

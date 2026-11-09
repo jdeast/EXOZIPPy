@@ -171,7 +171,7 @@ def test_polished_deeper_transit_raises_the_auto_count(auto_system, caplog):
     rad = system.planet.radius
     phys = rad.phys_from_raw(point[f"{rad.label}_raw"])
     point[f"{rad.label}_raw"] = rad.raw_from_initval(phys * 2.0)
-    with caplog.at_level(logging.INFO, logger=LOGGER):
+    with caplog.at_level(logging.DEBUG, logger=LOGGER):
         changed = system.check_at_point(model, point, "polished")
     assert changed
     n1 = tr.ninterp[0]
@@ -305,7 +305,7 @@ def test_check_exposure_false_skips_the_user_check_entirely(
         "_pairs_dchi2",
         lambda self, *a, **k: calls.append(1) or [],
     )
-    with caplog.at_level(logging.INFO, logger=LOGGER):
+    with caplog.at_level(logging.DEBUG, logger=LOGGER):
         system, _ = _build(
             tmp_path,
             {"exptime_s": 1800.0, "ninterp": 1, "check_exposure": False},

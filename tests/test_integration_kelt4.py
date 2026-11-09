@@ -419,10 +419,12 @@ KELT4_LOGP_ATOL = 0.2  # nats; 2x the 0.1-nat print resolution
 
 # One row of run.inspect_start's startup table, as the file log handler (always
 # DEBUG, so the table is there whatever logger_level the config asks for)
-# writes it:
-#   ... exozippy.run:   planet.b.mass |      0.96736983 |  0.100 |  jupiterMass | ...
+# writes it.  The table is ONE log record (docs/logging.md), so only its first
+# line carries the timestamp/logger prefix; every row is a bare continuation
+# line:
+#      planet.b.mass |      0.96736983 |  0.100 |  jupiterMass | ...
 _START_ROW = re.compile(
-    r"exozippy\.run:\s+(?P<label>[A-Za-z_][\w.]*)\s+\|"
+    r"^\s*(?P<label>[A-Za-z_][\w.]*)\s+\|"
     r"\s+(?P<value>\S+)\s+\|"
     r"\s+(?P<scale>\S+)\s+\|"
     r"\s+(?P<units>[^|]*?)\s*\|"

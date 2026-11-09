@@ -21,6 +21,8 @@ What is pinned, and against what:
    code), and a NaN proposal yields three NaN outputs.
 """
 
+import logging
+
 import numpy as np
 import pytensor.tensor as pt
 import pytest
@@ -343,13 +345,18 @@ def test_photometric_op_and_astrometric_op_agree_on_A():
         assert np.all(np.isfinite(dtau)) and np.all(np.isfinite(dbeta))
 
 
-def test_nan_proposal_gives_three_nan_outputs():
+def test_nan_proposal_gives_three_nan_outputs(caplog):
     op = VBMDirectMagOp(
         coords=COORDS, n_companions=1, use_rho=False, astrometry=True
     )
     p = [T0, U0, 20.0, 0.0, 0.0, np.nan, 0.3, 30.0]
-    with pytest.warns(RuntimeWarning, match="non-finite"):
+    with caplog.at_level(logging.WARNING, logger="exozippy"):
         outs = _op_eval(op, p, [T0, T0 + 1.0], np.zeros((2, 3)))
+    assert any(
+        "non-finite" in r.getMessage()
+        for r in caplog.records
+        if r.levelname == "WARNING"
+    )
     assert len(outs) == 3
     for o in outs:
         assert o.shape == (2,) and np.all(np.isnan(o))

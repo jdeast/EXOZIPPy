@@ -463,7 +463,7 @@ def _map_draw_from_lp(lp_values, mode_report, mode_status):
         )
     n_dropped = int(np.isfinite(ranked).sum() - np.isfinite(masked).sum())
     if n_dropped:
-        logger.info(
+        logger.debug(
             "mkparam: excluded %d numerically invalid draw(s) from the MAP "
             "ranking.",
             n_dropped,
@@ -665,7 +665,7 @@ def _sample_seed_draws(
 
     if labels is not None:
         quotas = _mode_seed_quotas(weights, n)
-        logger.info(
+        logger.debug(
             "mkparam: multimodal trace -- stratifying %d seeds across %d "
             "modes (quotas %s, weights %s)",
             n,
@@ -922,7 +922,7 @@ def write_param_file(
         map_pick = _map_draw_from_lp(ss["lp"].values, mode_report, mode_status)
     if map_pick is not None:
         map_chain, map_draw, map_lp = map_pick
-        logger.info(
+        logger.debug(
             f"mkparam: MAP chain={map_chain} draw={map_draw} lp={map_lp:.4f}"
         )
     else:
@@ -990,7 +990,7 @@ def write_param_file(
                 len(seed_pairs),
             )
     K = len(seed_pairs)
-    logger.info("mkparam: emitting %d seed(s) per parameter", K)
+    logger.debug("mkparam: emitting %d seed(s) per parameter", K)
 
     output = {}
     consumed_existing = set()

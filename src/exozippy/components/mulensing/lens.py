@@ -347,7 +347,7 @@ class Lens(Component):
                 out["log_s"][1][field] = log_vals.tolist()
                 out["s"][1][field] = s_vals.tolist()
         if logged:
-            logger.info(
+            logger.debug(
                 "Applying your s bound(s) to the sampled log_s (s = "
                 f"10**log_s): {'; '.join(logged)}.  Your params entries are "
                 "unchanged."

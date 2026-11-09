@@ -28,6 +28,7 @@ one expression, 1e-9, and zero floors to +U_0_FLOOR.
 
 import functools
 import inspect
+import logging
 import warnings
 
 import numpy as np
@@ -574,7 +575,7 @@ def test_require_mm_number_passes_infinities_through():
     )
 
 
-def test_pspl_op_reports_a_nan_by_name_and_still_rejects_the_proposal():
+def test_pspl_op_reports_a_nan_by_name_and_still_rejects_the_proposal(caplog):
     """
     Given a param vector whose t_E is NaN,
     When MulensMagOp.perform runs,
@@ -587,14 +588,13 @@ def test_pspl_op_reports_a_nan_by_name_and_still_rejects_the_proposal():
     obs = np.zeros((len(t), 3))
     out = [[None]]
 
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
+    with caplog.at_level(logging.WARNING, logger="exozippy"):
         MulensMagOp(coords=_COORDS, mag_method="point_source").perform(
             None, [p, t, obs], out
         )
 
     assert np.all(np.isnan(out[0][0]))
-    assert any("mulensevent.t_E" in str(w.message) for w in caught)
+    assert any("mulensevent.t_E" in r.getMessage() for r in caplog.records)
 
 
 def test_build_pspl_model_is_unchanged_for_a_healthy_vector():
@@ -613,7 +613,7 @@ def test_build_pspl_model_is_unchanged_for_a_healthy_vector():
     assert float(model.parameters.pi_E_E) == -0.01
 
 
-def test_vbm_direct_names_the_non_finite_entry_it_short_circuits_on():
+def test_vbm_direct_names_the_non_finite_entry_it_short_circuits_on(caplog):
     """
     Given a param vector with a NaN t_E,
     When VBMDirectMagOp.perform runs,
@@ -627,14 +627,13 @@ def test_vbm_direct_names_the_non_finite_entry_it_short_circuits_on():
     obs = np.zeros((len(t), 3))
     out = [[None]]
 
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
+    with caplog.at_level(logging.WARNING, logger="exozippy"):
         VBMDirectMagOp(coords=_COORDS, n_companions=1, use_rho=False).perform(
             None, [p, t, obs], out
         )
 
     assert np.all(np.isnan(out[0][0]))
-    assert any("mulensevent.t_E" in str(w.message) for w in caught)
+    assert any("mulensevent.t_E" in r.getMessage() for r in caplog.records)
 
 
 def test_vbm_direct_labels_cover_the_whole_param_vector():

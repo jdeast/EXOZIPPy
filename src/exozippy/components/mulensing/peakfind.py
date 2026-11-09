@@ -60,6 +60,8 @@ import logging
 import numpy as np
 from scipy.optimize import minimize
 
+from exozippy.logger import first_time
+
 logger = logging.getLogger(__name__)
 
 # Trial values for the coarse grid.  u_0 spans the high-magnification regime
@@ -311,7 +313,16 @@ def _fit_pspl(curves, mag_fn, fixed=None):
         t_0, u_0, t_E, chi2, ok = _refit_at_grid_u0(
             per_u0, curves, mag_fn, span, cadence, fixed
         )
-        logger.warning(
+        if first_time("peakfind-u0-degeneracy"):
+            logger.warning(
+                "Peak finder: the point-lens refinement hit the u_0 -> 0, "
+                "t_E -> inf degeneracy, so these data do not constrain u_0 "
+                "and the seed is a refit at grid u_0 values (detail in the "
+                "log file).\nThis is what a low-amplitude, gap-peaked or "
+                "anomaly-dominated event looks like: expect the sampler to "
+                "need a companion (binary-lens) seed, not a longer polish."
+            )
+        logger.debug(
             "Peak finder: the PSPL refinement ran into the u_0 -> 0, "
             "t_E -> inf degeneracy (u_0 = %.3g, t_E = %.3g d against a "
             "%.1f d data span) and is discarded; refitting t_0 and t_E at "
@@ -543,7 +554,7 @@ def find_pspl_seed(curves, mag_fn=None, primary_first=True, fixed=None):
     width_2 = _observed_width(second, masked, mag_fn)
     if not (width_2 > _PRIMARY_WIDTH_RATIO * fwhm_1):
         return first
-    logger.warning(
+    logger.debug(
         "Peak finder: the strongest feature (t_0 = %.4f, FWHM %.2f d) is "
         "an ANOMALY riding on a broader event; with it masked "
         "(%.4f..%.4f) the rest of the curve fits a PSPL at t_0 = %.4f, "
@@ -674,7 +685,7 @@ def push_peak_find_hints(seed, config_manager, source, replace=False):
     )
     anomaly = seed.get("anomaly")
     if anomaly:
-        logger.info(
+        logger.debug(
             "Peak finder (%s): a %.2f d anomaly at t_0 = %.4f was masked "
             "(%.4f..%.4f) to find that primary.",
             source,

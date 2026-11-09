@@ -1153,7 +1153,7 @@ def test_neighbor_pm_is_free_under_the_galactic_prior_at_its_distance(
 
     tmp = truth_files[0]
     cfg, params = _unread_neighbor(tmp)
-    cfg["galacticmodel"] = [{"star_ndx": 1}]
+    cfg["galacticmodel"] = [{}]
     params["star.Neighbor.distance"] = {"initval": D_N}
     system, model = _build(cfg, params)
     star = system.star

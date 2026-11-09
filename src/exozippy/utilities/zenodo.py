@@ -389,7 +389,7 @@ def _link_into(entry: Path, dest: Path, meta: Mapping[str, object]) -> bool:
             raise OSError(f"{tmp} is short after {how}")
         os.replace(tmp, dest)
         if how == "hard link":
-            logger.info(
+            logger.debug(
                 "Linked %s from the shared cache (hard link).", dest.name
             )
         else:
@@ -465,7 +465,7 @@ def _adopt_destination(
                 if _md5(tmp) != meta["md5"]:
                     raise OSError(f"the copy of {dest} at {tmp} is corrupt")
             if _publish(tmp, entry):
-                logger.info(
+                logger.debug(
                     "Adopted the existing %s into the shared cache at %s.",
                     dest.name,
                     entry,
@@ -721,7 +721,7 @@ def fetch_assets(
             dest.unlink()
 
         if _fetch_via_cache(filename, meta, dest, on_fetch):
-            logger.info(f"Saved {filename} to {dest}")
+            logger.debug(f"Saved {filename} to {dest}")
             continue
 
         # No usable shared cache: download straight into the destination.
@@ -755,7 +755,7 @@ def fetch_assets(
             finally:
                 part.unlink(missing_ok=True)
 
-        logger.info(f"Saved {filename} to {dest}")
+        logger.debug(f"Saved {filename} to {dest}")
 
 
 def fetch_every_record() -> None:

@@ -87,6 +87,33 @@ class Mann(StellarRelation, Component):
                 "required": False,
                 "doc": "Uncertainty on an observed apparent Ks. Default 0.02.",
             },
+            {
+                "key": "feh",
+                "kind": "option",
+                "accepts": [True, False],
+                "required": False,
+                "doc": (
+                    "Use the metallicity-dependent form of the relations (default true); false uses the [Fe/H]-independent form."
+                ),
+            },
+            {
+                "key": "mstar_floor",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Fractional systematic scatter floor on the predicted mass (default the relation's own)."
+                ),
+            },
+            {
+                "key": "rstar_floor",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Fractional systematic scatter floor on the predicted radius (default the relation's own)."
+                ),
+            },
         ]
 
     def load_data(self, system):
@@ -198,7 +225,8 @@ class Mann(StellarRelation, Component):
             message=(
                 "star '{star}' starts at [Fe/H] = "
                 "{value:.3f}, outside the Mann+ calibration range "
-                f"{physics.FEH_RANGE} dex."
+                f"{physics.FEH_RANGE} dex. If it stays there, prefer "
+                "MIST/PARSEC/Torres or a direct mass prior."
             ),
         )
 

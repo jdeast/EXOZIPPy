@@ -45,7 +45,7 @@ def _flatten_arrays(items):
             arr_flat = arr.reshape(-1, n_samples)
             n_elem = arr_flat.shape[0]
             if n_elem > 100:
-                logger.warning(
+                logger.debug(
                     f"corner_utils: {fallback_name} has {n_elem} "
                     "elements -- possible shape mismatch"
                 )
@@ -211,12 +211,14 @@ def _drop_undrawable(samples, labels, filename):
         col = samples[:, j]
         lo, hi = float(col.min()), float(col.max())
         if lo == hi:
-            logger.warning(
+            # DEBUG: a constant column is a pinned (sigma: 0) element or a
+            # stuck chain, and the convergence summary reports the latter.
+            logger.debug(
                 f"corner plot ({filename}): omitting {labels[j]} (constant "
                 f"at {lo:.10g}); the remaining parameters are still plotted"
             )
         elif histogram_grid_degenerate(lo, hi, CORNER_BINS + 1):
-            logger.warning(
+            logger.debug(
                 f"corner plot ({filename}): omitting {labels[j]} (range "
                 f"{hi - lo:.3g} around {lo:.10g} spans fewer than "
                 f"{CORNER_BINS} float64 steps, so it cannot be binned); the "

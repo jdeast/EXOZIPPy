@@ -332,7 +332,7 @@ class Background(Component):
                         star_names[s]
                         for s in self.psf_stars[self.names.index(owners[e])]
                     ]
-                    logger.info(
+                    logger.debug(
                         f"[{self.prefix}] {self.prefix}.{owners[e]}."
                         f"fluxratio_{self._element_band_pos(e)} is DERIVED: "
                         f"f_blend/f_source of light curve "
@@ -363,7 +363,7 @@ class Background(Component):
                     self.config_manager.add_hint(
                         f"{self.prefix}.{i}.{key}", mu
                     )
-            logger.info(
+            logger.debug(
                 f"[{self.prefix}] field proper-motion prior on "
                 f"{self.names}: (pm_ra*, pm_dec) ~ N(({mu_ra:.2f}, "
                 f"{mu_dec:.2f}), {sigma:.2f}) mas/yr per axis -- the bulge "
@@ -375,8 +375,9 @@ class Background(Component):
             self.manifest["pm_dec"] = None
             logger.warning(
                 f"[{self.prefix}] the sightline is outside the bulge box "
-                f"(|l|, |b| < {BULGE_BOX_DEG} deg), so {self.names}'s proper "
-                f"motion has no field prior: uniform on its bounds.  State "
+                f"(|l|, |b| < {BULGE_BOX_DEG} deg), so the proper motion of "
+                f"{', '.join(self.names)} has no field prior: uniform on its "
+                f"bounds.  State "
                 f"the field population's mean and dispersion as "
                 f"background.<name>.pm_ra/pm_dec {{mu, sigma}}."
             )

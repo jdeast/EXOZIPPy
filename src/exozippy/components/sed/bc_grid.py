@@ -772,13 +772,23 @@ def complete_axes(
         n[:-4]: (p[0], p[-1]) for n, p in axes.items() if len(box[n]) < len(p)
     }
     if trimmed:
-        logger.warning(
-            f"BC columns {columns} are only partly computed; using the "
-            f"complete part of the grid, which drops the edge(s) of "
-            f"{trimmed} -> "
-            f"{ {n[:-4]: (box[n][0], box[n][-1]) for n in box} }. Re-run "
-            f"the table generator to fill the gaps (it computes only the "
-            f"missing nodes)."
+        # DEBUG (docs/logging.md): grid bookkeeping a user cannot act on.
+        # A start outside the trimmed grid is reported by the SED's own
+        # start checks, which is where it matters.
+        kept = ", ".join(
+            f"{n[:-4]} {float(box[n][0]):g}..{float(box[n][-1]):g}"
+            for n in box
+            if n[:-4] in trimmed
+        )
+        full = ", ".join(
+            f"{n} {float(lo):g}..{float(hi):g}"
+            for n, (lo, hi) in trimmed.items()
+        )
+        logger.debug(
+            f"BC columns {', '.join(map(str, columns))} are only partly "
+            f"computed; using the complete part of the grid ({kept}; the "
+            f"table spans {full}).  Re-run the table generator to fill the "
+            f"gaps (it computes only the missing nodes)."
         )
     return box
 

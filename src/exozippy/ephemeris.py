@@ -11,7 +11,6 @@ ephemerides/get_ephemeris.py to generate new ones from JPL Horizons).
 import contextlib
 import logging
 import os
-import warnings
 import zlib
 from functools import lru_cache
 
@@ -58,7 +57,7 @@ def use_ephemeris(name=DEFAULT_EPHEMERIS):
     except Exception as exc:
         if name == DEFAULT_EPHEMERIS:
             raise
-        warnings.warn(
+        logger.warning(
             f"could not load solar-system ephemeris {name!r} ({exc}); "
             f"falling back to {DEFAULT_EPHEMERIS!r} "
             f"(~3.5e-8 AU on the Earth's barycentric position)"

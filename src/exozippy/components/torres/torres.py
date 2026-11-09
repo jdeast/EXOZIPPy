@@ -55,6 +55,24 @@ class Torres(StellarRelation, Component):
         return [
             star_schema_entry("Torres"),
             constrain_schema_entry("teff/logg/feh"),
+            {
+                "key": "logm_floor",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Systematic scatter floor on the predicted log mass, in dex (default the relation's own)."
+                ),
+            },
+            {
+                "key": "logr_floor",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Systematic scatter floor on the predicted log radius, in dex (default the relation's own)."
+                ),
+            },
         ]
 
     def load_data(self, system):

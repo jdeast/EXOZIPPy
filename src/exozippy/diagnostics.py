@@ -16,6 +16,9 @@ logger = logging.getLogger(__name__)
 # that on every run would train people to skip the block that matters.
 USER_START_RTOL = 1e-4
 USER_START_ATOL = 1e-12
+# Below this magnitude a start counts as zero for `polish_moves`, whose
+# relative change is then the absolute one.
+USER_START_ZERO = 1e-9
 
 # Sub-keys that resolve() does NOT read but that legitimately appear in a
 # params file, so warning about them would be a false positive:
@@ -594,26 +597,44 @@ class ModelAuditor:
         polish moved them by up to +8800%).  A move is a fact about the
         seed's distance from THIS model's optimum, and is reported as one.
 
-        Returns [{key, requested, build, polished, rel}] sorted worst-first
-        (``rel`` relative to the build value), skipping moves inside the
-        same tolerance the contract check uses.
+        Returns [{key, requested, build, polished, rel, absolute, n_sigma}]
+        sorted worst-first by ``n_sigma`` (the move in units of the element's
+        1-sigma width at the start, ``Parameter.start_width``; None for an
+        element the sampler does not move), ``rel`` relative to the build
+        value, skipping moves inside the same tolerance the contract check
+        uses.
         """
         targets = self._user_start_targets()
         if not targets or not build_values:
             return []
         polished = self.user_start_values()
         moves = []
-        for key, p, _i, requested in targets:
+        for key, p, i, requested in targets:
             before = build_values.get(key)
             after = polished.get(key)
             if before is None or after is None:
                 continue
             unit = getattr(p, "unit", "")
             diff = self._wrap_if_angle(after - before, unit)
-            denom = abs(before) if before else 1.0
+            # A start at (or within rounding of) zero has no relative scale:
+            # the move is then reported as an ABSOLUTE change ("rel" holds
+            # the difference itself).  Dividing by a 1e-18 build value is
+            # what printed "-707346329155310.38%" for a seed of 0.
+            absolute = abs(before) <= USER_START_ZERO
+            denom = 1.0 if absolute else abs(before)
             rel = diff / denom
             if abs(diff) <= USER_START_ATOL or abs(rel) <= USER_START_RTOL:
                 continue
+            # The move in units of the element's own 1-sigma width at the
+            # start (Parameter.start_width, internal units -> user units the
+            # way the startup table converts its Scale column), or None for
+            # an element the sampler does not move (derived, pinned): its
+            # move follows from the elements it is computed from.
+            width = p.start_width(i)
+            n_sigma = None
+            if width is not None:
+                width_user = abs(float(p.from_internal(width, index=i)))
+                n_sigma = abs(diff) / width_user
             moves.append(
                 {
                     "key": key,
@@ -621,9 +642,16 @@ class ModelAuditor:
                     "build": before,
                     "polished": after,
                     "rel": rel,
+                    "absolute": absolute,
+                    "n_sigma": n_sigma,
                 }
             )
-        moves.sort(key=lambda m: -abs(m["rel"]))
+        moves.sort(
+            key=lambda m: (
+                -(m["n_sigma"] if m["n_sigma"] is not None else -1.0),
+                -abs(m["rel"]),
+            )
+        )
         return moves
 
     def check_user_starts(self):

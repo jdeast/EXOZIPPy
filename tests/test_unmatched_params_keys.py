@@ -39,7 +39,8 @@ from exozippy.system import System
 CONFIG = {
     "star": [{"name": "A"}],
     "planet": [{"name": "DC2018_128"}],
-    "orbit": [{"star": "star.A", "planet": "planet.DC2018_128"}],
+    # One star, one planet, one orbit: omitting primary/companion pairs them.
+    "orbit": [{"name": "DC2018_128"}],
 }
 BAD_KEY = "star.DC2018_128.logmass"
 PARAMS = {

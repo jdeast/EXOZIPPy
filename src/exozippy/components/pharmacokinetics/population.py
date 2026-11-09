@@ -253,7 +253,7 @@ class Population(Component):
         self.manifest = manifest
 
         fixed = [q for q in self.sampled_quantities if q not in self.varying]
-        logger.info(
+        logger.debug(
             "[%s] %d subjects in the '%s' basis; between-subject variability "
             "on %s%s.",
             self.prefix,

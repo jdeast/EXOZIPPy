@@ -183,7 +183,7 @@ def resolve_frame_defaults(inst):
         on = hip[i] and any(frame_defined)
         where = f"[{inst.prefix}.{inst.names[i]}]"
         if on:
-            logger.info(
+            logger.debug(
                 f"{where} Hipparcos epoch astrometry (mode gaia, every epoch "
                 f"in the Hipparcos mission) fit with "
                 f"{[inst.names[j] for j, f in enumerate(frame_defined) if f]}"
@@ -192,7 +192,7 @@ def resolve_frame_defaults(inst):
                 f"false to take the frames as identical."
             )
         elif hip[i]:
-            logger.info(
+            logger.debug(
                 f"{where} Hipparcos epoch astrometry with no other absolute "
                 f"dataset to define a frame: {FRAME_FLAG} defaults to false "
                 f"(the frame terms would be fixed by their priors alone)."
@@ -216,11 +216,12 @@ def check_frame_reference(inst):
     ]
     if not others:
         logger.warning(
-            f"[{inst.prefix}] {FRAME_FLAG}: true on "
-            f"{[inst.names[i] for i, f in enumerate(flags) if f]}, and no "
-            f"other absolute dataset defines the frame they are tied to: "
-            f"the frame terms are then fixed by their priors alone and "
-            f"degenerate with the star's position and proper motion."
+            f"{inst.log_tag()} {FRAME_FLAG}: true on "
+            f"{', '.join(inst.names[i] for i, f in enumerate(flags) if f)}, "
+            f"and no other absolute dataset defines the frame they are tied "
+            f"to, so the frame terms are fixed by their priors alone and "
+            f"degenerate with the star's position and proper motion.  Set "
+            f"{FRAME_FLAG}: false on the dataset that defines the frame."
         )
 
 

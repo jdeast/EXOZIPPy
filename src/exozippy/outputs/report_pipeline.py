@@ -220,7 +220,7 @@ def build_mode_reports(
     # attach its own (the no-valid-draws path): drop them first, so the only
     # labels anything below can see are this pass's (review 2.11.8).
     if "mode" in idata.posterior.data_vars:
-        logger.info(
+        logger.debug(
             "Dropping the trace's stale posterior['mode'] labels from an "
             "earlier mode pass; this pass relabels every draw."
         )
@@ -239,7 +239,7 @@ def build_mode_reports(
         if mode_report.n_modes > 1:
             logger.info(
                 f"Posterior is multimodal: {mode_report.n_modes} modes, "
-                f"weights {[f'{w:.3f}' for w in mode_report.weights]} "
+                f"weights {', '.join(f'{w:.3f}' for w in mode_report.weights)} "
                 f"({'weights validated' if mode_report.weights_reliable else 'weights UNRELIABLE'}); "
                 f"see {modes_path}"
             )
@@ -274,13 +274,15 @@ def build_mode_reports(
             modes_path.write_text(
                 mode_status_to_text(mode_status), encoding="utf-8"
             )
-        except Exception:
+        except Exception as write_exc:
             modes_path = None
             logger.warning(
-                "Could not write the no-valid-draws mode report; the "
-                "failure is reported here and by the check below",
-                exc_info=True,
+                "Could not write the no-valid-draws mode report (%s: %s); "
+                "the failure is reported here and by the check below",
+                type(write_exc).__name__,
+                write_exc,
             )
+            logger.debug("No-valid-draws report traceback", exc_info=True)
 
     if raise_on_invalid:
         # The trace and mode report are already written at this point, so
@@ -318,7 +320,7 @@ def build_mode_reports(
             # place, which is the one the trace was sampled (or restored)
             # under -- see evidence.py, "Normalization".
             log_norm, norm_rows = system.evidence_log_norm(breakdown=True)
-            logger.info(
+            logger.debug(
                 "Evidence normalization: %+.3f nat over %d prior term(s) "
                 "added to every mode's bridge lnZ",
                 log_norm,
@@ -343,15 +345,18 @@ def build_mode_reports(
             logger.info(
                 "Evidence weighting %s: weights %s (%s)",
                 "applied" if applied else "refused (kept occupancy)",
-                [f"{w:.3f}" for w in mode_report.weights],
+                ", ".join(f"{w:.3f}" for w in mode_report.weights),
                 mode_report.provenance,
             )
             _declare_evidence_outcome_prose(system, applied)
-        except Exception:
+        except Exception as exc:
             logger.warning(
-                "Evidence weighting failed; keeping occupancy weights",
-                exc_info=True,
+                "Evidence weighting failed (%s: %s); the mode weights are "
+                "occupancy weights. The traceback is in the log file.",
+                type(exc).__name__,
+                exc,
             )
+            logger.debug("Evidence weighting traceback", exc_info=True)
             _declare_evidence_outcome_prose(system, False, failed=True)
 
     # Hot-chain suppressed-mode search outcome.  Written whether or not a
@@ -367,11 +372,15 @@ def build_mode_reports(
                 modes_path = Path(str(prefix) + "_modes.txt")
             with open(modes_path, "a", encoding="utf-8") as f:
                 f.write(hot_status_to_text(hot_status))
-        except Exception:
+        except Exception as exc:
             logger.warning(
-                "Hot-chain status reporting failed; continuing without it",
-                exc_info=True,
+                "Hot-chain status reporting failed (%s: %s); the modes report "
+                "lacks the suppressed-mode search outcome. The traceback is "
+                "in the log file.",
+                type(exc).__name__,
+                exc,
             )
+            logger.debug("Hot-chain status reporting traceback", exc_info=True)
 
     # Seeded-solution ledger: match every (polished) seed to a surviving
     # mode or mark it rejected, and report the rejected ones -- the
@@ -425,11 +434,15 @@ def build_mode_reports(
                     f"the posterior; Laplace characterization in "
                     f"{modes_path} and {prefix}_rejected_modes.tex"
                 )
-        except Exception:
+        except Exception as exc:
             logger.warning(
-                "Seed-ledger reporting failed; continuing without it",
-                exc_info=True,
+                "Seed-ledger reporting failed (%s: %s); the modes report and "
+                "the rejected-modes table lack the seeded-solution ledger. "
+                "The traceback is in the log file.",
+                type(exc).__name__,
+                exc,
             )
+            logger.debug("Seed-ledger reporting traceback", exc_info=True)
 
     # populate the parameters with the posteriors
     system.distribute_posterior(idata)
@@ -448,11 +461,14 @@ def build_mode_reports(
         # ever mentioned it).  run.py's summary header prints these, which
         # is where results are actually read from.
         system._near_bound_hits = warn_posterior_near_bounds(system)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         logger.warning(
-            "Near-bound posterior check failed; continuing without it",
-            exc_info=True,
+            "Near-bound posterior check failed (%s: %s); no parameter was "
+            "checked against its bounds. The traceback is in the log file.",
+            type(exc).__name__,
+            exc,
         )
+        logger.debug("Near-bound posterior check traceback", exc_info=True)
 
     # The ledger's rejected-seed rows are mode-keyed ('rejected-seed<k>'),
     # so the CSV must carry the mode columns even when the surviving
@@ -514,10 +530,13 @@ def build_mode_reports(
             from .ledger import append_ledger_csv
 
             append_ledger_csv(seed_ledger, str(prefix) + "_results.csv")
-        except Exception:
+        except Exception as exc:
             logger.warning(
-                "Seed-ledger CSV rows failed; continuing without them",
-                exc_info=True,
+                "Seed-ledger CSV rows failed (%s: %s); the results CSV lacks "
+                "the rejected-seed rows. The traceback is in the log file.",
+                type(exc).__name__,
+                exc,
             )
+            logger.debug("Seed-ledger CSV traceback", exc_info=True)
 
     return mode_report

@@ -85,11 +85,12 @@ def test_no_rows_pins_errscale_and_says_why(tmp_path, caplog):
     """
     Given an SED with `filters: []`,
     When errscale is built,
-    Then it is not a free RV, it sits at 1.0, and startup says it was
-      pinned because no row reads it.
+    Then it is not a free RV, it sits at 1.0, and the log says (at DEBUG:
+      a default taking effect, docs/logging.md) it was pinned because no
+      row reads it.
     """
     # ARRANGE / ACT
-    with caplog.at_level(logging.INFO, logger="exozippy.components.sed.sed"):
+    with caplog.at_level(logging.DEBUG, logger="exozippy.components.sed.sed"):
         system = _system(tmp_path, 0)
         model = _errscale_alone(system)
 

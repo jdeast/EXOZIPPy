@@ -1634,4 +1634,4 @@ def test_companion_star_ndx_on_a_rel_dataset_warns_and_is_ignored(
 
     # Assert
     assert comp._sed_fluxfrac == [False]
-    assert "companion_star_ndx is a gaia/abs key" in caplog.text
+    assert "companion_star_ndx is ignored: it is a gaia/abs key" in caplog.text

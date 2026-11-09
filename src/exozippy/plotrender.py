@@ -470,22 +470,37 @@ def plot_via_specs(
         component, system, points[1:], t_first=t_first, **plot_data_kwargs
     )
     n_timeout = 0
+    failed = []
     for idx, (state, value) in enumerate(rest, start=1):
         if state == "ok":
             spec_groups.append(value)
         elif state == "timeout":
             n_timeout += 1
         else:  # a bad posterior draw is skipped
-            logger.warning(
+            failed.append((idx, value))
+            logger.debug(
                 "plot_data failed for draw %d of %s: %s",
                 idx,
                 getattr(component, "prefix", component),
                 value,
             )
+    if failed:
+        # One line for the lot (docs/logging.md, "logged ONCE"); each
+        # draw's error is at DEBUG above.
+        logger.warning(
+            "plot_data failed for %d of %d posterior draw(s) of %s, which are "
+            "left out of its plots (first: draw %d: %s).",
+            len(failed),
+            len(points) - 1,
+            getattr(component, "prefix", component),
+            failed[0][0],
+            failed[0][1],
+        )
     if n_timeout:
         logger.warning(
             "%d of %d posterior draw(s) of %s exceeded eval_timeout=%gs in "
-            "plot_data and are left out of its plots.",
+            "plot_data and are left out of its plots; raise the sampler's "
+            "eval_timeout to draw them.",
             n_timeout,
             len(points) - 1,
             getattr(component, "prefix", component),
