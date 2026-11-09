@@ -1171,9 +1171,13 @@ def test_sed_residual_is_log_data_minus_log_model_per_point(sed_built):
         model_log = []
         for p in points:
             row, side = plot_obj.point_row[p], plot_obj.point_side[p]
-            stars = plot_obj.blend_matrix[row] == side
-            zp = plot_obj.filter_params[plot_obj.filters[row]]["zp"]
-            flux = zp * np.sum(10 ** (-0.4 * m_star[stars, row]))
+            side_matrix = (
+                plot_obj.pos_matrix if side > 0 else plot_obj.neg_matrix
+            )
+            stars = side_matrix[row] == 1
+            col = plot_obj.point_col[p]
+            zp = plot_obj.filter_params[plot_obj.point_filter[p]]["zp"]
+            flux = zp * np.sum(10 ** (-0.4 * m_star[stars, col]))
             model_log.append(np.log10(flux * plot_obj.wave_filter[p]))
         oc, obs = residuals[combo], data[combo]
         np.testing.assert_array_equal(oc.x, obs.x)

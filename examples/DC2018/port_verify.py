@@ -19,11 +19,6 @@ from exozippy.system import System  # noqa: E402
 
 # measured BEFORE the refactor; None = no baseline recorded
 KNOWN = {
-    "DC2018_128_severed_v3.yaml": 80519.222,
-    "DC2018_128_severed_v4.yaml": None,
-    "DC2018_128_severed_v5.yaml": None,
-    "DC2018_128_severed_v6.yaml": 80507.376,
-    "DC2018_128_severed_v7.yaml": 81373.201,
     "DC2018_128_tightpriors.yaml": 80865.224,
 }
 print(

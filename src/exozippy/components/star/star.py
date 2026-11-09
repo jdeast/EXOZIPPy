@@ -857,6 +857,7 @@ class Star(Component):
         "initfeh",
         "age",
         "av",
+        "rv_dust",
     )
 
     def orbit_anchors(self, system):
@@ -1551,6 +1552,13 @@ class Star(Component):
                     "fbolsed": "default",
                 }
             )
+            # The fitted-R_V mode's dust law parameter: one more SED knob,
+            # in the SED's STAR_KNOBS, so the unread-star pin below covers
+            # it with av.
+            from exozippy.components.sed.sed import RV_DUST, sed_fits_rv_dust
+
+            if sed_fits_rv_dust(system):
+                self.manifest[RV_DUST] = None
             # The SED-side parameters of a star whose SED flux nothing reads
             # (see `structure_consumers` and `SED.data_free_inventory`):
             # the SED's STAR_KNOBS (av, teffsed, radiussed) are read by

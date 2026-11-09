@@ -54,7 +54,39 @@ Tests: `tests/test_claret_ld_tie.py` (synthetic tables, `conftest.write_syntheti
 
 Everything that turns those (u1, u2) into an occultation flux goes through the one shared helper `components/limbdark.py:quad_limb_darkened_flux(b, r, u1, u2)` -- `transit.py` (likelihood and plotting) and `rm.py` (the Rossiter-McLaughlin blocked flux). Never open-code the dot product: exoplanet-core's `quad_solution_vector` returns `s` in starry's Green's basis, so the coefficients are `c0 = 1 - u1 - 1.5*u2`, `c1 = u1 + 2*u2`, `c2 = -0.25*u2` (Agol, Luger & Foreman-Mackey 2020), **not** the mu-power `[1 - u1 - u2, u1, u2]`. The naive basis is exact at `u2 = 0` and silently wrong otherwise -- rm.py carried it undetected (up to ~87% of the transit depth at u2 = 0.3, with flux > 1 near egress) precisely because every test that exercised it used u2 = 0. `transit/physics.py:calc_planet_visible` is the one deliberate exception: it occults the *planet* by the star, a uniform disk where `s0/pi` is the whole answer. Tests: `tests/test_limbdark.py` pins the helper against brute-force disk integration.
 
-The SED component supports n stars: each `.sed` filter row's `photType: {pos: [...], neg: [...]}` (with `blend:` as an alias for `pos`; entries are star names or indices) builds a +1/0/-1 blend matrix; blended rows are flux sums, `neg` makes the row a differential magnitude (`-2.5*log10(F_pos/F_neg)`). An empty `filters:` list is legal — the SED then only serves cross-component flux predictions (`predict_star_appmag`, `predict_blend_appmag`, `predict_flux_fraction`). BC tables for missing filters auto-generate from the model spectra (`components/sed/make_bc.py`, CLI `scripts/make_bc_tables.py`) -- but see **auto-generation is a development convenience, not the production path** below. The shipped tables are built from the full-resolution spectra by `models/NextGen/generate_NextGen_BC_Tables.py`; `models/NextGen/README.md` has the workflow and the table format.
+The SED component supports n stars: each `.sed` filter row's `photType: {pos: [...], neg: [...]}` (with `blend:` as an alias for `pos`; entries are star names or indices) builds two 0/1 star matrices (`pos_matrix`, `neg_matrix`); blended rows are flux sums, `neg` makes the row a differential magnitude (`-2.5*log10(F_pos/F_neg)`), and `neg_filter:` makes it a color between two filters ("Color rows", below). An empty `filters:` list is legal — the SED then only serves cross-component flux predictions (`predict_star_appmag`, `predict_blend_appmag`, `predict_flux_fraction`). BC tables for missing filters auto-generate from the model spectra (`components/sed/make_bc.py`, CLI `scripts/make_bc_tables.py`) -- but see **auto-generation is a development convenience, not the production path** below. The shipped tables are built from the full-resolution spectra by `models/NextGen/generate_NextGen_BC_Tables.py`; `models/NextGen/README.md` has the workflow and the table format.
+
+### Color rows: a measured color between two filters (`neg_filter:`)
+
+A row that names a second filter for its neg side is a COLOR: `-2.5 log10(F_pos(name) / F_neg(neg_filter))`, each side's stars summed in its own filter (review 8.9.10). It is the third kind of row beside the absolute row and the same-filter differential, and the one spelling for a cross-filter comparison:
+
+```yaml
+filters:
+  # V - I of the source from the light-curve regression (blend- and
+  # calibration-free): one number with its own error.
+  - name: "Generic/Bessell.V"     # the pos side's filter
+    mag: 1.832                    # m(V) - m(I), the measured color
+    err: 0.012
+    magsys: Vega                  # pos side's system (optional)
+    neg_filter: "Generic/Cousins.I"
+    neg_magsys: Vega              # neg side's system (optional)
+    photType:
+      pos: [Source]
+      neg: [Source]
+```
+
+**When to use one.** For a color MEASURED as a color, whose error is smaller than the quadrature sum of the two magnitudes' errors: (a) a microlensing source color from the light-curve regression (the V/I flux ratio while the source is magnified, ~0.01 mag), which is blend-free and calibration-free -- two absolute rows would each carry their band's independent zeropoint error, and the color would inherit both in quadrature; (b) a color-magnitude-diagram offset from the red clump, Delta(V-I) ~0.02 mag against Delta I ~0.05-0.1 mag; (c) a color from one image pair. Two absolute rows with independent errors throw that precision away.
+
+**Do not add a color beside both of its magnitudes when they are catalog magnitudes with independent errors.** The color is then the same information counted twice, and the fit is overconfident in exactly that color. A color row plus one of the magnitudes is the right shape when the color was measured more precisely than the second magnitude; a covariance between rows is the general answer (review 8.9.9) and is not built yet.
+
+The rules, each enforced at load with an error naming the file and row:
+
+- **Each side is in its own filter and its own magnitude system.** `magsys:` is the pos side's, `neg_magsys:` the neg side's; unstated means that filter's native system, as for any row. A color reported as m_a - m_b moves onto the BC columns' Vega system by the pos side's m_AB - m_Vega MINUS the neg side's (each only where that side is AB): an AB g minus Vega J is fitted at `color - [m_AB - m_Vega](g)`, a Vega J minus AB g at `color + [m_AB - m_Vega](g)`, so a color reported as the difference of two reported magnitudes is fitted as the difference of the two fitted ones (`_convert_to_bc_system`, the same per-column record and drift check as an absolute row). A same-filter differential row is unchanged: its system cancels, and `neg_magsys:` on it raises.
+- **pos and neg may name the same star** -- the color of one star is the common case. On a same-filter row that would be identically zero and still raises.
+- **`neg_filter:` needs a `neg` star list** (a row with no photType is the blend of all stars on the pos side only, so it raises too), must be a filter name, and must be a DIFFERENT BC column from the row's own: `neg_filter` naming the same filter under another alias is a same-filter differential row, whose one spelling has no `neg_filter`.
+- **A row takes only the keys `name`, `mag`, `err`, `magsys`, `photType`, `neg_filter`, `neg_magsys`** (`SED.ROW_KEYS`); any other key raises, because a misspelled `neg_filter` would otherwise turn a color into a same-filter differential in silence.
+
+**How it is built.** The second filter is a grid column of its own, appended after the rows' own filters (`row_filters`; `neg_col` is each row's neg-side column, its own on every other row), so the spectral (`fit_rv_dust`) path, the magnitude-system record and the `predict_*` API see it like any column. `_combined_appmag_node` sums the neg stars' flux in `neg_col`; a file with no color row builds the same-filter graph it always did, so every shipped SED start logp is bit-identical. A star named on either side of any row is read (`photometric_readers`). In the figure a color row is plotted like a differential row -- each side's point at its OWN filter's wavelength, through its own zero point, anchored on the model's flux for the other side in the OTHER filter -- and its residual sits between the two filters (the geometric mean of their effective wavelengths); the data-only GUI preview, which plots magnitudes against wavelength, leaves color rows out. The AB-conversion sentence in the draft names each AB side's filter. Tests: `tests/test_sed_color_rows.py`.
 
 **Every photometry row has a magnitude system, and an AB row is fitted on Vega** (review 1.9.1, 2026-10). Every NextGen BC column is Vega-referenced (its table's `mag_system`; SVO's Vega F_lambda zeropoint is what the BC divides by), while SDSS, Pan-STARRS, GALEX, Euclid and Roman publish in AB. Until this was fixed `magsys` was parsed into `self.magsys` and nothing read it, so an AB row was fitted as Vega -- wrong by m_AB - m_Vega in its band (SDSS u +0.90, PS1 z +0.51, GALEX FUV +2.09 mag) against errors of a few hundredths, and PR #349's new SLOAN/PAN-STARRS/GALEX tables made that silent.
 
@@ -158,7 +190,17 @@ The tie has a second table source since 2026-10-20: tables EXOZIPPy generates it
 - **The fit is quasi-spherical and flux-conserving** (`generate_PHOENIX_LD_Tables.fit_profile`; Claret, Hauschildt & Witte 2012 for the limb criterion), so the coefficients are NOT Claret's least-squares ones: measured over 30 (band, node) pairs at A_V = 0 (`scripts/compare_ld_sources.py`; `models/PHOENIX/README.md`), u1 + u2 agrees with Claret to -0.012 +/- 0.025 and the linear u to -0.025 +/- 0.043, inside the tie's 0.05 width, while u1 and u2 separately differ by ~0.08 with opposite signs -- the flux-conserving-versus-least-squares split; a fit may not mix sources on one band, and the modeling draft cites `Husser:2013` and `Claret:2012` for a PHOENIX-tied band, `Claret:2011`/`Claret:2017` for a Claret-tied one.
 - **The band side is one code path with a per-table axis order.** `Band._table_axes` / `_table_box` / `_interpolate_numpy` / `_interpolate_node` dispatch on the table object (`ClaretTable`, three axes; `LDTable`, four), so `_bound_tied_stars`, the start check and seed, the context nodes and the prose all serve either; a star read by two tables gets the intersection of their boxes. Tests: `tests/test_phoenix_ld.py` (the fit on a synthetic law and a synthetic cliff, the hole filling, the loader on a linear synthetic table, and the tie end to end at A_V = 0).
 
-## A runtime extinction law: the plan, and why it is blocked (2026-09-24)
+## The spectral mode: a fitted R_V (`sed: {fit_rv_dust: true}`)
+
+**What it does.** The default path interpolates tabulated BCs in (Teff, logg, [Fe/H], A_V) at the tables' one extinction law. `fit_rv_dust: true` computes the BCs from the spectrum at every evaluation instead (`spectral_bc.py`): the R = 3000 runtime grid (`models/NextGen/runtime_spectra.py`, `models/NextGen/README.md`, "The runtime spectral grid") interpolated trilinearly in log10 F over (teffsed, loggsed, feh), reddened at each bin centre with the Cardelli, Clayton & Mathis (1989) law with O'Donnell's (1994) optical coefficients, A_lambda/A_V = a + b/R_V (`extinction.ccm89_ab`), at the star's own `av` and `rv_dust`, and integrated through each filter with the tables' formula, profiles, DetectorType weighting and Vega zeropoints (`bolometric_correction._filter_set_data`). Everything downstream of the BC -- the magnitudes, blends, the mulensing zeropoint, dilution, fluxfrac -- is unchanged, and `fit_rv_dust: false` (the default) is bit-identical to the table path. A YAML boolean or absent; anything else raises.
+
+**What stays on the tables.** Every filter still needs a BC-table column in this mode, published or synthesized (above): the column names it, carries its magnitude-system record (`_convert_to_bc_system`) and supplies the grid bounds (`_inject_grid_bounds`), so a filter the published tables lack goes through the same synthesis as in table mode before the spectral path is built. `SpectralBC` is built on the same filter list and must produce the same column order (it raises otherwise). The A_V bound stays the tables' 0-20 though the spectral path has no A_V axis.
+
+**`star.rv_dust`.** Declared by Star only under `fit_rv_dust` (`sed_fits_rv_dust`, which answers from the built SED or the raw block, since Star may register first). Not `rv`: that is the systemic radial velocity, an orbit-linked parameter of its own. Default prior uniform on [2, 6], start 3.1 (`star/defaults.yaml`); a params entry pins it (`sigma: 0`) for a fixed non-3.1 law, or gives it a sight-line prior (the bulge is ~2.5, Nataf et al. 2013). It joins every list that enumerates the SED's star inputs, on the INSTANCE (the class tuples are the table mode's): `STAR_KNOBS` (so an unread star's rv_dust is pinned and inactive with its av), `PHOTOMETRIC_DOF` (so it counts toward the errscale pin -- one star now needs 6 rows, not 5), `_STAR_NODE_DEPS` and `FLUX_FRACTION_INPUTS` (the dilution start solver), plus `Star.ORBIT_LINKED_PARAMS` (one system, one dust column, like av) and the relaxation engine (`sed/symbolic_physics.py`, only under `fit_rv_dust`, or it would be a phantom leaf). The figure reddens with the same law at each draw's rv_dust (`plot.Plot._normalize_optical_depth`).
+
+**It is not the tables at R_V = 3.1.** The shipped law (`extinction_law.ascii`) and CCM89 at 3.1 differ by up to ~0.1 mag in a band at A_V = 8 (the table runs ~6% high in J, H, Ks), so switching `fit_rv_dust` on moves a reddened star even where R_V ends at 3.1. That is the law changing, not the machinery: with the shipped law plugged in (`SpectralBC(..., law="shipped")`, reachable from no config) the spectral path reproduces the tables at their nodes to 0.69 mmag or better on all 93 filters (`scripts/validate_runtime_grid.py`).
+
+**Why it is worth it, and what it costs** (feasibility study 2026-11-07, `models/NextGen/README.md`). Between R_V = 2.5 and 3.1 the BCs move by a median 30, 90 and 230 mmag at A_V = 1, 3 and 8 (Gaia G 0.34 mag at A_V = 8): on a reddened sight line the law is the dominant systematic. The tables' own A_V interpolation is also off by up to 24 mmag in the A_V 2-4 cell, which this path does not have. Speed, one star, logp + gradient: ~120-130 us for the tables, flat in the number of bands (op dispatch, not arithmetic), against ~370-450 us here at ~4000 bins -- set by the bins the filters touch, not by the band count. Neither path improves the interpolation in Teff/logg/[Fe/H]; grid spacing is the floor of both.
 
 **What the DC2018 work showed.** The challenge reddened each band monochromatically at its
 effective wavelength with a CCM-like R_V = 3.1 law (its A_Z087/A_W149 = 1.92 for all 293 events
@@ -175,46 +217,4 @@ than CCM's ~1.6, which is the opposite direction from the sim's greyness. Decisi
 2026-09-24): no heroics to match the challenge's convention; list it as a caveat, widen the
 zeropoint prior appropriately, move on.
 
-**What real data need.** The law's shape -- R_V and the NIR slope -- has to be settable per
-sight line and eventually samplable, with a prior per field. The tables anticipate it (an `Rv`
-column with only 3.1 populated), and adding it as a table axis means one more interpolation
-dimension per band on top of (Teff, logg, feh, Av): EXOFAST's experience is that even the 4-D
-per-band interpolation got slow at 8 bands.
-
-**The alternative: interpolate the spectrum, redden it, integrate the bands at runtime.** One
-trilinear interpolation in (log Teff, logg, feh) of the spectrum (8 x N_lambda), A_lambda(A_V,
-R_V, alpha) evaluated on the wavelength grid, and the band fluxes as one fixed
-[n_band x N_lambda] matrix product. Cost is not the constraint: at N_lambda ~ 3000-5000 it is
-~1e5 flops per likelihood evaluation, nothing against a 40k-point light curve, and it scales as
-one interpolation plus n_band dot products rather than n_band separate 4-5-D interpolations.
-It is differentiable (a weighted gather and a matmul), so NUTS-able where the rest of the model
-is. It is exact in A_V and in the law -- the tables interpolate between Av nodes at 8, 10 and
-12 mag, exactly where bulge sight lines live -- and it takes any law family without
-regenerating anything. It does not cover MIST's tabular BCs, which have no spectra behind
-them; those stay tables.
-
-**Why it is not simply better: resolution.** Phoebe's tests for the BC tables showed that
-~1 mmag agreement in the integrated band flux needs the spectra at R ~ 10,000 -- hundreds of GB
-for the grid, not something a NUTS interpolator can hold in memory. That is why the BC-table
-approach was chosen: the expensive integral is done once, offline, at full resolution, and the
-runtime interpolates a smooth scalar per band. A runtime spectral path therefore has to
-demonstrate, on a subset of wide filters, that a binned grid it CAN hold (R of a few hundred,
-tens of MB) reproduces the full-resolution band integrals to the mmag level -- plausible for
-broad bands, where the integral averages over lines, and not to be assumed. If that holds, it
-is faster and more general and wins; if it needs R ~ 10,000 to hold, the tables stay and the
-law becomes an axis.
-
-**The prerequisite that blocks the runtime path.** Step (i) is DONE: PR #335 (2026-09-27)
-rebuilt the shipped BC tables from the full-resolution spectra (Av to 20, Roman at full
-resolution), and the SED's `errscale` improved markedly against the R = 150 tables -- which is
-also why on-the-fly generation from the plotting spectra is now disabled (above). What remains
-is (ii): bin the full-resolution spectra, which Phoebe holds, to the candidate runtime
-resolution and run the wide-filter revalidation against the full-resolution band integrals.
-Until those spectra are in hand for binning, nothing on the runtime path can be built or
-validated. The write-up for the plan, when the work starts:
-the wavelength grid and binning (photon-counting integration, filter edges resolved), the
-zeropoints per magnitude system from the shipped SVO files, the law family (CCM/F99 with R_V
-plus an NIR index, or an R_V-only family such as Gordon+2023) and its per-field prior, the
-validation matrix (per filter: table vs runtime at Av 0..20, R_V 3.1, then off-axis), and the
-switch that lets a DC2018 run reproduce the challenge's monochromatic convention for scoring
-only.
+**Not done.** The NIR slope as a second law parameter (the bulge wants a steeper power law than CCM's 1.61, Nishiyama et al. 2009), a choice of law family (Fitzpatrick 1999, Gordon et al. 2023), the A_V bound beyond the tables' 20, and a switch reproducing the DC2018 challenge's monochromatic convention for scoring.

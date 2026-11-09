@@ -1,0 +1,20 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 4
+#$ -q mThM.q
+#$ -l use_himem=TRUE
+#$ -cwd
+#$ -j y
+#$ -N rtsedacc
+#$ -o scripts/runtime_sed_feasibility.$JOB_ID.log
+# Accuracy half of the runtime-spectral-SED feasibility study.
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export OMP_NUM_THREADS=4
+cd $HOME/python/EXOZIPPy
+echo "commit $(git rev-parse --short HEAD)   $(date)"
+python -u scripts/runtime_sed_feasibility.py $HOME/runtime_sed/accuracy.json
+echo "exit $?   $(date)"

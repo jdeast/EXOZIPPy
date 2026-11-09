@@ -60,6 +60,40 @@ logger = logging.getLogger(__name__)
 #: The label every SED photometry row registers under (``photometric_readers``).
 SED_ROW = "sed photometry"
 
+# The star parameter the fitted-R_V mode adds (sed.md, "The spectral mode").
+# Not "rv": that is the star's systemic radial velocity.
+RV_DUST = "rv_dust"
+
+
+def fit_rv_dust_from_config(block):
+    """The ``fit_rv_dust`` switch of an ``sed:`` block (a dict, or the one-element
+    list the base Component wraps it in).  Absent is False; anything but a
+    YAML boolean raises (``bool("false")`` is True)."""
+    if isinstance(block, list):
+        if len(block) != 1:
+            raise ValueError(
+                f"sed is a singleton block; got a list of {len(block)}."
+            )
+        block = block[0]
+    value = (block or {}).get("fit_rv_dust", False)
+    if not isinstance(value, bool):
+        raise ValueError(
+            f"sed.fit_rv_dust must be true or false (a YAML boolean), not {value!r}."
+        )
+    return value
+
+
+def sed_fits_rv_dust(system):
+    """Does this system's SED fit R_V?  For readers that may run before the
+    SED instance exists: ``in_topology`` returns the built instance or the
+    raw block, and both answer."""
+    sed = in_topology(system, "sed")
+    if sed is None:
+        return False
+    if isinstance(sed, Component):
+        return sed.fit_rv_dust
+    return fit_rv_dust_from_config(sed)
+
 
 @dataclass(frozen=True)
 class SEDReader:
@@ -210,15 +244,17 @@ class SED(Component):
       * __init__ pulls the SED config (file, model, error floors) and
         injects the BC grid's axis limits as star-parameter bounds.
       * load_data parses the .sed file, resolves each filter row's
-        photType (which stars it blends or differences) into a
-        +1/0/-1 blend matrix over the system's stars, and builds one
+        photType (which stars it blends or differences, and for a color
+        row in which second filter) into 0/1 pos and neg matrices over
+        the system's stars, and builds one
         pytensor BC interpolator over (teff, logg, feh, Av) whose
         trailing axis spans the .sed filters plus any Band-referenced
         filters (so other components can request flux predictions).
       * build_likelihood predicts per-star apparent magnitudes via
         m_pred = m_bol - BC + distance modulus, combines them per row
         (flux sums for blends, -2.5*log10(F_pos/F_neg) for
-        differential mags, following EXOFASTv2's exofast_multised),
+        differential mags, following EXOFASTv2's exofast_multised, with
+        F_neg in a second filter for a color row),
         and adds a Normal likelihood with the sampled errscale.
       * predict_star_appmag / predict_blend_appmag expose calibrated
         flux predictions to other components (mulensing f_source
@@ -229,8 +265,9 @@ class SED(Component):
     * logg for the BC interpolation is reconstructed from
       (star.mass, star.radiussed) — NOT the star component's
       star.logg (which uses star.radius).
-    * Rv is assumed fixed at the grid's value (3.1 for NextGen).
-      Promote to a parameter if/when the science calls for it.
+    * By default R_V is the BC tables' (3.1 for NextGen).  ``fit_rv_dust:
+      true`` computes the BCs from the spectra at a fitted per-star R_V
+      (``star.rv_dust``; spectral_bc.py, sed.md "The spectral mode").
     """
 
     # factory.discover_components() maps a Component subclass to a
@@ -266,6 +303,20 @@ class SED(Component):
 
         self.teffsedfloor = self.config.get("teffsedfloor", 0.020)
         self.fbolsedfloor = self.config.get("fbolsedfloor", 0.024)
+
+        # The fitted-R_V mode: BCs from the R = 3000 spectra, reddened with
+        # a CCM89 law at a per-star star.rv_dust (spectral_bc.py).  Its one
+        # new star knob joins every list that enumerates the SED's star
+        # inputs, so the unread-star pin, the errscale dof count, the
+        # forward model's lazy node build and the dilution start solver all
+        # see it; in table mode the class tuples stand as they are.
+        self.fit_rv_dust = fit_rv_dust_from_config(self.config)
+        self.spectral = None
+        if self.fit_rv_dust:
+            self.STAR_KNOBS = SED.STAR_KNOBS + (RV_DUST,)
+            self.PHOTOMETRIC_DOF = SED.PHOTOMETRIC_DOF + (RV_DUST,)
+            self._STAR_NODE_DEPS = SED._STAR_NODE_DEPS + (RV_DUST,)
+            self.FLUX_FRACTION_INPUTS = SED.FLUX_FRACTION_INPUTS + (RV_DUST,)
 
         # Data buckets — filled by load_data.
         self.user_filters = []
@@ -383,13 +434,19 @@ class SED(Component):
         below can reflect what THESE filters' tables cover -- a table
         extended to larger Av for some filters but not yet for others must
         not bound this fit onto nodes one of its filters lacks."""
-        labels = [c.get("name") for c in (self.SED_yaml.get("filters") or [])]
+        rows = self.SED_yaml.get("filters") or []
+        labels = [c.get("name") for c in rows]
+        # A color row's second filter is a grid column like any row's.
+        labels += [c.get("neg_filter") for c in rows]
         # Read exactly as _collect_band_filters does: system_config is an
         # internal attribute and must exist; only the band block itself is
         # legitimately optional.
         for cfg in self.config_manager.system_config.get("band") or []:
             labels.append(cfg.get("filter"))
-        return [lbl for lbl in labels if lbl]
+        # A malformed label (a neg_filter that is not a string) is refused,
+        # naming its row, by _process_SED_yaml at load_data; the bounds peek
+        # only needs the well-formed ones.
+        return [lbl for lbl in labels if lbl and isinstance(lbl, str)]
 
     def _inject_grid_bounds(self):
 
@@ -501,7 +558,8 @@ class SED(Component):
                 "doc": (
                     "SED photometry file (YAML content): declares 'model', "
                     "'nstars', and a 'filters' list of per-band rows "
-                    "(bandname, magnitude, errors, photType blend spec)."
+                    "(bandname, magnitude, errors, photType blend spec; "
+                    "neg_filter makes a row a color between two filters)."
                 ),
             },
             {
@@ -528,6 +586,19 @@ class SED(Component):
                 "accepts": None,
                 "required": False,
                 "doc": "Systematic bolometric-flux error floor. Default 0.024.",
+            },
+            {
+                "key": "fit_rv_dust",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "true: compute the bolometric corrections from the R = "
+                    "3000 model spectra at every evaluation, reddened with "
+                    "the Cardelli et al. (1989) law at a fitted per-star "
+                    "R_V (star.rv_dust). Default false: the tabulated BCs "
+                    "at R_V = 3.1."
+                ),
             },
         ]
 
@@ -583,6 +654,24 @@ class SED(Component):
     # ------------------------------------------------------------------
     # 2) load_data — parse .sed file and build one BC interpolator
     # ------------------------------------------------------------------
+    # The keys a .sed filter row may carry.  Anything else raises naming
+    # the row: a misspelled `neg_filter` would otherwise turn a color into
+    # a same-filter differential row in silence.
+    ROW_KEYS = (
+        "name",
+        "mag",
+        "err",
+        "magsys",
+        "photType",
+        "neg_filter",
+        "neg_magsys",
+    )
+
+    def _row_where(self, i):
+        """How an error names .sed row ``i``: the file, the row index and
+        its filter."""
+        return f"{self.sedfile}, filter row {i} ({self.filters[i]!r})"
+
     def _process_SED_yaml(self):
         # An empty (or absent) filter list is legal: the SED component can
         # still serve cross-component flux predictions (e.g. the mulensing
@@ -593,6 +682,46 @@ class SED(Component):
         # per filter information
         self.filters = [c.get("name") for c in filter_dict]
         self.photType_unprocessed = [c.get("photType") for c in filter_dict]
+        for i, c in enumerate(filter_dict):
+            unknown = sorted(set(c) - set(self.ROW_KEYS))
+            if unknown:
+                raise ValueError(
+                    f"{self._row_where(i)}: unknown key(s) {unknown}. A row "
+                    f"takes {list(self.ROW_KEYS)} (sed.md)."
+                )
+
+        # A COLOR row (review 8.9.10): `neg_filter` names the filter of the
+        # row's neg side, so the row is -2.5 log10(F_pos(name) /
+        # F_neg(neg_filter)).  Absent, the row is absolute or a same-filter
+        # differential, exactly as before.  Its second filter is a grid
+        # column of its own, appended after the rows' own filters:
+        # row_filters is every column the rows read, neg_col the column of
+        # each row's neg side (its own column on a same-filter row).
+        self.neg_filters = []
+        for i, c in enumerate(filter_dict):
+            nf = c.get("neg_filter")
+            if nf is not None and (not isinstance(nf, str) or not nf):
+                raise ValueError(
+                    f"{self._row_where(i)}: neg_filter must be a filter "
+                    f"name; got {nf!r}."
+                )
+            if "neg_magsys" in c and nf is None:
+                raise ValueError(
+                    f"{self._row_where(i)}: neg_magsys without neg_filter.  "
+                    f"A same-filter differential row has one magnitude "
+                    f"system (it cancels); neg_magsys is the system of a "
+                    f"color row's second filter."
+                )
+            self.neg_filters.append(nf)
+        self.color_rows = np.array(
+            [nf is not None for nf in self.neg_filters], dtype=bool
+        )
+        color_idx = np.flatnonzero(self.color_rows)
+        self.row_filters = list(self.filters) + [
+            self.neg_filters[i] for i in color_idx
+        ]
+        self.neg_col = np.arange(self.nfilters, dtype=int)
+        self.neg_col[color_idx] = self.nfilters + np.arange(color_idx.size)
 
         # The row's magnitude system AS STATED, translated to the one
         # internal spelling at this boundary (None = not stated; an unknown
@@ -601,16 +730,22 @@ class SED(Component):
         # against the BC columns' record in _convert_to_bc_system, once the
         # grid has named each row's column.
         self._magsys_stated = [
+            parse_magsys(c.get("magsys"), self._row_where(i))
+            for i, c in enumerate(filter_dict)
+        ]
+        # A color row's second filter has its own system, stated or native.
+        self._neg_magsys_stated = [
             parse_magsys(
-                c.get("magsys"),
-                f"{self.sedfile}, filter row {i} ({c.get('name')!r})",
+                c.get("neg_magsys"),
+                f"{self._row_where(i)}, neg_filter {c.get('neg_filter')!r}",
             )
             for i, c in enumerate(filter_dict)
         ]
 
         # One observation per filter row (a row may be the blended or
         # differential magnitude of several stars; which stars is encoded
-        # in photType and resolved into self.blend_matrix by load_data).
+        # in photType and resolved into self.pos_matrix / self.neg_matrix by
+        # load_data).
         # mag_reported is the file's number in the row's own system; the
         # fitted (and plotted) self.mag is set by _convert_to_bc_system.
         self.mag_reported = np.array(
@@ -643,8 +778,13 @@ class SED(Component):
 
     def _build_blend_matrix(self, star_names):
         """
-        Resolve each filter row's photType into a +1/0/-1 coefficient matrix
-        (EXOFASTv2 exofast_multised convention), shape (nfilters, nstars).
+        Resolve each filter row's photType into two 0/1 coefficient
+        matrices over the system's stars, ``pos_matrix`` and ``neg_matrix``
+        (shape (nfilters, nstars)): the row predicts
+        -2.5*log10(F_pos / F_neg), F_pos the summed flux of its pos stars in
+        the row's filter and F_neg that of its neg stars in the neg side's
+        filter (``neg_col``; EXOFASTv2 exofast_multised convention, extended
+        to two filters).  A row with no neg stars is absolute.
 
         photType schema per filter row:
             photType:
@@ -654,9 +794,15 @@ class SED(Component):
         `blend: [...]` is accepted as an alias for `pos` (original schema).
         Star references may be names or integer indices. A missing photType
         means the blend of all stars (the historical default).
+
+        A COLOR row (``neg_filter``) takes its neg stars in that second
+        filter, so pos and neg may name the same star -- the color of one
+        star -- where a same-filter row naming a star on both sides would
+        be identically zero and raises.  A color row must have neg stars.
         """
         nstars = len(star_names)
-        blend_matrix = np.zeros((self.nfilters, nstars), dtype=int)
+        pos_matrix = np.zeros((self.nfilters, nstars), dtype=int)
+        neg_matrix = np.zeros((self.nfilters, nstars), dtype=int)
         combo_labels = []
 
         for i, phot in enumerate(self.photType_unprocessed):
@@ -696,18 +842,35 @@ class SED(Component):
                     f"with 'pos'/'neg' (or 'blend') star lists; got {phot!r}."
                 )
 
+            color = bool(self.color_rows[i])
+            if color and not neg:
+                raise ValueError(
+                    f"{self._row_where(i)}: a color row (neg_filter "
+                    f"{self.neg_filters[i]!r}) needs a non-empty photType "
+                    f"'neg' star list -- the stars measured in "
+                    f"{self.neg_filters[i]!r}."
+                )
             overlap = set(pos) & set(neg)
-            if overlap:
+            if overlap and not color:
                 raise ValueError(
                     f"photType for ``{self.filters[i]}`` lists star(s) "
                     f"{sorted(overlap)} in both pos and neg."
                 )
 
-            blend_matrix[i, pos] = 1
-            blend_matrix[i, neg] = -1
-            combo_labels.append(self._combo_label(pos, neg, star_names))
+            pos_matrix[i, pos] = 1
+            neg_matrix[i, neg] = 1
+            label = self._combo_label(pos, neg, star_names)
+            if color:
+                label = (
+                    f"{self._combo_label(pos, [], star_names)} "
+                    f"[{self.filters[i]}] - "
+                    f"{self._combo_label(neg, [], star_names)} "
+                    f"[{self.neg_filters[i]}]"
+                )
+            combo_labels.append(label)
 
-        self.blend_matrix = blend_matrix
+        self.pos_matrix = pos_matrix
+        self.neg_matrix = neg_matrix
         self.combo_labels = combo_labels
 
     def _ensure_model_data(self):
@@ -788,7 +951,7 @@ class SED(Component):
 
         known_mist = {
             resolve_filter_name(n, alias_df, alias="MIST")
-            for n in self.filters
+            for n in self.row_filters
         }
         # One entry per distinct filter: two band blocks may share a filter
         # (one read, one not), and the filter goes in if either needs it.
@@ -1019,7 +1182,7 @@ class SED(Component):
         self.band_filters = self._collect_band_filters(
             self.consumed_sed_bands(system)
         )
-        self.all_filters = list(self.filters) + self.band_filters
+        self.all_filters = list(self.row_filters) + self.band_filters
         if not self.all_filters:
             raise ValueError(
                 "SED has no usable filters: the .sed file lists none and no "
@@ -1053,6 +1216,7 @@ class SED(Component):
         )
         self.bc_grid_data = grid
         self.mist_filters = grid["filter_order"]
+        self._check_color_columns()
         self._locate_grid_columns()
         self._check_band_mag_systems()
         self._convert_to_bc_system()
@@ -1090,6 +1254,48 @@ class SED(Component):
             np.asarray(grid["bc_values"], dtype=float),
         )
 
+        # The fitted-R_V mode computes the BCs from the spectrum instead.
+        # The tables above still name every column, resolve its magnitude
+        # system and bound the star (their box is the runtime grid's box or
+        # smaller), so the two paths share everything but the BC itself.
+        if self.fit_rv_dust:
+            from exozippy.models.NextGen.runtime_spectra import (
+                load_runtime_grid,
+            )
+
+            from .spectral_bc import SpectralBC
+
+            if self.sedmodel != "NextGen":
+                raise ValueError(
+                    f"sed.fit_rv_dust reads the NextGen runtime spectra; this "
+                    f"SED's model is {self.sedmodel!r}."
+                )
+            self.spectral = SpectralBC(
+                load_runtime_grid(self.model_root),
+                self.all_filters,
+                law="ccm89",
+            )
+            if self.spectral.filters_mist != list(self.mist_filters):
+                raise RuntimeError(
+                    f"The spectral BCs' columns {self.spectral.filters_mist} "
+                    f"are not the BC grid's {list(self.mist_filters)}."
+                )
+
+    def _check_color_columns(self):
+        """A color row's two filters must be two BC columns.  ``neg_filter``
+        naming the row's own column (in any alias spelling) is a
+        same-filter differential row, whose one spelling has no
+        ``neg_filter``."""
+        for i in np.flatnonzero(self.color_rows):
+            col = self.mist_filters[i]
+            if self.mist_filters[self.neg_col[i]] == col:
+                raise ValueError(
+                    f"{self._row_where(i)}: neg_filter "
+                    f"{self.neg_filters[i]!r} is the row's own filter (BC "
+                    f"column {col}).  A same-filter differential row is "
+                    f"spelled without neg_filter."
+                )
+
     # ------------------------------------------------------------------
     # The ONE place a row's magnitude system is applied (review 1.9.1).
     #
@@ -1101,46 +1307,84 @@ class SED(Component):
     # the error unchanged.  A differential row (photType neg) is
     # -2.5 log10(F_pos/F_neg) in one band, where the offset cancels
     # exactly, so it is not shifted -- but its system is still resolved,
-    # so a misspelled or unrecordable system still raises.
+    # so a misspelled or unrecordable system still raises.  A COLOR row's
+    # two filters each have a system (``magsys``, ``neg_magsys``; unstated
+    # = native), and m_a - m_b moves onto Vega by the pos side's offset
+    # MINUS the neg side's: a Vega color is the reported one minus
+    # [m_AB - m_Vega](a) on an AB side a, plus [m_AB - m_Vega](b) on an AB
+    # side b.
     # ------------------------------------------------------------------
     def _convert_to_bc_system(self):
         self.magsys = []
+        self.neg_magsys = []
         self.ab_minus_vega = np.zeros(self.nfilters)
         if self.nfilters == 0:
             # Band filters only: no photometry row has a system to apply.
             self.mag = self.mag_reported
             return
 
-        has_neg = (self.blend_matrix < 0).any(axis=1)
+        has_neg = self.neg_matrix.any(axis=1)
         for i in range(self.nfilters):
             name = self.filters[i]
             col = self.mist_filters[i]
             where = f"{self.sedfile}, filter row {i} ({name!r}, column {col})"
+            color = bool(self.color_rows[i])
             system, offset = self._column_magsys(
                 i,
                 self._magsys_stated[i],
                 where,
                 differential_note=(
-                    " (for a differential row either gives the same "
-                    "fit: the system cancels)"
+                    ""
+                    if color
+                    else (
+                        " (for a differential row either gives the same "
+                        "fit: the system cancels)"
+                    )
                 ),
             )
             self.magsys.append(system)
-            if system == AB and not has_neg[i]:
-                self.ab_minus_vega[i] = offset
+            if not color:
+                self.neg_magsys.append(None)
+                if system == AB and not has_neg[i]:
+                    self.ab_minus_vega[i] = offset
+                continue
+            j = int(self.neg_col[i])
+            neg_system, neg_offset = self._column_magsys(
+                j,
+                self._neg_magsys_stated[i],
+                f"{where}, neg_filter {self.neg_filters[i]!r} (column "
+                f"{self.mist_filters[j]})",
+                key="neg_magsys",
+            )
+            self.neg_magsys.append(neg_system)
+            self.ab_minus_vega[i] = (offset if system == AB else 0.0) - (
+                neg_offset if neg_system == AB else 0.0
+            )
 
         # What the likelihood fits and the figures plot: the row's
         # magnitude on its column's Vega system.
         self.mag = self.mag_reported - self.ab_minus_vega
         converted = np.flatnonzero(self.ab_minus_vega)
         for i in converted:
+            if self.color_rows[i]:
+                logger.debug(
+                    f"SED: color row {i} ({self.filters[i]} "
+                    f"{self.magsys[i]} - {self.neg_filters[i]} "
+                    f"{self.neg_magsys[i]}); fitting "
+                    f"{self.mag_reported[i]:.4f} - "
+                    f"{self.ab_minus_vega[i]:.4f} = {self.mag[i]:.4f} "
+                    f"(Vega - Vega)."
+                )
+                continue
             logger.debug(
                 f"SED: {self.filters[i]} is AB; fitting "
                 f"{self.mag_reported[i]:.4f} - {self.ab_minus_vega[i]:.4f} "
                 f"= {self.mag[i]:.4f} (Vega)."
             )
 
-    def _column_magsys(self, col_idx, stated, where, differential_note=""):
+    def _column_magsys(
+        self, col_idx, stated, where, differential_note="", key="magsys"
+    ):
         """(system, m_AB - m_Vega) for grid column ``col_idx``.
 
         The ONE resolution of a magnitude in one BC column, shared by the
@@ -1188,11 +1432,11 @@ class SED(Component):
             system = rec["native_system"]
             if not system:
                 raise ValueError(
-                    f"{where}: no magsys is stated and {col} has "
+                    f"{where}: no {key} is stated and {col} has "
                     f"no native magnitude system ({record_path}: none "
                     f"exists for it, or it is UNRESOLVED -- Kepler Kp, "
                     f"JDE 2026-10-01). "
-                    f"State it with `magsys: Vega` or `magsys: AB`"
+                    f"State it with `{key}: Vega` or `{key}: AB`"
                     f"{differential_note}."
                 )
         return system, float(rec["ab_minus_vega"])
@@ -1232,7 +1476,7 @@ class SED(Component):
         )
 
     # ------------------------------------------------------------------
-    # 3) build_maps — the star axis is handled by blend_matrix; nothing
+    # 3) build_maps — the star axis is handled by pos/neg_matrix; nothing
     #    to convert here.
     # ------------------------------------------------------------------
     def build_maps(self):
@@ -1305,9 +1549,16 @@ class SED(Component):
         # the same node.
         loggsed = star.loggsed.value  # dex(cm/s2)
 
-        # RegularGridInterpolator.evaluate expects shape (ntest, ndim).
-        coords = pt.stack([teffsed, loggsed, feh, av], axis=-1)  # (nstars, 4)
-        bc = self.bc_interpolator.evaluate(coords)  # (nstars, n_all_filters)
+        if self.fit_rv_dust:
+            # Interpolate the spectrum, redden it at the star's own R_V,
+            # integrate the bands (spectral_bc.py).
+            bc = self.spectral.bc_node(
+                teffsed, loggsed, feh, av, star.rv_dust.value
+            )
+        else:
+            # RegularGridInterpolator.evaluate expects shape (ntest, ndim).
+            coords = pt.stack([teffsed, loggsed, feh, av], axis=-1)
+            bc = self.bc_interpolator.evaluate(coords)  # (nstars, n_filters)
 
         # Bolometric luminosity
         Lbol = calc_luminosity(radiussed, teffsed)
@@ -1327,17 +1578,26 @@ class SED(Component):
     def _combined_appmag_node(self, system):
         """
         Predicted magnitude for each .sed filter row, combining stars per
-        the blend matrix: blended rows are flux sums, differential rows
-        are -2.5*log10(F_pos/F_neg) (exofast_multised convention).
-        Shape (nfilters,).
+        the pos/neg matrices: blended rows are flux sums, differential rows
+        are -2.5*log10(F_pos/F_neg) (exofast_multised convention), with
+        F_neg in the neg side's filter (``neg_col``: the row's own column,
+        or a color row's second one).  Shape (nfilters,).
         """
-        m_app = self._predicted_appmag_node(system)[:, : self.nfilters]
+        m_all = self._predicted_appmag_node(system)
+        m_app = m_all[:, : self.nfilters]
         F = 10 ** (-0.4 * m_app)  # (nstars, nfilters)
-        Cpos = np.clip(self.blend_matrix, 0, None)  # (nfilters, nstars)
-        Cneg = np.clip(-self.blend_matrix, 0, None)
+        Cpos = self.pos_matrix  # (nfilters, nstars)
+        Cneg = self.neg_matrix
         F_pos = pt.sum(Cpos * F.T, axis=1)  # (nfilters,)
-        F_neg = pt.sum(Cneg * F.T, axis=1)
-        has_neg = (self.blend_matrix < 0).any(axis=1)  # static numpy mask
+        # Without a color row every neg side reads its row's own column, so
+        # the graph is the same-filter one (start logp bit-identical).
+        F_negside = (
+            10 ** (-0.4 * m_all[:, self.neg_col])
+            if self.color_rows.any()
+            else F
+        )
+        F_neg = pt.sum(Cneg * F_negside.T, axis=1)
+        has_neg = self.neg_matrix.any(axis=1)  # static numpy mask
         F_neg_safe = pt.switch(pt.as_tensor(has_neg), F_neg, 1.0)
         return -2.5 * (pt.log10(F_pos) - pt.log10(F_neg_safe))
 
@@ -1395,7 +1655,8 @@ class SED(Component):
         ``SEDReader(label, star)``, from which ``seen_star_mask`` and
         ``data_free_inventory`` are both derived.  A star is read when:
 
-          * an SED filter row names it (``blend_matrix`` column non-zero);
+          * an SED filter row names it, on either side (``pos_matrix`` or
+            ``neg_matrix`` column non-zero);
           * a microlensing light curve TIES its source flux to the SED --
             a prediction in its band AND a user-stated zeropoint ``mu`` and
             ``sigma`` (``MulensInstrument.sed_tie_mask``).  With no stated
@@ -1457,8 +1718,8 @@ class SED(Component):
             except Exception:  # noqa: BLE001 -- an unresolvable body is not ours to diagnose here
                 return None
 
-        # 1. SED filter rows (blend_matrix is built in load_data, stage 1).
-        bm = np.asarray(self.blend_matrix)
+        # 1. SED filter rows (pos/neg matrices built in load_data, stage 1).
+        bm = np.asarray(self.pos_matrix) | np.asarray(self.neg_matrix)
         if bm.size:
             _mark(SED_ROW, np.nonzero((bm != 0).any(axis=0))[0])
 
@@ -1799,16 +2060,28 @@ class SED(Component):
         interp = _RGI(axes, bc_values[..., col])
         flux = {}
         for j in star_indices:
-            coords = [
-                values["teffsed"][j],
-                values["loggsed"][j],
-                values["feh"][j],
-                values["av"][j],
-            ]
-            coords = [
-                float(np.clip(c, ax[0], ax[-1])) for c, ax in zip(coords, axes)
-            ]
-            bc = float(interp([coords])[0])
+            if self.fit_rv_dust:
+                bc = float(
+                    self.spectral.bc_np(
+                        values["teffsed"][j],
+                        values["loggsed"][j],
+                        values["feh"][j],
+                        values["av"][j],
+                        values[RV_DUST][j],
+                    )[col]
+                )
+            else:
+                coords = [
+                    values["teffsed"][j],
+                    values["loggsed"][j],
+                    values["feh"][j],
+                    values["av"][j],
+                ]
+                coords = [
+                    float(np.clip(c, ax[0], ax[-1]))
+                    for c, ax in zip(coords, axes)
+                ]
+                bc = float(interp([coords])[0])
             flux[j] = (
                 values["radiussed"][j] ** 2
                 * values["teffsed"][j] ** 4
@@ -1898,6 +2171,7 @@ class SED(Component):
         self._declare_grid_support(system)
         self._add_data_free_prose(system)
         self._add_synthesized_prose(system)
+        self._add_spectral_prose(system)
 
     # ------------------------------------------------------------------
     # The BC grid's support, as the reports see it.
@@ -1947,15 +2221,31 @@ class SED(Component):
             # interval's edges, not a density over it.
             support_phrase="whose logg support is",
         )
+        if self.fit_rv_dust:
+            support = (
+                r"The model spectra are interpolated on a regular grid in "
+                r"effective temperature, surface gravity and metallicity, "
+                r"and the extinction is bounded to the range the "
+                r"bolometric-correction tables cover; each star is held "
+                r"inside that support, the temperature, metallicity and "
+                r"extinction as hard bounds on the sampled parameters and "
+                r"the surface gravity -- which is derived from the mass "
+                r"and radius, so that bounding its inputs would not bound "
+                r"it -- as a soft barrier at the grid edge."
+            )
+        else:
+            support = (
+                r"The bolometric corrections are interpolated on a regular "
+                r"grid in effective temperature, surface gravity, metallicity "
+                r"and extinction; each star is held inside that grid's "
+                r"support, the first, third and fourth as hard bounds on the "
+                r"sampled parameters and the surface gravity -- which is "
+                r"derived from the mass and radius, so that bounding its "
+                r"inputs would not bound it -- as a soft barrier at the grid "
+                r"edge."
+            )
         get_collector(system).add(
-            r"The bolometric corrections are interpolated on a regular "
-            r"grid in effective temperature, surface gravity, metallicity "
-            r"and extinction; each star is held inside that grid's "
-            r"support, the first, third and fourth as hard bounds on the "
-            r"sampled parameters and the surface gravity -- which is "
-            r"derived from the mass and radius, so that bounding its "
-            r"inputs would not bound it -- as a soft barrier at the grid "
-            r"edge.",
+            support,
             section="priors",
             key=f"{self.prefix}.bc_grid_support",
             rank=20,
@@ -2060,7 +2350,10 @@ class SED(Component):
 
         # All compiled functions take the FULL plot-parameter bundle
         # (vectors stay vectors) and return per-star / per-row arrays:
-        #   _compiled_mag_predictors : (nstars, nfilters) per-star app mags
+        #   _compiled_mag_predictors : (nstars, n_row_columns) per-star app
+        #                              mags in every column a row reads
+        #                              (row_filters: the rows' own, then
+        #                              the color rows' second filters)
         #   _compiled_combined_mag   : (nfilters,) blended/diff row mags
         #   _compiled_logg_calc      : (nstars,) loggsed
         # In the model's context: with no SED rows and no other reader
@@ -2069,7 +2362,7 @@ class SED(Component):
         # materialize star nodes.
         with model:
             m_star_node = self._predicted_appmag_node(system)[
-                :, : self.nfilters
+                :, : len(self.row_filters)
             ]
         loggsed_node = star.loggsed.value
 
@@ -2175,8 +2468,10 @@ class SED(Component):
         sub_combos = []
         seen_combos = set()
         for row in range(plot_obj.nfilters):
-            bm = plot_obj.blend_matrix[row]
-            for idx in (np.where(bm > 0)[0], np.where(bm < 0)[0]):
+            for idx in (
+                np.flatnonzero(plot_obj.pos_matrix[row]),
+                np.flatnonzero(plot_obj.neg_matrix[row]),
+            ):
                 combo = frozenset(idx)
                 if (
                     len(combo) >= 2
@@ -2333,16 +2628,9 @@ class SED(Component):
             )
 
         # ---- residuals: one per filter ROW (the actual measurement),  ----
-        # ---- against its combined (blend/diff) prediction              ----
-        wave_row = (
-            np.array(
-                [
-                    plot_obj.filter_params[f]["wave_eff"]
-                    for f in plot_obj.filters
-                ]
-            )
-            * ANG_TO_MICRON_CONST
-        )
+        # ---- against its combined (blend/diff/color) prediction; a     ----
+        # ---- color row's sits between its two filters                 ----
+        wave_row = plot_obj.row_wave_eff() * ANG_TO_MICRON_CONST
         for row in range(plot_obj.nfilters):
             # use the pos-side point's color/marker for this row's residual
             p = np.where(
@@ -2470,7 +2758,8 @@ class SED(Component):
         plt.close(fig)
 
     def _filter_wave_eff_micron(self):
-        """Effective wavelength (micron) of each .sed filter row."""
+        """Effective wavelength (micron) of each .sed filter row (a color
+        row's pos-side filter)."""
         from ...filters import filter as VOID
 
         alias_df = _load_alias_table()
@@ -2496,16 +2785,23 @@ class SED(Component):
             return []
 
         # ---- Data-only preview: observed mag vs effective wavelength --
+        # A color row's value is a magnitude DIFFERENCE between two
+        # filters, with no place on a magnitude-vs-wavelength axis, so the
+        # preview leaves it out (the model chart below places each of its
+        # sides against the model, as for a differential row).
         if point is None:
-            wave = self._filter_wave_eff_micron()
+            keep = ~self.color_rows
+            if not keep.any():
+                return []
+            wave = self._filter_wave_eff_micron()[keep]
             traces = [
                 Trace(
                     name="observed",
                     role="data",
                     kind="scatter",
                     x=wave,
-                    y=self.mag,
-                    yerr=self.err,
+                    y=self.mag[keep],
+                    yerr=self.err[keep],
                 )
             ]
             return [
@@ -2735,16 +3031,23 @@ class SED(Component):
         """The AB-conversion sentence, declared where the conversion is fitted.
 
         Only when a row is actually shifted (an AB row that is not
-        differential): an all-Vega SED does nothing worth a sentence, and
-        its draft is unchanged.
+        differential, or an AB side of a color row): an all-Vega SED does
+        nothing worth a sentence, and its draft is unchanged.
         """
         from ...outputs.prose import join_names
         from ...outputs.texutils import latex_escape
 
-        converted = np.flatnonzero(self.ab_minus_vega)
-        if converted.size == 0:
+        names = {}
+        for i in np.flatnonzero(self.ab_minus_vega):
+            if not self.color_rows[i]:
+                names[self.filters[i]] = None
+                continue
+            if self.magsys[i] == AB:
+                names[self.filters[i]] = None
+            if self.neg_magsys[i] == AB:
+                names[self.neg_filters[i]] = None
+        if not names:
             return
-        names = dict.fromkeys(self.filters[i] for i in converted)
         bands = join_names(latex_escape(n) for n in names)
         get_collector(system).add(
             "The bolometric corrections are referenced to the Vega "
@@ -2785,6 +3088,27 @@ class SED(Component):
             section="data",
             key=f"{self.prefix}.synthesized_bcs",
             rank=21.6,
+        )
+
+    def _add_spectral_prose(self, system):
+        """How the fitted-R_V mode computes a band magnitude, declared only
+        in that mode (a table-mode draft is unchanged)."""
+        if not self.fit_rv_dust:
+            return
+        get_collector(system).add(
+            r"The bolometric corrections are computed at every model "
+            r"evaluation rather than interpolated from tables: the "
+            r"BT-NextGen (AGSS2009) model spectra \citep{Allard:2011, "
+            r"Allard:2012}, resampled to a resolution of 3000, are "
+            r"interpolated linearly in the logarithm of the flux, reddened "
+            r"with the \citet{Cardelli:1989} extinction law with the "
+            r"optical coefficients of \citet{ODonnell:1994} at each star's "
+            r"own $A_V$ and $R_V$, and integrated through each filter's "
+            r"transmission curve with the same flux weighting and Vega "
+            r"zero point as the tabulated corrections.",
+            section="stellar",
+            key=f"{self.prefix}.spectral_bc",
+            rank=20.2,
         )
 
     def _add_data_free_prose(self, system):

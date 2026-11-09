@@ -1,26 +1,34 @@
 # DC2018-128 configuration arms
 
-Working configs behind the DC2018 event-128 investigation (review 8.6.7 and
-its children).  Their traces are the evidence base for the conclusion that
-the event's `theta_E` error is entirely a `mu_rel` error.
+Working configs behind the DC2018 event-128 investigation.
+
+## Retired: the severed arms (v3..v7)
+
+`DC2018_128_severed_v3.yaml` ... `_v7.yaml` (and their
+`DC2018_128_sed_severed_v*.params.yaml`) cut `rho` loose from the stellar
+chain (`star_constrains_rho: false`) to find why every fit put `theta_E`
+~6x above the answer key, then varied the lens pins, an SED error-scale cap
+and the relink.  They were removed because they all fit a STATIC lens, and
+event 128's lens orbits (P = 1.27 yr): with linear lens orbital motion the
+prior-free light curve gains 458 in chi2 over the best static fit and
+recovers the key's `s`, `q` and `rho` to 0.1%, 0.1% and 1%, while the static
+model's `s` and `q` are 40 and 21 sigma off (`../dc18_orbital_motion_signal.py`,
+#318).  The arms were diagnosing a symptom of fitting a moving lens static.
+Their lasting lessons -- an uncapped noise scale absorbs any disagreement
+between parts of the model, and a pin inherited from a no-SED config can
+force a solar-type lens -- are already in the code (the error-scale caps)
+and in the configs here.  They also stopped building when the relaxation
+engine was rewritten (#455: no start for `log_pi_rel` with the `rho` tie
+cut and no `pi_E` seed).  The scripts that read their traces went with
+them.  Recover any of them from git history (removed in the PR that added
+this section).  The fit that matters for 128 is one with lens orbital
+motion.
 
 ## Ported to the 8.6.17 component split (PR #246)
 
-These build and are verified against the current code:
-
 | config | what it isolates |
 |---|---|
-| `DC2018_128_severed_v3.yaml` | the severed baseline |
-| `DC2018_128_severed_v4.yaml` | v3 + `star.Lens.radius` unpinned |
-| `DC2018_128_severed_v5.yaml` | v4 + `teff` unpinned, `feh` given N(0, 0.5) |
-| `DC2018_128_severed_v6.yaml` | v5 + a 3.0 cap on `sed.sed.errscale` |
-| `DC2018_128_severed_v7.yaml` | v5 + `star_constrains_rho` back ON (the relink) |
 | `DC2018_128_tightpriors.yaml` | the observable NS arm with 8.2.2's bounds |
-
-Verification: v3, v6 and v7 reproduce their pre-refactor start logp
-BIT-IDENTICALLY (80519.222 / 80507.376 / 81373.201).  v4 and v5 build with
-the expected element counts (39 and 41) but had no pre-refactor baseline
-recorded.  `tightpriors` is discussed below.
 
 ## NOT ported -- pre-#246, will not load
 

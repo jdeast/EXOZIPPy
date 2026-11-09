@@ -352,11 +352,12 @@ def test_fragment_puts_seed_polish_in_a_comment_not_in_the_params_file():
 
 
 def test_fragment_omits_t_E_and_rho_because_they_are_derived():
-    """Seeding either is a silent no-op in a model with a galactic prior.
+    """t_E and rho are written as comments, not seeds (both DERIVED).
 
-    RMDC26 event 096's own run log: `mulensevent.0.t_E: you set 8.42027,
-    the model starts at 9.7949 (+16.33%) -- initval has no effect on a
-    derived parameter`, and rho -85%.
+    When this was decided an initval on either did not reach the model
+    (RMDC26 event 096: t_E +16.33%, rho -85%).  Since #592/#594 observable
+    seeds do; writing them as seeds is a pending change (mulensing.md,
+    "What the grid does not seed (yet)").
     """
     seeds = _two_basin_grid().local_minima(k=2)
     text = seed_fragment(seeds, NAMES)

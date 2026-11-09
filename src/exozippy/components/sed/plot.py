@@ -177,8 +177,17 @@ class Plot:
         # on the BC columns' Vega system: AB rows arrive converted
         self.mag_obs = self.system.sed.mag  # (nfilters,)
         self.mag_obs_err = self.system.sed.err  # (nfilters,)
-        self.blend_matrix = self.system.sed.blend_matrix  # (nfilters, nstars)
+        # star membership of each row's two sides, (nfilters, nstars) 0/1
+        self.pos_matrix = self.system.sed.pos_matrix
+        self.neg_matrix = self.system.sed.neg_matrix
         self.combo_labels = self.system.sed.combo_labels
+        # A color row's neg side is in a second filter: neg_filters names
+        # it (None on every other row), neg_col is the predicted-magnitude
+        # column each row's neg side reads, and n_row_columns counts the
+        # columns the rows read (the compiled per-star magnitudes' width).
+        self.neg_filters = self.system.sed.neg_filters
+        self.neg_col = self.system.sed.neg_col
+        self.n_row_columns = len(self.system.sed.row_filters)
 
         # Expand each filter row into one "plot point" per side: a blended
         # row (no neg) contributes one point (its pos side); a differential
@@ -186,25 +195,38 @@ class Plot:
         # model-anchored flux from the same measurement, so both
         # constituent parts get their own marker (e.g. "A-(B+C)" plots an
         # "A" point and a "B+C" point). point_row maps each point back to
-        # its originating filter row (shared wavelength/mag_obs/err);
-        # point_side is +1/-1 for which side of that row it represents.
+        # its originating filter row (shared mag_obs/err); point_side is
+        # +1/-1 for which side of that row it represents.  A color row's
+        # two sides are in different filters, so each point also carries
+        # its own filter (point_filter, for the zero point and wavelength)
+        # and its own predicted-magnitude column (point_col).
         point_row, point_side, point_label = [], [], []
+        point_filter, point_col = [], []
         for row in range(len(self.combo_labels)):
-            bm = self.blend_matrix[row]
-            pos_idx = np.where(bm > 0)[0]
-            neg_idx = np.where(bm < 0)[0]
+            pos_idx = np.flatnonzero(self.pos_matrix[row])
+            neg_idx = np.flatnonzero(self.neg_matrix[row])
             point_row.append(row)
             point_side.append(1)
             point_label.append("+".join(self.star_names[i] for i in pos_idx))
+            point_filter.append(self.filters[row])
+            point_col.append(row)
             if neg_idx.size > 0:
                 point_row.append(row)
                 point_side.append(-1)
                 point_label.append(
                     "+".join(self.star_names[i] for i in neg_idx)
                 )
+                point_filter.append(
+                    self.neg_filters[row]
+                    if self.neg_filters[row] is not None
+                    else self.filters[row]
+                )
+                point_col.append(int(self.neg_col[row]))
 
         self.point_row = np.array(point_row, dtype=int)
         self.point_side = np.array(point_side, dtype=int)
+        self.point_filter = point_filter
+        self.point_col = np.array(point_col, dtype=int)
         self.point_labels = point_label
         self.npoints = len(point_row)
 
@@ -322,7 +344,11 @@ class Plot:
 
         """
         filter_dict = {}
-        for filter in self.filters:
+        for filter in list(self.filters) + [
+            f for f in self.neg_filters if f is not None
+        ]:
+            if filter in filter_dict:
+                continue
             SVO_name = resolve_filter_name(filter, self.filter_alias_df, "SVO")
             filter_dict[filter] = VOID.Filter(SVO_name)
 
@@ -389,6 +415,30 @@ class Plot:
         optical_depth_draws = np.zeros(
             (self.ndraws, self.nstars, len(self.df_wave))
         )
+        # The fitted-R_V mode reddens with CCM89 at each star's own R_V
+        # (sed.md, "The spectral mode"), so the figure must too, or it would
+        # draw a spectrum the fit never evaluated.  getattr: the plot classes
+        # are also driven from tests with a stubbed system (see model_root).
+        if getattr(self.system.sed, "fit_rv_dust", False):
+            from .extinction import ccm89_ab
+            from .sed import RV_DUST
+
+            ccm_a, ccm_b = ccm89_ab(
+                np.asarray(self.df_wave["wavelength_micron"], float)
+            )
+            for d, draw in enumerate(self.draws):
+                av = np.asarray(draw.get("star.av"), float)
+                rv = np.asarray(draw.get(f"star.{RV_DUST}"), float)
+                optical_depth_draws[d, :] = (
+                    av[:, np.newaxis]
+                    * (
+                        ccm_a[np.newaxis]
+                        + ccm_b[np.newaxis] / rv[:, np.newaxis]
+                    )
+                    / 1.086
+                )
+            self.optical_depth_draws = optical_depth_draws
+            return
         for d, draw in enumerate(self.draws):
             av = draw.get("star.av")
             optical_depth = (
@@ -441,7 +491,10 @@ class Plot:
         F_neg(model, median draw) * 10**(-0.4*mag_obs) (the positive
         stars' flux implied by the observed magnitude difference), and the
         neg-side point is F_pos(model, median draw) * 10**(+0.4*mag_obs)
-        (the same, solved for the negative side instead).
+        (the same, solved for the negative side instead).  A color row is
+        the same with each side in its own filter: a side's point is at
+        its own filter's wavelength, through its own zero point, anchored
+        on the other side's model magnitude in the OTHER filter.
 
         Created Class Attributes
         -------
@@ -466,24 +519,29 @@ class Plot:
         # _calc_compiled_func before this method)
         mag_pred_med = np.median(
             self.mag_pred_draws, axis=0
-        )  # (nstars, nfilters)
+        )  # (nstars, n_row_columns)
 
         for p in range(self.npoints):
             row = self.point_row[p]
             side = self.point_side[p]
-            filter = self.filters[row]
+            filter = self.point_filter[p]
             mag_obs = self.mag_obs[row]
             mag_obs_err = self.mag_obs_err[row]
 
             # flux calculations
             zp = self.filter_params[filter]["zp"]
 
-            other_stars = np.where(self.blend_matrix[row] == -side)[0]
+            if side > 0:
+                other_stars = np.flatnonzero(self.neg_matrix[row])
+                other_col = int(self.neg_col[row])
+            else:
+                other_stars = np.flatnonzero(self.pos_matrix[row])
+                other_col = row
             if other_stars.size > 0:
                 # differential row: anchor this side on the model's flux
-                # for the OTHER side (whose sign is -side)
+                # for the OTHER side, in the other side's filter
                 scale = np.sum(
-                    zp * 10 ** (-0.4 * mag_pred_med[other_stars, row])
+                    zp * 10 ** (-0.4 * mag_pred_med[other_stars, other_col])
                 )
             else:
                 scale = zp
@@ -509,6 +567,19 @@ class Plot:
         self.wave_err = wave_err
 
     ######## functions used for plotting ########
+
+    def row_wave_eff(self):
+        """Effective wavelength (angstrom) at which each ROW's residual is
+        drawn: its filter's, or for a color row the geometric mean of its
+        two filters' (the midpoint on the plot's log axis)."""
+        waves = []
+        for row, f in enumerate(self.filters):
+            w = self.filter_params[f]["wave_eff"]
+            nf = self.neg_filters[row]
+            if nf is not None:
+                w = np.sqrt(w * self.filter_params[nf]["wave_eff"])
+            waves.append(w)
+        return np.asarray(waves, dtype=float)
 
     def _get_ylim(self):
         """

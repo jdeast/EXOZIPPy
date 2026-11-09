@@ -269,6 +269,7 @@ def _sed_stub(bands, model_root, filters=()):
     sed = object.__new__(SED)
     sed.config_manager = _StubConfigManager(bands)
     sed.filters = list(filters)
+    sed.row_filters = list(filters)
     sed.sedmodel = "NextGen"
     sed.model_root = model_root
     return sed
