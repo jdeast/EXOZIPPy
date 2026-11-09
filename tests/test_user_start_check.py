@@ -649,9 +649,10 @@ def test_the_mulens_t_E_and_pi_E_seed_remedy_names_the_recipe():
     Given the mulensing defaults,
     When t_E, pi_E_N and pi_E_E are read,
     Then all three declare ONE seed_remedy (the YAML anchor), and it names
-      the recipe -- seed all four proper-motion leaves with the masses and
-      distances, DROP the t_E / pi_E seeds -- and the reason the pi_E
-      magnitude is not a datum to seed.
+      both recipes -- seed the observables alone (#594), or all four
+      proper-motion leaves with the masses and distances and DROP the
+      t_E / pi_E seeds -- and the reason the pi_E magnitude is not a datum
+      to seed over the leaves.
 
     Drift guard on the sentence that answers review 8.6.15: rewording it
     is fine, losing the recipe is the regression.
@@ -674,6 +675,7 @@ def test_the_mulens_t_E_and_pi_E_seed_remedy_names_the_recipe():
     }
     assert len(set(remedies.values())) == 1, remedies
     text = " ".join(remedies["t_E"].split())
+    assert "seed the observables (t_E, pi_E, rho)" in text
     assert "all four proper-motion leaves" in text
     assert "DROP the t_E and pi_E seeds" in text
     assert "masses and distances" in text
