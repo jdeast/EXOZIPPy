@@ -2893,17 +2893,14 @@ def report_polish_moves(moves):
     if large:
         logger.warning(
             f"The seed polish moved {len(large)} of your start values by "
-            f"more than {LARGE_POLISH_MOVE_SIGMA:g} sigma (each one's "
-            f"measured 1-sigma width at the start): those seeds are not near "
-            f"this model's optimum -- stale, or a different solution.\n"
+            f"more than {LARGE_POLISH_MOVE_SIGMA:g} sigma:\n"
             + bullets(
                 f"{m['key']}: {m['requested']:.6g} -> {m['polished']:.6g} "
                 f"({m['n_sigma']:.3g} sigma)"
                 for m in large
             )
-            + "\nRefresh them in the params file; to hold one fixed through "
-            "the polish pin it (sigma: 0), or set sampler: {seed_polish: "
-            "false} to start at the seeds."
+            + '\nSet "sampler: {seed_polish: false}" to start at the seeds or '
+            '"sigma: 0" in the params file to fix it throughout the fit.'
         )
     elif moves:
         logger.debug(

@@ -100,13 +100,11 @@ hand. The layout is fixed in that one place (`examples/kelt4`, RV only, as
 the console prints it):
 
 ```
-The seed polish moved 2 of your start values by more than 3 sigma (each one's
-  measured 1-sigma width at the start): those seeds are not near this model's
-  optimum -- stale, or a different solution.
+The seed polish moved 2 of your start values by more than 3 sigma:
   - orbit.0.cosi: 0.11996 -> 0.999944 (1.6e+05 sigma)
   - planet.0.radius: 1.706 -> 1.0041 (16 sigma)
-  Refresh them in the params file; to hold one fixed through the polish pin it
-  (sigma: 0), or set sampler: {seed_polish: false} to start at the seeds.
+  Set "sampler: {seed_polish: false}" to start at the seeds or "sigma: 0" in the
+  params file to fix it throughout the fit.
 ```
 
 The headline starts flush left and its continuation is indented two spaces;
