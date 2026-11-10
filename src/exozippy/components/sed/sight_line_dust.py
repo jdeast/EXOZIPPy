@@ -16,6 +16,7 @@ import pytensor.tensor as pt
 
 from exozippy.components.component import Component, in_topology
 from exozippy.config import PRECEDENCE_DERIVED_USER, user_entry
+from exozippy.logger import first_time
 
 from . import dust_profile as dp
 
@@ -288,12 +289,16 @@ class SightLineDust:
             split = bool(self.fit_rv_dust and near and far_groups)
         else:
             split = bool(self.fit_rv_dust_near)
-        if split and not (near and has_far):
+        if (
+            split
+            and not (near and has_far)
+            and first_time("dust-split-no-near")
+        ):
             logger.warning(
                 f"[{self.prefix}] fit_rv_dust_near: true, but no read object "
-                f"is nearer than the far group (the selected sources and the "
-                f"extinction anchor): the near R_V is held by its prior "
-                f"alone."
+                f"is nearer than the far group, so sed.rv_dust_near is held "
+                f"by its prior alone.\nRemove fit_rv_dust_near from the sed "
+                f"block, or read a nearer object (a lens) in an SED row."
             )
         names = star.names
         reason = (
@@ -346,7 +351,7 @@ class SightLineDust:
                     f"describe nothing; set distance_constrains_av: true to "
                     f"turn it on, or remove them."
                 )
-            logger.info(
+            logger.debug(
                 f"[{self.prefix}] no sight-line dust profile: {plan.reason}."
             )
             return plan
@@ -377,7 +382,7 @@ class SightLineDust:
             self.manifest[DUST_BOUNDARY] = None
         self._seed_dust_anchor(system, plan)
         edges = dp.bin_edges_pc(plan.n_bins, plan.sinb, plan.h_pc)
-        logger.info(
+        logger.debug(
             f"[{self.prefix}] sight-line dust profile ON: {plan.reason}. "
             f"A(d) = A_anchor C(d)/C(anchor) with {plan.n_bins} bins equal in "
             f"the H = {plan.h_pc:g} pc layer's dust (edges "
@@ -436,7 +441,7 @@ class SightLineDust:
             for p in paths:
                 v = probed[p].user_value
                 if v is None:
-                    logger.info(
+                    logger.debug(
                         f"[{self.prefix}] {p} has no start yet, so "
                         f"star.{star.names[i]}.av's start does not seed the "
                         f"dust anchor."
@@ -459,7 +464,7 @@ class SightLineDust:
         self.config_manager.add_hint(
             f"{self.prefix}.{DUST_ANCHOR}", value, PRECEDENCE_DERIVED_USER
         )
-        logger.info(
+        logger.debug(
             f"[{self.prefix}] the dust anchor starts at {value:.4g} mag, so "
             f"that star.{star.names[i]}.av starts at the {av:g} asked for "
             f"(distance {dist[paths[0]]:.0f} pc, layer shape {shape:.4g})."

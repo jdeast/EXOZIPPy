@@ -389,7 +389,7 @@ class RedClump(Component):
                     f"key, or set 'sed: {{distance_constrains_av: false}}' "
                     f"to use the tie instead of the profile."
                 )
-            logger.info(
+            logger.debug(
                 f"{where} the sight-line dust profile ties every object's "
                 f"A_V to the clump's anchor; no interim av_ratio tie."
             )
@@ -635,7 +635,7 @@ class RedClump(Component):
                 else sed.reference_band_extinction_np(band, av, system, rv)
             )
             self.config_manager.add_hint("sed.dust_anchor", value)
-            logger.info(
+            logger.debug(
                 f"{where} the dust anchor starts at {value:.3f} mag (clump "
                 f"A_V {av:.3f}), from {what}."
             )
