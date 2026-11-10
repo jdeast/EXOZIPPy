@@ -51,21 +51,11 @@ def relations_apply(system_config):
 
 
 def get_symbol_map(config, system_config):
-    # av (and, under sed.fit_rv_dust, rv_dust) is in no relation: a leaf, mapped
-    # so the engine owns its start like every other SED input.  rv_dust only
-    # where the star declares it, or it would be a phantom leaf (the
-    # relations_apply ruling above).
-    from .sed import RV_DUST, fit_rv_dust_from_config
-
-    extra = (
-        (RV_DUST,)
-        if fit_rv_dust_from_config((system_config or {}).get("sed"))
-        else ()
-    )
+    # av is in no relation: a leaf, mapped so the engine owns its start like
+    # every other SED input.
     return {
         name: name
-        for name in extra
-        + (
+        for name in (
             "teff",
             "teffsed",
             "radius",
@@ -80,3 +70,26 @@ def get_symbol_map(config, system_config):
             "av",
         )
     }
+
+
+def get_extra_relations(star_cfg, system_config):
+    """Under sed.fit_rv_dust, every star's R_V IS the sight line's:
+    ``star.<i>.rv_dust = sed.0.rv_dust`` (sed.md, "The spectral mode"), in
+    full-path symbols, so a user initval on star.<name>.rv_dust seeds
+    sed.rv_dust at user rank and the engine owns both starts.  Only under
+    fit_rv_dust, or the symbols would be phantom leaves (the
+    relations_apply ruling above).  Called once per star entry; returns the
+    whole set each time (ConfigManager keeps one copy of each)."""
+    from .sed import RV_DUST, fit_rv_dust_from_config
+
+    cfg = system_config or {}
+    if not fit_rv_dust_from_config(cfg.get("sed")):
+        return []
+    stars = cfg.get("star") or []
+    if not isinstance(stars, list):
+        stars = [stars]
+    sight = sp.Symbol(f"sed.0.{RV_DUST}")
+    return [
+        sp.Eq(sp.Symbol(f"star.{i}.{RV_DUST}"), sight)
+        for i in range(len(stars))
+    ]

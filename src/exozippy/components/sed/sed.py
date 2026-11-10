@@ -19,11 +19,13 @@ from matplotlib.lines import Line2D
 
 from exozippy.components.component import (
     Component,
+    SEDFluxSource,
     in_topology,
     resolve_star_ref,
 )
 from exozippy.components.parameter import Parameter
-from exozippy.constants import ANG_TO_MICRON_CONST
+from exozippy.config import user_entry
+from exozippy.constants import ANG_TO_MICRON_CONST, LOG_L0_CONST, LUM_CONST
 from exozippy.outputs.prose import get_collector
 
 from ..orbit.bodies import component_instance_names
@@ -305,16 +307,17 @@ class SED(Component):
         self.fbolsedfloor = self.config.get("fbolsedfloor", 0.024)
 
         # The fitted-R_V mode: BCs from the R = 3000 spectra, reddened with
-        # a CCM89 law at a per-star star.rv_dust (spectral_bc.py).  Its one
-        # new star knob joins every list that enumerates the SED's star
-        # inputs, so the unread-star pin, the errscale dof count, the
-        # forward model's lazy node build and the dilution start solver all
-        # see it; in table mode the class tuples stand as they are.
+        # a CCM89 law at the sight line's R_V (spectral_bc.py).  ONE
+        # parameter, sed.rv_dust, sampled here; each star the SED reads
+        # derives star.rv_dust from it (sed.md, "The spectral mode").  So
+        # rv_dust is NOT a per-star knob (STAR_KNOBS / PHOTOMETRIC_DOF stay
+        # the table mode's; the errscale count adds it once,
+        # data_free_inventory), but the forward model and the dilution
+        # start solver read each star's value.
         self.fit_rv_dust = fit_rv_dust_from_config(self.config)
         self.spectral = None
+        self._spectral_take = None
         if self.fit_rv_dust:
-            self.STAR_KNOBS = SED.STAR_KNOBS + (RV_DUST,)
-            self.PHOTOMETRIC_DOF = SED.PHOTOMETRIC_DOF + (RV_DUST,)
             self._STAR_NODE_DEPS = SED._STAR_NODE_DEPS + (RV_DUST,)
             self.FLUX_FRACTION_INPUTS = SED.FLUX_FRACTION_INPUTS + (RV_DUST,)
 
@@ -372,6 +375,10 @@ class SED(Component):
         # fallback fired; every reader of a predicted flux asks
         # can_predict() rather than this set.
         self.severed_stars = frozenset()
+        # SED flux sources other components provide (Component.
+        # sed_flux_sources; sed.md, "SED flux sources"): evaluated like a
+        # star, after the stars on the source axis.  Filled by load_data.
+        self.providers = []
         self._inject_grid_bounds()
 
     # ------------------------------------------------------------------
@@ -448,13 +455,21 @@ class SED(Component):
         # only needs the well-formed ones.
         return [lbl for lbl in labels if lbl and isinstance(lbl, str)]
 
-    def _inject_grid_bounds(self):
+    def _inject_grid_bounds(self, extra_filters=()):
+        """Put the grid's extent on the star parameters (see above).
 
+        ``extra_filters`` are filter labels known only at stage 1 -- the
+        ones a component reads directly (``Component.sed_flux_filters``) --
+        so load_data calls this a second time with them: the grid box is
+        then the one EVERY requested column covers.  The override channel
+        replaces a path's fields, and the box over more columns is never
+        larger, so the second call can only tighten.
+        """
         try:
             axes = peek_grid_axes(
                 model=self.sedmodel,
                 model_root=self.model_root,
-                filters=self._requested_filter_labels(),
+                filters=self._requested_filter_labels() + list(extra_filters),
             )
         except FileNotFoundError as e:
             # If the grid isn't findable at construction time,
@@ -511,6 +526,38 @@ class SED(Component):
             }
             for key, bounds in overrides.items()
         }
+
+    # A flux source's inputs on the grid's axes: the three sampled ones are
+    # hard support (logit), loggsed a soft barrier if it is derived.
+    _GRID_AXIS_OF = {
+        "teffsed": "teff_pts",
+        "loggsed": "logg_pts",
+        "feh": "feh_pts",
+        "av": "av_pts",
+    }
+
+    def _bound_flux_sources(self):
+        """Stage 3: the grid's extent on every SED flux source's grid-axis
+        inputs, at their INDEX paths through the override channel -- the
+        same validity limit ``_inject_grid_bounds`` puts on the stars (a
+        source's start outside it then has no raw coordinate and the build
+        refuses it, as for a star a row reads) -- and published in
+        ``grid_bound_paths`` so the wrap-up's near-bound check names the
+        wall."""
+        axes = self.grid_axes
+        if not isinstance(axes, dict):
+            return
+        for prov in self.providers:
+            for key, axis in self._GRID_AXIS_OF.items():
+                path = prov.paths[key]
+                lo = float(axes[axis].min())
+                hi = float(axes[axis].max())
+                self.config_manager.add_override(path, lower=lo, upper=hi)
+                self._grid_bound_paths[path] = {
+                    "lower": lo,
+                    "upper": hi,
+                    "source": f"{self.sedmodel} bolometric-correction grid",
+                }
 
     def grid_bound_paths(self):
         """{parameter path: {lower, upper, source}} for grid-extent bounds.
@@ -608,6 +655,10 @@ class SED(Component):
     def register_parameters(self, system):
         # in future could foresee doing per facility error scaling
         self.manifest = {"errscale": None}
+        # The sight line's R_V under fit_rv_dust: one sampled number every
+        # read star's star.rv_dust derives from (sed/defaults.yaml).
+        if self.fit_rv_dust:
+            self.manifest[RV_DUST] = None
 
         # The SED's own temperature is what its colors pin, independently
         # of everything else, so a contradiction elsewhere must not move it
@@ -621,6 +672,7 @@ class SED(Component):
         cm = self.config_manager
         for si in range(len(system.star.names)):
             cm.declare_likelihood_backed(f"star.{si}.teffsed")
+        self._bound_flux_sources()
 
         # errscale multiplies the photometric errors, so it is identified
         # only by the residual scatter of rows the stars' own parameters
@@ -665,6 +717,7 @@ class SED(Component):
         "photType",
         "neg_filter",
         "neg_magsys",
+        "color_filter",
     )
 
     def _row_where(self, i):
@@ -723,6 +776,47 @@ class SED(Component):
         self.neg_col = np.arange(self.nfilters, dtype=int)
         self.neg_col[color_idx] = self.nfilters + np.arange(color_idx.size)
 
+        # A DIFFERENTIAL COLOR row (review 8.9.11): `color_filter` names a
+        # second filter b, and the row is the difference of two same-filter
+        # differentials, [m_pos(a) - m_neg(a)] - [m_pos(b) - m_neg(b)] --
+        # four fluxes in two filters: the Delta(V-I) of a source from the
+        # red clump.  Its second filter is a grid column of its own too,
+        # appended after the color rows' (color_col; the row's own column
+        # on every other row).
+        self.color_filters = []
+        for i, c in enumerate(filter_dict):
+            cf = c.get("color_filter")
+            if cf is not None and (not isinstance(cf, str) or not cf):
+                raise ValueError(
+                    f"{self._row_where(i)}: color_filter must be a filter "
+                    f"name; got {cf!r}."
+                )
+            if cf is not None and self.neg_filters[i] is not None:
+                raise ValueError(
+                    f"{self._row_where(i)}: color_filter and neg_filter "
+                    f"together.  neg_filter makes the row a color "
+                    f"(pos side in one filter, neg side in another); "
+                    f"color_filter makes it a differential color (both "
+                    f"sides in both filters).  A row is one of them."
+                )
+            if cf is not None and "neg_magsys" in c:
+                raise ValueError(
+                    f"{self._row_where(i)}: neg_magsys on a differential "
+                    f"color row: every magnitude system cancels there "
+                    f"(each filter is on both sides), and neg_magsys is "
+                    f"the system of a color row's neg_filter."
+                )
+            self.color_filters.append(cf)
+        self.dcolor_rows = np.array(
+            [cf is not None for cf in self.color_filters], dtype=bool
+        )
+        dcolor_idx = np.flatnonzero(self.dcolor_rows)
+        self.color_col = np.arange(self.nfilters, dtype=int)
+        self.color_col[dcolor_idx] = len(self.row_filters) + np.arange(
+            dcolor_idx.size
+        )
+        self.row_filters += [self.color_filters[i] for i in dcolor_idx]
+
         # The row's magnitude system AS STATED, translated to the one
         # internal spelling at this boundary (None = not stated; an unknown
         # spelling raises naming the row).  The system each row is actually
@@ -753,15 +847,25 @@ class SED(Component):
         )
         self.err = np.array([c.get("err") for c in filter_dict], dtype=float)
 
-    @staticmethod
-    def _resolve_star_ref(ref, star_names):
-        """A photType star reference (name, path or index) as an index.
-
-        The shared translator, so `photType` accepts exactly what every
-        other star reference does -- including the `star.<name>` path
-        spelling, which this local copy rejected.
-        """
-        return resolve_star_ref(ref, star_names, "photType")
+    def _resolve_source_ref(self, ref, star_names):
+        """A photType reference as a SOURCE index: a star (name, path or
+        index -- the shared translator, so `photType` accepts exactly what
+        every other star reference does), or an SED flux source by its
+        bare NAME, at ``nstars + k``.  A provider has no index spelling: an
+        index always means a star (one spelling, and no ambiguity), and a
+        provider name that is also a star name was refused when the
+        providers were collected (``_collect_flux_sources``)."""
+        names = [p.name for p in self.providers]
+        if isinstance(ref, str) and ref in names:
+            return len(star_names) + names.index(ref)
+        try:
+            return resolve_star_ref(ref, star_names, "photType")
+        except ValueError as exc:
+            if not names:
+                raise
+            raise ValueError(
+                f"{exc} SED flux sources (by name only): {names}."
+            ) from None
 
     @staticmethod
     def _combo_label(pos, neg, star_names):
@@ -801,8 +905,12 @@ class SED(Component):
         be identically zero and raises.  A color row must have neg stars.
         """
         nstars = len(star_names)
-        pos_matrix = np.zeros((self.nfilters, nstars), dtype=int)
-        neg_matrix = np.zeros((self.nfilters, nstars), dtype=int)
+        # The column axis is the SED SOURCES: the stars, then the flux
+        # sources other components provide (sed.md, "SED flux sources").
+        source_names = list(star_names) + [p.name for p in self.providers]
+        nsources = len(source_names)
+        pos_matrix = np.zeros((self.nfilters, nsources), dtype=int)
+        neg_matrix = np.zeros((self.nfilters, nsources), dtype=int)
         combo_labels = []
 
         for i, phot in enumerate(self.photType_unprocessed):
@@ -829,11 +937,11 @@ class SED(Component):
                         f"non-empty 'pos' (or 'blend') star list."
                     )
                 pos = [
-                    self._resolve_star_ref(r, star_names)
+                    self._resolve_source_ref(r, star_names)
                     for r in np.atleast_1d(pos_refs)
                 ]
                 neg = [
-                    self._resolve_star_ref(r, star_names)
+                    self._resolve_source_ref(r, star_names)
                     for r in np.atleast_1d(phot.get("neg") or [])
                 ]
             else:
@@ -850,6 +958,14 @@ class SED(Component):
                     f"'neg' star list -- the stars measured in "
                     f"{self.neg_filters[i]!r}."
                 )
+            if self.dcolor_rows[i] and not neg:
+                raise ValueError(
+                    f"{self._row_where(i)}: a differential color row "
+                    f"(color_filter {self.color_filters[i]!r}) needs both "
+                    f"a 'pos' and a non-empty 'neg' list: it is "
+                    f"[pos - neg] in {self.filters[i]!r} minus [pos - neg] "
+                    f"in {self.color_filters[i]!r}."
+                )
             overlap = set(pos) & set(neg)
             if overlap and not color:
                 raise ValueError(
@@ -859,19 +975,116 @@ class SED(Component):
 
             pos_matrix[i, pos] = 1
             neg_matrix[i, neg] = 1
-            label = self._combo_label(pos, neg, star_names)
+            label = self._combo_label(pos, neg, source_names)
             if color:
                 label = (
-                    f"{self._combo_label(pos, [], star_names)} "
+                    f"{self._combo_label(pos, [], source_names)} "
                     f"[{self.filters[i]}] - "
-                    f"{self._combo_label(neg, [], star_names)} "
+                    f"{self._combo_label(neg, [], source_names)} "
                     f"[{self.neg_filters[i]}]"
+                )
+            elif self.dcolor_rows[i]:
+                label = (
+                    f"{label} [{self.filters[i]} - {self.color_filters[i]}]"
                 )
             combo_labels.append(label)
 
         self.pos_matrix = pos_matrix
         self.neg_matrix = neg_matrix
         self.combo_labels = combo_labels
+
+    # The inputs an SED flux source's ``paths`` must name: what the forward
+    # model reads for a star (``_predicted_appmag_node``), plus ``rv_dust``
+    # under ``fit_rv_dust``.
+    SOURCE_INPUTS = (
+        "teffsed",
+        "loggsed",
+        "feh",
+        "av",
+        "radiussed",
+        "distance",
+    )
+
+    @staticmethod
+    def _split_path(path):
+        """``"comp.<i>.param"`` -> ``(comp, i, param)``; any other shape is
+        a provider's bookkeeping error and raises naming it."""
+        parts = str(path).split(".")
+        if len(parts) != 3 or not parts[1].isdigit():
+            raise ValueError(
+                f"SED flux source path {path!r} is not 'comp.<index>.param'."
+            )
+        return parts[0], int(parts[1]), parts[2]
+
+    def _source_inputs(self):
+        """The inputs a flux source must provide in this SED's mode."""
+        return self.SOURCE_INPUTS + ((RV_DUST,) if self.fit_rv_dust else ())
+
+    def _collect_flux_sources(self, system, star_names):
+        """Every component's ``sed_flux_sources`` (Component hook), checked.
+
+        Asked at stage 1, generically: this component knows no provider by
+        name.  A provider name that is a star name, two providers with one
+        name, or a path map that does not cover exactly this mode's
+        ``_source_inputs`` RAISES, naming the owner -- a row could not tell
+        which object it reads, or the forward model would read a value
+        nobody declared.
+        """
+        out, owner = [], {}
+        need = set(self._source_inputs())
+        for comp in system.active_components.values():
+            for src in comp.sed_flux_sources(system):
+                if not isinstance(src, SEDFluxSource):
+                    raise TypeError(
+                        f"[{comp.prefix}] sed_flux_sources must return "
+                        f"SEDFluxSource objects; got {type(src).__name__}."
+                    )
+                if src.name in star_names:
+                    raise ValueError(
+                        f"SED flux source {src.name!r} (from {comp.prefix}) "
+                        f"has the name of a star; a photType name must name "
+                        f"one object. Rename one of them."
+                    )
+                if src.name in owner:
+                    raise ValueError(
+                        f"SED flux source name {src.name!r} is provided by "
+                        f"both {owner[src.name]} and {comp.prefix}."
+                    )
+                got = set(src.paths)
+                if got != need:
+                    raise ValueError(
+                        f"SED flux source {src.name!r} ({comp.prefix}) maps "
+                        f"{sorted(got)}; this SED reads {sorted(need)}"
+                        + (
+                            " (sed.fit_rv_dust adds rv_dust)"
+                            if self.fit_rv_dust
+                            else ""
+                        )
+                        + "."
+                    )
+                for path in src.paths.values():
+                    self._split_path(path)
+                owner[src.name] = comp.prefix
+                out.append(src)
+        return out
+
+    def _collect_provider_filters(self, system):
+        """Filter labels components read directly off the grid
+        (``Component.sed_flux_filters``), not already a column."""
+        alias_df = _load_alias_table()
+        known = {
+            resolve_filter_name(n, alias_df, alias="MIST")
+            for n in list(self.row_filters) + list(self.band_filters)
+        }
+        out = []
+        for comp in system.active_components.values():
+            for label in sorted(comp.sed_flux_filters(system)):
+                mist = resolve_filter_name(label, alias_df, alias="MIST")
+                if mist in known:
+                    continue
+                known.add(mist)
+                out.append(label)
+        return out
 
     def _ensure_model_data(self):
         """Fetch the raw model spectra from Zenodo if not already cached.
@@ -1173,6 +1386,9 @@ class SED(Component):
                 f"SED file declares nstars={yaml_nstars} but the system "
                 f"defines {self.nstars} star(s); using the system value."
             )
+        self.providers = self._collect_flux_sources(system, star_names)
+        self.source_names = star_names + [p.name for p in self.providers]
+        self.nsources = len(self.source_names)
         self._build_blend_matrix(star_names)
 
         # Filters from the .sed file first (their columns feed the SED
@@ -1182,7 +1398,16 @@ class SED(Component):
         self.band_filters = self._collect_band_filters(
             self.consumed_sed_bands(system)
         )
-        self.all_filters = list(self.row_filters) + self.band_filters
+        # Filters a component reads straight off the grid (sed_flux_filters:
+        # the red clump's V and I at A_V = 0), after the band filters.  The
+        # grid box is re-peeked over them too, so a flux source is never
+        # bounded onto nodes one of its columns lacks.
+        self.provider_filters = self._collect_provider_filters(system)
+        if self.provider_filters:
+            self._inject_grid_bounds(extra_filters=self.provider_filters)
+        self.all_filters = (
+            list(self.row_filters) + self.band_filters + self.provider_filters
+        )
         if not self.all_filters:
             raise ValueError(
                 "SED has no usable filters: the .sed file lists none and no "
@@ -1207,6 +1432,21 @@ class SED(Component):
                 float(np.min(cfg["lower"])),
                 float(np.max(cfg["upper"])),
             )
+        # ...and every grid point a flux source can reach (its own bounds;
+        # register_parameters overlays the grid's on them at stage 3).
+        for prov in self.providers:
+            for axis, key in (
+                ("teff", "teffsed"),
+                ("feh", "feh"),
+                ("av", "av"),
+            ):
+                comp, idx, param = self._split_path(prov.paths[key])
+                cfg = self.config_manager.resolve(comp, param, element=idx)
+                lo, hi = bounds[axis]
+                bounds[axis] = (
+                    min(lo, float(np.min(cfg["lower"]))),
+                    max(hi, float(np.max(cfg["upper"]))),
+                )
 
         grid = build_bc_grid(
             user_filter_names=self.all_filters,
@@ -1270,16 +1510,31 @@ class SED(Component):
                     f"sed.fit_rv_dust reads the NextGen runtime spectra; this "
                     f"SED's model is {self.sedmodel!r}."
                 )
+            # One spectral column per DISTINCT filter: rows may repeat a
+            # filter (two rows in I, a color row's second filter), and the
+            # filter-set integrals take each filter once.  `_spectral_take`
+            # maps the grid's columns onto them (None when it is the
+            # identity, so a file without a repeat builds the graph it
+            # always did).
+            mist = list(self.mist_filters)
+            first = {}
+            for label, m in zip(self.all_filters, mist):
+                first.setdefault(m, label)
+            uniq = list(first)
             self.spectral = SpectralBC(
                 load_runtime_grid(self.model_root),
-                self.all_filters,
+                [first[m] for m in uniq],
                 law="ccm89",
             )
-            if self.spectral.filters_mist != list(self.mist_filters):
+            if self.spectral.filters_mist != uniq:
                 raise RuntimeError(
                     f"The spectral BCs' columns {self.spectral.filters_mist} "
-                    f"are not the BC grid's {list(self.mist_filters)}."
+                    f"are not the BC grid's distinct columns {uniq}."
                 )
+            take = [uniq.index(m) for m in mist]
+            self._spectral_take = (
+                None if take == list(range(len(uniq))) else np.asarray(take)
+            )
 
     def _check_color_columns(self):
         """A color row's two filters must be two BC columns.  ``neg_filter``
@@ -1294,6 +1549,15 @@ class SED(Component):
                     f"{self.neg_filters[i]!r} is the row's own filter (BC "
                     f"column {col}).  A same-filter differential row is "
                     f"spelled without neg_filter."
+                )
+        for i in np.flatnonzero(self.dcolor_rows):
+            col = self.mist_filters[i]
+            if self.mist_filters[self.color_col[i]] == col:
+                raise ValueError(
+                    f"{self._row_where(i)}: color_filter "
+                    f"{self.color_filters[i]!r} is the row's own filter (BC "
+                    f"column {col}): the differential color would be "
+                    f"identically zero."
                 )
 
     # ------------------------------------------------------------------
@@ -1343,6 +1607,21 @@ class SED(Component):
                 ),
             )
             self.magsys.append(system)
+            if self.dcolor_rows[i]:
+                # Every system cancels (each filter is on both sides), but
+                # the second filter's record is still resolved and checked
+                # against its column.
+                j = int(self.color_col[i])
+                self._column_magsys(
+                    j,
+                    None,
+                    f"{where}, color_filter {self.color_filters[i]!r} "
+                    f"(column {self.mist_filters[j]})",
+                    differential_note=" (either gives the same fit: a "
+                    "differential color cancels every system)",
+                )
+                self.neg_magsys.append(None)
+                continue
             if not color:
                 self.neg_magsys.append(None)
                 if system == AB and not has_neg[i]:
@@ -1528,37 +1807,120 @@ class SED(Component):
             if not Component._parameter_is_current(star, name, model):
                 star.add_parameter(model, name, system)
 
-    def _predicted_appmag_node(self, system):
-        """Per-star predicted apparent mags, shape (nstars, n_all_filters)."""
-        if getattr(self, "_m_pred_matrix", None) is not None:
-            return self._m_pred_matrix
+    def source_input_node(self, system, path):
+        """The scalar node an SED flux source's input ``path``
+        (``"comp.<i>.param"``) names, materializing that Parameter for THIS
+        build if it is not current -- the lazy build ``_ensure_star_nodes``
+        does for the stars, and for the same reason (the forward model can
+        be asked for at stage 6, before the topological order reaches the
+        provider)."""
+        comp_name, idx, param = self._split_path(path)
+        comp = getattr(system, comp_name, None)
+        if comp is None:
+            raise ValueError(
+                f"SED flux source path {path!r}: no component {comp_name!r}."
+            )
+        model = pm.modelcontext(None)
+        if not Component._parameter_is_current(comp, param, model):
+            comp.add_parameter(model, param, system)
+        return getattr(comp, param).value[idx]
 
+    def _source_vectors(self, system):
+        """{input: (nsources,) node}: the stars' inputs, then each flux
+        source's (``SOURCE_INPUTS`` + rv_dust under fit_rv_dust).  With no
+        flux source the star vectors are returned untouched, so the graph
+        is exactly the stars-only one (bit-identical start logp)."""
         self._ensure_star_nodes(system)
         star = system.star
-        teffsed = star.teffsed.value  # K,        (nstars,)
-        radiussed = star.radiussed.value  # R_sun,    (nstars,)
-        feh = star.feh.value  # dex
-        av = star.av.value  # mag
-        distance = star.distance.value  # pc
-
         # loggsed is derived from logmass + radiussed (NOT radius) by the
         # star component.  Read the Parameter rather than recomputing the
         # expression here: the grid's logg extent is a soft bound ON THAT
         # PARAMETER (_inject_grid_bounds), so the quantity the barrier
         # restrains and the quantity the interpolator is handed have to be
         # the same node.
-        loggsed = star.loggsed.value  # dex(cm/s2)
-
+        out = {
+            "teffsed": star.teffsed.value,  # K,        (nstars,)
+            "loggsed": star.loggsed.value,  # dex(cm/s2)
+            "feh": star.feh.value,  # dex
+            "av": star.av.value,  # mag
+            "radiussed": star.radiussed.value,  # R_sun
+            "distance": star.distance.value,  # pc
+        }
         if self.fit_rv_dust:
+            out[RV_DUST] = star.rv_dust.value
+        if not self.providers:
+            return out
+        for key in list(out):
+            extra = [
+                self.source_input_node(system, prov.paths[key])
+                for prov in self.providers
+            ]
+            out[key] = pt.concatenate([out[key], pt.stack(extra)])
+        return out
+
+    def bc_node(self, teff, logg, feh, av, rv=None):
+        """(n, n_all_filters) bolometric corrections at (n,) coordinate
+        vectors: the table interpolator, or under ``fit_rv_dust`` the
+        spectral path at ``rv`` (required there, ignored here).  THE one
+        evaluation of this SED's grid -- the forward model calls it, and a
+        component reading a BC directly (the red clump's (V-I)_0 and its
+        band extinctions) calls it too, so there is never a second grid
+        (components.md, "A plot never recomputes the model")."""
+        if self.fit_rv_dust:
+            if rv is None:
+                raise ValueError("SED.bc_node: fit_rv_dust needs rv.")
             # Interpolate the spectrum, redden it at the star's own R_V,
             # integrate the bands (spectral_bc.py).
-            bc = self.spectral.bc_node(
-                teffsed, loggsed, feh, av, star.rv_dust.value
-            )
-        else:
-            # RegularGridInterpolator.evaluate expects shape (ntest, ndim).
-            coords = pt.stack([teffsed, loggsed, feh, av], axis=-1)
-            bc = self.bc_interpolator.evaluate(coords)  # (nstars, n_filters)
+            bc = self.spectral.bc_node(teff, logg, feh, av, rv)
+            if self._spectral_take is not None:
+                bc = bc[:, self._spectral_take]
+            return bc
+        # RegularGridInterpolator.evaluate expects shape (ntest, ndim).
+        coords = pt.stack([teff, logg, feh, av], axis=-1)
+        return self.bc_interpolator.evaluate(coords)  # (n, n_filters)
+
+    def bc_np(self, filter_key, teff, logg, feh, av, rv=None):
+        """``bc_node`` for one point and one filter, as numpy (start-value
+        solvers), with coordinates clipped to the grid -- the twin
+        ``predict_flux_fraction_at`` uses."""
+        col = self.filter_column(filter_key)
+        if self.fit_rv_dust:
+            if self._spectral_take is not None:
+                col = int(self._spectral_take[col])
+            return float(self.spectral.bc_np(teff, logg, feh, av, rv)[col])
+        from scipy.interpolate import RegularGridInterpolator as _RGI
+
+        axes, bc_values = self._bc_grid_np
+        coords = [
+            float(np.clip(c, ax[0], ax[-1]))
+            for c, ax in zip((teff, logg, feh, av), axes)
+        ]
+        return float(_RGI(axes, bc_values[..., col])([coords])[0])
+
+    def appmag_np(
+        self, filter_key, teff, logg, feh, av, radius, distance, rv=None
+    ):
+        """Predicted apparent magnitude of one source in one filter, as
+        numpy: the forward model of ``_predicted_appmag_node`` at a point
+        (start-value solvers; the red clump's extinction seed)."""
+        bc = self.bc_np(filter_key, teff, logg, feh, av, rv)
+        lbol = LUM_CONST * radius**2 * teff**4
+        mbol = -2.5 * np.log10(lbol) + LOG_L0_CONST
+        return float(mbol - bc + 5.0 * np.log10(distance) - 5.0)
+
+    def _predicted_appmag_node(self, system):
+        """Per-source predicted apparent mags, shape (nsources,
+        n_all_filters): the stars, then the SED flux sources."""
+        if getattr(self, "_m_pred_matrix", None) is not None:
+            return self._m_pred_matrix
+
+        v = self._source_vectors(system)
+        teffsed = v["teffsed"]
+        radiussed = v["radiussed"]
+        distance = v["distance"]
+        bc = self.bc_node(
+            teffsed, v["loggsed"], v["feh"], v["av"], v.get(RV_DUST)
+        )
 
         # Bolometric luminosity
         Lbol = calc_luminosity(radiussed, teffsed)
@@ -1599,7 +1961,19 @@ class SED(Component):
         F_neg = pt.sum(Cneg * F_negside.T, axis=1)
         has_neg = self.neg_matrix.any(axis=1)  # static numpy mask
         F_neg_safe = pt.switch(pt.as_tensor(has_neg), F_neg, 1.0)
-        return -2.5 * (pt.log10(F_pos) - pt.log10(F_neg_safe))
+        m_rows = -2.5 * (pt.log10(F_pos) - pt.log10(F_neg_safe))
+        idx = np.flatnonzero(self.dcolor_rows)
+        if idx.size == 0:
+            # No differential color row: the graph it always was.
+            return m_rows
+        # A differential color row subtracts the same differential in its
+        # color_filter, [m_pos(b) - m_neg(b)]; only those rows enter (a
+        # static index set, assembled with set_subtensor, never a where).
+        F_b = 10 ** (-0.4 * m_all[:, self.color_col[idx]])  # (nsrc, nd)
+        Fp_b = pt.sum(self.pos_matrix[idx] * F_b.T, axis=1)
+        Fn_b = pt.sum(self.neg_matrix[idx] * F_b.T, axis=1)
+        m_b = -2.5 * (pt.log10(Fp_b) - pt.log10(Fn_b))
+        return pt.set_subtensor(m_rows[idx], m_rows[idx] - m_b)
 
     # ------------------------------------------------------------------
     # Public flux-prediction API for other components (mulensinstrument
@@ -1719,9 +2093,11 @@ class SED(Component):
                 return None
 
         # 1. SED filter rows (pos/neg matrices built in load_data, stage 1).
+        # Their columns past the stars are SED flux sources, which
+        # provider_readers reports: an SEDReader is a star.
         bm = np.asarray(self.pos_matrix) | np.asarray(self.neg_matrix)
         if bm.size:
-            _mark(SED_ROW, np.nonzero((bm != 0).any(axis=0))[0])
+            _mark(SED_ROW, np.nonzero((bm[:, :n] != 0).any(axis=0))[0])
 
         # 2. microlensing source ties, 3. blend-tied light curves.
         src = in_topology(system, "source")
@@ -1783,6 +2159,20 @@ class SED(Component):
                 _mark("astrometric fluxfrac", range(n))
         return out
 
+    def provider_readers(self, system):
+        """{flux-source name: [labels]} of the terms reading each SED flux
+        source -- today only SED rows (no cross-component tie reads one).
+        The sibling of ``photometric_readers``, kept apart so an SEDReader
+        stays a STAR index and nothing star-side (``seen_star_mask``,
+        ``Star.structure_consumers``, the unseen-star pins) changes."""
+        n = int(system.star.n_elements)
+        bm = np.asarray(self.pos_matrix) | np.asarray(self.neg_matrix)
+        out = {}
+        for k, prov in enumerate(self.providers):
+            read = bm.size and bool((bm[:, n + k] != 0).any())
+            out[prov.name] = [SED_ROW] if read else []
+        return out
+
     def seen_star_mask(self, system):
         """Which stars some likelihood term actually SEES through the SED.
 
@@ -1833,6 +2223,19 @@ class SED(Component):
             for p in self.PHOTOMETRIC_DOF
             if s not in pinned[p]
         )
+        # A flux source a row reads brings its own count (SEDFluxSource.
+        # photometric_dof); one no row reads constrains nothing here.
+        prov_read = self.provider_readers(system)
+        read_providers = [p for p in self.providers if prov_read[p.name]]
+        n_free += sum(p.photometric_dof for p in read_providers)
+        # The sight line's R_V is ONE free coordinate however many sources
+        # the rows read (unless the user pinned it).
+        if (
+            self.fit_rv_dust
+            and (row_stars or read_providers)
+            and not self._rv_dust_user_pinned()
+        ):
+            n_free += 1
         return DataFreeInventory(
             n_rows=int(self.nfilters),
             n_free=n_free,
@@ -1840,6 +2243,19 @@ class SED(Component):
             severed=tuple(sorted(self.severed_stars)),
             star_knobs=self.STAR_KNOBS,
         )
+
+    def _rv_dust_user_pinned(self):
+        """Did the params file pin sed.rv_dust (sigma: 0)?"""
+        user = getattr(self.config_manager, "user_params", None) or {}
+        for key in (
+            f"{self.prefix}.{RV_DUST}",
+            f"{self.prefix}.0.{RV_DUST}",
+            f"{self.prefix}.{self.names[0]}.{RV_DUST}",
+        ):
+            entry = user_entry(user, key)
+            if entry is not None and entry.get("sigma") == 0:
+                return True
+        return False
 
     def can_predict(self, star_indices):
         """Can this SED predict the (blended) flux of ``star_indices``?
@@ -2061,14 +2477,13 @@ class SED(Component):
         flux = {}
         for j in star_indices:
             if self.fit_rv_dust:
-                bc = float(
-                    self.spectral.bc_np(
-                        values["teffsed"][j],
-                        values["loggsed"][j],
-                        values["feh"][j],
-                        values["av"][j],
-                        values[RV_DUST][j],
-                    )[col]
+                bc = self.bc_np(
+                    filter_key,
+                    values["teffsed"][j],
+                    values["loggsed"][j],
+                    values["feh"][j],
+                    values["av"][j],
+                    values[RV_DUST][j],
                 )
             else:
                 coords = [
@@ -2364,7 +2779,12 @@ class SED(Component):
             m_star_node = self._predicted_appmag_node(system)[
                 :, : len(self.row_filters)
             ]
-        loggsed_node = star.loggsed.value
+            # (nsources,) each: the stars' inputs, then each flux source's
+            source_vectors = self._source_vectors(system)
+        loggsed_node = source_vectors["loggsed"]
+        self._source_input_keys = tuple(
+            k for k in source_vectors if k != "loggsed"
+        )
 
         # Retain a symbolic model node so plot_data can derive param_deps
         # (graph walk) and hand G5 the tensors behind the model traces.
@@ -2386,6 +2806,14 @@ class SED(Component):
                 outputs=loggsed_node,
                 on_unused_input="ignore",
             )
+            # The figure's per-source spectrum inputs, off the SAME nodes
+            # the forward model reads (a flux source's come from its own
+            # parameter paths), never from the draw dict by hand.
+            self._compiled_source_inputs = pytensor.function(
+                inputs=param_symbols,
+                outputs=[source_vectors[k] for k in self._source_input_keys],
+                on_unused_input="ignore",
+            )
             if self.nfilters > 0:
                 self._compiled_combined_mag = pytensor.function(
                     inputs=param_symbols,
@@ -2400,6 +2828,7 @@ class SED(Component):
             logger.warning(f"SED plotter compile failed: {e}")
             self._compiled_mag_predictors = None
             self._compiled_logg_calc = None
+            self._compiled_source_inputs = None
             self._compiled_combined_mag = None
 
     # ------------------------------------------------------------------
@@ -2420,6 +2849,13 @@ class SED(Component):
         module = load_model_plot_module(plot_class_path, sed.sedmodel)
         return plot_class_from(module, plot_class_path)(system, points)
 
+    def _source_label(self, name):
+        """A source's legend/trace label: "Star <name>" for a star, the
+        bare name for an SED flux source (the red clump is not a star)."""
+        if name in {p.name for p in self.providers}:
+            return name
+        return f"Star {name}"
+
     @staticmethod
     def _identity_styles(plot_obj):
         """
@@ -2435,7 +2871,9 @@ class SED(Component):
         charts always style an identity the same way.
         """
         identities = list(plot_obj.star_names)
-        for combo in plot_obj.unique_combos:
+        for combo in list(plot_obj.unique_combos) + list(
+            plot_obj.row_only_labels
+        ):
             if combo not in identities:
                 identities.append(combo)
         n_colors = len(plot_obj.colors_obs)
@@ -2464,7 +2902,7 @@ class SED(Component):
         Returns (label, sorted star-index list) pairs, size >= 2 only.
         Shared by plot() and plot_data().
         """
-        all_idx = frozenset(range(plot_obj.nstars))
+        all_idx = frozenset(range(plot_obj.n_stars_only))
         sub_combos = []
         seen_combos = set()
         for row in range(plot_obj.nfilters):
@@ -2554,11 +2992,15 @@ class SED(Component):
                     ls=id_line[name],
                     color=id_color[name],
                     alpha=alpha_spec,
-                    label=f"Star {name}",
+                    label=self._source_label(name),
                 )
-            if plot_obj.nstars > 1:
-                # blended total (exofast_multised plots this in black)
-                total = np.sum(plot_obj.flux_model_draws[d], axis=0)
+            if plot_obj.n_stars_only > 1:
+                # blended total of the STARS (exofast_multised plots this in
+                # black); an SED flux source is not part of the blend
+                total = np.sum(
+                    plot_obj.flux_model_draws[d][: plot_obj.n_stars_only],
+                    axis=0,
+                )
                 ax_top.plot(
                     x_spec,
                     np.log10(total * wave_ang),
@@ -2632,11 +3074,15 @@ class SED(Component):
         # ---- color row's sits between its two filters                 ----
         wave_row = plot_obj.row_wave_eff() * ANG_TO_MICRON_CONST
         for row in range(plot_obj.nfilters):
-            # use the pos-side point's color/marker for this row's residual
-            p = np.where(
-                (plot_obj.point_row == row) & (plot_obj.point_side == 1)
-            )[0][0]
-            label = plot_obj.point_labels[p]
+            # use the pos-side point's color/marker for this row's residual;
+            # a differential color row has no point and uses its own label
+            if plot_obj.dcolor_rows[row]:
+                label = plot_obj.combo_labels[row]
+            else:
+                p = np.where(
+                    (plot_obj.point_row == row) & (plot_obj.point_side == 1)
+                )[0][0]
+                label = plot_obj.point_labels[p]
             color = id_color[label]
             marker = id_marker[label]
 
@@ -2669,7 +3115,7 @@ class SED(Component):
                     color=id_color[name],
                     linestyle=id_line[name],
                     alpha=0.7,
-                    label=f"Star {name}",
+                    label=self._source_label(name),
                 )
                 marker = Line2D(
                     [0],
@@ -2685,7 +3131,7 @@ class SED(Component):
                 legend_handles.append((line, marker))
 
             labels = [
-                f"Star {plot_obj.star_names[nstar]}"
+                self._source_label(plot_obj.star_names[nstar])
                 for nstar in range(plot_obj.nstars)
             ]
 
@@ -2711,9 +3157,12 @@ class SED(Component):
                         alpha=0.7,
                     )
                 )
-                labels.append(f"Star {name}")
-            legend_handles.append(Line2D([0], [0], color="#001219", lw=1.2))
-            labels.append("Total")
+                labels.append(self._source_label(name))
+            if plot_obj.n_stars_only > 1:
+                legend_handles.append(
+                    Line2D([0], [0], color="#001219", lw=1.2)
+                )
+                labels.append("Total")
             for label, combo_idx in sub_combos:
                 legend_handles.append(
                     Line2D(
@@ -2790,7 +3239,7 @@ class SED(Component):
         # preview leaves it out (the model chart below places each of its
         # sides against the model, as for a differential row).
         if point is None:
-            keep = ~self.color_rows
+            keep = ~(self.color_rows | self.dcolor_rows)
             if not keep.any():
                 return []
             wave = self._filter_wave_eff_micron()[keep]
@@ -2863,10 +3312,10 @@ class SED(Component):
         # per-star model spectra: lambda * F_lambda at Earth, from the shared helper
         for nstar in range(plot_obj.nstars):
             name = plot_obj.star_names[nstar]
-            identity[f"Star {name}"] = name
+            identity[self._source_label(name)] = name
             traces.append(
                 Trace(
-                    name=f"Star {name}",
+                    name=self._source_label(name),
                     role="model",
                     kind="line",
                     x=wave_micron,
@@ -2875,7 +3324,7 @@ class SED(Component):
                     style={"color": id_color[name]},
                 )
             )
-        if plot_obj.nstars > 1:
+        if plot_obj.n_stars_only > 1:
             identity["Total"] = "Total"
             traces.append(
                 Trace(
@@ -2884,7 +3333,13 @@ class SED(Component):
                     kind="line",
                     x=wave_micron,
                     y=_log10(
-                        np.sum(plot_obj.flux_model_draws[0], axis=0) * wave_ang
+                        np.sum(
+                            plot_obj.flux_model_draws[0][
+                                : plot_obj.n_stars_only
+                            ],
+                            axis=0,
+                        )
+                        * wave_ang
                     ),
                     node=getattr(self, "_sed_mag_node", None),
                     style={"color": "#001219", "lw": 1.2},

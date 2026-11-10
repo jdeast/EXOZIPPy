@@ -49,19 +49,22 @@ combines them, which is the one thing about it that is not yet validated.
     |u_0| <= 3, log_f_total to the measured baseline +/-2 dex.  Worth
     9.9k -> 23-25k ESS on their own.  `err_scale` is NOT the tight arm's
     [0.1, 10] but the LATER and tighter [0.5, 2.0] (JDE 2026-09-15).
-  * The colour-anchored av prior, which is what AV_COLS is about below.
+  * The colour-anchored clump extinction, which is what AV_COLS is about
+    below (a prior on the red clump's colour excess since review
+    2.9.16(b); it was an inverted star.Source.av prior before).
 AND ONE THING NO ARM HAS HAD: all seven predate #293, so `ptde` ignored
 store_hot_chains in every sync arm -- no hot-chain mode detector.  That is
 fixed, so this sweep gets the good chains AND mode discovery together.
 
 THE RULES, one line each:
   ra, dec           event_info.txt columns 3-4.
-  star.Source.av    the red-clump (A_W149, A_Z087) of event_info.txt
-                    columns 6-9, inverted for A_V through OUR OWN BC grid
-                    and anchored on the COLOUR.  v7 put A_W149 itself here,
-                    which is ~5x too small; see AV_COLS below for why the
-                    colour is the right anchor and why the two quoted
-                    dispersions are one correlated error.
+  redclump          the red-clump (A_W149, A_Z087) of event_info.txt
+                    columns 6-9, as a prior on the CLUMP's colour excess
+                    E(Z087 - W149), anchored on the COLOUR; the source's
+                    A_V follows through redclump's soft tie.  v7 put A_W149
+                    itself on star.Source.av, ~5x too small; see AV_COLS
+                    below for why the colour is the right anchor and why
+                    the two quoted dispersions are one correlated error.
   out_scale         upper = 10x the per-LC median flux error, initval = 1x,
                     in the file's flux system (review 8.6.3, RULED).
   zeropoint         Vega centre (22.0 minus the SVO AB-Vega offset), ONE
@@ -193,26 +196,50 @@ AZ_COLS = (7, 8)
 LAW_FRAC_SIGMA = 0.06
 
 
-def av_from_clump_colour(a_w149, sig_w149, a_z087, sig_z087):
-    """
-    Invert the clump's (A_W149, A_Z087) for `av` THROUGH OUR OWN BC GRID.
+CLUMP = "RedClump"
 
-    Returns (av, sigma_av, grey_residual), where grey_residual is the
-    common-mode band-extinction offset our integrated model still carries at
-    that av -- the piece the zeropoint prior has to be wide enough to absorb.
 
-    This inverts the INTEGRATED band extinction the model actually uses
-    (BC(Av=0) - BC(Av) off the shipped Roman table), NOT the monochromatic
-    law in components.sed.extinction.  Using the law here would reproduce the
-    simulation's own convention and so hide the disagreement rather than
-    budget for it (C29).
+def clump_block():
+    """The red-clump reference (components/redclump/redclump.md): the
+    challenge's clump extinctions are a measurement OF THE CLUMP, so they go
+    on the clump, in the bands they were made, and the forward model does
+    the inversion (review 2.9.16(b)).  The source's A_V is tied to the
+    clump's by redclump's default soft tie (1 +/- 9%)."""
+    return [
+        {
+            "name": CLUMP,
+            "bands": [b for b, _ in BANDS],
+            "colors": [["Z087", "W149"]],
+        }
+    ]
 
-    The cell is the red clump (Teff 4800 K, logg 2.5, solar feh).  That
-    choice is cheap: measured across 36 cells spanning Teff 4500-5500,
-    logg 2.0-3.0 and feh -0.5 to +0.3, the colour-anchored av has a standard
-    deviation of 0.10 and is independent of logg and feh to +/-0.01,
-    depending on Teff alone at 0.28 per 1000 K.
-    """
+
+def clump_priors(a_w149, sig_w149, a_z087, sig_z087):
+    """The params-file prior on the clump's colour excess E(Z087 - W149)
+    -- THE ANCHOR (conventions.md C29): the simulation reddened each band
+    monochromatically, our model integrates through the passband, so no A_V
+    reproduces both band extinctions; the colour leaves a common-mode grey
+    term (``c29_grey_budget``) instead of a colour residual.  The two quoted
+    dispersions are ONE correlated fraction (see AV_COLS), plus the law's
+    shape uncertainty in quadrature."""
+    excess = a_z087 - a_w149
+    frac = 0.5 * (sig_w149 / a_w149 + sig_z087 / a_z087)
+    sigma = excess * float(np.hypot(frac, LAW_FRAC_SIGMA))
+    return {
+        "redclump.%s.color_excess_0" % CLUMP: {
+            "mu": round(float(excess), 4),
+            "sigma": round(float(sigma), 4),
+        }
+    }
+
+
+def c29_grey_budget(a_w149, a_z087):
+    """The common-mode band-extinction offset our INTEGRATED model carries
+    against the simulation's MONOCHROMATIC clump extinctions at the
+    colour-anchored extinction (conventions.md C29) -- the zeropoint's width
+    budget, NOT a prior on anything.  Through OUR OWN BC table at the clump
+    cell (Teff 4800 K, logg 2.5, solar feh: across 36 cells the anchored
+    extinction moves 0.10 rms, by Teff alone)."""
     tab = C.nextgen_bc_slice("Roman", feh=0.0)
     teffs = np.unique(tab["teff"])
     cell = np.isclose(
@@ -222,7 +249,6 @@ def av_from_clump_colour(a_w149, sig_w149, a_z087, sig_z087):
     av_pts = sub["Av"].to_numpy()
     a146 = sub["WFI_F146"].iloc[0] - sub["WFI_F146"].to_numpy()
     a087 = sub["WFI_F087"].iloc[0] - sub["WFI_F087"].to_numpy()
-
     excess = a_z087 - a_w149
     if not a087[-1] - a146[-1] > excess:
         raise SystemExit(
@@ -231,31 +257,7 @@ def av_from_clump_colour(a_w149, sig_w149, a_z087, sig_z087):
             % (excess, a087[-1] - a146[-1], av_pts[-1])
         )
     av = float(np.interp(excess, a087 - a146, av_pts))
-
-    # ONE fractional error, fully correlated (see AV_COLS), so the colour
-    # carries the same fraction and av scales with it; the law's own shape
-    # uncertainty goes in quadrature.
-    frac_clump = 0.5 * (sig_w149 / a_w149 + sig_z087 / a_z087)
-    sigma = av * float(np.hypot(frac_clump, LAW_FRAC_SIGMA))
-
-    # AND THE CONVENTION AMBIGUITY ITSELF, AS A WIDTH ON av.  The anchors
-    # disagree -- colour gives this av, A_W149 alone gives a larger one --
-    # and that spread IS the systematic, so half of it belongs in the prior
-    # width.  Putting it HERE rather than on the zeropoint is deliberate and
-    # measured: with `filters: []` the SED carries no photometry of its own,
-    # so the ONLY colour information in the fit is the two-band zeropoint
-    # tie, and widening both zeropoints to the grey residual would inject
-    # sqrt(2)*grey of COLOUR slack -- 0.82 mag on event 194 -- destroying the
-    # constraint the colour anchor exists to exploit.  `av` is the correctly
-    # CORRELATED nuisance: moving it reddens both bands together in the ratio
-    # the law dictates, which is mostly grey with exactly the colour term the
-    # physics implies, so it buys freedom along the reddening direction
-    # without opening the differential.
-    av_band = float(np.interp(a_w149, a146, av_pts))
-    sigma = float(np.hypot(sigma, 0.5 * abs(av_band - av)))
-
-    grey = float(np.interp(av, av_pts, a146)) - a_w149
-    return av, sigma, grey
+    return float(np.interp(av, av_pts, a146)) - a_w149
 
 
 def event_info_row(event):
@@ -302,12 +304,9 @@ def build(event, outdir, draws, tune, cores, t_max):
     name = "DC2018_%s" % ev3
     row = event_info_row(event)
     ra, dec = float(row[2]), float(row[3])
-    av_mu, av_sd, av_grey = av_from_clump_colour(
-        float(row[AV_COLS[0]]),
-        float(row[AV_COLS[1]]),
-        float(row[AZ_COLS[0]]),
-        float(row[AZ_COLS[1]]),
-    )
+    a_w, s_w = float(row[AV_COLS[0]]), float(row[AV_COLS[1]])
+    a_z, s_z = float(row[AZ_COLS[0]]), float(row[AZ_COLS[1]])
+    av_grey = c29_grey_budget(a_w, a_z)
 
     files = {
         b: os.path.join(DATA, "n20180816.%s.WFIRST18.%s.txt" % (b, ev3))
@@ -371,6 +370,7 @@ def build(event, outdir, draws, tune, cores, t_max):
             }
         ],
         "galacticmodel": [{"name": name, "anchor_idx": 1}],
+        "redclump": clump_block(),
         "band": (
             # Neither Roman filter has a Claret table, so the limb-
             # darkening tie must be chosen explicitly (it raises otherwise).
@@ -487,7 +487,7 @@ def build(event, outdir, draws, tune, cores, t_max):
         # Not a microlensing observable and not used by anything here;
         # pinning it keeps it out of the sampled dimension count.
         "planet.Companion.radius": {"sigma": 0},
-        "star.Source.av": {"mu": av_mu, "sigma": av_sd},
+        **clump_priors(a_w, s_w, a_z, s_z),
         # No limb darkening is present in the simulation.
         "band.W149.u1": {"initval": 0.0, "sigma": 0},
         "band.Z087.u1": {"initval": 0.0, "sigma": 0},
@@ -612,15 +612,14 @@ def build(event, outdir, draws, tune, cores, t_max):
         )
     }
     print(
-        "%s  ra=%.4f dec=%.4f  av=%.2f+/-%.2f (grey %+.2f)  "
+        "%s  ra=%.4f dec=%.4f  E(Z-W)=%.3f (grey %+.2f)  "
         "seed t_0=%.3f u_0=%.4f "
         "t_E=%.2f\n    -> %s"
         % (
             name,
             ra,
             dec,
-            av_mu,
-            av_sd,
+            a_z - a_w,
             av_grey,
             s["t_0"],
             s["u_0"],

@@ -34,3 +34,11 @@ def calc_absmag_from_bc(absbolmag, bolcorr):
 def calc_appmag(absmag, distance):
     """Apparent magnitude using distance modulus."""
     return absmag + 5 * pt.log10(distance) - 5
+
+
+@register_physics
+def calc_rv_dust_from_sightline(sightline_rv_dust):
+    """A star's R_V is the sight line's (sed.rv_dust): one sight line, one
+    dust law (sed.md, "The spectral mode").  The context node is already
+    one entry per star, so this is the identity."""
+    return sightline_rv_dust

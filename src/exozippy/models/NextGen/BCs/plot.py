@@ -10,9 +10,10 @@ logger = logging.getLogger(__name__)
 
 class NextGenPlot(Plot):
     ALPHA_GRID_PTS = np.array([0, 0.2, -0.2, 0.4, 0.6])
+    # spectra-grid axis -> the SED source input (Plot.source_input_draws)
     axis_alias = {
-        "teff": "star.teffsed",
-        "feh": "star.feh",
+        "teff": "teffsed",
+        "feh": "feh",
     }
 
     def __init__(self, system, draws):
@@ -59,17 +60,7 @@ class NextGenPlot(Plot):
         )
         combined_pred_draws = np.zeros((self.ndraws, self.nfilters))
 
-        for d, draw in enumerate(self.draws):
-            params = [
-                (
-                    float(np.squeeze(np.asarray(draw.get(p.label, p.initval))))
-                    if getattr(p.value, "ndim", 0) == 0
-                    else np.atleast_1d(draw.get(p.label, p.initval)).astype(
-                        np.float64
-                    )
-                )
-                for p in self.system.plot_params
-            ]
+        for d, params in enumerate(self._plot_param_values()):
             mag_pred_draws[d] = mag_compiled(*params)
             logg_vals_draws[d] = logg_compiled(*params)
             if combined_compiled is not None:
@@ -78,6 +69,7 @@ class NextGenPlot(Plot):
         self.logg_vals_draws = logg_vals_draws
         self.mag_pred_draws = mag_pred_draws
         self.combined_pred_draws = combined_pred_draws
+        self._calc_source_inputs()
 
     def _warn_if_off_grid(
         self, nstar, axis_names, points, eval_point, off_grid
@@ -129,14 +121,16 @@ class NextGenPlot(Plot):
         )
 
         off_grid = {}
-        for d, draw in enumerate(self.draws):
+        for d in range(self.ndraws):
             pt_dict = {}
             for col in self.df_spec.columns:
                 if col in self.grid_axes:
                     if col == "logg":
                         pt_dict[col] = self.logg_vals_draws[d]
                     else:
-                        pt_dict[col] = draw[self.axis_alias[col]]
+                        pt_dict[col] = self.source_input_draws[d][
+                            self.axis_alias[col]
+                        ]
 
             nearPts = self._findNearestGridPoints(pt_dict, self.df_spec)
 

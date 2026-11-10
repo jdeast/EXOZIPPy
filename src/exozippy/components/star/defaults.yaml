@@ -255,17 +255,33 @@ star:
     initval: 0.01
   # R_V of the dust in front of the star, declared only under sed.fit_rv_dust
   # (sed.md, "The spectral mode").  Not `rv`: that is the systemic radial
-  # velocity.  Uniform on [2, 6]: the range the CCM89 family is fitted
-  # over (Galactic sight lines run ~2.2-5.5; the bulge ~2.5, Nataf+2013).
+  # velocity.  DERIVED: the sight line has ONE R_V, sampled as sed.rv_dust,
+  # and every star the SED reads takes it (from_sightline); inactive on a
+  # star whose SED flux nothing reads.  It is a parameter of the star, not
+  # an alias, because PR 3's near/far dust split makes it genuinely per
+  # star ("the R_V of the dust in front of this star").  A prior here would
+  # count one number once per star, so mu/sigma are closed: state it on
+  # sed.rv_dust.  An initval is a start for sed.rv_dust (the engine
+  # relation star.<i>.rv_dust = sed.0.rv_dust carries it at user rank);
+  # the initval below is only the bookkeeping value of an inactive element.
   rv_dust:
     unit: ""
     internal_unit: ""
     latex: "R_V"
-    description: "Total-to-selective extinction ratio"
-    lower: 2.0
-    upper: 6.0
-    init_scale: 0.05
+    description: "Total-to-selective extinction ratio of the dust in front of the star"
     initval: 3.1
+    # Not a table row while R_V is one number per sight line (it would
+    # repeat sed.rv_dust once per star); PR 3's near/far split makes it a
+    # per-star result and turns the row on (review 8.9.8, pending JDE).
+    print_to_table: false
+    structural_prior: true
+    structural_remedy: "state the sight line's R_V on sed.rv_dust (one sight line, one R_V; sed.md, \"The spectral mode\")"
+    expressions:
+      from_sightline:
+        # sightline_rv_dust is a context node Star.add_parameter injects:
+        # sed.rv_dust broadcast to one entry per star (aligned).
+        func_name: "calc_rv_dust_from_sightline"
+        deps: ["sightline_rv_dust"]
   pm_ra:
     initval: -3.0
     init_scale: 0.05
