@@ -1,0 +1,26 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 16
+#$ -q mThM.q
+#$ -l use_himem=TRUE
+#$ -cwd
+#$ -j y
+#$ -N kmt1122replot
+#$ -o fitresults_sync_slowtail/replot.$JOB_ID.log
+#
+# Regenerate the reports and plots of the finished sync fit (job 15517717)
+# from its saved trace -- no sampling: the cores64 config with
+# sampler.recompute_trace false, i.e. what `exozippy-modes` does (run.md).
+# Picks up the tight peak zoom of 383f4be2; a 3-body lens gets no
+# per-anomaly zooms or caustic figure (MulensModel carries at most 2 bodies).
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor_kmt1122replot"
+cd $HOME/python/EXOZIPPy/examples/KMT-2021-BLG-1122L
+echo "commit $(git -C $HOME/python/EXOZIPPy rev-parse --short HEAD) on $(git -C $HOME/python/EXOZIPPy branch --show-current)   $(date)   slots $NSLOTS"
+/usr/bin/time -v $HOME/vbm_slowtail_venv/bin/python -c "import sys; from exozippy.cli import main; sys.exit(main())" fitresults_sync_slowtail/KMT-2021-BLG-1122L.replot.yaml 2> fitresults_sync_slowtail/replot_time.txt
+echo "exit $?   $(date)"
+grep -E "Elapsed|Maximum resident" fitresults_sync_slowtail/replot_time.txt
