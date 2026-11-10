@@ -778,16 +778,23 @@ class Lens(Component):
         return out
 
     def _warn_linear_separation_collapse(self, system, linear):
-        """Stage 7: warn (rope, not a gate) when a LINEAR orbit's separation
-        s(t) = s_0 + ds_dt (t - t0_par) falls below ``S_MERGE`` -- through
-        zero, typically -- inside the light curve's span, at any seed's
-        start (review 1.6.22).
+        """Stage 7: warn (rope, not a gate) when a uniform_rotation orbit's
+        polar line s_0 + ds_dt (t - t0_par) falls below ``S_MERGE`` --
+        through zero, typically -- inside the light curve's span, at any
+        seed's start (reviews 1.6.22, 8.6.44).
 
         A first-order orbit is an expansion about t0_par; a projected
         separation is not linear through zero, so where the line reaches
-        it the approximation has broken down.  The magnification stays
-        well defined there (op.py merges the pair into one lens, exact as
-        s -> 0), but those epochs see a lens the orbit does not describe.
+        it the approximation has broken down, and those epochs see a lens
+        the orbit does not describe.  What the backends then evaluate, and
+        what the warning COUNTS, is the orbit's Cartesian state
+        ``(X, Y) = s(t) (cos, sin) alpha(t)`` (JDE 2026-11-03;
+        MulensEvent._companion_geometry_series): the pair at separation
+        ``|s(t)|``, merged into one lens of the summed mass where that is
+        below ``S_MERGE`` (op.close_lens_groups, exact as s -> 0), and past
+        the crossing UNMERGED at ``|s(t)|`` on the far side of the primary
+        (``alpha + 180 deg``).  Until #557 the whole ``s < S_MERGE`` side
+        was merged, and this message said so after it stopped being true.
         OGLE-2013-BLG-0341's close seeds (Gould et al. 2014) carry
         s_0 ~ 0.19 and ds_dt ~ 0.14-0.49 /yr across a 3.6-year light curve,
         so s(t) crosses zero 0.4-1.3 yr before t0_par.  ONE warning per
@@ -809,9 +816,12 @@ class Lens(Component):
             o = self.companion_orbit_idx[elem - 1]
             for k, (s_k, r_k) in enumerate(zip(s_seeds, rate_seeds)):
                 s0, rate = float(s_k[elem]), float(r_k[o])
-                low = s0 + rate * dt_yr < S_MERGE
+                s_line = s0 + rate * dt_yr
+                low = s_line < S_MERGE
                 if not np.any(low):
                     continue
+                merged = np.abs(s_line) < S_MERGE
+                far_side = s_line <= -S_MERGE
                 t_zero = t0_par - s0 / rate * DAYS_PER_YEAR if rate else np.nan
                 cross = (
                     f", through zero at BJD {t_zero:.1f}"
@@ -824,21 +834,29 @@ class Lens(Component):
                     f"{s0:.4g} at t0_par = {t0_par:.2f}, ds_dt = {rate:.4g} "
                     f"/yr -> s(t) < {S_MERGE:g} at {int(low.sum())} of "
                     f"{t.size} epochs, BJD {t[low].min():.1f} to "
-                    f"{t[low].max():.1f}{cross}"
+                    f"{t[low].max():.1f}{cross}: {int(merged.sum())} with "
+                    f"|s(t)| < {S_MERGE:g} (the pair merged into one lens), "
+                    f"{int(far_side.sum())} past the crossing (the pair "
+                    "unmerged at |s(t)| on the far side of the primary, up "
+                    f"to |s| = {float(np.max(-s_line, initial=0.0)):.4g})"
                 )
         if lines:
             logger.warning(
-                "lens: a LINEAR (Taylor) orbit drives a companion onto the "
-                f"primary {primary} inside the data span:\n"
+                "lens: a uniform_rotation orbit's separation s_0 + ds_dt "
+                f"(t - t0_par) reaches the primary {primary} inside the data "
+                "span:\n"
                 + "\n".join(lines)
                 + "\nA first-order orbit is an expansion about t0_par and a "
                 "projected separation is not linear through zero, so the "
                 "approximation has broken down at those epochs.  They are "
-                "evaluated with the pair merged into one lens of the summed "
-                "mass (exact as s -> 0), which is a lens the orbit does not "
-                "describe.  The physical alternative is a keplerian orbit "
-                "(type: keplerian); otherwise check that the seed's rate is "
-                "meant to apply across the whole light curve."
+                "evaluated from the orbit's Cartesian state: within "
+                f"{S_MERGE:g} of the primary the pair is merged into one "
+                "lens of the summed mass (exact as s -> 0); past the crossing "
+                "the companion is on the far side of the primary at |s(t)|, "
+                "a lens the orbit does not describe.  The physical "
+                "alternative is a keplerian orbit (type: keplerian); "
+                "otherwise check that the seed's rate is meant to apply "
+                "across the whole light curve."
             )
 
     def _body_label(self, system, elem):
