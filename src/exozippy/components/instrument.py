@@ -1193,6 +1193,12 @@ class Instrument(TimeSystem, Component):
         # Element index -> indices into the concatenated observation arrays,
         # sorted by time.  Filled by _prepare_gp.
         self._gp_obs_index = {}
+        # Per GP element: (white-noise level in the hint's units, n_obs).
+        # Recorded here because the only place that knows a file's white
+        # noise is the loader; a component that needs a NUMERICAL bound on a
+        # GP amplitude (MulensInstrument._gp_numerical_upper) reads it back
+        # at register_parameters, long after `err` has gone out of scope.
+        self._gp_white_level = {}
         self._gp_time = None
         # Linear values of the log-sampled hyperparameters, as Deterministics
         # (built once in add_observation_likelihood).
@@ -1289,6 +1295,8 @@ class Instrument(TimeSystem, Component):
             self._gp_obs_index[i] = sel[np.argsort(time[sel], kind="stable")]
 
             amp = float(np.median(err[sel])) * user_factor
+            if np.isfinite(amp) and amp > 0.0:
+                self._gp_white_level[i] = (amp, int(sel.size))
             if not np.isfinite(amp) or amp <= 0.0:
                 # Degenerate (zero/absent) errors: fall back to the
                 # defaults.yaml start rather than hinting a zero amplitude,

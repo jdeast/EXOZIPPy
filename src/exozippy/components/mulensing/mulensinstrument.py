@@ -2557,18 +2557,51 @@ class MulensInstrument(Instrument):
                 f"star.{src}.{param}", val, rank=PRECEDENCE_DERIVED_DATA
             )
 
-    # Flux-space images of the magnitude caps these amplitudes used to carry:
-    # a 5 mag GP amplitude is a factor 10**(0.4*5) = 100 in flux, and a 10 mag
-    # outlier scale a factor 10**(0.4*10) = 1e4.  Applied per light curve
-    # against its own bootstrapped baseline flux, because a microlensing file's
-    # flux zeropoint is arbitrary (10**(-0.4 m) ~ 1e-8 for a magnitude file,
-    # O(1) or O(1e4) counts for difference imaging) and no single number in
-    # defaults.yaml can serve both.
+    # out_scale's upper bound is a MEASURED REGULARIZER and stays a modeling
+    # choice: uncapped on DC2018-128 it grew to 300-1000x the median error,
+    # forgave 777 nats of caustic residuals and picked the wrong mode by +142
+    # nats (review 8.6.3).  1e4 is the flux-space image of the 10 mag cap it
+    # carried before the switch, applied per light curve against its own
+    # bootstrapped baseline flux, because a microlensing file's flux zeropoint
+    # is arbitrary (10**(-0.4 m) ~ 1e-8 for a magnitude file, O(1) or O(1e4)
+    # counts for difference imaging) and no single number in defaults.yaml can
+    # serve both.
     _FLUX_AMPLITUDE_CAPS = {
-        "gp_rot_sigma": (1.0e2, 1.85e-2),
-        "gp_sho_sigma": (1.0e2, 1.85e-2),
         "out_scale": (1.0e4, 2.0e-1),
     }
+
+    # THE GP AMPLITUDES ARE NOT REGULARIZED (review 2.1.26, CANNON-GPCAP,
+    # 3524 core-h; JDE ruling 2026-11-09).  Their old 1e2 multiplier was the
+    # flux-space image of a 5 mag cap -- a statistical statement nobody ever
+    # measured.  Measured now: on 5 events x 2 arms (cap 1e2 vs 1e6) NO event
+    # absorbs a microlensing anomaly into the GP; the amplitude sits at its
+    # floor three or more decades under the cap either way, and the two arms'
+    # posteriors agree.  So the bound carries no modeling content and the
+    # number below is NOT a prior width.
+    #
+    # It cannot simply be removed.  Two things need a finite upper:
+    #   - the logit transform (a parameter is bounded within e^30 of its
+    #     floor; defaults.yaml's 1e30 ceiling is unrunnable, it puts
+    #     sigma >= 9.4e16), and
+    #   - celerite2's semiseparable factorization, which in the uncapped
+    #     (1e6) arm raised "LinAlgError: failed to factorize or solve matrix"
+    #     in the polish, the whitening probe and the hot rungs of every fit,
+    #     where the capped arm raised none.  Those proposals are rejected, so
+    #     the T=1 posterior survives, but the evaluations are wasted.
+    # The honest replacement is therefore a NUMERICAL bound that scales with
+    # the data: see _gp_numerical_upper.
+    _GP_AMPLITUDE_PARAMS = ("gp_rot_sigma", "gp_sho_sigma")
+    _GP_AMPLITUDE_START = 1.85e-2
+
+    # Keep the normal matrix's condition number under ~1e10 in float64 (~6
+    # significant digits left), which is what celerite's factorization needs:
+    # a GP with variance sigma^2 against a white diagonal err^2 over n points
+    # conditions like n*sigma^2/err^2, so sigma <= sqrt(BUDGET/n) * err.
+    _GP_COND_BUDGET = 1.0e10
+    # ... and never tighter than the bound this code shipped with, so the
+    # change can only ever LOOSEN an existing fit.  The measured posterior
+    # sits >= 3 decades below this floor, so it is not reachable either.
+    _GP_UPPER_FLOOR = 1.0e2
 
     def _scale_flux_amplitudes(self, manifest, f_total_init):
         """Put the optional noise amplitudes on each light curve's flux scale.
@@ -2581,8 +2614,11 @@ class MulensInstrument(Instrument):
         ``overrides`` channel, i.e. layered UNDER the user's params file so an
         explicit bound or start still wins.
 
-        The multipliers are the flux-space images of the magnitude caps these
-        parameters carried before the switch (see ``_FLUX_AMPLITUDE_CAPS``).
+        ``out_scale``'s multiplier is the flux-space image of the magnitude
+        cap it carried before the switch, and is a measured regularizer (see
+        ``_FLUX_AMPLITUDE_CAPS``).  The GP amplitudes get a NUMERICAL bound
+        instead -- ``_gp_numerical_upper``, review 2.1.26 -- because the
+        measurement found no modeling content in theirs.
         The ``initval`` is only a fallback -- ``Instrument._prepare_gp`` and
         ``_prepare_robust`` push data-driven hints (the median error bar,
         for both) which outrank it -- but it matters when a file has
@@ -2594,16 +2630,59 @@ class MulensInstrument(Instrument):
         degenerate-error files.
         """
         scale = np.asarray(f_total_init, dtype=float)
-        for param, (cap, start) in self._FLUX_AMPLITUDE_CAPS.items():
+        bounds = {
+            param: (cap * scale, start * scale)
+            for param, (cap, start) in self._FLUX_AMPLITUDE_CAPS.items()
+        }
+        gp_upper = self._gp_numerical_upper(scale)
+        for param in self._GP_AMPLITUDE_PARAMS:
+            bounds[param] = (gp_upper, self._GP_AMPLITUDE_START * scale)
+        for param, (upper, start) in bounds.items():
             if param not in manifest:
                 continue
             entry = dict(manifest[param] or {})
             overrides = dict(entry.get("overrides") or {})
-            overrides["upper"] = (cap * scale).tolist()
-            overrides["initval"] = (start * scale).tolist()
+            overrides["upper"] = np.asarray(upper, dtype=float).tolist()
+            overrides["initval"] = np.asarray(start, dtype=float).tolist()
             entry["overrides"] = overrides
             manifest[param] = entry
         return manifest
+
+    def _gp_numerical_upper(self, scale):
+        """The GP amplitudes' upper bound, per light curve: NOT a prior.
+
+        Two numbers, whichever is larger (the constants carry the measured
+        reasons both exist):
+
+        * ``sqrt(_GP_COND_BUDGET / n) * median(err)`` -- the amplitude at
+          which celerite2's factorization of this file's own matrix runs out
+          of float64.  It is data-scaled in the way the numerics actually
+          care about: a noisy light curve can carry a larger GP than a
+          precise one of the same brightness, which a multiple of the
+          baseline flux cannot express.
+        * ``_GP_UPPER_FLOOR * baseline flux`` -- the bound this code shipped
+          with, kept as a floor so the change can only ever LOOSEN an
+          existing fit, never tighten one.
+
+        A file whose errors are degenerate (zero or non-finite) records no
+        white-noise level in ``_prepare_gp`` and keeps the floor alone.
+        """
+        upper = np.atleast_1d(
+            np.array(
+                self._GP_UPPER_FLOOR * np.asarray(scale, dtype=float),
+                dtype=float,
+            )
+        )
+        white = getattr(self, "_gp_white_level", None) or {}
+        for i, (err, n_obs) in white.items():
+            if not (0 <= i < upper.size) or n_obs < 1:
+                continue
+            if not np.isfinite(err) or err <= 0.0:
+                continue
+            cond = float(np.sqrt(self._GP_COND_BUDGET / n_obs) * err)
+            if np.isfinite(cond):
+                upper[i] = max(float(upper[i]), cond)
+        return upper
 
     def _finite_source_limb_darkening(self, system, i):
         """(u1, u2, bandpass) for light curve ``i``'s magnification, or
