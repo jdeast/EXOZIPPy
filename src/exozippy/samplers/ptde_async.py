@@ -74,6 +74,7 @@ import time
 
 import numpy as np
 
+from exozippy.logger import ProgressCadence
 from exozippy.samplers import _common, convergence
 from exozippy.samplers._common import (
     DE_JITTER,
@@ -381,6 +382,9 @@ def ptde_async_sample(
     # One async "step" = n_slots completed evaluations, the work of one
     # synchronous ptde.py step -- so log_interval means the same thing in
     # both samplers' configs.
+    # Every progress line to the file log; one per logger.INFO_PROGRESS_S
+    # to the console (docs/logging.md).
+    progress_cadence = ProgressCadence()
     log_every_evals = (
         max(1, int(log_interval)) * n_slots
         if log_interval
@@ -471,7 +475,7 @@ def ptde_async_sample(
             raise KeyboardInterrupt
         stop_requested[0] = True
         logger.info(
-            f"PTDE-async: stop requested ({signal.Signals(sig).name}) — finishing "
+            f"PTDE-async: stop requested ({signal.Signals(sig).name}) -- finishing "
             "in-flight evaluations (send the signal again to abort immediately)"
         )
 
@@ -787,7 +791,7 @@ def ptde_async_sample(
         lost = list(in_flight_meta.items())
         in_flight_meta.clear()
         in_flight[0] -= len(lost)
-        logger.warning(
+        logger.debug(
             f"PTDE-async: recycling worker pool ({len(stale)} timeout(s))"
         )
         pool = _common.recycle_pool(pool, actual_cores)
@@ -830,7 +834,7 @@ def ptde_async_sample(
                     # nothing that was recorded; the pool is torn down in
                     # the `finally`.
                     logger.info(
-                        f"PTDE-async: {stop_reason[0]} — abandoning "
+                        f"PTDE-async: {stop_reason[0]} -- abandoning "
                         f"{in_flight[0]} in-flight evaluation(s) that did "
                         f"not return, and saving what is stored"
                     )
@@ -924,7 +928,7 @@ def ptde_async_sample(
                 if k == 0 and not gamma_frozen[0] and iter_count[k][i] >= tune:
                     gamma_frozen[0] = True
                     if adapt_gamma:
-                        logger.info(
+                        logger.debug(
                             f"PTDE-async gamma: frozen at {gamma_box[0]:.4f} "
                             f"(chain {i} entered its draw phase)"
                         )
@@ -979,7 +983,7 @@ def ptde_async_sample(
                 if ar_T1 > 0:
                     gamma_new = next_gamma(gamma_box[0], ar_T1, target_accept)
                     if abs(gamma_new - gamma_box[0]) / gamma_box[0] > 0.01:
-                        logger.info(
+                        logger.debug(
                             f"PTDE-async gamma: {gamma_box[0]:.4f} -> {gamma_new:.4f} "
                             f"(T=1 accept={ar_T1:.3f}, target={target_accept:.2f})"
                         )
@@ -1051,12 +1055,12 @@ def ptde_async_sample(
                     # no way to tell a genuinely crowded ladder from a
                     # rounded one.
                     acc_win = n_swap_accept / np.maximum(n_swap_propose, 1)
-                    logger.info(
+                    logger.debug(
                         "PTDE-async ladder (barrier-equalized, from "
                         f"{n_measured} swap proposals): "
                         f"T=[{', '.join(f'{t:.4g}' for t in new_T)}]"
                     )
-                    logger.info(
+                    logger.debug(
                         "PTDE-async ladder measurement: swap accept="
                         f"[{', '.join(f'{r:.2f}' for r in acc_win)}]  "
                         f"mean={float(acc_win.mean()):.3f} "
@@ -1079,7 +1083,8 @@ def ptde_async_sample(
                 # that has stopped communicating.
                 sr = n_swap_accept_cum / np.maximum(n_swap_propose_cum, 1)
                 rt_rate = round_trips[0] / max(n_swap_rounds[0], 1)
-                logger.info(
+                logger.log(
+                    progress_cadence.level(),
                     f"PTDE-async: {n_completed_total[0]} evals  "
                     f"draws=[min={per_chain_draws.min()}, "
                     f"mean={per_chain_draws.mean():.0f}, "
@@ -1092,7 +1097,7 @@ def ptde_async_sample(
                         f"(rate={rt_rate:.3f}/swap)"
                         if n_temps > 1
                         else ""
-                    )
+                    ),
                 )
                 # ONE variable -- whichever ranges widest at the HOT
                 # rung -- measured at both ends, so top/cold is a ratio of
@@ -1113,7 +1118,7 @@ def ptde_async_sample(
                     # variable to measure at both ends.  Say that, rather
                     # than fall back to report(None) -- per-rung maxima are
                     # exactly the incomparable pair this block removes.
-                    logger.info(
+                    logger.debug(
                         "PTDE-async explored span: no states recorded at "
                         f"T={temperatures[-1]:.0f} yet"
                     )
@@ -1121,7 +1126,7 @@ def ptde_async_sample(
                     cum = spans.report(hot_key)
                     win = spans_window.report(hot_key)
                     ratio = cum[-1][0] / max(cum[0][0], 1e-9)
-                    logger.info(
+                    logger.debug(
                         f"PTDE-async explored span (raw sigma) [{hot_key}]: "
                         f"cumulative T=1 {cum[0][0]:.1f}  "
                         f"T={temperatures[-1]:.0f} {cum[-1][0]:.1f}  "
@@ -1140,7 +1145,7 @@ def ptde_async_sample(
         if stop_category[0] == "abort" and int(per_chain_draws.min()) == 0:
             logger.warning(
                 f"PTDE-async: stopped ({stop_reason[0]}) before any chain "
-                "recorded a draw — nothing to save"
+                "recorded a draw -- nothing to save"
             )
             raise KeyboardInterrupt
 

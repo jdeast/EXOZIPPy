@@ -18,6 +18,7 @@ import re
 
 from exozippy.constants import SYMPY_SOLVE_TIMEOUT_S
 from exozippy.linking import extract_links
+from exozippy.logger import first_time
 
 # --- The per-parameter sub-key vocabulary --------------------------------
 #
@@ -3361,7 +3362,7 @@ class ConfigManager:
         resolved_flat = seed_resolved[0]
         self.seed_resolved = seed_resolved if K > 1 else None
         if K > 1:
-            logger.info(f"Multi-seed sampling: solved {K} seed start points.")
+            logger.debug(f"Multi-seed sampling: solved {K} seed start points.")
 
         logger.debug("Solver finished.")
 
@@ -4593,7 +4594,7 @@ class ConfigManager:
         for i, key in enumerate(self.user_params):
             file_order.setdefault(key, i)
 
-        logger.info(
+        logger.debug(
             "Solving for starting values/scales of sampled parameters given "
             "user/data/default initialization...."
         )
@@ -4609,9 +4610,17 @@ class ConfigManager:
             constants=self.constants,
         )
         resolved = engine.solve()
-        logger.info(
+        logger.debug(
             f"Done solving ({engine.keep_report.get('wall_s', 0.0):.2f} s)."
         )
+        # Once per System: a multi-seed fit solves once per seed, and
+        # System.prepare may solve a second time.
+        # isEnabledFor first: the stage-1a probe solves with this logger
+        # muted, and must not use up the once-per-System line.
+        if logger.isEnabledFor(logging.INFO) and first_time(
+            "start-values-solved"
+        ):
+            logger.info("Start values solved.")
 
         provenance = {p: r for p, r in engine.ranks.items() if p in resolved}
         solved_by = {}

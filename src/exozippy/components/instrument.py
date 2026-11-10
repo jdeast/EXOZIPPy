@@ -833,7 +833,9 @@ class Instrument(TimeSystem, Component):
                 f"[{label}] mask excludes every one of the {n} data points."
             )
         if n_masked:
-            logger.info(f"[{label}] mask excluded {n_masked}/{n} data points.")
+            logger.debug(
+                f"{self.log_tag(i)} mask excluded {n_masked}/{n} data points."
+            )
             df = df.loc[~exclude].reset_index(drop=True)
         return df
 
@@ -1607,10 +1609,9 @@ class Instrument(TimeSystem, Component):
             # the same observations the likelihood conditioned on, in the same
             # sorted order.
             self._gp_observed_node[i] = observed[idx]
-            logger.info(
-                "[%s] %s: %s GP on %d observations.",
-                self.prefix,
-                self.names[i],
+            logger.debug(
+                "%s %s GP on %d observations.",
+                self.log_tag(i),
                 "+".join(self.gp_terms[i]),
                 idx.size,
             )
@@ -1975,10 +1976,9 @@ class Instrument(TimeSystem, Component):
                     sigma=sigma[idx],
                     observed=observed[idx],
                 )
-            logger.info(
-                "[%s] %s: %s likelihood on %d observations.",
-                self.prefix,
-                self.names[i],
+            logger.debug(
+                "%s %s likelihood on %d observations.",
+                self.log_tag(i),
                 kind,
                 idx.size,
             )
@@ -2343,13 +2343,11 @@ class Instrument(TimeSystem, Component):
                 or (ninterp > 1 and "exptime_s" not in c and not has_rows)
             ):
                 logger.warning(
-                    f"{self.prefix} {self.names[i]}: invalid exposure "
-                    f"smearing config (exptime_s="
-                    f"{c.get('exptime_s', '<unset>')} s, "
-                    f"ninterp={c.get('ninterp', '<unset>')}): needs "
-                    f"ninterp >= 1 and, when ninterp > 1, an explicit "
-                    f"exptime_s > 0. Ignoring -- defaulting to ninterp=1 "
-                    f"(no smearing)."
+                    f"{self.log_tag(i)} exposure smearing config ignored "
+                    f"(exptime_s: {c.get('exptime_s', '<unset>')}, "
+                    f"ninterp: {c.get('ninterp', '<unset>')}): the model is "
+                    f"instantaneous, with no smearing.  Set ninterp >= 1 "
+                    f"and, when ninterp > 1, an explicit exptime_s > 0."
                 )
                 exptime, ninterp = self.INERT_EXPTIME_S, 1
             else:
@@ -2758,8 +2756,8 @@ class Instrument(TimeSystem, Component):
         if where == "start":
             for i in described:
                 if not self.exposure_checks_on[i]:
-                    logger.info(
-                        f"[{self.prefix}[{self.names[i]}]] check_exposure: "
+                    logger.debug(
+                        f"{self.log_tag(i)} check_exposure: "
                         f"false -- ninterp: {self.ninterp[i]} is not checked "
                         f"against the smearing tolerance."
                     )
@@ -2814,7 +2812,7 @@ class Instrument(TimeSystem, Component):
         changed = False
         report = {}
         for i in files:
-            label = f"[{self.prefix}[{self.names[i]}]]"
+            label = self.log_tag(i)
             n_i = int(self.ninterp[i])
             if i in found:
                 n_new, d_new, capped, n_need = found[i]
@@ -2841,7 +2839,7 @@ class Instrument(TimeSystem, Component):
                         f"to choose a count yourself."
                     )
                 elif where == "start":
-                    logger.info(
+                    logger.debug(
                         f"{label} exptime_s {self.exptime_s[i]:g} s: "
                         f"automatic ninterp = {n_new} "
                         + ("" if i in choose else "(restored from the trace; ")
@@ -2849,7 +2847,7 @@ class Instrument(TimeSystem, Component):
                         + f"smearing error Delta chi2 = {d_new:.3g} at {at})."
                     )
                 elif where == "polished" and i in found:
-                    logger.info(
+                    logger.debug(
                         f"{label} automatic ninterp raised from {old} to "
                         f"{n_new} at {at} (Delta chi2 {now[i]:.3g} with "
                         f"{old}, {d_new:.3g} with {n_new}; threshold {thr}); "
@@ -3065,18 +3063,21 @@ class Instrument(TimeSystem, Component):
             ws.append(w_k)
         if bare and not quiet:
             logger.warning(
-                "%s exposure_meter: no bins for data rows %s and no "
-                "exposure columns: those exposures are modeled at their "
-                "midpoints.",
-                where,
-                bare,
+                "%s exposure_meter has no bins for %d data row(s) (%s) and "
+                "they have no exposure columns, so those exposures are "
+                "modeled at their midpoints.  Add their bins to the meter "
+                "file, or an exptime_s column.",
+                self.log_tag(i),
+                len(bare),
+                ", ".join(str(r) for r in bare[:10])
+                + (", ..." if len(bare) > 10 else ""),
             )
         if worst * exposure_rules.SECONDS_PER_DAY > 1.0 and not quiet:
-            logger.warning(
+            logger.debug(
                 "%s exposure_meter: an exposure's photon-weighted mean time "
                 "differs from its time-column tag by up to %.1f s; the model "
                 "uses the meter (the tag only places the plotted point).",
-                where,
+                self.log_tag(i),
                 worst * exposure_rules.SECONDS_PER_DAY,
             )
         return np.concatenate(rows), np.concatenate(ts), np.concatenate(ws)

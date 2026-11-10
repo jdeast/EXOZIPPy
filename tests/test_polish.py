@@ -652,7 +652,7 @@ def _polish_gamma_transition(caplog, **kwargs):
     from exozippy.samplers.ptde import polish_seed_starts
 
     caplog.clear()
-    with caplog.at_level(logging.INFO, logger="exozippy.samplers.ptde"):
+    with caplog.at_level(logging.DEBUG, logger="exozippy.samplers.ptde"):
         polish_seed_starts(**kwargs)
     m = re.search(r"gamma ([0-9.eE+-]+)->([0-9.eE+-]+)", caplog.text)
     assert m, f"no gamma transition logged; got: {caplog.text!r}"
@@ -1084,7 +1084,7 @@ def test_serial_de_polish_announces_the_cost(caplog):
         pm.Potential("like", _NoGradSquare()(x))
 
     # ACT
-    with caplog.at_level(logging.INFO, logger="exozippy.polish"):
+    with caplog.at_level(logging.DEBUG, logger="exozippy.polish"):
         _polished, _dlps, method = polish_raw_starts(
             model, [{"x": np.array(0.0)}], n_steps=3, cores=1
         )
@@ -1109,7 +1109,7 @@ def test_pooled_de_polish_announces_its_worker_count(caplog):
         pm.Potential("like", _NoGradSquare()(x))
 
     # ACT
-    with caplog.at_level(logging.INFO, logger="exozippy.polish"):
+    with caplog.at_level(logging.DEBUG, logger="exozippy.polish"):
         polish_raw_starts(model, [{"x": np.array(0.0)}], n_steps=2, cores=2)
 
     # ASSERT
@@ -1139,7 +1139,7 @@ def test_de_polish_heartbeats_on_wall_clock_not_sweep_count(caplog):
     scales = {"x": np.ones(1)}
 
     # ACT: an interval short enough that every sweep crosses it
-    with caplog.at_level(logging.INFO, logger="exozippy.samplers.ptde"):
+    with caplog.at_level(logging.DEBUG, logger="exozippy.samplers.ptde"):
         polish_seed_starts(
             seeds,
             logp,
@@ -1163,7 +1163,7 @@ def test_de_polish_heartbeats_on_wall_clock_not_sweep_count(caplog):
 
     # ACT again, at the shipped default: a sub-second polish says nothing
     caplog.clear()
-    with caplog.at_level(logging.INFO, logger="exozippy.samplers.ptde"):
+    with caplog.at_level(logging.DEBUG, logger="exozippy.samplers.ptde"):
         polish_seed_starts(
             seeds,
             logp,
@@ -1283,7 +1283,7 @@ def test_heartbeat_fires_inside_a_sweep_not_only_between_them(caplog):
     pool = _FakeAsyncPool(per_item=0.05)
 
     # ACT
-    with caplog.at_level(logging.INFO, logger="exozippy.samplers.ptde"):
+    with caplog.at_level(logging.DEBUG, logger="exozippy.samplers.ptde"):
         polish_seed_starts(
             [{"x": np.array([0.0])}],
             _quadratic_logp,
@@ -1335,7 +1335,7 @@ def test_a_wedged_proposal_does_not_silence_the_heartbeat(caplog):
         return dead  # the same fake stands in for the fresh pool
 
     # ACT
-    with caplog.at_level(logging.INFO, logger="exozippy.samplers.ptde"):
+    with caplog.at_level(logging.DEBUG, logger="exozippy.samplers.ptde"):
         polished, dlps = polish_seed_starts(
             [{"x": np.array([0.0])}],
             _quadratic_logp,
@@ -1716,7 +1716,7 @@ def test_async_de_polish_climbs_to_the_mode_and_reports_its_population(caplog):
     n_steps, pop = 40, 8
 
     # ACT
-    with caplog.at_level(logging.INFO, logger="exozippy.samplers.ptde"):
+    with caplog.at_level(logging.DEBUG, logger="exozippy.samplers.ptde"):
         polished, dlps = polish_seed_starts(
             seeds,
             _quadratic_logp,
@@ -1791,7 +1791,7 @@ def test_async_de_polish_spends_exactly_the_budget_per_seed(caplog):
     n_steps, pop = 7, 8
 
     # ACT
-    with caplog.at_level(logging.INFO, logger="exozippy.samplers.ptde"):
+    with caplog.at_level(logging.DEBUG, logger="exozippy.samplers.ptde"):
         polish_seed_starts(
             seeds,
             _quadratic_logp,
@@ -1821,7 +1821,7 @@ def test_async_de_polish_heartbeats_with_the_sweep_count(caplog):
     pool = _CallbackPool(workers=2)
 
     # ACT
-    with caplog.at_level(logging.INFO, logger="exozippy.samplers.ptde"):
+    with caplog.at_level(logging.DEBUG, logger="exozippy.samplers.ptde"):
         polish_seed_starts(
             [{"x": np.array([0.0])}],
             _quadratic_logp,
@@ -1867,7 +1867,7 @@ def test_async_de_polish_eval_timeout_writes_off_and_recycles(caplog):
         return new
 
     # ACT
-    with caplog.at_level(logging.INFO, logger="exozippy.samplers.ptde"):
+    with caplog.at_level(logging.DEBUG, logger="exozippy.samplers.ptde"):
         polished, dlps = polish_seed_starts(
             [{"x": np.array([0.0])}],
             _quadratic_logp,
@@ -2001,7 +2001,7 @@ def test_pipeline_de_polish_stops_on_rate(caplog):
         return lp(p)
 
     # ACT
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.DEBUG, logger="exozippy"):
         polish_raw_starts(
             model, [{"x": np.array(3.0)}], logp_fn=counting, cores=1
         )
@@ -2038,7 +2038,7 @@ def test_polish_progress_line_reports_acceptance_and_current_rate(caplog):
     """
     from exozippy.samplers.ptde import polish_seed_starts
 
-    with caplog.at_level(logging.INFO, logger="exozippy.samplers.ptde"):
+    with caplog.at_level(logging.DEBUG, logger="exozippy.samplers.ptde"):
         polish_seed_starts(
             [{"x": np.array([0.0])}, {"x": np.array([6.0])}],
             lambda p: float(-0.5 * np.sum((p["x"] - 3.0) ** 2)),
@@ -2134,7 +2134,7 @@ def test_polish_rounds_runs_the_lbfgs_engine_through_the_same_rounds(caplog):
     model, p = _toy_param_model()
     system = _RoundsSystem([p])
 
-    with caplog.at_level(logging.INFO, logger="exozippy.polish"):
+    with caplog.at_level(logging.DEBUG, logger="exozippy.polish"):
         summary = polish_rounds(system, model, cores=1, rewhiten=True)
 
     assert summary["method"] == "lbfgs"
@@ -2167,7 +2167,7 @@ def test_polish_rounds_rewhitens_and_polishes_again_on_the_de_engine(caplog):
     lp = model.compile_logp()
     lp_start = float(lp(system.get_raw_start(model)))
 
-    with caplog.at_level(logging.INFO, logger="exozippy.polish"):
+    with caplog.at_level(logging.DEBUG, logger="exozippy.polish"):
         summary = polish_rounds(
             system, model, cores=1, rewhiten=True, rng=np.random.default_rng(1)
         )
@@ -2399,7 +2399,7 @@ def test_progress_line_without_a_cap_reports_the_rate_and_no_eta(caplog):
     m = _monitor(progress_interval_s=1e-9)
     m.begin(0, 0.0)
     m.step(0, 3.0)
-    with caplog.at_level(logging.INFO, logger="exozippy.polish"):
+    with caplog.at_level(logging.DEBUG, logger="exozippy.polish"):
         m.heartbeat(detail=lambda: "  (seed 0)")
     line = caplog.records[-1].getMessage()
     assert line.startswith("test: iteration 1  elapsed=")
@@ -2564,7 +2564,7 @@ def test_a_spent_budget_takes_no_step_on_either_engine(gradient, caplog):
         model, start = _toy_param_model()[0], {"toy.x_raw": np.array([0.0])}
     else:
         model, start = _nograd_model(), {"x": np.array(0.0)}
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.DEBUG, logger="exozippy"):
         polished, dlps, method = polish_raw_starts(
             model,
             [start],

@@ -201,7 +201,7 @@ def de_metropolis_sample(
     # Multi-seed provenance, same attr PTDE writes (_common).
     idata.posterior.attrs["chain_seed_index"] = list(chain_seed_index)
     if len(set(chain_seed_index)) > 1:
-        logger.info(
+        logger.debug(
             f"{label} multi-seed provenance (chain -> seed): "
             f"{list(chain_seed_index)}"
         )

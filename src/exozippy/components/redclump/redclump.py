@@ -14,6 +14,7 @@ through each passband at the fit's own law.
 """
 
 import logging
+import re
 
 import numpy as np
 import pytensor.tensor as pt
@@ -89,7 +90,7 @@ class RedClump(Component):
                 f"one clump describes one sight line."
             )
         cfg = self.config[0] or {}
-        where = f"[{self.prefix}.{self.names[0]}]"
+        where = self.log_tag(0)
         unknown = sorted(set(cfg) - set(self.CONFIG_KEYS))
         if unknown:
             raise ValueError(
@@ -257,7 +258,7 @@ class RedClump(Component):
         sed = system.sed
         gm = system.galacticmodel
         cm = self.config_manager
-        where = f"[{self.prefix}.{self.names[0]}]"
+        where = self.log_tag(0)
 
         # The sight line, and the bar on it (galacticmodel's public queries).
         l_deg, b_deg = gm.sight_line(system)
@@ -274,17 +275,17 @@ class RedClump(Component):
         formula = k21.red_clump_distance_modulus(l_deg, b_deg)
         if abs(mean_mu - formula) > BAR_FORMULA_TOLERANCE_MAG:
             logger.warning(
-                f"{where} the galactic model's bar puts the clump at "
-                f"distance modulus {mean_mu:.3f}, genulens's red-clump "
-                f"formula at {formula:.3f} ({mean_mu - formula:+.3f} mag): "
-                f"more than {BAR_FORMULA_TOLERANCE_MAG} apart on this sight "
-                f"line.  The prior uses the bar's; state "
-                f"redclump.distance {{mu, sigma}} to override it."
+                f"{where} The galactic model's bar puts the clump at "
+                f"distance modulus {mean_mu:.3f} and genulens's red-clump "
+                f"formula at {formula:.3f} ({mean_mu - formula:+.3f} mag); "
+                f"the distance prior uses the bar's.\nTo use another, set "
+                f"redclump.{self.names[0]}.distance: {{mu, sigma}} in the "
+                f"params file."
             )
         d_bar = 10.0 ** (0.2 * mean_mu + 1.0)
         sig_d = BAR_DISTANCE_SIGMA_MAG * np.log(10.0) / 5.0 * d_bar
         self.bar_moments = (mean_mu, sd_mu, mode_mu)
-        logger.info(
+        logger.debug(
             f"{where} sight line (l, b) = ({l_signed:.3f}, {b_deg:.3f}) deg; "
             f"bar distance modulus mean {mean_mu:.3f} (mode {mode_mu:.3f}, "
             f"depth {sd_mu:.3f} mag of single stars): clump distance prior "
@@ -361,7 +362,8 @@ class RedClump(Component):
             # JDE 2026-11-09: a warning, kept short (redclump.md says why).
             logger.warning(
                 f"{where} redclump without sed.fit_rv_dust: a fixed R_V may "
-                f"bias Teff/R_star (redclump.md)."
+                f"bias Teff/R_star.\nSet sed: {{fit_rv_dust: true}} "
+                f"(redclump.md)."
             )
 
     @staticmethod
@@ -393,7 +395,7 @@ class RedClump(Component):
             )
             return
         if flag is False:
-            logger.info(
+            logger.debug(
                 f"{where} clump_constrains_source_av: false -- no source's "
                 f"A_V is tied to the clump's."
             )
@@ -430,7 +432,7 @@ class RedClump(Component):
         for k in sorted(selected - members):
             (tied if seen[k] else unread).append(k)
         if unread:
-            logger.info(
+            logger.debug(
                 f"{where} not tying {[star.names[k] for k in unread]}: "
                 f"nothing reads their SED flux, so their A_V is pinned."
             )
@@ -442,7 +444,7 @@ class RedClump(Component):
                     f"(a microlensing source with an SED row or a stated "
                     f"zeropoint tie).  Remove the key, or read the source."
                 )
-            logger.info(
+            logger.debug(
                 f"{where} no selected source to tie to the clump's A_V; "
                 f"the tie is off."
             )
@@ -454,34 +456,40 @@ class RedClump(Component):
             "shape": (len(tied),),
             "element_owners": [self.names[0]] * len(tied),
         }
-        logger.info(
+        logger.debug(
             f"{where} A_V of {[star.names[k] for k in tied]} tied to the "
             f"clump's: av_ratio ~ N(1, 0.09) (Nataf et al. 2013's "
             f"extinction granularity; clump_constrains_source_av: false "
             f"turns it off)."
         )
 
+    #: A prior on one of these reads the clump (a published extinction).
+    _READ_BY_PRIOR = ("extinction", "color_excess")
+
+    def _is_extinction_key(self, key):
+        """``redclump.<owner|i>.extinction_<k>`` (the params-file owner
+        spelling, before ``adopt_element_owners``) or
+        ``redclump.<e>.extinction`` (the internal element form after it: a
+        second stage-3 pass reads the translated keys)."""
+        parts = str(key).split(".")
+        if len(parts) != 3 or parts[0] != self.prefix:
+            return False
+        param = re.sub(r"_\d+$", "", parts[2])
+        return param in self._READ_BY_PRIOR
+
     def _extinction_priors(self):
-        """Params-file priors (mu/sigma) on the clump's extinction or
-        color-excess elements -- a published clump extinction."""
-        out = []
-        prefix = f"{self.prefix}."
-        for key, entry in (self.config_manager.user_params or {}).items():
-            if not (isinstance(entry, dict) and key.startswith(prefix)):
-                continue
-            param = key.split(".")[-1]
-            base = param.rsplit("_", 1)[0]
-            if base in ("extinction", "color_excess") and (
-                "mu" in entry or "sigma" in entry
-            ):
-                out.append(key)
-        for key in getattr(self.config_manager, "links", {}) or {}:
-            param = key.split(".")[-1]
-            if key.startswith(prefix) and param.rsplit("_", 1)[0] in (
-                "extinction",
-                "color_excess",
-            ):
-                out.append(key)
+        """Params-file priors (mu/sigma, or a link) on the clump's
+        extinction or color-excess elements -- a published clump
+        extinction."""
+        cm = self.config_manager
+        out = [
+            key
+            for key, entry in (cm.user_params or {}).items()
+            if isinstance(entry, dict)
+            and ("mu" in entry or "sigma" in entry)
+            and self._is_extinction_key(key)
+        ]
+        out += [k for k in (cm.links or {}) if self._is_extinction_key(k)]
         return out
 
     def _clump_rows(self, sed):
@@ -513,13 +521,12 @@ class RedClump(Component):
             if not np.asarray(sed.neg_matrix)[i].any() or sed.color_rows[i]
         ]
         if not absolute and not priors:
-            logger.info(
-                f"{where} only differential rows read the clump: they fix "
-                f"the source's color and magnitude RELATIVE to it, not the "
-                f"extinction, so the clump's A_V is constrained only by "
-                f"what calibrates the source (a stated zeropoint tie, an "
-                f"absolute source row) and the av tie.  A calibrated "
-                f"I_RC / (V-I)_RC row naming the clump measures it."
+            logger.warning(
+                f"{where} Only differential rows read the clump, so its "
+                f"extinction is held only by what calibrates the source and "
+                f"the A_V tie, not measured.\nAdd the clump's calibrated "
+                f"I_RC and (V-I)_RC as .sed rows naming it, or a published "
+                f"extinction prior on redclump.{self.names[0]}.extinction_<k>."
             )
 
     # ------------------------------------------------------------------
@@ -610,9 +617,11 @@ class RedClump(Component):
         f_lo, f_hi = resid(lo), resid(hi)
         if f_lo * f_hi > 0:
             logger.warning(
-                f"{where} no A_V in [{lo:g}, {hi:g}] reproduces {what} at "
-                f"the clump's start (Teff {teff:.0f} K); A_V starts at its "
-                f"default."
+                f"{where} No A_V in [{lo:g}, {hi:g}] reproduces {what} at "
+                f"the clump's start (Teff {teff:.0f} K), so A_V starts at "
+                f"its default.\nCheck that row, or set "
+                f"redclump.{self.names[0]}.av: {{initval: ...}} in the "
+                f"params file."
             )
             return
         av = float(brentq(resid, lo, hi, xtol=1e-6))
@@ -632,7 +641,7 @@ class RedClump(Component):
             )
             return
         self.config_manager.add_hint(self._path("av"), av)
-        logger.info(f"{where} A_V starts at {av:.3f} mag, from {what}.")
+        logger.debug(f"{where} A_V starts at {av:.3f} mag, from {what}.")
 
     def _start_bound(self, param, field):
         cfg = self.config_manager.resolve(self.prefix, param, element=0)
@@ -741,12 +750,11 @@ class RedClump(Component):
         if abs(a_i - gm.source_ai_rc) <= SOURCE_AI_RC_TOLERANCE_MAG:
             return
         logger.warning(
-            f"[{self.prefix}] the clump's {when} A_I = {a_i:.3f} differs from "
-            f"galacticmodel.source_ai_rc = {gm.source_ai_rc:.3f} by "
-            f"{a_i - gm.source_ai_rc:+.3f} mag (> "
-            f"{SOURCE_AI_RC_TOLERANCE_MAG} mag).  The luminosity-function "
-            f"source selection uses the static value: set "
-            f"galacticmodel.source_ai_rc: {a_i:.3f} and rerun."
+            f"{self.log_tag(0)} The clump's {when} A_I = {a_i:.3f} differs "
+            f"from galacticmodel source_ai_rc = {gm.source_ai_rc:.3f} by "
+            f"{a_i - gm.source_ai_rc:+.3f} mag, and the luminosity-function "
+            f"source selection uses the static value.\nSet source_ai_rc: "
+            f"{a_i:.3f} in the galacticmodel block and rerun."
         )
 
     def _check_source_ai_rc(self, system):

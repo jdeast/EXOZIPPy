@@ -1693,7 +1693,7 @@ class Engine:
             if c.key in new_keys:
                 continue
             rep["escalated"].append([c.label, self._tier_name(tier), steps])
-            logger.info(
+            logger.debug(
                 "The %s starts could not satisfy '%s' inside their bounds; "
                 "the residual was absorbed by %s.",
                 self._tier_name(tier),

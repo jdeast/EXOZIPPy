@@ -158,7 +158,7 @@ def _check_present(path: Path, name: str) -> bool:
     md5 = None
     if st.st_size != meta["size"] or (md5 := _md5(path)) != meta["md5"]:
         if (md5 or _md5(path)) in _SUPERSEDED.get(name, ()):
-            logger.info(
+            logger.debug(
                 "%s is a previous published version of %s; fetching the "
                 "pinned one (record %s) over it.",
                 path,

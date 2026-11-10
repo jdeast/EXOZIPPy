@@ -1075,8 +1075,8 @@ class AstrometryInstrument(Instrument):
             where=f"[{self.prefix}.{self.names[i]}]",
         )
         self._gaia_epoch_meta[i] = meta
-        logger.info(
-            f"[{self.prefix}.{self.names[i]}] Gaia epoch astrometry of "
+        logger.debug(
+            f"{self.log_tag(i)} Gaia epoch astrometry of "
             f"source {meta['source_id']}: {len(df)} along-scan CCD "
             f"observations used by AGIS, from {meta['n_transits']} "
             f"field-of-view transits; w measured from (ra0, dec0) = "
@@ -1098,18 +1098,19 @@ class AstrometryInstrument(Instrument):
         warned, not raised -- the fit can still be run to look."""
         ours = d["P_E"] * d["sin_psi"] + d["P_N"] * d["cos_psi"]
         diff = float(np.max(np.abs(ours - d["plx_al_dpac"])))
-        msg = (
-            f"[{self.prefix}.{self.names[i]}] along-scan parallax factors, "
-            f"model minus DPAC: max |diff| = {diff:.1e}"
-        )
         if diff > self.PARALLAX_FACTOR_TOL:
             logger.warning(
-                msg + f" exceeds {self.PARALLAX_FACTOR_TOL:g}: the "
-                f"spacecraft ephemeris, the observer or the time "
-                f"conversion disagrees with Gaia's own."
+                f"{self.log_tag(i)} along-scan parallax factors differ from "
+                f"DPAC's by up to {diff:.1e} (tolerance "
+                f"{self.PARALLAX_FACTOR_TOL:g}): the spacecraft ephemeris, "
+                f"the observer or the time conversion disagrees with Gaia's "
+                f"own.  Check the dataset's time_* keys and observer."
             )
         else:
-            logger.info(msg + ".")
+            logger.debug(
+                f"{self.log_tag(i)} along-scan parallax factors, model minus "
+                f"DPAC: max |diff| = {diff:.1e}."
+            )
 
     @property
     def prefix(self):
@@ -1714,8 +1715,8 @@ class AstrometryInstrument(Instrument):
             self.epoch = (
                 float(np.mean(np.concatenate(t_all))) if t_all else 0.0
             )
-        logger.info(
-            f"[{self.prefix}] reference epoch for ra/dec/pm: {self.epoch:.4f}"
+        logger.debug(
+            f"{self.log_tag()} reference epoch for ra/dec/pm: {self.epoch:.4f}"
         )
         self.fithipframe = resolve_frame_defaults(self)
 
@@ -1781,7 +1782,7 @@ class AstrometryInstrument(Instrument):
             (t0, t1), n = kind[1], kind[2]
             epochs = np.linspace(t0, t1, n)
             logger.warning(
-                f"{where} no catalog_epochs given: the model track is "
+                f"{self.log_tag(i)} no catalog_epochs given: the model track is "
                 f"fit at {n} UNIFORM epochs over [{t0:.2f}, {t1:.2f}] "
                 f"BJD_TDB, standing in for the catalog's real epochs and "
                 f"weights.  Where the track is not linear (an orbit, the "
@@ -1800,8 +1801,8 @@ class AstrometryInstrument(Instrument):
         d["y_obs"] = np.asarray(y, dtype=float)
         d["cov"] = cov
         d["param_names"] = CATALOG_PARAM_NAMES[n_par]
-        logger.info(
-            f"{where} catalog solution ({n_par} parameters) at epoch "
+        logger.debug(
+            f"{self.log_tag(i)} catalog solution ({n_par} parameters) at epoch "
             f"{row['time']:.4f} BJD_TDB, modeled from {len(epochs)} epochs "
             f"over [{epochs[0]:.2f}, {epochs[-1]:.2f}]."
         )
@@ -1986,13 +1987,12 @@ class AstrometryInstrument(Instrument):
                     # `fluxfrac_sed` Deterministic that enters no model.
                     if c.get("companion_star_ndx") is not None:
                         logger.warning(
-                            f"[{self.prefix}.{self.names[i]}] "
-                            f"companion_star_ndx is a gaia/abs key (it "
-                            f"selects the photocenter flux fraction) and "
-                            f"this dataset is mode '{self.modes[i]}'; it is "
-                            f"ignored. Relative astrometry weighs each "
-                            f"nested orbit's photocenter from the SED in "
-                            f"`band:` instead."
+                            f"{self.log_tag(i)} companion_star_ndx is "
+                            f"ignored: it is a gaia/abs key (it selects the "
+                            f"photocenter flux fraction), and this dataset "
+                            f"is mode '{self.modes[i]}'.  Remove it; relative "
+                            f"astrometry weighs each nested orbit's "
+                            f"photocenter from the SED in `band:` instead."
                         )
                     continue
                 stars = photocenter_stars(c, self.config_manager.system_config)
@@ -2114,9 +2114,9 @@ class AstrometryInstrument(Instrument):
                 # geocentric frame anchor, as for a lensed abs dataset.
                 if flag is not None:
                     logger.warning(
-                        f"[{where}] microlensing is a gaia/abs key; a "
-                        f"'lensrel' dataset is the lens-source trajectory "
-                        f"by definition and the key is ignored."
+                        f"{self.log_tag(i)} microlensing: is ignored: it is "
+                        f"a gaia/abs key, and a 'lensrel' dataset is the "
+                        f"lens-source trajectory by definition.  Remove it."
                     )
                 event.check_lens_offset_supported(where)
                 self._lens_phot[i] = self._resolve_lens_photometry(system, i)
@@ -2124,10 +2124,10 @@ class AstrometryInstrument(Instrument):
             if self.modes[i] == "rel":
                 if explicit_on:
                     logger.warning(
-                        f"[{where}] microlensing is a gaia/abs key (the "
-                        f"centroid shift of the lensed star's absolute "
-                        f"position); this dataset is mode 'rel' and the "
-                        f"key is ignored."
+                        f"{self.log_tag(i)} microlensing: is ignored: it is "
+                        f"a gaia/abs key (the centroid shift of the lensed "
+                        f"star's absolute position), and this dataset is "
+                        f"mode 'rel'.  Remove it."
                     )
                 continue
             if event is None:
@@ -2387,8 +2387,8 @@ class AstrometryInstrument(Instrument):
                 "shape": (len(owners),),
                 "element_owners": owners,
             }
-            logger.info(
-                f"[{self.prefix}] psf_fluxratio SAMPLED on "
+            logger.debug(
+                f"{self.log_tag()} psf_fluxratio SAMPLED on "
                 f"{sorted(set(owners))} (each psf_stars member's flux "
                 f"relative to the source's baseline flux in the dataset's "
                 f"band), uniform on the defaults.yaml bounds [0, 1000] "
@@ -2867,16 +2867,17 @@ class AstrometryInstrument(Instrument):
                 F_p = group_flux(prim_stars)
                 return F_c / (F_c + F_p)
             logger.warning(
-                f"astrometryinstrument {self.names[i]}: band filter "
-                f"'{filter_key}' is not in the SED's BC grid; "
-                f"approximating the photocenter of orbit "
-                f"{orbits.names[o2]} by its barycenter."
+                f"{self.log_tag(i)} band filter '{filter_key}' is not in the "
+                f"SED's BC grid, so the photocenter of orbit "
+                f"{orbits.names[o2]} is approximated by its barycenter.  "
+                f"Name a band whose filter the grid has in `band:`."
             )
             return None
         logger.warning(
-            f"astrometryinstrument {self.names[i]}: both sides of nested "
-            f"orbit {orbits.names[o2]} are luminous but no band/sed is "
-            f"configured; approximating its photocenter by its barycenter."
+            f"{self.log_tag(i)} both sides of nested orbit "
+            f"{orbits.names[o2]} are luminous but no band/sed is configured, "
+            f"so its photocenter is approximated by its barycenter.  Set "
+            f"`band:` on the dataset (with an sed block) to weight it by flux."
         )
         return None
 

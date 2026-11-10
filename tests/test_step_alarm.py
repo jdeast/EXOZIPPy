@@ -38,7 +38,7 @@ def test_a_slow_step_alarms_while_running_and_names_its_phase(caplog):
         alarm.phase("eval (parallel logp batch)")
         t0 = alarm._t_step
 
-        with caplog.at_level(logging.WARNING, logger=log.name):
+        with caplog.at_level(logging.DEBUG, logger=log.name):
             # ACT: below the threshold, at it, just after, and at 2x
             quiet = alarm.check(now=t0 + 5.0)
             first = alarm.check(now=t0 + 12.0)

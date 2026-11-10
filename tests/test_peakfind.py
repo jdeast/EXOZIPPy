@@ -397,7 +397,11 @@ def test_a_degenerate_refinement_is_discarded_for_the_grid_seed(
 
     monkeypatch.setattr(peakfind, "minimize", fake_minimize)
 
-    # ACT
+    # ACT (the warning is once per System/fit -- logger.first_time -- so
+    # forget any earlier test's in this process)
+    from exozippy.logger import reset_first_time
+
+    reset_first_time()
     with caplog.at_level(logging.WARNING, logger=peakfind.__name__):
         seed = peakfind.find_pspl_seed([(t, f, ivar)])
     monkeypatch.setattr(peakfind, "minimize", real_minimize)

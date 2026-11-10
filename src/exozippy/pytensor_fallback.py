@@ -5,7 +5,7 @@ that cannot actually run a fit: a missing g++ or missing Python development
 headers (the RHEL-family ``python3.12-devel`` package) only surfaces as a
 ``CompileError`` deep inside the first ``pytensor.function`` call, long after
 the model has been built. ``ensure_usable_backend()`` probes the C backend
-with a trivial compile up front and, when it is broken, prints a loud banner
+with a trivial compile up front and, when it is broken, logs one WARNING
 naming the fix and switches PyTensor to its pure-Python backend in-process.
 
 The pure-Python backend alone is not enough: PyMC joins the model's logp
@@ -146,24 +146,17 @@ def activate_python_fallback(reason):
             "  or system-wide, RHEL/Fedora:   sudo dnf install gcc-c++\n"
             "(see README 'Installing')"
         )
-    banner = textwrap.dedent(
-        """
-        {sep}
-        WARNING: PyTensor's C backend is unusable on this machine:
-
-        {reason}
-        {hint}
-        Falling back to PyTensor's pure-Python backend. This works, but it is
-        ORDERS OF MAGNITUDE slower -- fine as a smoke test, hopeless for a
-        real fit. Fix the toolchain above before fitting anything real.
-        {sep}
-        """
-    ).format(
-        sep="!" * 75, reason=textwrap.indent(reason.strip(), "    "), hint=hint
-    )
-    print(banner, flush=True)
+    # One WARNING, no frame (docs/logging.md, "Plain ASCII"): the headline
+    # says what happened and what it costs, then the reason and the fix.
+    # run_fit calls this before setup_logging, so with no handler installed
+    # yet it reaches stderr through logging's last-resort handler.
     logger.warning(
-        "PyTensor C backend unusable; using pure-Python fallback: %s", reason
+        "PyTensor's C backend is unusable on this machine; falling back to "
+        "the pure-Python backend, which is ORDERS OF MAGNITUDE slower -- fine "
+        "as a smoke test, hopeless for a real fit.\n%s%s\nFix the toolchain "
+        "before fitting anything real.",
+        textwrap.indent(reason.strip(), "    "),
+        hint,
     )
 
 

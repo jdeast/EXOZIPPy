@@ -1574,7 +1574,7 @@ def test_vcve_warns_where_an_occultation_or_rvs_measure_e_omega(
     occultation = _transit_config(transit_lc, True)
     occultation["band"][0]["fitthermal"] = True
     (msg,) = _vcve_warnings(caplog, occultation)
-    assert "orbit 'b'" in msg and "transit 'inst0'" in msg
+    assert "[orbit b]" in msg and "transit 'inst0'" in msg
     assert "fitvcve: false" in msg
 
     with_rv = _transit_config(transit_lc, True)

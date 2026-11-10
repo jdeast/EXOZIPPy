@@ -85,10 +85,15 @@ def _build_star_mass(user_params, model_name, system_config=CONFIG):
 
 
 def _table_row(caplog, label):
-    """The startup-table line for one element, or None."""
+    """The startup-table line for one element, or None.
+
+    The table is ONE multi-line log record (docs/logging.md), so its rows are
+    the lines of a record, not records.
+    """
     for rec in caplog.records:
-        if rec.getMessage().strip().startswith(label + " "):
-            return rec.getMessage()
+        for line in rec.getMessage().splitlines():
+            if line.strip().startswith(label + " "):
+                return line
     return None
 
 

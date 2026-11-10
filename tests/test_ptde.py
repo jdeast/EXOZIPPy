@@ -705,7 +705,7 @@ def test_sync_eval_timeout_rejects_the_proposal_and_recycles(
     model.compile_logp = lambda *a, **k: _slower_than(1.0)
 
     # ACT
-    with caplog.at_level(logging.INFO, logger="exozippy.samplers.ptde"):
+    with caplog.at_level(logging.DEBUG, logger="exozippy.samplers.ptde"):
         idata = ptde_sample(
             model,
             _MinimalSystem(),
@@ -1968,7 +1968,7 @@ def test_sync_reports_its_mode_hop_acceptance_at_wrap_up(caplog):
     cannot drift apart again; sync's counts span the draw phase, because its
     counters are zeroed at the tune -> draw boundary.
     """
-    with caplog.at_level(logging.INFO, logger="exozippy.samplers.ptde"):
+    with caplog.at_level(logging.DEBUG, logger="exozippy.samplers.ptde"):
         ptde_sample(
             _simple_model(),
             _MinimalSystem(),
@@ -2092,7 +2092,7 @@ def test_gamma_adapts_on_a_tune_window_not_a_run_length_window(caplog):
 
     def _count_gamma_updates(tune, draws):
         model = _simple_model()
-        with caplog.at_level(logging.INFO, logger="exozippy.samplers.ptde"):
+        with caplog.at_level(logging.DEBUG, logger="exozippy.samplers.ptde"):
             caplog.clear()
             ptde_sample(
                 model,

@@ -231,7 +231,7 @@ def test_resolution_is_logged_per_light_curve(caplog):
     When the system is prepared,
     Then each light curve logs its zeropoint system and the offset applied.
     """
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.DEBUG, logger="exozippy"):
         _kmt_system(magsys="AB", zp={"mu": 0.0, "sigma": 0.2}, build=False)
     lines = [
         r.getMessage()

@@ -240,7 +240,7 @@ def test_global_state_restored_when_the_call_raises():
 
 
 def test_use_ephemeris_falls_back_to_builtin_when_kernel_unavailable(
-    monkeypatch,
+    monkeypatch, caplog
 ):
     """
     Given a JPL kernel that cannot be loaded (no network, no jplephem),
@@ -266,8 +266,9 @@ def test_use_ephemeris_falls_back_to_builtin_when_kernel_unavailable(
     before = solar_system_ephemeris.get()
 
     # Act
-    with pytest.warns(UserWarning, match="falling back to 'builtin'"):
+    with caplog.at_level(logging.WARNING, logger="exozippy.ephemeris"):
         xyz = eph.get_observer_position(TIMES, "earth", ephemeris="de440")
+    assert "falling back to 'builtin'" in caplog.text
 
     # Assert
     expected = eph.get_observer_position(TIMES, "earth", ephemeris="builtin")

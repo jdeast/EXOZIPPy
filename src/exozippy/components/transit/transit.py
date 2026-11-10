@@ -46,9 +46,10 @@ class Transit(Instrument):
         ]
         if deprecated_filters:
             logger.warning(
-                "transit 'filter:' is deprecated and ignored; reference a "
-                "band: block instead (bands carry the filter identity and "
-                "limb darkening)."
+                "%s 'filter:' is ignored (deprecated).  Reference a band: "
+                "block instead (bands carry the filter identity and limb "
+                "darkening).",
+                self.log_tag(),
             )
         self.total_detrend_cols = 0
         # Light-travel-time (Roemer delay) correction, per file (see
@@ -112,8 +113,9 @@ class Transit(Instrument):
                 )
             if "seddeblend_floor" in c and deb is False:
                 logger.warning(
-                    f"[{label}] seddeblend_floor is set but seddeblend is "
-                    f"false; there is no SED constraint for it to floor."
+                    f"{self.log_tag(i)} seddeblend_floor is ignored: "
+                    f"seddeblend is false, so there is no SED constraint for "
+                    f"it to floor.  Remove it, or set seddeblend: true."
                 )
             self.fitdilute.append(bool(fit))
             self.seddeblend_raw.append(
@@ -232,9 +234,10 @@ class Transit(Instrument):
         missing = [p for p in paths if probed[p].value is None]
         if missing:
             logger.warning(
-                f"[{self.prefix}] cannot start dilute at the SED prediction: "
-                f"no start for {missing}; it starts at 0 and the seddeblend "
-                f"prior pulls it in."
+                f"{self.log_tag()} cannot start dilute at the SED "
+                f"prediction: no start for {', '.join(missing)}, so it starts "
+                f"at 0 and the seddeblend prior pulls it in.  Give those a "
+                f"start in the params file."
             )
             return
         values = {
@@ -295,8 +298,9 @@ class Transit(Instrument):
                 )
             if "splinespace" in c and not fit:
                 logger.warning(
-                    f"[{label}] splinespace is set but fitspline is not "
-                    f"true; no spline is fit, so splinespace is ignored."
+                    f"{self.log_tag(i)} splinespace is ignored: fitspline is "
+                    f"not true, so no spline is fit.  Remove it, or set "
+                    f"fitspline: true."
                 )
             self.fitspline.append(bool(fit))
             self.splinespace.append(float(space))
@@ -336,10 +340,11 @@ class Transit(Instrument):
             return self._light_travel_time_active
         if self._light_travel_time_active.any():
             logger.warning(
-                "transit: light-travel-time correction disabled -- the orbit "
-                "does not define %s (its bodies did not resolve; see the "
-                "orbit component's own warning). Set light_travel_time: "
-                "false on the affected transit file(s) to silence this.",
+                "%s light-travel-time correction disabled: the orbit does "
+                "not define %s (its bodies did not resolve).  Set "
+                "light_travel_time: false on the affected transit file(s) "
+                "to silence this.",
+                self.log_tag(),
                 ", ".join(ltt.REQUIRED_ORBIT_PARAMS),
             )
         return np.zeros_like(self._light_travel_time_active)
@@ -500,6 +505,15 @@ class Transit(Instrument):
                     "earliest time (EXOFASTv2's FITRAMP; JWST/Spitzer), "
                     "fitting transit.<name>.ramp_amp and ramp_tau. Default "
                     "false."
+                ),
+            },
+            {
+                "key": "light_travel_time",
+                "kind": "option",
+                "accepts": [True, False],
+                "required": False,
+                "doc": (
+                    "Per file, on by default: include the star's light-travel time across its orbits in this file's model (components/ltt.py). false turns it off."
                 ),
             },
         ]
@@ -935,8 +949,9 @@ class Transit(Instrument):
             val = float(arr[i])
             if not np.isfinite(val):
                 logger.warning(
-                    f"transit {self.names[i]}: median flux is not finite; "
-                    f"leaving baseline at its defaults.yaml start value."
+                    f"{self.log_tag(i)} median flux is not finite, so "
+                    f"baseline starts at its defaults.yaml value.  Check the "
+                    f"file's flux column for non-finite values."
                 )
                 continue
             self.config_manager.add_hint(f"{self.prefix}.{i}.baseline", val)
@@ -2200,7 +2215,10 @@ class Transit(Instrument):
             try:
                 curves = self._unphased_lc_curves(system, point)
             except Exception as e:  # noqa: BLE001 - bad point/draw
-                logger.warning(f"LC model eval failed: {e}")
+                logger.warning(
+                    f"{self.log_tag()} light-curve model evaluation failed, "
+                    f"so the unphased plots show the data only: {e}"
+                )
         for i in range(self.n_elements):
             mask = self.inst_map == i
             traces = []
@@ -2282,7 +2300,11 @@ class Transit(Instrument):
                             system, point, p_idx, i, shared=shared
                         )
                     except Exception as e:  # noqa: BLE001 - bad point/draw
-                        logger.warning(f"LC phased model eval failed: {e}")
+                        logger.warning(
+                            f"{self.log_tag(i)} phased light-curve model "
+                            f"evaluation failed, so its phased plot for "
+                            f"planet {planets.names[p_idx]} is skipped: {e}"
+                        )
                         continue
                     mask = self.inst_map == i
                     traces = [

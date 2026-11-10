@@ -1,5 +1,7 @@
 """Tests for the PyTensor pure-Python backend fallback (pytensor_fallback.py)."""
 
+import logging
+
 import numpy as np
 import pytensor
 import pytensor.tensor as pt
@@ -93,18 +95,19 @@ def test_check_c_backend_reports_missing_cxx(restore_pytensor_config):
 
 
 def test_activate_python_fallback_sets_config_and_warns(
-    restore_pytensor_config, capsys
+    restore_pytensor_config, caplog
 ):
     """Given a Python.h-flavored compile error, when the fallback activates,
     then the C backend is disabled in-process, the split rewrite is
-    registered, and the banner names both the slowdown and the header fix."""
+    registered, and the warning names both the slowdown and the header fix."""
     # Act
-    activate_python_fallback(
-        "fatal error: Python.h: No such file or directory"
-    )
+    with caplog.at_level(logging.WARNING, logger="exozippy.pytensor_fallback"):
+        activate_python_fallback(
+            "fatal error: Python.h: No such file or directory"
+        )
 
     # Assert
-    out = capsys.readouterr().out
+    out = caplog.text
     assert pytensor.config.cxx == ""
     assert pytensor_fallback._REWRITE_REGISTERED
     assert "ORDERS OF MAGNITUDE slower" in out
@@ -112,20 +115,21 @@ def test_activate_python_fallback_sets_config_and_warns(
 
 
 def test_fallback_banner_names_a_compiler_fix_when_none_is_found(
-    restore_pytensor_config, capsys
+    restore_pytensor_config, caplog
 ):
     """Given the probe's reason when PyTensor found no C++ compiler at all,
-    when the fallback activates, then the banner names how to install one,
+    when the fallback activates, then the warning names how to install one,
     including the no-root conda route."""
     # Arrange
     pytensor.config.cxx = ""
     reason = check_c_backend()
 
     # Act
-    activate_python_fallback(reason)
+    with caplog.at_level(logging.WARNING, logger="exozippy.pytensor_fallback"):
+        activate_python_fallback(reason)
 
     # Assert
-    out = capsys.readouterr().out
+    out = caplog.text
     assert "No C++ compiler was found" in out
     assert "conda install -c conda-forge gxx" in out
 

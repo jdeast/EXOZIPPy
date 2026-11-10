@@ -45,10 +45,11 @@ ANCHOR_PLACEHOLDER_DEC_DEG = 0.0
 
 def _unnormalized_warning():
     logger.warning(
-        "[galacticmodel] Cannot read finite log10-mass bounds; the FFP "
-        "mass prior is left unnormalized (harmless for sampling, but its "
-        "logp is offset by an unknown constant and is not comparable with "
-        "the stellar mass function's)."
+        "[galacticmodel] the FFP mass prior is left unnormalized (no finite "
+        "log10-mass bounds), so its logp is offset by an unknown constant "
+        "and evidences are not comparable with the stellar mass "
+        "function's; sampling is unaffected.  Give the sampled log10 mass "
+        "finite lower/upper bounds."
     )
     return 0.0
 
@@ -993,13 +994,13 @@ class GalacticModel(Component):
             return
         logger.warning(
             f"[{self.prefix}] star.{'/'.join(moving)} of the anchor star "
-            f"{anchor} is sampled, but the galactic model's line of "
-            f"sight is FROZEN at the start value (ra="
+            f"{stars.names[anchor]} is sampled, but the galactic model's line "
+            f"of sight is FROZEN at the start value (ra="
             f"{np.degrees(ra_rad):.6f} deg, dec={np.degrees(dec_rad):.6f} "
-            f"deg) for the whole fit. This is safe -- 1 arcsec of coordinate "
-            f"error moves the galactocentric velocity by ~1e-3 km/s and the "
-            f"galactic position by ~0.05 pc -- but the sampled ra/dec do NOT "
-            f"feed the density or kinematic prior."
+            f"deg), so the sampled ra/dec do not feed its density or "
+            f"kinematic prior.  Safe at arcsec level (1 arcsec moves the "
+            f"velocity ~1e-3 km/s, the position ~0.05 pc); pin ra/dec if "
+            f"they can move further."
         )
 
     def build_likelihood(self, model, system):
@@ -1022,7 +1023,7 @@ class GalacticModel(Component):
         # safe out to ~1 arcmin).
         anchor = stars.position_root(self.anchor_idx)
         if anchor != self.anchor_idx:
-            logger.info(
+            logger.debug(
                 f"[{self.prefix}] anchor star {self.anchor_idx}'s position is "
                 f"derived from star {anchor}'s (the lens track); the line of "
                 f"sight is read from star {anchor}."
@@ -1500,7 +1501,7 @@ class GalacticModel(Component):
                 )
                 + ", in the same Galactic population"
             )
-            logger.info(
+            logger.debug(
                 f"[{self.prefix}] star '{label(k)}' shares the position of "
                 f"star '{label(int(j))}' (hard-linked distance): one "
                 f"position, one density and d^2 volume term; '{label(k)}' "
@@ -1509,13 +1510,12 @@ class GalacticModel(Component):
         for k, paths in refused:
             logger.warning(
                 f"[{self.prefix}] star '{label(k)}' has a hard-linked "
-                f"distance that does not name exactly one other star's "
-                f"distance (it reads {list(paths) or 'nothing'}), so there "
-                f"is no single partner whose position it shares. It keeps "
-                f"its own Galactic density term, which is then a factor on "
-                f"the link's sources rather than a density of a coordinate "
-                f"of its own. Link it as 'initval: star.<other>.distance' "
-                f"with 'sigma: 0' to share that star's position instead."
+                f"distance that reads {', '.join(paths) or 'nothing'}, not "
+                f"exactly one other star's distance, so it keeps its own "
+                f"Galactic density term, a factor on the link's sources "
+                f"rather than a density of its own coordinate.  Link it as "
+                f"'initval: star.<other>.distance' with 'sigma: 0' to share "
+                f"that star's position instead."
             )
 
     def _kinematic_evidence_log_norm(self, stars, roots, vel_linked):

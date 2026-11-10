@@ -71,6 +71,7 @@ from exozippy.components.parameter import Parameter, SeedBoundViolation, to_vec
 from exozippy.config import ConfigManager
 from exozippy.evaluator import structural_hash, structural_payload
 from exozippy.graph import determine_pymc_build_order
+from exozippy.logger import bullets, reset_first_time, wrap_message
 from exozippy.manifest import interpret_manifest_entry, normalize_selector
 from exozippy.outputs.prose import ProseCollector
 from exozippy.yamlio import load_yaml
@@ -206,7 +207,7 @@ class System(Component):
                 # write a config, not a mistake to apologize for.  A key that
                 # IS present still has to name a file that exists, which is
                 # the real typo (below) and stays fatal.
-                logger.info(
+                logger.debug(
                     "No 'parameter_file' in the config; proceeding with no "
                     "user parameter overrides. Start values come from each "
                     "component's defaults.yaml, its data-derived hints and "
@@ -239,6 +240,8 @@ class System(Component):
         # were never folded and survived name-form forever (review 2d-1).
         # The registry is discovered here rather than below for the same
         # reason: the hook lives on the component classes.
+        # A new model: every once-per-run warning may be said again.
+        reset_first_time()
         self.registry = discover_components()
         for key, block in self.config.items():
             CompClass = self.registry.get(key)
@@ -286,37 +289,46 @@ class System(Component):
         # normalize_config_block could run first.
         self.active_components = {}
 
-        # 1. AGNOSTIC INSTANTIATION
-        reserved_keys = RESERVED_CONFIG_KEYS
-        for key in self.config.keys():
-            if key in self.registry:
-                CompClass = self.registry[key]
-                inst = CompClass(self.config[key], self.config_manager)
-                self.active_components[key] = inst
-                setattr(self, key, inst)
-            elif key not in reserved_keys:
-                # Distinguish "you typo'd a key" from "the component you
-                # asked for failed to import".  The old code said the
-                # former for both and then fitted a model missing an
-                # entire component and its data, quietly.
-                failed = import_failures().get(key)
-                if failed is not None:
-                    module_path, exc = failed
-                    raise ImportError(
-                        f"YAML key '{key}' names the component module "
-                        f"{module_path}, which failed to import: "
-                        f"{type(exc).__name__}: {exc}.  A missing optional "
-                        f"dependency is the usual cause.  Fix the import or "
-                        f"remove the '{key}' block -- continuing would fit a "
-                        f"model without it."
-                    ) from exc
-                logger.warning(
-                    f"YAML key '{key}' does not match any registered component and will be ignored."
-                )
+        # 0. Every top-level key is a component or a reserved block, checked
+        # BEFORE any component is built so a typo costs nothing.  An unknown
+        # key RAISES, like an unknown key inside a component block (JDE
+        # 2026-11-08; docs/logging.md, "User input is never silently
+        # ignored"): it used to warn "will be ignored" and fit a model missing
+        # whatever the user meant by it.
+        self._check_top_level_keys()
 
-        logger.info("Modeling the following components:")
-        for key, comp in self.active_components.items():
-            logger.info(f"  {key} ({comp.n_elements})")
+        # 1. AGNOSTIC INSTANTIATION
+        for key in self.config.keys():
+            if key not in self.registry:
+                continue  # a reserved block; _check_top_level_keys vetted it
+            CompClass = self.registry[key]
+            # The keys the USER wrote, taken before construction: a
+            # component may normalize its own block in __init__.
+            user_block = [
+                dict(e) if isinstance(e, dict) else e
+                for e in (
+                    self.config[key]
+                    if isinstance(self.config[key], list)
+                    else [self.config[key]]
+                )
+            ]
+            inst = CompClass(self.config[key], self.config_manager)
+            # After construction, so a component's own refusal of a
+            # retired key comes first; then every key nobody reads
+            # raises (docs/logging.md).
+            CompClass.validate_config_keys(key, user_block)
+            self.active_components[key] = inst
+            setattr(self, key, inst)
+
+        # ONE line for the model (docs/logging.md): "Model: star (3), lens
+        # (2), ...", in config order, the count being the instances.
+        logger.info(
+            "Model: "
+            + ", ".join(
+                f"{key} ({comp.n_elements})"
+                for key, comp in self.active_components.items()
+            )
+        )
 
         # Prose topic vocabulary: HERE, once every component exists, because a
         # component may add a sentence as early as stage 1 and add() validates
@@ -341,6 +353,55 @@ class System(Component):
             self.config, self.user_params
         )
         self._structural_hash = structural_hash(self.config, self.user_params)
+
+    def _check_top_level_keys(self):
+        """Raise on a top-level config key that is neither a registered
+        component nor one of RESERVED_CONFIG_KEYS.
+
+        A key naming a component module that failed to import raises that
+        ImportError instead ("you typo'd a key" and "the component you asked
+        for failed to import" are different fixes).  Otherwise the message
+        names every unknown key, suggests a near miss among the components
+        and reserved blocks (never case-folded: a case variant is a near miss
+        to suggest, not a spelling to accept), and lists what is valid.
+        """
+        import difflib
+
+        known = set(self.registry) | set(RESERVED_CONFIG_KEYS)
+        unknown = [str(k) for k in self.config.keys() if k not in known]
+        if not unknown:
+            return
+        failures = import_failures()
+        for key in unknown:
+            failed = failures.get(key)
+            if failed is not None:
+                module_path, exc = failed
+                raise ImportError(
+                    f"YAML key '{key}' names the component module "
+                    f"{module_path}, which failed to import: "
+                    f"{type(exc).__name__}: {exc}.  A missing optional "
+                    f"dependency is the usual cause.  Fix the import or "
+                    f"remove the '{key}' block -- continuing would fit a "
+                    f"model without it."
+                ) from exc
+        hints = []
+        for key in unknown:
+            close = difflib.get_close_matches(
+                key, sorted(known), n=1, cutoff=0.75
+            )
+            if close:
+                hints.append(f"'{key}': did you mean '{close[0]}'?")
+        raise ValueError(
+            wrap_message(
+                f"Unknown top-level config key(s) "
+                f"{', '.join(repr(k) for k in unknown)}: neither a component "
+                f"nor a reserved block, so nothing would read them."
+                + ("\n" + bullets(hints) if hints else "")
+                + "\nCorrect the spelling or delete the block.  Components: "
+                f"{', '.join(sorted(self.registry))}.  Reserved blocks: "
+                f"{', '.join(sorted(RESERVED_CONFIG_KEYS))}."
+            )
+        )
 
     def structural_fingerprint(self):
         """``(hash, payload)`` of the config + params this System was built from.
@@ -494,7 +555,7 @@ class System(Component):
                     + "; ".join(m for m, _ in unsettled)
                 )
             for message, paths in start_rereads:
-                logger.info(message)
+                logger.debug(message)
                 self.config_manager.record_diagnostic("info", message, paths)
             for message, paths in self.topology_revisions:
                 logger.warning(
@@ -1168,7 +1229,7 @@ class System(Component):
                 len(branches),
             )
         else:
-            logger.info(
+            logger.debug(
                 "[system] marginalizing the likelihood over %d branch "
                 "combination(s) (%s).",
                 n_comb,
@@ -1440,12 +1501,13 @@ class System(Component):
             return []
         self._warned_unmatched_user_params = True
         if unmatched:
+            where = self.config_manager.param_file or "the params"
             logger.warning(
-                f"The following parameters in the parameter.yaml file did "
-                f"not match any model parameter and were not applied: "
-                f"{unmatched}\n"
-                "This can be safely ignored if intentional, but check for "
-                "typos."
+                f"{len(unmatched)} key(s) in {where} did not match any model "
+                f"parameter and were NOT applied: "
+                f"{', '.join(map(str, unmatched))}.\n"
+                "Check their spelling against the startup table, or remove "
+                "the ones for a component this config does not include."
             )
         return unmatched
 
@@ -1680,7 +1742,7 @@ class System(Component):
                 starts.append(raw)
                 seed_indices.append(k)
 
-        logger.info(
+        logger.debug(
             f"Multi-seed starts: {len(starts)}/{len(seed_resolved)} seeds "
             f"usable (seed indices {seed_indices})."
         )
@@ -1825,7 +1887,7 @@ class System(Component):
             )
         if moved:
             n = sum(len(v) for v in moved.values())
-            logger.info(
+            logger.debug(
                 f"Whitening anchor re-centered on the polished start: "
                 f"{n} logit element(s) across {len(moved)} parameter(s) now "
                 f"have raw = 0 at the start."
@@ -1943,7 +2005,7 @@ class System(Component):
                 posterior[name] = posterior[name].copy(
                     data=np.array(regenerated[name].values)
                 )
-        logger.info(
+        logger.debug(
             "degeneracy fold applied; %d deterministics regenerated.",
             len(regenerated.data_vars),
         )
@@ -1966,7 +2028,7 @@ class System(Component):
                 keep = labels >= 0
                 posterior = posterior.isel(sample=keep)
                 labels = labels[keep]
-                logger.info(
+                logger.debug(
                     f"distribute_posterior: dropped {int((~keep).sum())} "
                     f"invalid/unassigned draws flagged by mode identification"
                 )

@@ -67,7 +67,7 @@ def test_constant_column_is_dropped_and_named(healthy, caplog):
     samples[:, 1] = 4.25
 
     # ACT
-    with caplog.at_level("WARNING", logger="exozippy.corner_utils"):
+    with caplog.at_level("DEBUG", logger="exozippy.corner_utils"):
         out, out_labels = _drop_undrawable(samples, labels, "f.png")
 
     # ASSERT
@@ -198,7 +198,7 @@ def test_column_with_sub_bin_range_is_dropped_and_named(healthy, caplog):
     assert samples[:, 1].min() != samples[:, 1].max()
 
     # ACT
-    with caplog.at_level("WARNING", logger="exozippy.corner_utils"):
+    with caplog.at_level("DEBUG", logger="exozippy.corner_utils"):
         out, out_labels = _drop_undrawable(samples, labels, "f.png")
 
     # ASSERT

@@ -39,7 +39,6 @@ mulensinstrument:
     # OGLE observes in Cousins I.  A bare "I" would name two rows of the
     # filter alias table (Bessell and Cousins), so the band spells it out.
     band: "Cousins_I"
-    zero_point: ""
 
 parameter_file: "ob08092.params.yaml"
 

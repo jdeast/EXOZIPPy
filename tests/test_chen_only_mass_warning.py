@@ -94,7 +94,7 @@ def test_a_transit_only_jupiter_warns_at_build(data, caplog):
     ]
     assert len(hits) == 1
     msg = hits[0]
-    assert "[planet.b]" in msg
+    assert "[planet b]" in msg
     assert "unlikely to mix" in msg
     assert "sigma: 0" in msg and "mu/sigma" in msg
     # The pin it recommends is on the SAMPLED coordinate (log_q here): a pin

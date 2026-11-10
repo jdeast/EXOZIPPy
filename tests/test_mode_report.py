@@ -1489,7 +1489,8 @@ def test_a_bound_pileup_with_an_ordinary_lp_is_kept_valid(caplog):
       not fire) but inside the bulk's lp range,
     When identify_modes runs,
     Then none is invalid: they are counted as a bound pileup, the dimension
-      is named with its draw count, a warning says so, the report text
+      is named with its draw count, a DEBUG line says so (the per-parameter
+      WARNING is diagnostics.log_bound_pileups'), the report text
       carries the pileup line instead of the numerical-failure banner, and
       the pileup is clustered with the bulk rather than reported as a
       second mode (its stretched coordinate would otherwise split off).
@@ -1497,7 +1498,7 @@ def test_a_bound_pileup_with_an_ordinary_lp_is_kept_valid(caplog):
     rng = np.random.default_rng(217)
     idata, pile = _wall_pileup_idata(rng)
 
-    with caplog.at_level("WARNING", logger="exozippy.outputs.modes"):
+    with caplog.at_level("DEBUG", logger="exozippy.outputs.modes"):
         rep = identify_modes(idata)
 
     assert rep.n_invalid == 0

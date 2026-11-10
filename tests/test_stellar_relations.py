@@ -325,7 +325,7 @@ def test_a_star_outside_the_range_warns_and_does_not_raise(caplog):
 
     # Assert
     msgs = [r.message for r in caplog.records]
-    assert msgs == ["toy 'i1': star 'B' starts at 3.000 solMass"]
+    assert msgs == ["[toy i1] star 'B' starts at 3.000 solMass"]
 
 
 def test_a_missing_or_nan_initval_is_skipped(caplog):

@@ -767,7 +767,7 @@ class SED(SightLineDust, Component):
                 f"{inv.n_free - 1} stellar), so the rows leave no residual "
                 f"scatter to measure it from"
             )
-            log = logger.info if inv.n_rows == 0 else logger.warning
+            log = logger.debug if inv.n_rows == 0 else logger.warning
             log(
                 f"[{self.prefix}] errscale pinned at 1.0: {why}. Give "
                 f"'sed.errscale' a prior or bounds in the params file to fit "
@@ -1294,7 +1294,7 @@ class SED(SightLineDust, Component):
                 )
                 continue
             if not entry["readers"]:
-                logger.info(
+                logger.debug(
                     f"SED: band(s) {bands} filter '{label}' ({svo}) has no "
                     f"{self.sedmodel} BC column, and no component reads its "
                     f"SED flux, so it is left out of the BC grid (no "
@@ -1408,7 +1408,7 @@ class SED(SightLineDust, Component):
             if model_root_of(path) == synth_root:
                 self.synthesized_filters.append(name)
                 if self.mist_filters[i] not in self._to_synthesize:
-                    logger.info(
+                    logger.debug(
                         f"SED: filter '{name}' (BC column "
                         f"{self.mist_filters[i]}) is not in the published "
                         f"{self.sedmodel} tables; reading the column "
@@ -1717,7 +1717,7 @@ class SED(SightLineDust, Component):
         converted = np.flatnonzero(self.ab_minus_vega)
         for i in converted:
             if self.color_rows[i]:
-                logger.info(
+                logger.debug(
                     f"SED: color row {i} ({self.filters[i]} "
                     f"{self.magsys[i]} - {self.neg_filters[i]} "
                     f"{self.neg_magsys[i]}); fitting "
@@ -1726,7 +1726,7 @@ class SED(SightLineDust, Component):
                     f"(Vega - Vega)."
                 )
                 continue
-            logger.info(
+            logger.debug(
                 f"SED: {self.filters[i]} is AB; fitting "
                 f"{self.mag_reported[i]:.4f} - {self.ab_minus_vega[i]:.4f} "
                 f"= {self.mag[i]:.4f} (Vega)."
@@ -3045,20 +3045,20 @@ class SED(SightLineDust, Component):
         if isinstance(points, dict):
             points = [points]
         if not points:
-            logger.warning("SED.plot: no points provided.")
+            logger.warning("[sed] plot: no points provided.")
             return
         # The dust profile's figure needs no photometry row (a row-less SED
         # still places its stars on the profile).
         if getattr(self, "_compiled_dust", None) is not None:
             self.plot_dust_profile(system, points, filename_prefix)
         if self.nfilters == 0:
-            logger.info(
-                "SED.plot: no catalog photometry rows; skipping SED plot."
+            logger.debug(
+                "[sed] plot: no catalog photometry rows; skipping the SED plot."
             )
             return
         if getattr(self, "_compiled_mag_predictors", None) is None:
             logger.warning(
-                "SED.plot: plotting functions failed to compile "
+                "[sed] plot: plotting functions failed to compile "
                 "(see the earlier 'SED plotter compile failed' warning); "
                 "skipping SED plot."
             )
@@ -3385,7 +3385,7 @@ class SED(SightLineDust, Component):
         # ---- Model mode: model spectra + observed flux points ---------
         if getattr(self, "_compiled_mag_predictors", None) is None:
             logger.warning(
-                "SED.plot_data: plotters failed to compile; "
+                "[sed] plot_data: plotters failed to compile; "
                 "returning data-only spec."
             )
             return self.plot_data(system, point=None)

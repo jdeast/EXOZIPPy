@@ -95,6 +95,13 @@ from ..config import PRECEDENCE_DERIVED_DATA, user_entry
 
 logger = logging.getLogger(__name__)
 
+#: The remedy every "search skipped / found nothing" warning ends with: the
+#: search ran because a start was missing, and it supplied none.
+NO_SEED_REMEDY = (
+    "  No start was seeded: give the orbit's period and tc starts in the "
+    "params file."
+)
+
 
 # --- detection thresholds -----------------------------------------------------
 #
@@ -220,7 +227,7 @@ def bls_search(
     if time.size < MIN_BLS_POINTS:
         logger.warning(
             "[%s] BLS skipped: %d usable photometric points, fewer than the "
-            "%d a box search needs.",
+            "%d a box search needs." + NO_SEED_REMEDY,
             context,
             time.size,
             MIN_BLS_POINTS,
@@ -230,7 +237,8 @@ def bls_search(
     baseline = float(time.max() - time.min())
     if not np.isfinite(baseline) or baseline <= 0:
         logger.warning(
-            "[%s] BLS skipped: the times span no baseline.", context
+            "[%s] BLS skipped: the times span no baseline." + NO_SEED_REMEDY,
+            context,
         )
         return None
 
@@ -244,7 +252,7 @@ def bls_search(
     if durations.size == 0:
         logger.warning(
             "[%s] BLS skipped: the %.4g d baseline is shorter than the "
-            "shortest trial transit duration.",
+            "shortest trial transit duration." + NO_SEED_REMEDY,
             context,
             baseline,
         )
@@ -262,7 +270,7 @@ def bls_search(
     except ValueError as exc:
         logger.warning(
             "[%s] BLS skipped: astropy could not build a period grid over a "
-            "%.4g d baseline (%s).",
+            "%.4g d baseline (%s)." + NO_SEED_REMEDY,
             context,
             baseline,
             exc,
@@ -271,7 +279,7 @@ def bls_search(
     if np.size(periods) < 3:
         logger.warning(
             "[%s] BLS skipped: the period grid holds only %d trial period(s) "
-            "over a %.4g d baseline.",
+            "over a %.4g d baseline." + NO_SEED_REMEDY,
             context,
             int(np.size(periods)),
             baseline,
@@ -283,7 +291,8 @@ def bls_search(
     finite = np.isfinite(power)
     if not finite.any():
         logger.warning(
-            "[%s] BLS skipped: the periodogram is all NaN.", context
+            "[%s] BLS skipped: the periodogram is all NaN." + NO_SEED_REMEDY,
+            context,
         )
         return None
 
@@ -311,8 +320,7 @@ def bls_search(
             "[%s] BLS found no convincing transit: best period %.6g d has "
             "SDE = %.3g (need %.3g) and depth = %.4g +/- %.4g "
             "(SNR %.3g, need %.3g), over %d points spanning %.4g d and "
-            "%d trial periods. No start values were seeded from the "
-            "photometry.",
+            "%d trial periods." + NO_SEED_REMEDY,
             context,
             period,
             sde,
@@ -436,7 +444,7 @@ def lombscargle_search(
     if time.size < MIN_LS_POINTS:
         logger.warning(
             "[%s] Lomb-Scargle skipped: %d usable velocities, fewer than the "
-            "%d a periodogram needs.",
+            "%d a periodogram needs." + NO_SEED_REMEDY,
             context,
             time.size,
             MIN_LS_POINTS,
@@ -449,7 +457,7 @@ def lombscargle_search(
     if not np.isfinite(baseline) or maximum_period <= minimum_period:
         logger.warning(
             "[%s] Lomb-Scargle skipped: the %.4g d baseline admits no period "
-            "range above the %.4g d floor.",
+            "range above the %.4g d floor." + NO_SEED_REMEDY,
             context,
             baseline,
             minimum_period,
@@ -465,7 +473,8 @@ def lombscargle_search(
     )
     if power.size == 0 or not np.isfinite(power).any():
         logger.warning(
-            "[%s] Lomb-Scargle skipped: the periodogram is empty or all NaN.",
+            "[%s] Lomb-Scargle skipped: the periodogram is empty or all NaN."
+            + NO_SEED_REMEDY,
             context,
         )
         return None
@@ -512,7 +521,7 @@ def lombscargle_search(
         logger.warning(
             "[%s] Lomb-Scargle skipped: astropy could not evaluate a "
             "false-alarm probability (%s), and a periodogram peak with no "
-            "significance is not a detection.",
+            "significance is not a detection." + NO_SEED_REMEDY,
             context,
             exc,
         )
@@ -522,8 +531,8 @@ def lombscargle_search(
         logger.warning(
             "[%s] Lomb-Scargle found no convincing periodicity: the best "
             "period %.6g d has power %.4g, false-alarm probability %.3g "
-            "(need < %.3g), over %d velocities spanning %.4g d. No start "
-            "values were seeded from the RVs.",
+            "(need < %.3g), over %d velocities spanning %.4g d."
+            + NO_SEED_REMEDY,
             context,
             period,
             peak_power,
@@ -625,7 +634,7 @@ def seed_start(config_manager, path, value, quality, source):
         key, value / user_factor, rank=PRECEDENCE_DERIVED_DATA
     )
     registry[key] = (quality, value, source)
-    logger.info(
+    logger.debug(
         "Global search: seeded %s = %.10g (internal units) from %s.",
         key,
         value,
@@ -729,10 +738,10 @@ def search_mode(system):
         return "auto"
     if len(values) > 1:
         logger.warning(
-            "orbit blocks disagree about global_search (%s); the search is a "
-            "system-wide startup decision, so the most restrictive setting "
-            "wins.",
-            sorted(str(v) for v in values),
+            "[orbit] orbit blocks disagree about global_search (%s), so the "
+            "most restrictive setting applies to the whole system.  Set the "
+            "same global_search on every orbit block.",
+            ", ".join(sorted(str(v) for v in values)),
         )
     if any(
         v is False or str(v).lower() in ("false", "off", "none")
@@ -767,14 +776,27 @@ def sole_orbit_index(system, context):
     # the single-orbit case.
     keplerian = [int(i) for i in np.nonzero(orbit.is_keplerian)[0]]
     if len(keplerian) != 1:
-        logger.warning(
+        # Warn only where it matters: an orbit that lacks a period or tc
+        # start.  With every start supplied there is nothing to search for,
+        # and a warning on every multi-planet fit is one nobody reads.
+        groups = {}
+        for o in keplerian:
+            groups[(o, "period")] = (f"orbit.{o}.period", f"orbit.{o}.logP")
+            groups[(o, "tc")] = (f"orbit.{o}.tc",)
+        satisfied = starts_satisfied(orbit.config_manager, groups)
+        missing = sorted(
+            {orbit.names[o] for (o, _), ok in satisfied.items() if not ok}
+        )
+        logger.log(
+            logging.WARNING if missing else logging.DEBUG,
             "[%s] the global period search is skipped: this system has %d "
             "Keplerian orbits, and a periodogram peak carries no statement "
-            "about WHICH orbit it belongs to. Supply start values for the "
-            "orbital periods and conjunction times in the params file (the "
-            "standalone BLS/Lomb-Scargle utilities will report the peaks).",
+            "about WHICH orbit it belongs to.  Supply period and tc starts "
+            "for orbit(s) %s in the params file (the standalone "
+            "BLS/Lomb-Scargle utilities will report the peaks).",
             context,
             len(keplerian),
+            ", ".join(missing) or "(none missing)",
         )
         return None
     return keplerian[0]

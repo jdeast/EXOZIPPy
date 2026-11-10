@@ -189,7 +189,7 @@ def test_the_ledger_reports_its_progress(cores, monkeypatch, caplog):
     kw = {} if cores == 1 else {"cores": cores, "eval_timeout": 60.0}
 
     # ACT
-    with caplog.at_level(logging.INFO, logger="exozippy.whitening"):
+    with caplog.at_level(logging.DEBUG, logger="exozippy.whitening"):
         build_seed_ledger(system, model, _two_seeds(model), [0, 1], **kw)
 
     # ASSERT

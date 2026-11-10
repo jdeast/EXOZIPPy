@@ -219,9 +219,11 @@ class Assay(Component):
                 )
             if not good.all():
                 logger.warning(
-                    "[%s] dropped %d of %d rows with a non-finite time or "
-                    "concentration.",
-                    where,
+                    "[%s %s] dropped %d of %d rows with a non-finite time or "
+                    "concentration.  Check the file's time and concentration "
+                    "columns.",
+                    self.prefix,
+                    name,
                     int((~good).sum()),
                     good.size,
                 )
@@ -312,7 +314,7 @@ class Assay(Component):
             )
         factor = float((1.0 * unit).to(target).value)
         if factor != 1.0:
-            logger.info(
+            logger.debug(
                 "[%s] converting %s -> %s (x%g).", where, unit, target, factor
             )
         return values * factor
@@ -358,10 +360,11 @@ class Assay(Component):
         missing = set(range(len(names))) - set(rows)
         if missing:
             logger.warning(
-                "[%s] subjects %s have no observations in any assay file; "
-                "their parameters are constrained only by their priors.",
-                self.prefix,
-                [names[i] for i in sorted(missing)],
+                "%s subject(s) %s have no observations in any assay file, so "
+                "their parameters are constrained only by their priors.  "
+                "Check the subject names the assay files use.",
+                self.log_tag(),
+                ", ".join(str(names[i]) for i in sorted(missing)),
             )
 
     # ------------------------------------------------------------------

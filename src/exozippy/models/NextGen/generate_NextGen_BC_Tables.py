@@ -26,6 +26,7 @@ README.md in this directory for the workflow):
 from __future__ import annotations
 
 import datetime
+import logging
 import os
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
@@ -65,6 +66,8 @@ from exozippy.models.NextGen.nextgen_spectra import (
     find_spectrum_file,
     process_spectrum,
 )
+
+logger = logging.getLogger(__name__)
 
 try:
     from tqdm.auto import tqdm
@@ -605,12 +608,16 @@ def plan_bc_work(
 
 def _summarize_plan(plan: Dict[str, pd.DataFrame], n_nodes: int) -> None:
     if not plan:
-        print("Every requested BC column is already computed; nothing to do.")
+        logger.debug(
+            "Every requested BC column is already computed; nothing to do."
+        )
         return
     for fac, todo in plan.items():
         cols = [c for c in todo.columns if c not in GRID_KEY_COLS]
         counts = ", ".join(f"{c}: {int(todo[c].sum())}" for c in cols)
-        print(f"{fac}: cells to compute (of {n_nodes} grid nodes) -- {counts}")
+        logger.debug(
+            f"{fac}: cells to compute (of {n_nodes} grid nodes) -- {counts}"
+        )
 
 
 def generate_bc_tables(
@@ -825,7 +832,7 @@ def generate_bc_tables(
 
     if save:
         for fac in out:
-            print(f"Wrote {bc_table_path(model_root, MODEL, fac)}")
+            logger.debug(f"Wrote {bc_table_path(model_root, MODEL, fac)}")
         # The offsets are a property of the columns just written (profile,
         # weighting, zeropoint), so they are rewritten with them -- a
         # regenerated column cannot keep a stale offset.
@@ -1174,7 +1181,7 @@ def write_magsys_table(
         )
         new.to_csv(f, index=False, float_format="%.10g")
     os.replace(tmp, path)
-    print(f"Wrote {path}")
+    logger.debug(f"Wrote {path}")
     return path
 
 
@@ -1206,5 +1213,9 @@ def __main_step2_generate_bc_tables__():
 
 # depending on what you want to run, you can comment out either step
 if __name__ == "__main__":
+    # generate_bc_tables and write_magsys_table also run inside a fit (via
+    # bc_synthesis), where their progress is DEBUG; run as a script, show it.
+    logging.basicConfig(format="%(message)s")
+    logging.getLogger("exozippy").setLevel(logging.DEBUG)
     __main_step1_process_raw_spectra__()
     __main_step2_generate_bc_tables__()

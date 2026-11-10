@@ -340,8 +340,8 @@ class Band(Component):
                 and alias_df is not None
                 and not alias_df.eq(filt).any(axis=1).any()
             ):
-                logger.warning(
-                    f"Band '{band_name}': filter '{filt}' is not in the "
+                logger.debug(
+                    f"[{self.prefix} {band_name}] filter '{filt}' is not in the "
                     f"filter alias table (exozippy/filters/"
                     f"filternames.txt); assuming it is already a canonical "
                     f"BC-table/SVO name."
@@ -359,7 +359,7 @@ class Band(Component):
                 # warnings.  Stating the resolution once per band is enough
                 # for a user who meant the other one to notice.
                 logger.info(
-                    f"Band '{band_name}': filter '{filt}' names more than "
+                    f"[{self.prefix} {band_name}] filter '{filt}' names more than "
                     f"one row of the filter alias table; resolving it to "
                     f"'{self.filter_svo[-1]}' by the project convention "
                     f"that a bare '{filt}' is the Cousins band. Write the "
@@ -528,8 +528,9 @@ class Band(Component):
             # all read the same (u1, u2).  The one consumer question is
             # whether ANYTHING reads them.
             if not any(c.band == i for c in consumers):
-                # For an unset band that is simply not a case for it (INFO).
-                level = logging.INFO
+                # For an unset band that is simply not a case for it: DEBUG,
+                # a decision that follows from the topology (docs/logging.md).
+                level = logging.DEBUG
                 reason = (
                     "nothing in this topology reads this band's limb "
                     "darkening, so there is nothing to tie"
@@ -921,7 +922,7 @@ class Band(Component):
         for i, reason, level in skipped:
             logger.log(
                 level,
-                f"[{self.prefix}] {self.names[i]}: the Claret limb-darkening "
+                f"{self.log_tag(i)} the Claret limb-darkening "
                 f"tie (star_constrains_ld, on by default) is OFF for this "
                 f"band: {reason}.  Set star_constrains_ld: false on it to "
                 f"say so explicitly.",
@@ -933,11 +934,12 @@ class Band(Component):
         for i, name in plan:
             if self.claret_filters[i] is not None:
                 logger.warning(
-                    f"[{self.prefix}] {self.names[i]}: limb darkening tied "
+                    f"{self.log_tag(i)} limb darkening tied "
                     f"to Claret's {name} table as an APPROXIMATION for "
                     f"filter {self.filter_names[i]!r} (claret_filter: "
                     f"{self.claret_filters[i]!r}); the modeling draft says "
-                    f"so."
+                    f"so.  Set star_constrains_ld: false on the band to fit its limb "
+                    f"darkening freely instead."
                 )
         for i, name in plan:
             if self.ld_sources[i] == "phoenix":
@@ -1106,7 +1108,7 @@ class Band(Component):
                     # documented probe_start answer when nothing before
                     # stage 4 reaches it (no mass/radius information yet).
                     # Its bound is a soft barrier in the model either way.
-                    logger.info(
+                    logger.debug(
                         f"[{self.prefix}] star {label}: its logg start is "
                         f"not derivable before stage 4, so the Claret "
                         f"tables' logg range is not checked at the start; "
@@ -1141,8 +1143,8 @@ class Band(Component):
             axes = self._star_axes(i)
             starts = {ax: probed[f"star.{s}.{ax}"] for ax in axes}
             if not all(p.informed for p in starts.values()):
-                logger.info(
-                    f"[{self.prefix}] {self.names[i]}: not seeding the limb "
+                logger.debug(
+                    f"{self.log_tag(i)} not seeding the limb "
                     f"darkening from the "
                     f"{self._table_source(self._claret_tables[i])} table -- "
                     f"star {self._star_label(star_names, s)}'s start "
@@ -1195,8 +1197,8 @@ class Band(Component):
             seed = {"u1": float(coeffs[0])}
         clipped = {k: float(np.clip(v, lo, hi)) for k, v in seed.items()}
         if clipped != seed:
-            logger.info(
-                f"[{self.prefix}] {self.names[i]}: the Claret table value "
+            logger.debug(
+                f"{self.log_tag(i)} the Claret table value "
                 f"({', '.join(f'{c:.4f}' for c in coeffs)}) lies outside the "
                 f"physical limb-darkening region; its start is projected "
                 f"inside it ({', '.join(f'{k}={v:.4f}' for k, v in clipped.items())}). "
@@ -1509,7 +1511,7 @@ class Band(Component):
         for i in unread:
             joined = "/".join(self.LD_SAMPLED_PARAMS[self.ld_laws[i]])
             first = self.LD_SAMPLED_PARAMS[self.ld_laws[i]][0]
-            logger.info(
+            logger.debug(
                 f"[{self.prefix}] pinning {self.prefix}.{self.names[i]}."
                 f"{joined} (sigma=0): nothing in this topology reads this "
                 f"band's limb darkening. Only a transit, a finite-source "
@@ -1566,7 +1568,7 @@ class Band(Component):
             )
             self._pin_unread_limb_darkening(system, consumers=consumers)
         else:
-            logger.info(
+            logger.debug(
                 f"[{self.prefix}] no limb-darkening parameters: nothing in "
                 f"this topology reads any band's limb darkening (only a "
                 f"transit, a finite-source microlensing light curve, or an "

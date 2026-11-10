@@ -330,9 +330,10 @@ def start_run(config_path, cwd=None):
         os.makedirs(os.path.dirname(console_path) or ".", exist_ok=True)
         console = open(console_path, "wb")
     except OSError:
-        logger.exception(
+        logger.warning(
             "Could not open the run console log; the fit's output stays on "
-            "the parent's streams (non-fatal)."
+            "the parent's streams (non-fatal).",
+            exc_info=True,
         )
 
     try:

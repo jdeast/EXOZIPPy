@@ -222,6 +222,12 @@ def _invalid_reason_hint(reason_counts):
     return ""
 
 
+def _reason_text(reason_counts):
+    """``{'raw-z': 3, 'nonfinite-lp': 1}`` as ``raw-z: 3, nonfinite-lp: 1``
+    -- a log message names the reasons in words, not as a dict repr."""
+    return ", ".join(f"{k}: {int(v)}" for k, v in reason_counts.items())
+
+
 def check_invalid_frac(
     mode_report,
     max_invalid_frac=DEFAULT_MAX_INVALID_FRAC,
@@ -288,29 +294,25 @@ def check_invalid_frac(
         # 226 and 289 (2026-10) lost their whole wrap-up to this raise.  The
         # draws stay excluded from every summary.
         logger.warning(
-            "modes: %d draws (%.2f%%) were rejected by the raw-z filter "
-            "alone, above max_invalid_frac=%.2f%% -- they are finite, with "
-            "finite lp, but far from the bulk in the sampled coordinates "
-            "and below the bulk's lp range: chains that have not "
-            "equilibrated. They are EXCLUDED from every table and from the "
-            "restart file's seeds, which therefore describe the remaining "
-            "draws only. Run longer (or restart from the restart file) "
-            "before trusting the results. reasons=%s",
+            "modes: %d draws (%.2f%%, above max_invalid_frac=%.2f%%) were "
+            "rejected by the raw-z filter alone -- chains that have not "
+            "equilibrated -- and are EXCLUDED from every table and from the "
+            "restart file's seeds.\nRun longer (or restart from the restart "
+            "file) before trusting the results.",
             n_invalid,
             100 * frac,
             100 * max_invalid_frac,
-            reason_counts,
         )
         return
     if force:
         logger.warning(
             "modes: %d draws (%.2f%%) are numerically invalid, above "
             "max_invalid_frac=%.2f%%, but `modes: {force: true}` was set -- "
-            "emitting tables from a trace known to be broken. reasons=%s",
+            "emitting tables from a trace known to be broken (%s).",
             n_invalid,
             100 * frac,
             100 * max_invalid_frac,
-            reason_counts,
+            _reason_text(reason_counts),
         )
         return
 
@@ -1535,7 +1537,10 @@ def identify_modes(
                     + ", ".join(f"{k}: {v}" for k, v in top)
                 )
                 notes.append(msg)
-                logger.warning("identify_modes: %s", msg)
+                # DEBUG: diagnostics.log_bound_pileups warns about the same
+                # draws naming each parameter and its bound; this line is in
+                # raw coordinates.
+                logger.debug("identify_modes: %s", msg)
                 z_ok |= pileup
         valid &= z_ok
         reasons[(reasons == "") & ~z_ok] = "raw-z"
@@ -1558,13 +1563,16 @@ def identify_modes(
         )
         logger.warning(
             "identify_modes: %d/%d draws (%.2f%%) rejected as numerically "
-            "invalid -- this should only happen due to a model or sampler "
-            "bug. reasons=%s, per-chain invalid counts=%s",
+            "invalid (%s); only a model or sampler bug should produce these "
+            "-- investigate.",
             n_invalid,
             n_samples,
             100 * frac,
-            invalid_reason_counts,
-            invalid_per_chain.tolist(),
+            _reason_text(invalid_reason_counts),
+        )
+        logger.debug(
+            "identify_modes: invalid draws per chain: %s",
+            ", ".join(str(int(c)) for c in invalid_per_chain),
         )
     if not valid.any():
         # Carries the counts so the caller's validity gate has something to
@@ -1836,7 +1844,14 @@ def identify_modes(
                 f"run, or the scatter of independent repeats, settles it."
             )
             notes.append(msg)
-            logger.warning("identify_modes: %s", msg)
+            logger.warning(
+                "identify_modes: mode-weight error is APPROXIMATE: this run "
+                "does not resolve the drift of the mode populations (mode "
+                "%d: %s); details in the modes report.\nA longer run, or the "
+                "scatter of independent repeats, settles it.",
+                worst.index + 1,
+                _fmt_pm(worst.occ_weight, worst.occ_weight_err),
+            )
 
     report = ModeReport(
         labels=labels_2d,
@@ -1862,10 +1877,12 @@ def identify_modes(
     )
     if attach:
         report.attach(idata)
-    logger.info(
-        "identify_modes: %d mode(s), weights=%s, %s",
+    logger.debug(
+        "identify_modes: %d mode(s), weights %s, %s",
         report.n_modes,
-        [f"{m_.weight:.3f}+/-{m_.weight_err:.3f}" for m_ in report.modes],
+        ", ".join(
+            f"{m_.weight:.3f}+/-{m_.weight_err:.3f}" for m_ in report.modes
+        ),
         provenance,
     )
     return report

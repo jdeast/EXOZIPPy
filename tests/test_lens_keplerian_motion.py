@@ -75,7 +75,7 @@ def _kep_system(tmp_path, cosi=0.5):
             {"body": "star.L2", "orbit": "L"},
         ],
         "source": [{"body": "star.Source"}],
-        "mulensinstrument": [{"name": "OGLE", "file": lc, "filter": "I"}],
+        "mulensinstrument": [{"name": "OGLE", "file": lc}],
     }
     params = {
         "source.Source.t_0": {"initval": _T0_PAR},
