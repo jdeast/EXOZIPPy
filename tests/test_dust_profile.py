@@ -574,3 +574,64 @@ def test_no_stated_position_leaves_the_profile_off_unless_asked(tmp_path):
     assert not build({}).sed._dust_plan.on
     with pytest.raises(ValueError, match="sky position"):
         build({"distance_constrains_av": True})
+
+
+def _lens_source_no_clump(tmp_path, galactic):
+    """A lens and a source the SED reads, no red clump."""
+    import yaml
+
+    rows = [
+        {"name": I, "mag": m, "err": 0.05, "photType": {"pos": [n]}}
+        for n, m in (("Source", 18.0), ("Lens", 19.5))
+    ]
+    path = tmp_path / "ls.sed"
+    path.write_text(yaml.safe_dump({"model": "NextGen", "filters": rows}))
+    cfg = {
+        "star": [{"name": n, "mist": False} for n in ("Source", "Lens")],
+        "sed": {"file": str(path)},
+    }
+    if galactic:
+        cfg["galacticmodel"] = [{"anchor_idx": 0}]
+    system = System(cfg, _lens_params())
+    system.prepare()
+    return system
+
+
+def test_without_a_clump_the_anchor_is_the_bar_with_a_galactic_model(
+    tmp_path,
+):
+    """
+    Given a lens and a source, no red clump, and a galactic model,
+    When the profile is built,
+    Then the anchor sits at the bar's mean distance on the sight line (a
+      fixed number: where a red-clump map's extinction is measured; JDE
+      2026-11-10), so a star AT that distance has A_V = the anchor.
+    """
+    from exozippy.components.galacticmodel import koshimoto21 as k21
+
+    system = _lens_source_no_clump(tmp_path, galactic=True)
+    plan = system.sed._dust_plan
+    assert plan.on and not plan.clump
+    l_deg, b_deg = k21.line_of_sight_basis(np.radians(RA), np.radians(DEC))[:2]
+    d_bar = 10 ** (0.2 * k21.bar_distance_moments(l_deg, b_deg)[0] + 1)
+    assert plan.bar_pc == pytest.approx(d_bar, rel=1e-12)
+    assert plan.shape_np(np.array([d_bar]))[0] == pytest.approx(1.0)
+    model = system.build_model()
+    ip = model.initial_point()
+    with model:
+        a_bar = system.sed.profile_av_node(
+            system, pt.as_tensor_variable(np.array([d_bar]))
+        )
+    got, anchor = _at(model, [a_bar, system.sed.dust_anchor.value], ip)
+    np.testing.assert_allclose(got, anchor, rtol=1e-12)
+
+
+def test_without_a_clump_or_a_galactic_model_the_anchor_is_the_column(
+    tmp_path,
+):
+    """Same, with no galactic model: the anchor is the whole column (a
+    star far past the layer has A_V = the anchor)."""
+    system = _lens_source_no_clump(tmp_path, galactic=False)
+    plan = system.sed._dust_plan
+    assert plan.on and not plan.clump and plan.bar_pc is None
+    assert plan.shape_np(np.array([1e9]))[0] == pytest.approx(1.0)

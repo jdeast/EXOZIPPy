@@ -26,8 +26,10 @@ gradient is finite on both sides).  No pt.where anywhere (CLAUDE.md).
 
 THE ANCHOR.  A(d) = A_anchor C(d) / C(d_anchor): the sampled anchored total
 carries the AMOUNT, the z_k only the SHAPE (their common shift cancels).
-d_anchor is the red clump's sampled distance when a clump is in the fit, else
-infinity (C(inf) = sum_k 10**z_k: the whole column, what a 2D map states).
+d_anchor is the red clump's sampled distance when a clump is in the fit; else,
+with a galactic model, the Galactic bar's mean distance on the sight line (a
+fixed number: where a red-clump map's extinction is measured; JDE 2026-11-10);
+else infinity (C(inf) = sum_k 10**z_k: the whole column, what a 2D map states).
 
 NO DIVISION BY ZERO, NO FLOOR.  C(d) >= 10**z_0 K s(d) > 0 for d > 0, and
 every distance's lower bound is strictly positive; s(d) > 0 needs sin|b| > 0,
@@ -155,7 +157,10 @@ class DustPlan:
     ``n_bins``        K.
     ``sinb``          sin|b| of the sight line.
     ``h_pc``          the layer's scale height.
-    ``clump``         the anchor is the red clump's distance (else infinity).
+    ``clump``         the anchor is the red clump's sampled distance.
+    ``bar_pc``        else the FIXED anchor distance, the bar's mean on the
+                      sight line (a galactic model present), or None: the
+                      whole column (infinity).
     ``anchor_band``   None for A_V itself, else the filter label.
     ``split``         near/far R_V mixing on.
     ``groups``        list of tuples of read star indices sharing a distance.
@@ -169,6 +174,7 @@ class DustPlan:
     b_deg: float = float("nan")
     h_pc: float = DEFAULT_SCALE_HEIGHT_PC
     clump: bool = False
+    bar_pc: float | None = None
     anchor_band: str | None = None
     split: bool = False
     groups: tuple = field(default_factory=tuple)
@@ -181,13 +187,23 @@ class DustPlan:
         z = np.asarray(z, float)
         k = self.n_bins
         c = cumulative(np.asarray(d, float), z, self.sinb, self.h_pc, k, xp=np)
-        if self.clump:
+        if self.clump or self.bar_pc is not None:
+            da = d_anchor if self.clump else self.bar_pc
             ca = cumulative(
-                np.asarray(d_anchor, float), z, self.sinb, self.h_pc, k, xp=np
+                np.asarray(da, float), z, self.sinb, self.h_pc, k, xp=np
             )
         else:
             ca = total(z, xp=np)
         return c / ca
+
+    @property
+    def anchor_where(self):
+        """Where the anchor is, in words (descriptions, logs, prose)."""
+        if self.clump:
+            return "the red clump's distance"
+        if self.bar_pc is not None:
+            return f"the Galactic bar's distance ({self.bar_pc:.0f} pc)"
+        return "the far end of the sight line (the whole column)"
 
 
 def sinb_of(b_deg):

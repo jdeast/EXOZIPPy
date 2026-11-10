@@ -289,6 +289,21 @@ class SightLineDust:
             else dp.default_bins(n_groups)
         )
         clump = bool(anchors)
+        # Without a clump the anchor is the bar's mean distance on the sight
+        # line when a galactic model defines one (JDE 2026-11-10: a red-clump
+        # map's extinction is the extinction TO THE CLUMP, at the bar, and a
+        # source behind the bar sees 3-5% more at |b| ~ 3-4 deg), else the
+        # whole column.
+        bar_pc = None
+        gm = in_topology(system, "galacticmodel")
+        if not clump and isinstance(gm, Component):
+            mean_mu = gm.bar_distance_moments(system)[0]
+            bar_pc = float(10.0 ** (0.2 * mean_mu + 1.0))
+        elif not clump:
+            logger.debug(
+                f"[{self.prefix}] no red clump and no galactic model: the "
+                f"dust profile is anchored to the whole column."
+            )
         far = set()
         for comp in system.active_components.values():
             far |= {int(k) for k in comp.selected_sources(system)}
@@ -334,6 +349,7 @@ class SightLineDust:
             b_deg=float(b_deg),
             h_pc=self.dust_scale_height,
             clump=clump,
+            bar_pc=bar_pc,
             anchor_band=self.dust_anchor_band,
             split=split,
             groups=tuple(groups),
@@ -375,7 +391,7 @@ class SightLineDust:
         where = (
             f"the {self.anchor_provider().name}'s distance"
             if plan.clump
-            else "the far end of the sight line (the whole column)"
+            else plan.anchor_where
         )
         self.manifest[DUST_ANCHOR] = {
             "description": f"Extinction in {band} at {where}",
@@ -587,6 +603,12 @@ class SightLineDust:
         if plan.clump:
             prov = self.anchor_provider()
             d_a = self.source_input_node(system, prov.paths["distance"])
+            parts["d_anchor"] = d_a
+            parts["c_anchor"] = dp.cumulative(
+                d_a, z, plan.sinb, plan.h_pc, plan.n_bins
+            )
+        elif plan.bar_pc is not None:
+            d_a = pt.as_tensor_variable(np.float64(plan.bar_pc))
             parts["d_anchor"] = d_a
             parts["c_anchor"] = dp.cumulative(
                 d_a, z, plan.sinb, plan.h_pc, plan.n_bins
@@ -820,11 +842,7 @@ class SightLineDust:
                         rf"{plan.n_bins} bins of equal dust in an "
                         rf"exponential layer of scale height "
                         rf"{plan.h_pc:g}~pc, anchored in {band} at "
-                        + (
-                            "the red clump"
-                            if plan.clump
-                            else "the whole column"
-                        )
+                        + plan.anchor_where
                         + r"; each point is an SED object at its distance."
                     ),
                 },
@@ -864,11 +882,7 @@ class SightLineDust:
         if plan is None or not plan.on:
             return
         band = plan.anchor_band or "V"
-        anchor = (
-            "the red clump's distance"
-            if plan.clump
-            else "the far end of the sight line (the whole column)"
-        )
+        anchor = plan.anchor_where
         prose = get_collector(system)
         prose.add(
             r"The extinction of every object in the SED is one monotone "
