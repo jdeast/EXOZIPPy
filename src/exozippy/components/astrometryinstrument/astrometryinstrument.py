@@ -1475,6 +1475,7 @@ class AstrometryInstrument(Instrument):
         """Load per-instrument astrometry and precompute parallax factors."""
         self.datasets = []
         self.jittervar_lower = [0.0] * self.n_elements
+        self.n_obs_per_element = [0] * self.n_elements
         self.n_total_obs = 0
 
         event = getattr(system, "mulensevent", None)
@@ -1673,7 +1674,11 @@ class AstrometryInstrument(Instrument):
                 )
             self.jittervar_lower[i] = self._jitter_floor([min_err])
             # A catalog dataset observes its n_par solution, not its epochs.
-            self.n_total_obs += d["n_par"] if mode == "catalog" else len(t)
+            n_obs_i = d["n_par"] if mode == "catalog" else len(t)
+            self.n_total_obs += n_obs_i
+            # What register_parameters needs to decide whether this file can
+            # estimate a jitter at all (see _pin_underdetermined_jitter).
+            self.n_obs_per_element[i] = int(n_obs_i)
             self.datasets.append(d)
 
         # Reference epoch for ra/dec/pm: first explicit config wins, else the
@@ -1944,6 +1949,7 @@ class AstrometryInstrument(Instrument):
         active = [m in ABSOLUTE_MODES for m in self.modes]
         self.manifest = {"fluxfrac": {"mask": active, "inactive_value": 0.0}}
         self._register_noise(self.manifest, self.jittervar_lower)
+        self._pin_underdetermined_jitter(self.manifest)
         if "catalog" in self.modes:
             # A catalog solution's covariance is its own error model, and a
             # jitter in mas^2 has no meaning on a vector that mixes mas and
@@ -2041,6 +2047,81 @@ class AstrometryInstrument(Instrument):
                     "mask": list(self.fithipframe),
                     "inactive_value": 0.0,
                 }
+
+    # Below this many epochs a free jitter is not a measurement (review
+    # 7.6.5, JDE ruling 2026-11-09).  MOA-2008-BLG-379 is the worked
+    # example: TWO Keck epochs of lens-source separation, errors measured at
+    # 0.44-1.55 mas, and the posterior jitter came back 4.7 +8.2/-2.6 mas
+    # with only 4% of draws below 1 mas.  That is not a noise estimate, it
+    # is the Keck constraint being switched off: the fitted heliocentric
+    # mu_rel moved 4.4 and 3.0 paper-sigma, the 2 epochs' linear-motion
+    # chi2 went 3.9 -> 29, and theta_E rose 9.5% to +1.4 sigma from the
+    # published value, buying back the rho the source SED could not absorb
+    # for ~7 nats of normalization on 4 points.
+    _JITTER_MIN_EPOCHS = 5
+
+    def _pin_underdetermined_jitter(self, manifest):
+        """Pin `jitter_variance` at zero on files too short to estimate one.
+
+        A STRUCTURAL pin, through the manifest ``"overrides"`` channel like
+        every other one in this component -- never a write into
+        ``config_manager.user_params``, which would report this component's
+        decision back as the user's own (components.md, and the comment on
+        the SED fluxfrac pin above).  The override sits below
+        PRECEDENCE_USER, so a params file that gives this element a `sigma`
+        -- including ``sigma: null``, which is "no prior at all" and
+        restores the free uniform -- still wins.
+
+        Zero is the default VALUE because it is the only one the component
+        can justify: nothing here knows a given instrument's astrometric
+        systematics, and a quoted error bar is already supposed to carry
+        them.  A user who knows better states the number (review 7.6.5's
+        question (2); the value is theirs to choose, the default is not to
+        invent one).
+
+        Long files are untouched: Gaia epoch astrometry has hundreds of
+        epochs and estimates its jitter perfectly well.
+        """
+        entry = manifest.get("jitter_variance")
+        if entry is None:
+            return manifest
+        counts = getattr(self, "n_obs_per_element", None)
+        if not counts:
+            return manifest
+
+        short = [
+            i
+            for i in range(self.n_elements)
+            if 0 < int(counts[i]) < self._JITTER_MIN_EPOCHS
+        ]
+        if not short:
+            return manifest
+
+        entry = dict(entry or {})
+        overrides = dict(entry.get("overrides") or {})
+        sigma = list(overrides.get("sigma", [None] * self.n_elements))
+        initval = list(overrides.get("initval", [None] * self.n_elements))
+        for i in short:
+            sigma[i] = 0.0
+            # A pin must say what it pins to (components/parameter.md).
+            if initval[i] is None:
+                initval[i] = 0.0
+            logger.info(
+                f"[{self.prefix}.{self.names[i]}] {int(counts[i])} epochs is "
+                f"too few to estimate an astrometric jitter, so "
+                f"jitter_variance is PINNED at 0 (fewer than "
+                f"{self._JITTER_MIN_EPOCHS}; review 7.6.5).  The quoted "
+                f"error bars are then the whole error model.  To fit it "
+                f"anyway write `astrometryinstrument."
+                f"{self.names[i]}.jitter_variance: {{sigma: null}}` in the "
+                f"params file, or pin it to a value you trust with "
+                f"`{{initval: <mas^2>, sigma: 0}}`."
+            )
+        overrides["sigma"] = sigma
+        overrides["initval"] = initval
+        entry["overrides"] = overrides
+        manifest["jitter_variance"] = entry
+        return manifest
 
     def _check_sed_pair(self, system, i, target, other):
         """The SED path's ``companion_star_ndx`` must name ANOTHER star of
