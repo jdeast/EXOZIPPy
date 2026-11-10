@@ -489,15 +489,68 @@ def test_gp_and_outlier_amplitudes_are_capped_on_the_flux_scale():
     }
     inst._scale_flux_amplitudes(manifest, f_total)
 
+    checked = []
     for name, (cap, start) in MulensInstrument._FLUX_AMPLITUDE_CAPS.items():
         if name not in manifest:
             continue
         ov = manifest[name]["overrides"]
         np.testing.assert_allclose(ov["upper"], cap * f_total, rtol=1e-12)
         np.testing.assert_allclose(ov["initval"], start * f_total, rtol=1e-12)
+        checked.append(name)
+    # The loop above covers out_scale only: the GP amplitudes left
+    # _FLUX_AMPLITUDE_CAPS when their bound became numerical (2.1.26), so
+    # assert them by name rather than let this loop go quietly empty.
+    assert checked == ["out_scale"]
+
+    # No white-noise level was recorded (this instrument never loaded data),
+    # so the GP bound is the floor: the multiplier the code shipped with.
+    gp = manifest["gp_rot_sigma"]["overrides"]
+    np.testing.assert_allclose(
+        gp["upper"], MulensInstrument._GP_UPPER_FLOOR * f_total, rtol=1e-12
+    )
+    np.testing.assert_allclose(
+        gp["initval"],
+        MulensInstrument._GP_AMPLITUDE_START * f_total,
+        rtol=1e-12,
+    )
 
     # The pin installed by _register_gp for the opted-out element survives.
     assert manifest["gp_rot_sigma"]["overrides"]["sigma"][0] == 0.0
+
+
+def test_gp_amplitude_bound_loosens_on_a_noisy_light_curve():
+    """
+    Given two light curves on the same flux scale, one ten times noisier,
+    When _scale_flux_amplitudes installs the GP amplitude bounds,
+    Then the noisy one's bound is the celerite conditioning limit
+    (sqrt(budget/n) * median err) and the precise one's is the shipped floor
+    (100x baseline flux) -- the bound follows the DATA, not the brightness.
+
+    This is the whole point of review 2.1.26's ruling: the old 100x was the
+    flux image of a 5 mag cap, a statistical statement that measured nothing,
+    and the replacement exists only so celerite2 can factorize and the logit
+    transform has a finite upper.
+    """
+    from exozippy.components.mulensing.mulensinstrument import MulensInstrument
+
+    inst = MulensInstrument.__new__(MulensInstrument)
+    f_total = np.array([1.0e-7, 1.0e-7])
+    n_obs = 600
+    # Element 0: err = 1e-9 -> conditioning limit 4.1e-6 < floor 1e-5.
+    # Element 1: err = 1e-8 -> conditioning limit 4.1e-5 > floor 1e-5.
+    inst._gp_white_level = {0: (1.0e-9, n_obs), 1: (1.0e-8, n_obs)}
+    manifest = {"gp_sho_sigma": {}}
+    inst._scale_flux_amplitudes(manifest, f_total)
+
+    upper = np.asarray(manifest["gp_sho_sigma"]["overrides"]["upper"])
+    floor = MulensInstrument._GP_UPPER_FLOOR * f_total
+    cond = np.sqrt(MulensInstrument._GP_COND_BUDGET / n_obs) * np.array(
+        [1.0e-9, 1.0e-8]
+    )
+    assert cond[0] < floor[0] and cond[1] > floor[1]  # the two branches fire
+    np.testing.assert_allclose(upper, [floor[0], cond[1]], rtol=1e-12)
+    # Never tighter than what shipped, on either element.
+    assert np.all(upper >= floor - 1e-18)
 
 
 @pytest.fixture(scope="module")
@@ -522,6 +575,11 @@ def test_gp_amplitude_bound_follows_the_light_curve_flux_scale(gp_system):
     which outranks the per-element default) -- not the fixed magnitude-era
     numbers, which would have put the entire prior 8 orders of magnitude above
     any physical amplitude.
+
+    100x is the FLOOR of the numerical bound (2.1.26) and it is what binds
+    here: these errors are 1e-9 on a 1e-7 baseline, so celerite's conditioning
+    limit, sqrt(1e10/600) * 1e-9 = 4.1e-6, sits below the floor's 1e-5.  The
+    companion unit test covers the other branch.
     """
     system, _model = gp_system
     inst = system.mulensinstrument
