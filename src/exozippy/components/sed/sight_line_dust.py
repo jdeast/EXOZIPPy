@@ -106,6 +106,7 @@ class SightLineDust:
                 "tabulated law has no R_V."
             )
         self._dust_seed_distances = None
+        self._stated_positions = {}
         self._dust_parts_cache = None
 
     # ------------------------------------------------------------------
@@ -172,11 +173,24 @@ class SightLineDust:
             if probe_star_radec(cm, [root])[root] is None:
                 return None
             return gm.sight_line(system)
+        from exozippy.components.star.star import position_root_of
+
         star = system.star
-        got = probe_star_radec(cm, [int(i) for i in stars])
-        if any(got[int(i)] is None for i in stars):
+        # A star whose position derives from another's (a microlensing lens
+        # from its source, review 8.10.4) is on that star's sight line: read
+        # each star's POSITION ROOT, as GalacticModel.sight_line does.
+        stars = sorted({position_root_of(system, int(i)) for i in stars})
+        # Read each star's STATED position once, at the first plan (stage
+        # 3): after stage 4 the solve's starts are injected into user_params
+        # (config.md, "finalize is not re-entrant"), where an unstated
+        # position would read as the defaults.yaml placeholder.
+        new = [i for i in stars if i not in self._stated_positions]
+        if new:
+            self._stated_positions.update(probe_star_radec(cm, new))
+        got = self._stated_positions
+        if any(got[i] is None for i in stars):
             return None
-        pos = [got[int(i)] for i in stars]
+        pos = [got[i] for i in stars]
         ra0, dec0 = pos[0]  # radians
         for (ra, dec), i in zip(pos[1:], stars[1:]):
             c = math.sin(dec0) * math.sin(dec) + math.cos(dec0) * math.cos(
