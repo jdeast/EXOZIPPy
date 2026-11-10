@@ -2099,12 +2099,8 @@ class AstrometryInstrument(Instrument):
 
         entry = dict(entry or {})
         overrides = dict(entry.get("overrides") or {})
-        sigma = list(
-            overrides.get("sigma", [None] * self.n_elements)
-        )
-        initval = list(
-            overrides.get("initval", [None] * self.n_elements)
-        )
+        sigma = list(overrides.get("sigma", [None] * self.n_elements))
+        initval = list(overrides.get("initval", [None] * self.n_elements))
         for i in short:
             sigma[i] = 0.0
             # A pin must say what it pins to (components/parameter.md).
