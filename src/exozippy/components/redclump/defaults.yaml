@@ -86,6 +86,44 @@ redclump:
     internal_unit: "mag"
     latex: "A_{V,{\\rm RC}}"
     description: "Red clump V-band extinction"
+    expressions:
+      # Under the SED's sight-line dust profile (sed.md): the profile at the
+      # clump's distance -- the anchor -- times its granularity, 1 + av_frac.
+      from_dust_profile:
+        func_name: "calc_av_from_profile"
+        deps: ["profile_av", "av_frac"]
+  # Declared only under the dust profile: the clump CENTROID's field-scale
+  # extinction granularity about the pencil-beam profile, N(0, 0.09)
+  # (Nataf et al. 2013's 9%, the width of the interim av_ratio tie it
+  # replaces).  Source vs clump then differ by sqrt(0.03^2 + 0.09^2) ~ 9.5%.
+  av_frac:
+    mu: 0.0
+    sigma: 0.09
+    lower: -0.9
+    upper: 10.0
+    initval: 0.0
+    init_scale: 0.03
+    unit: ""
+    internal_unit: ""
+    latex: "\\delta A_{V,{\\rm RC}}/A_{V,{\\rm RC}}"
+    description: "Red clump fractional extinction granularity about the dust profile"
+  # Declared only under sed.fit_rv_dust: the R_V of the dust in front of the
+  # clump.  The sight line's sed.rv_dust (from_sightline); under the dust
+  # profile's near/far split the mix in front of the clump.  A derived
+  # copy, so not a table row unless it differs (the split).
+  rv_dust:
+    unit: ""
+    internal_unit: ""
+    latex: "R_{V,{\\rm RC}}"
+    description: "$R_V$ of the dust in front of the red clump"
+    print_to_table: false
+    expressions:
+      from_sightline:
+        func_name: "calc_rv_dust_from_sightline"
+        deps: ["sightline_rv_dust"]
+      from_dust_profile:
+        func_name: "calc_rv_dust_from_profile"
+        deps: ["profile_rv_dust"]
   # DERIVED: the radius that makes M_I = mi at A_V = 0 through the SED's
   # own bolometric correction -- what the SED's forward model reads.
   radius:

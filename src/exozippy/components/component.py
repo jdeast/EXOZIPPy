@@ -33,11 +33,17 @@ class SEDFluxSource:
     ``photometric_dof``  its free photometric coordinates, counted toward the
                          SED's errscale pin when a row reads it (a star's
                          count is ``len(SED.PHOTOMETRIC_DOF)``).
+    ``extinction_anchor`` the source's distance is where the SED's sight-line
+                         dust profile is anchored (the red clump: its
+                         extinction is the measured one; sed.md, "The
+                         sight-line dust profile").  At most one source may
+                         claim it.
     """
 
     name: str
     paths: dict
     photometric_dof: int
+    extinction_anchor: bool = False
 
 
 def layer_options(cfg, options):

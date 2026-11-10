@@ -164,6 +164,10 @@ def test_blend_tie_makes_the_lens_seen(monkeypatch, tmp_path):
     config, user_params = _inputs(tmp_path)
     for c in config["mulensinstrument"]:
         c["sed_constrains_blend"] = True
+    # The tie reads the lens AND the source at two distances, which turns
+    # the sight-line dust profile on (the lens's av DERIVED from it,
+    # sed.md); off here, so av is the lens's own sampled knob as before.
+    config["sed"] = {**config["sed"], "distance_constrains_av": False}
     system, model = _build(config, user_params)
     for p in SED_SIDE + STRUCTURE:
         assert _sampled(system, p, 0), f"Lens {p} should sample under the tie"

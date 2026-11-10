@@ -43,12 +43,14 @@ be sampled with nothing constraining them).
 | `feh` | sampled | N(0.0, 0.3) | bulge clump-giant MDF, two ~equal components near -0.3 and +0.3 dex (Hill et al. 2011) |
 | `mi` | sampled | N(-0.12, 0.10) mag | M_I,RC = -0.12 (Nataf et al. 2013); 0.10 a provisional CENTROID systematic (the 0.09 Nataf quotes is the clump's star-to-star dispersion); JDE 2026-11-09: keep, and verify both against the paper's text once the dust stack is done (TODO in defaults.yaml) |
 | `distance` | sampled | N(d_bar, 0.1 mag) | the galactic model's bar on the sight line |
-| `av` | sampled | flat [0.05, 20] | lower bound strictly positive: the tie divides by it |
+| `av` | sampled (derived under the dust profile) | flat [0.05, 20] | lower bound strictly positive: the tie divides by it; under the profile A(d_clump) (1 + av_frac) |
+| `av_frac` | sampled, profile only | N(0, 0.09) | the centroid's field-scale granularity about the profile (Nataf et al. 2013) |
+| `rv_dust` | derived, fit_rv_dust only | -- | the sight line's sed.rv_dust, or under the near/far split the mix in front of the clump |
 | `radius` | derived | -- | what makes M_I = `mi` at A_V = 0 through the SED's own BC_I |
 | `vi0` | derived | N(1.06, 0.06) | (V-I)_0 = BC_I - BC_V at A_V = 0 (Johnson V, Cousins I); Bensby et al. (2013) |
 | `extinction_<k>` | derived | none by default | A_band per `bands:` entry |
 | `color_excess_<k>` | derived | none by default | E(a - b) per `colors:` pair |
-| `av_ratio_<k>` | derived | N(1, 0.09) | the interim tie, one element per tied star |
+| `av_ratio_<k>` | derived, profile off only | N(1, 0.09) | the interim tie, one element per tied star |
 
 - **The color prior is stated in the observable.** `vi0`'s Gaussian (the derived-with-sigma
   idiom of `band.du1` and `mulensinstrument.zeropoint`) makes (V-I)_0 = 1.06 +/- 0.06 come out
@@ -94,7 +96,11 @@ flux (a stated zeropoint tie, an absolute source row). The forward model needs n
 for any of these; a clump read only by differential rows logs at INFO that its A_V is held by
 what calibrates the source and the tie.
 
-## The interim soft A_V tie (`clump_constrains_source_av`)
+## Under the SED's sight-line dust profile (review 8.9.8)
+
+With the profile on (`components/sed/sed.md`, "The sight-line dust profile" -- the default whenever the SED reads the clump and any star, since they sit at two distances) the clump is the profile's ANCHOR: its flux source carries `extinction_anchor=True`, the profile is `A(d) = sed.dust_anchor C(d) / C(d_clump)` at the clump's sampled distance, and `redclump.av` is DERIVED, `A(d_clump) (1 + redclump.av_frac)`, `av_frac` ~ N(0, 0.09): the clump centroid measures the pencil-beam profile to Nataf et al. (2013)'s field-scale 9%. So a source in front of the bar gets less dust than the clump by geometry (the caveat below is resolved), and the interim tie is NOT built: `clump_constrains_source_av: true` raises with the remedy (`sed: {distance_constrains_av: false}` returns to the tie). The A_V start from the clump's calibrated rows seeds `sed.dust_anchor` (in the anchor band, through the reference spectrum, when `sed.dust_anchor_band` is set). Under `sed.fit_rv_dust` the clump reads its own `redclump.rv_dust` (derived: `sed.rv_dust`, or under the near/far split the mix in front of the clump), never `sed.rv_dust` directly. Its `av` is declared likelihood-backed only with the profile off (under it, it is derived).
+
+## The interim soft A_V tie (`clump_constrains_source_av`; only with the profile off)
 
 `A_V(source) = A_V(clump) (1 +/- 9%)`, Nataf et al. (2013)'s field-scale extinction
 granularity: the derived `redclump.<name>.av_ratio_<k> = star.av[tied] / redclump.av` with its

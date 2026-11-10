@@ -65,6 +65,10 @@ band:
 
 sed:
   file: "MOA-2008-BLG-379.sed.yaml"
+  # Bennett+2024's lens extinction: the smooth dust layer (one bin) of
+  # scale height 100 pc, anchored to the whole column (sed.md).
+  dust_bins: 1
+  dust_scale_height: 100
 
 mulensinstrument:
   - name: "OGLE_I"

@@ -56,6 +56,7 @@ from .magsys import (
     read_magsys_table,
 )
 from .physics import *
+from .sight_line_dust import SightLineDust
 
 logger = logging.getLogger(__name__)
 
@@ -237,7 +238,7 @@ def plot_class_from(module, plot_path):
     return candidates[0]
 
 
-class SED(Component):
+class SED(SightLineDust, Component):
     """
     Spectral Energy Distribution likelihood driven by a precomputed
     grid of bolometric corrections (BCs).
@@ -315,6 +316,10 @@ class SED(Component):
         # data_free_inventory), but the forward model and the dilution
         # start solver read each star's value.
         self.fit_rv_dust = fit_rv_dust_from_config(self.config)
+        # The sight-line dust profile (review 8.9.8; sed.md, "The sight-line
+        # dust profile"): its config keys, one spelling each, checked here.
+        self._parse_dust_config()
+        self._dust_plan = None
         self.spectral = None
         self._spectral_take = None
         if self.fit_rv_dust:
@@ -647,7 +652,70 @@ class SED(Component):
                     "at R_V = 3.1."
                 ),
             },
+            {
+                "key": "distance_constrains_av",
+                "kind": "option",
+                "accepts": [True, False],
+                "required": False,
+                "doc": (
+                    "The sight-line dust profile: every SED object's A_V is "
+                    "one monotone A_V(d) at its distance. On by default "
+                    "when the objects the SED reads sit at two or more "
+                    "distances; false frees every A_V."
+                ),
+            },
+            {
+                "key": "dust_bins",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Number of profile bins (equal shares of the dust "
+                    "layer). Default one per object at its own distance, "
+                    "between 3 and 6; 1 is the smooth exponential layer."
+                ),
+            },
+            {
+                "key": "dust_scale_height",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": "Dust layer scale height (pc), the profile's prior center. Default 164 (Nataf et al. 2013).",
+            },
+            {
+                "key": "dust_anchor_band",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Filter whose extinction the anchored total (sed."
+                    "dust_anchor) is stated in, e.g. a NIR map's Ks. "
+                    "Default: A_V itself."
+                ),
+            },
+            {
+                "key": "fit_rv_dust_near",
+                "kind": "option",
+                "accepts": [True, False],
+                "required": False,
+                "doc": (
+                    "Near/far R_V split under fit_rv_dust: dust in front of "
+                    "a sampled boundary has its own R_V (sed.rv_dust_near). "
+                    "On by default when an SED row reads an object nearer "
+                    "than the far group (lens light)."
+                ),
+            },
         ]
+
+    def sed_flux_filters(self, system):
+        """The dust anchor's band, read straight off the grid on the
+        reference spectrum (sight_line_dust.py)."""
+        if (
+            self.dust_anchor_band is None
+            or self.distance_constrains_av is False
+        ):
+            return set()
+        return {self.dust_anchor_band}
 
     # ------------------------------------------------------------------
     # 1) register_parameters — declare the manifest for stage 3.
@@ -673,6 +741,9 @@ class SED(Component):
         for si in range(len(system.star.names)):
             cm.declare_likelihood_backed(f"star.{si}.teffsed")
         self._bound_flux_sources()
+        # The sight-line dust profile (sight_line_dust.py): its SED-level
+        # parameters, when the plan is on.
+        self._register_dust(system)
 
         # errscale multiplies the photometric errors, so it is identified
         # only by the residual scatter of rows the stars' own parameters
@@ -1784,7 +1855,17 @@ class SED(Component):
     # Built at STAGE 6 (the mulensing zeropoint expression asks for it while
     # parameters are still being materialized), so it cannot be dropped at
     # the top of stage 7 the way transit's dilution node is.
-    per_build_caches = ("_m_pred_matrix",)
+    per_build_caches = ("_m_pred_matrix", "_dust_parts_cache")
+
+    # sed.av_anchor's A_V on the reference spectrum (sight_line_dust.py).
+    context_dep_names = frozenset({"anchor_av"})
+    aligned_context_deps = frozenset({"anchor_av"})
+
+    def add_parameter(self, model, param_name, system, context_nodes=None):
+        """Inject the dust profile's context nodes (sight_line_dust.py)."""
+        if not context_nodes and self._dust_plan is not None:
+            context_nodes = self.dust_context(param_name, system) or None
+        return super().add_parameter(model, param_name, system, context_nodes)
 
     def _ensure_star_nodes(self, system):
         """Materialize the star Parameters ``_predicted_appmag_node`` reads.
@@ -2213,15 +2294,15 @@ class SED(Component):
             if r.label not in read_by[r.star]:
                 read_by[r.star].append(r.label)
         row_stars = sorted({r.star for r in readers if r.label == SED_ROW})
-        pinned = {
-            p: set(system.star.user_pinned_stars(p))
-            for p in self.PHOTOMETRIC_DOF
-        }
+        # Under the sight-line dust profile a star's A_V is DERIVED from the
+        # profile, and its own coordinate is the scatter about it, av_frac;
+        # the profile's anchor (and the split's near R_V and boundary) are
+        # counted once, below.
+        plan = self.dust_plan(system)
+        dof = self.photometric_dof(plan)
+        pinned = {p: set(system.star.user_pinned_stars(p)) for p in dof}
         n_free = 1 + sum(
-            1
-            for s in row_stars
-            for p in self.PHOTOMETRIC_DOF
-            if s not in pinned[p]
+            1 for s in row_stars for p in dof if s not in pinned[p]
         )
         # A flux source a row reads brings its own count (SEDFluxSource.
         # photometric_dof); one no row reads constrains nothing here.
@@ -2236,12 +2317,27 @@ class SED(Component):
             and not self._rv_dust_user_pinned()
         ):
             n_free += 1
+        if plan.on and (row_stars or read_providers):
+            n_free += 1 + (2 if plan.split else 0)
         return DataFreeInventory(
             n_rows=int(self.nfilters),
             n_free=n_free,
             readers={i: tuple(v) for i, v in read_by.items()},
             severed=tuple(sorted(self.severed_stars)),
-            star_knobs=self.STAR_KNOBS,
+            star_knobs=self.star_knobs(plan),
+        )
+
+    def star_knobs(self, plan):
+        """``STAR_KNOBS``, plus ``av_frac`` under the dust profile (where av
+        is derived and av_frac is the star's own extinction coordinate)."""
+        return self.STAR_KNOBS + (("av_frac",) if plan.on else ())
+
+    def photometric_dof(self, plan):
+        """``PHOTOMETRIC_DOF``, with av_frac for av under the profile."""
+        if not plan.on:
+            return self.PHOTOMETRIC_DOF
+        return tuple(
+            "av_frac" if p == "av" else p for p in self.PHOTOMETRIC_DOF
         )
 
     def _rv_dust_user_pinned(self):
@@ -2321,7 +2417,11 @@ class SED(Component):
         cm = self.config_manager
         inv = self.data_free_inventory(system)
         off = {}
-        for param in self._SAMPLED_GRID_AXES:
+        plan = self.dust_plan(system)
+        axes = tuple(
+            a for a in self._SAMPLED_GRID_AXES if not (plan.on and a == "av")
+        )
+        for param in axes:
             cfg = cm.resolve("star", param, shape=(n,), names=star.names)
             init = np.asarray(cfg["initval"], dtype=float)
             lo = np.asarray(cfg["lower"], dtype=float)
@@ -2587,6 +2687,7 @@ class SED(Component):
         self._add_data_free_prose(system)
         self._add_synthesized_prose(system)
         self._add_spectral_prose(system)
+        self._add_dust_prose(system)
 
     # ------------------------------------------------------------------
     # The BC grid's support, as the reports see it.
@@ -2822,6 +2923,11 @@ class SED(Component):
                 )
             else:
                 self._compiled_combined_mag = None
+            # The sight-line dust profile's figure (sight_line_dust.py).
+            with model:
+                self._compile_dust_plotter(
+                    system, param_symbols, source_vectors
+                )
         except Exception as e:
             # Don't let plotting infra kill model build; warn
             # and leave None in place so plot() skips gracefully.
@@ -2941,6 +3047,10 @@ class SED(Component):
         if not points:
             logger.warning("[sed] plot: no points provided.")
             return
+        # The dust profile's figure needs no photometry row (a row-less SED
+        # still places its stars on the profile).
+        if getattr(self, "_compiled_dust", None) is not None:
+            self.plot_dust_profile(system, points, filename_prefix)
         if self.nfilters == 0:
             logger.debug(
                 "[sed] plot: no catalog photometry rows; skipping the SED plot."
@@ -3228,10 +3338,14 @@ class SED(Component):
         """
         from exozippy.chart import Chart, Trace
 
+        if point is not None and getattr(self, "_compiled_dust", None):
+            dust_charts = self.dust_profile_charts(system, point)
+        else:
+            dust_charts = []
         if self.nfilters == 0:
             # No catalog photometry rows -- the SED only serves
-            # cross-component flux predictions; nothing to chart.
-            return []
+            # cross-component flux predictions; nothing else to chart.
+            return dust_charts
 
         # ---- Data-only preview: observed mag vs effective wavelength --
         # A color row's value is a magnitude DIFFERENCE between two
@@ -3422,7 +3536,7 @@ class SED(Component):
         # the axis autorange to those would squash the interesting region.
         plot_obj._get_ylim()
 
-        return [
+        return dust_charts + [
             Chart(
                 id=f"{self.prefix}.sed",
                 component={"yaml_key": self.prefix, "instance": None},

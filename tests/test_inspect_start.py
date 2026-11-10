@@ -408,7 +408,10 @@ def test_orbit_n_is_the_only_shipped_not_for_tables_parameter():
     """
     Given the shipped defaults.yaml tree,
     When print_to_table: false is counted,
-    Then orbit.n and star.rv_dust are the only users -- so wiring the flag
+    Then orbit.n, star.rv_dust, redclump.rv_dust (copies of sed.rv_dust
+      outside the near/far split) and sed.dust_z (the dust profile's shape
+      coordinates, results.csv only: review 8.9.8) are the only users -- so
+      wiring the flag
       into the startup table changes no shipped table today (star.rv_dust
       exists only under sed.fit_rv_dust, which no shipped example uses; it
       repeats sed.rv_dust per star until PR 3's near/far split).
@@ -427,7 +430,7 @@ def test_orbit_n_is_the_only_shipped_not_for_tables_parameter():
         if "print_to_table: false" in path.read_text()
     )
 
-    assert users == ["orbit", "star"]
+    assert users == ["orbit", "redclump", "sed", "star"]
 
 
 # ---------------------------------------------------------------------------
