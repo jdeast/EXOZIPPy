@@ -19,11 +19,13 @@ messages appear under "exozippy.samplers.ptde" / "...ptde_async" -- the
 logger names tests and users filter on.
 """
 
+import ctypes
 import gc
 import logging
 import multiprocessing as mp
 import os
 import signal
+import sys
 import threading
 import time
 
@@ -311,13 +313,33 @@ def count_nan_logps(lps):
 # ---------------------------------------------------------------------------
 
 
+_PR_SET_PDEATHSIG = 1  # linux/prctl.h
+
+
 def _worker_init():
     """Pool worker: ignore SIGINT/SIGTERM so only the parent handles graceful
     stop. A batch scheduler typically signals the whole process group, and a
     worker that died mid pool.map() would break the parent's current step
-    (BrokenProcessPool) instead of letting it finish and wrap up cleanly."""
+    (BrokenProcessPool) instead of letting it finish and wrap up cleanly.
+
+    The other half: a worker dies with its parent (Linux).  When the parent
+    is killed instead of stopping the pool, a worker waiting on its queue
+    exits, but one still inside a long logp call has nobody left to stop it
+    and ignores SIGTERM; two seed polishes stopped by a wall-clock limit
+    left one behind.  PR_SET_PDEATHSIG has the kernel SIGKILL the worker when
+    its parent exits, which SIG_IGN cannot block.
+    """
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    if sys.platform.startswith("linux"):
+        parent = os.getppid()
+        libc = ctypes.CDLL(None, use_errno=True)
+        if libc.prctl(_PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0) != 0:
+            err = ctypes.get_errno()
+            raise OSError(err, f"prctl(PR_SET_PDEATHSIG): {os.strerror(err)}")
+        if os.getppid() != parent:
+            # the parent died between reading its pid and the prctl
+            os._exit(1)
 
 
 def _shutdown_pool(pool, grace=1.0):
