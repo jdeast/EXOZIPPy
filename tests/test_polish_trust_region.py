@@ -112,3 +112,51 @@ def test_single_seed_keeps_an_infinite_radius():
     # With no other seed there is no trust radius: reaching the deep well
     # is allowed (and, given the 50-nat tilt, expected).
     assert dlps[0] > 0.0
+
+
+def _two_wells_in_25d(point):
+    """Two narrow Gaussian wells in 25-D, one beside each seed of the test
+    below: centres (+-1.5, 1, 0, ...), sd 0.3."""
+    x = np.asarray(point["x"], dtype=float)
+    lps = []
+    for sign in (-1.0, 1.0):
+        mu = np.zeros(25)
+        mu[0], mu[1] = sign * 1.5, 1.0
+        lps.append(-0.5 * np.sum(((x - mu) / 0.3) ** 2))
+    return float(np.logaddexp(*lps))
+
+
+def test_close_seeds_in_many_dimensions_still_move():
+    """
+    Given two seeds 3 scale units apart in 25 dimensions (trust radius 1.5,
+    where one scale unit of opening jitter reaches ~5), each 1 scale unit
+    from the peak of its own well,
+    When both are polished with the default trust_fraction,
+    Then each seed climbs its own well and stays inside its trust radius.
+
+    Before the opening jitter was fitted to the radius, every member opened
+    outside it and every move was refused: both gains were exactly 0.
+    """
+    # Arrange
+    seeds = []
+    for sign in (-1.0, 1.0):
+        x = np.zeros(25)
+        x[0] = sign * 1.5
+        seeds.append({"x": x})
+    scales = {"x": np.ones(25)}
+
+    # Act
+    polished, dlps = polish_seed_starts(
+        seeds,
+        _two_wells_in_25d,
+        np.random.default_rng(3),
+        scales,
+        n_steps=200,
+        pop_size=12,
+    )
+
+    # Assert
+    for seed, out, dlp in zip(seeds, polished, dlps):
+        moved = float(np.linalg.norm(out["x"] - seed["x"]))
+        assert dlp > 1.0, f"the seed did not climb its well (dlp {dlp})"
+        assert moved <= 1.5, f"the seed left its trust radius ({moved:.2f})"

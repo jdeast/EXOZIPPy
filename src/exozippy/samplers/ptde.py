@@ -234,6 +234,8 @@ def polish_seed_starts(
     """Parallel T=1 differential-evolution polish of each seed's raw start.
 
     For each seed: spawn a small population jittered at ONE scale unit
+    (less where the seed's trust radius is smaller than that population's
+    reach, so it opens inside the region it may move in)
     around the seed (staying inside its own basin -- this is a local
     refiner, not a search), run DE-MC at T=1 (Metropolis acceptance on
     difference-vector proposals, the same move the sampler itself uses), and
@@ -584,20 +586,6 @@ def polish_seed_starts(
             return
         monitor.heartbeat(n_done=n_swept, partial=partial, detail=_acc_detail)
 
-    # --- build every seed's population, then score them all in one batch ---
-    pops, states = [], []
-    for center in raw_starts:
-        pop = [{k: np.array(v, dtype=float) for k, v in center.items()}]
-        for _ in range(pop_size - 1):
-            pop.append(
-                {
-                    k: center[k]
-                    + scales[k] * rng.standard_normal(np.shape(center[k]))
-                    for k in keys
-                }
-            )
-        pops.append(pop)
-
     def _dist(a, b):
         return float(
             np.sqrt(
@@ -619,6 +607,38 @@ def polish_seed_starts(
             radii.append(trust_fraction * d_min)
     else:
         radii = [np.inf] * n_seeds
+    # --- build every seed's population, then score them all in one batch ---
+    # The opening jitter is one scale unit per coordinate, so a member starts
+    # ~sqrt(D) scale units from its seed.  A seed whose trust radius is
+    # smaller than that would open with every member outside its own region,
+    # and _accept refuses every move that lands outside it: the polish could
+    # accept nothing (MOA-2008-BLG-379: four seeds in D = 46, two pairs 3.8
+    # scale units apart, radius 1.9, opening members a median 6.7 out; 0 of
+    # 25,727 proposals per seed accepted in a 92 min round).  Such a seed
+    # opens at the scale that puts its members a median half its radius out.
+    n_dim = sum(int(np.size(raw_starts[0][k])) for k in keys)
+    pops, states = [], []
+    for s_i, center in enumerate(raw_starts):
+        jitter = min(1.0, 0.5 * radii[s_i] / np.sqrt(n_dim))
+        if jitter < 1.0:
+            logger.info(
+                f"PTDE seed polish: seed {s_i} opens at {jitter:.3g} scale "
+                f"units of jitter, inside its trust radius "
+                f"({radii[s_i]:.2f} scale units in {n_dim} dimensions)."
+            )
+        pop = [{k: np.array(v, dtype=float) for k, v in center.items()}]
+        for _ in range(pop_size - 1):
+            pop.append(
+                {
+                    k: center[k]
+                    + jitter
+                    * scales[k]
+                    * rng.standard_normal(np.shape(center[k]))
+                    for k in keys
+                }
+            )
+        pops.append(pop)
+
     n_trust_rej = [0] * n_seeds
 
     flat = [p for pop in pops for p in pop]
