@@ -402,7 +402,10 @@ class Orbit(Component):
             "chord": {"output_expr_key": "from_cosi"},
         },
         "chord": {
-            "chord": None,
+            # The fraction is sampled and the chord derived from it, so the
+            # chord can never pass 1 + p (defaults.yaml `chordfrac`).
+            "chordfrac": None,
+            "chord": {"expr_key": "from_chordfrac", "force_node": True},
             "cosi": {"expr_key": "from_chord", "force_node": True},
         },
         "nochord": {
@@ -1813,6 +1816,8 @@ class Orbit(Component):
         for key in ("vcve", "xomega", "yomega"):
             if key in ecc_entries:
                 self.manifest[key] = ecc_entries[key]
+        if "chordfrac" in inc_entries:
+            self.manifest["chordfrac"] = inc_entries["chordfrac"]
         if "chord" in inc_entries:
             self.manifest["chord"] = inc_entries["chord"]
 
@@ -3788,7 +3793,7 @@ class Orbit(Component):
         return [i for i, m in enumerate(self.inc_modes) if m == "chord"]
 
     def _add_chord_terms(self, system):
-        """The two terms a chord orbit owes: the Jacobian and the shield.
+        """The term a chord orbit owes: the Jacobian.
 
         The geometric half of what `_add_vcve_terms` does for the
         eccentricity, and deliberately a separate potential rather than a
@@ -3808,28 +3813,35 @@ class Orbit(Component):
         on cos i is checked for flatness) rather than argued, because a
         finite-difference check of the derivative passes under either sign.
 
-        THE SHIELD is the soft half of the pair.  `chord_radicand` is floored
-        inside `calc_cosi_from_chord`'s sqrt -- at a STRICTLY POSITIVE floor,
-        `physics.CHORD_RADICAND_FLOOR`, and that qualifier is the whole of
-        review 1.8.5: with the floor at 0.0 the shield produced a NaN gradient
-        instead of preventing one, and because one NaN poisons the whole
-        gradient VECTOR, the penalty below could never act.  The shield being
-        correct is a PRECONDITION for this potential doing anything at all.
-        The floor leaves that whole region flat -- so the penalty here reads
-        the UNFLOORED radicand, where it has a gradient pointing back to a
-        chord that a transit could actually produce.  Same argument, and the same
-        helper, as the eccentricity bound and the V_c/V_e real-root bound.
+        The sampled coordinate is `chordfrac`, which maps linearly onto
+        [chord_min, 1 + p] (physics.calc_chord_from_chordfrac), so the Jacobian
+        carries one more factor, `d(chord)/d(chordfrac) = (1 + p) - chord_min`
+        at fixed geometry: `log|d(cos i)/d(chordfrac)| = chordfrac_log_span -
+        chord_log_jacobian`.  Without it the prior on p would tilt by a factor
+        (1 + p).
+
+        NO SHIELD.  Sampling the chord on [0, 2] put [1 + p, 2] in the support,
+        and a soft lower bound on the radicand was the only thing pushing back;
+        it lost to the capped -log b there by e^20 in prior mass, and inside
+        the edge it also cost up to log 2 nats at b -> 0 (a log-sigmoid is
+        -0.69 at its threshold), a dent in the isotropic prior on the most
+        central transits.  On [0, 1] the radicand is
+        `(1 + p)^2 (1 - chordfrac^2) >= 0` by construction, so there is nothing
+        to bound.  `CHORD_RADICAND_FLOOR` stays inside the sqrt for the one
+        value rounding can still produce, chordfrac == 1.0 exactly (raw past
+        ~37), where it keeps the gradient finite as before.
         """
         idx = self._chord_indices()
         if not idx:
             return
-        # Every `chord` orbit has all three in its manifest (INC_MODE_TABLE;
+        # Every `chord` orbit has all of these in its manifest (INC_MODE_TABLE;
         # ecc/esinw on every orbit) and stage 6 builds every manifest entry,
         # and building `chord` or `cosi` stashes the geometry -- so a miss
         # here is a bookkeeping bug.  It used to RETURN, which would drop the
-        # Jacobian (a non-isotropic cos i prior) and the geometry bound with
-        # no error (review 2.8.6).
-        self._require_built(("chord", "ecc", "esinw"), idx, "fitchord")
+        # Jacobian (a non-isotropic cos i prior) with no error (review 2.8.6).
+        self._require_built(
+            ("chordfrac", "chord", "ecc", "esinw"), idx, "fitchord"
+        )
         geom = self._chord_geometry
         if geom is None:
             raise RuntimeError(
@@ -3847,31 +3859,26 @@ class Orbit(Component):
         ar = geom["ar"][take]
 
         # MINUS the derivative -- see the docstring, and vcve_log_jacobian's,
-        # for why the sign is the whole content of this term.
+        # for why the sign is the whole content of this term -- plus the
+        # chord -> chordfrac factor.
         pm.Potential(
             f"{self.prefix}.chord_jacobian",
-            -pt.sum(
-                physics.chord_log_jacobian(chord, p_ratio, ar, ecc, esinw)
-            ),
-        )
-        # scale = 1.0: the radicand is (1 + p)^2 - chord^2, an O(1) quantity
-        # in units of R_*, so the default 1% softness is a 0.01-wide
-        # transition -- the same order of steepness as the eccentricity
-        # bound's, and 4.4 nats one width past the last transiting geometry.
-        pm.Potential(
-            f"{self.prefix}.chord_geometry",
-            soft_lower_bound(
-                physics.chord_radicand(chord, p_ratio), 0.0, scale=1.0
+            pt.sum(
+                physics.chordfrac_log_span(p_ratio, ar, ecc, esinw)
+                - physics.chord_log_jacobian(chord, p_ratio, ar, ecc, esinw)
             ),
         )
 
         names = [self.names[i] for i in idx]
-        self.chord.add_prior_contribution(
-            latex=r"$\propto |\partial \cos{i} / \partial \rm chord|$",
+        self.chordfrac.add_prior_contribution(
+            latex=(
+                r"$\propto |\partial \cos{i} / "
+                r"\partial ({\rm chord}/(1+R_P/R_*))|$"
+            ),
             text="uniform in cos i (Jacobian applied)",
             elements=idx,
             supersedes_bounds=True,
-            support_phrase="whose chord support is",
+            support_phrase="whose chord-fraction support is",
         )
         collector = get_collector(system)
         if collector is not None:

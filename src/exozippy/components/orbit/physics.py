@@ -1037,6 +1037,47 @@ def calc_chord_from_cosi(cosi, p, ar, ecc, esinw):
     )
 
 
+def chord_min(p, ar, ecc, esinw):
+    """The shortest chord the orbit's own geometry allows.
+
+    b = kappa cos i can never exceed kappa (the star-planet separation at
+    conjunction, in R_*), so where kappa < 1 + p the chords shorter than
+    sqrt((1 + p)^2 - kappa^2) would need |cos i| > 1.  That happens only on an
+    orbit whose conjunction overlaps the star (e near 1), which no posterior
+    keeps -- but a V_c/V_e root the mixture weights to ~0 can sit there, and
+    there `arccos(cos i)` is NaN, and logaddexp's 0 * NaN poisons the gradient
+    of the whole mixture (measured on examples/hat3/hat3_transitonly.yaml:
+    cos i = 1.19 at e = 0.9985 on the down-weighted root, and the seed polish
+    raised).  Where kappa >= 1 + p, every ordinary orbit, this is
+    sqrt(CHORD_RADICAND_FLOOR) = 1e-15.  The radicand is floored, not the
+    result, and positively (review 1.8.5).
+    """
+    kappa = chord_kappa(ar, ecc, esinw)
+    return pt.sqrt(
+        pt.maximum(pt.sqr(1.0 + p) - pt.sqr(kappa), CHORD_RADICAND_FLOOR)
+    )
+
+
+@register_physics
+def calc_chord_from_chordfrac(chordfrac, p, ar, ecc, esinw):
+    """The chord of a `fitchord: true` orbit, from its sampled fraction.
+
+    `chordfrac` lives on [0, 1] and maps linearly onto the chords the geometry
+    allows, [chord_min, 1 + p]: every sampled value transits (the radicand
+    `(1 + p)^2 - chord^2` is never negative) and has |cos i| <= 1 (see
+    chord_min).  Sampling the chord itself on [0, 2] is what put a plateau
+    holding e^20 of the prior past 1 + p (see defaults.yaml `chordfrac`).
+    """
+    lo = chord_min(p, ar, ecc, esinw)
+    return lo + chordfrac * ((1.0 + p) - lo)
+
+
+def chordfrac_log_span(p, ar, ecc, esinw):
+    """log d(chord)/d(chordfrac) = log((1 + p) - chord_min), the Jacobian
+    factor `Orbit._add_chord_terms` adds beside minus chord_log_jacobian."""
+    return pt.log((1.0 + p) - chord_min(p, ar, ecc, esinw))
+
+
 def chord_log_jacobian(chord, p, ar, ecc, esinw):
     """``log|d(chord)/d(cos i)|`` at fixed everything else.  SUBTRACT this.
 

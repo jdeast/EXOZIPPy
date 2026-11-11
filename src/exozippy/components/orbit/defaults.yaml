@@ -461,6 +461,34 @@ orbit:
       from_cosi:
         func_name: "calc_chord_from_cosi"
         deps: ["cosi", "p", "ar", "ecc", "esinw"]
+      # Where `fitchord: true`: DERIVED from the sampled fraction below, so
+      # it can never pass 1 + p (Orbit.INC_MODE_TABLE).
+      from_chordfrac:
+        func_name: "calc_chord_from_chordfrac"
+        deps: ["chordfrac", "p", "ar", "ecc", "esinw"]
+  # The SAMPLED coordinate of a `fitchord: true` orbit: where the chord sits
+  # between the shortest the orbit allows and its largest, 1 + p
+  # (physics.calc_chord_from_chordfrac; chord / (1 + p) on any orbit whose
+  # conjunction clears the star).  Sampling the
+  # chord itself on [0, 2] put [1 + p, 2] -- no transiting geometry at all --
+  # inside the support, where the floored radicand made b = 1e-15 and the
+  # chord Jacobian's capped -log b (+27.6 nats) a plateau that held e^20 times
+  # the prior mass of every real chord, so the posterior piled at b = 0
+  # (measured on a single KeplerCam transit of HAT-P-3 b: 4000 of 4000 draws
+  # at b = 1e-15).  On [0, 1] every value is a transit, and the interval
+  # transform sends chord = 1 + p (a central transit, where the isotropic
+  # prior's 1/b is integrable but infinite) to raw = +inf, where the logit
+  # Jacobian u(1 - u) turns the density into u^2 sqrt((1 - u)/(1 + u)) -> 0.
+  # See orbit.md, "The transit-chord parameterization".
+  chordfrac:
+    lower: 0.0
+    upper: 1.0
+    initval: 0.9
+    init_scale: 0.02
+    unit: ""
+    internal_unit: ""
+    latex: "{\\rm chord}/(1+R_P/R_*)"
+    description: "Transit chord as a fraction of $1 + R_P/R_*$"
   inc:
     unit: "deg"
     internal_unit: "rad"

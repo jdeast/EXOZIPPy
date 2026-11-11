@@ -258,6 +258,53 @@ def register_solvers(config_manager):
         "orbit.chord", chord_solver, standalone=True
     )
 
+    # The largest START the chord fraction takes.  chordfrac = 1 is a central
+    # transit, which the interval transform puts at raw = +inf, and the
+    # default cos i start (1e-7) lands within 1e-12 of it: a start there sits
+    # ~28 whitening units out on a tail whose slope is half a nat per unit.
+    # 0.999 is b = 0.045 (1 + p), still central for any start a user means.
+    CHORDFRAC_START_MAX = 0.999
+
+    def chordfrac_solver(resolved, system_config, index):
+        """orbit.chordfrac initval: the resolved chord over its largest value.
+
+        Reads the chord the engine already resolved -- a user's own
+        `orbit.<n>.chord`, or chord_solver's answer from a seeded cos i -- so
+        both spellings of a params file still reach a `fitchord: true` fit,
+        and clamps it below the central-transit edge (CHORDFRAC_START_MAX).
+        """
+        orbit_cfgs = (system_config or {}).get("orbit") or []
+        if not isinstance(orbit_cfgs, list):
+            orbit_cfgs = [orbit_cfgs]
+        primary, companion = parse_orbit_bodies(orbit_cfgs, system_config)
+        planets = [
+            idx for (ctype, idx) in companion[index] if ctype == "planet"
+        ]
+        if len(planets) != 1:
+            raise KeyError(f"orbit.{index} has no single transiting planet")
+        j = planets[0]
+        vals = {}
+        for path in (
+            f"orbit.{index}.chord",
+            f"planet.{j}.p",
+            f"planet.{j}.ar",
+            f"orbit.{index}.ecc",
+            f"orbit.{index}.esinw",
+        ):
+            val = resolved.get(path)
+            if val is None:
+                raise KeyError(f"Missing {path} for orbit.{index}.chordfrac")
+            vals[path.rsplit(".", 1)[1]] = float(val)
+        top = 1.0 + vals["p"]
+        kappa = vals["ar"] * (1.0 - vals["ecc"] ** 2) / (1.0 + vals["esinw"])
+        lo = float(np.sqrt(max(top**2 - kappa**2, 0.0)))
+        frac = (vals["chord"] - lo) / (top - lo)
+        return float(min(frac, CHORDFRAC_START_MAX))
+
+    config_manager.register_custom_solver(
+        "orbit.chordfrac", chordfrac_solver, standalone=True
+    )
+
     def tc_solver(resolved, system_config, index):
         """orbit.tc from a seeded time of PERIASTRON (review 8.1.1).
 

@@ -391,8 +391,9 @@ def test_a_chord_orbit_samples_the_chord_and_reports_cos_i(chord_fit):
     """
     Given a transit fit with fitchord: true,
     When the model is built,
-    Then the chord is sampled, cos i is DERIVED from it, both potentials are
-      present, and the logp is finite at the start.
+    Then the chord fraction is sampled, the chord and cos i are DERIVED from
+      it, the Jacobian is present (and no geometry bound: on [0, 1] every
+      value transits), and the logp is finite at the start.
 
     cos i is derived rather than reported, unlike the sqrt(e) pair on a
     V_c/V_e orbit: the transit model consumes it (through planet.b), which is
@@ -401,17 +402,132 @@ def test_a_chord_orbit_samples_the_chord_and_reports_cos_i(chord_fit):
     system, model, start = chord_fit
 
     raw = {v.name for v in model.free_RVs}
-    assert "orbit.chord_raw" in raw
+    assert "orbit.chordfrac_raw" in raw
+    assert "orbit.chord_raw" not in raw
     assert "orbit.cosi_raw" not in raw
-    assert system.orbit.chord.is_sampled.tolist() == [True]
+    assert system.orbit.chordfrac.is_sampled.tolist() == [True]
+    assert system.orbit.chord.is_derived.tolist() == [True]
     assert system.orbit.cosi.is_derived.tolist() == [True]
     assert system.orbit.cosi.is_reported.tolist() == [False]
 
     names = {p.name for p in model.potentials}
     assert "orbit.chord_jacobian" in names
-    assert "orbit.chord_geometry" in names
+    assert "orbit.chord_geometry" not in names
 
     assert np.isfinite(model.compile_logp()(start))
+
+
+@pytest.mark.parametrize(
+    "p,ar,ecc,esinw",
+    [
+        (0.1, 10.0, 0.0, 0.0),  # an ordinary orbit: kappa >> 1 + p
+        (
+            0.109,
+            9.677,
+            0.9985,
+            -0.9435,
+        ),  # hat3_transitonly's polish: kappa 0.51
+        (0.15, 2.0, 0.6, 0.5),  # kappa 0.43 < 1 + p
+    ],
+)
+def test_every_chord_fraction_is_a_geometry_with_cos_i_at_most_one(
+    p, ar, ecc, esinw
+):
+    """
+    Given a geometry, including one where kappa < 1 + p (W1's polish crash),
+    When cos i is derived from every chord fraction on [0, 1],
+    Then |cos i| <= 1 and the gradient of arccos(cos i) is finite.
+
+    b = kappa cos i cannot exceed kappa, so chords shorter than
+    sqrt((1 + p)^2 - kappa^2) need |cos i| > 1.  The chord coordinate allowed
+    them, and on examples/hat3/hat3_transitonly.yaml a down-weighted V_c/V_e
+    root reached cos i = 1.19 (e = 0.9985): arccos is NaN there, and the
+    branch mixture's 0 * NaN made the seed polish raise.
+    """
+    u = pt.dvector("u")
+    chord = physics.calc_chord_from_chordfrac(u, p, ar, ecc, esinw)
+    cosi = physics.calc_cosi_from_chord(chord, p, ar, ecc, esinw, 1.0)
+    inc = pt.arccos(cosi)
+    f = pytensor.function([u], [cosi, pt.grad(pt.sum(inc), u)])
+    grid = np.linspace(0.0, 1.0 - 1e-9, 2001)
+    cos_i, grad = f(grid)
+    assert np.all(np.abs(cos_i) <= 1.0 + 1e-12)
+    assert np.all(np.isfinite(grad[1:]))
+
+
+def _sampled_inclination_coordinate(model):
+    """The free inclination coordinate of a chord fit, whatever its name."""
+    for name in ("orbit.chordfrac", "orbit.chord"):
+        raw = f"{name}_raw"
+        if any(v.name == raw for v in model.free_RVs):
+            return name, raw
+    raise AssertionError("no sampled chord coordinate in this model")
+
+
+def test_almost_no_prior_mass_sits_at_a_central_transit_floor(chord_fit):
+    """
+    Given a built chord fit,
+    When the prior the orbit's own chord potentials put on its SAMPLED
+      inclination coordinate is integrated over that coordinate's whole
+      support (everything else held at the start),
+    Then under 1% of it lies where planet.b is below 1e-6 (0.983 on
+      f05e1e21, 4.7e-7 patched).
+
+    Read off the model, not a replica: the coordinate, b and the potentials
+    are the built graph's own nodes.  The isotropic prior gives b < 1e-6 a
+    share of order 1e-6 / (1 + p).  Sampling the chord on [0, 2] put [1 + p, 2]
+    -- no transit at all -- in the support, where the floored radicand made
+    b = 1e-15 and the capped -log b a plateau holding e^20 times the prior mass
+    of every real chord: there the share was ~1, and a fit of a single
+    ground-based transit returned b = 1e-15 in every draw.
+    """
+    system, model, start = chord_fit
+    name, raw_name = _sampled_inclination_coordinate(model)
+    raw_var = next(v for v in model.value_vars if v.name == raw_name)
+    pots = [p for p in model.potentials if p.name.startswith("orbit.chord")]
+    assert pots, "a chord fit carries its chord potentials"
+    others = [v for v in model.value_vars if v is not raw_var]
+    # The named nodes hang off the random variables; evaluate them at the
+    # value variables the sampler moves.
+    outs = model.replace_rvs_by_values(
+        [
+            model.named_vars[name],
+            model.named_vars["planet.b"],
+            pt.sum([pt.sum(p) for p in pots]),
+        ]
+    )
+    fn = pytensor.function([raw_var, *others], outs, on_unused_input="ignore")
+    fixed = [start[v.name] for v in others]
+
+    def at(r):
+        x, b, lp = fn(np.full_like(start[raw_name], r), *fixed)
+        return float(np.ravel(x)[0]), float(np.ravel(b)[0]), float(lp)
+
+    # Walk the raw coordinate out until the physical one reaches both ends of
+    # its support (whitening sets the raw scale, so the span is found, not
+    # assumed), then integrate exp(potential) d(coordinate) on a grid.
+    lo_r, hi_r = -1.0, 1.0
+    x_lo, x_hi = at(lo_r)[0], at(hi_r)[0]
+    for _ in range(200):
+        nlo, nhi = at(2.0 * lo_r)[0], at(2.0 * hi_r)[0]
+        if nlo == x_lo and nhi == x_hi:
+            break
+        lo_r, hi_r, x_lo, x_hi = 2.0 * lo_r, 2.0 * hi_r, nlo, nhi
+    grid = np.concatenate(
+        [np.linspace(lo_r, hi_r, 40001), np.linspace(-1.0, 1.0, 4001)]
+    )
+    rows = np.array(sorted(at(r) for r in np.unique(grid)))
+    x, b, lp = rows[:, 0], rows[:, 1], rows[:, 2]
+    keep = np.concatenate([[True], np.diff(x) > 0])
+    x, b, lp = x[keep], b[keep], lp[keep]
+    w = np.exp(lp - lp.max())
+    seg = 0.5 * (w[1:] + w[:-1]) * np.diff(x)
+    at_floor = (b[1:] < 1e-6) & (b[:-1] < 1e-6)
+    share = seg[at_floor].sum() / seg.sum()
+    assert share < 0.01, (
+        f"{share:.3g} of the prior on {name} sits at b < 1e-6 "
+        f"(support [{x[0]:.6g}, {x[-1]:.6g}])"
+    )
 
 
 def test_the_geometry_identity_holds_at_the_start(chord_fit):
