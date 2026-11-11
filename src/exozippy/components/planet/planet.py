@@ -1158,6 +1158,35 @@ class Planet(Component):
         ]
         return self._mass_side
 
+    # The planet quantities whose user prior measures the mass.
+    _MASS_PRIOR_PARAMS = ("mass", "msini", "log_q", "K")
+
+    def _user_mass_priors(self, index):
+        """Which mass quantities the user gave a prior (mu/sigma) or a pin on.
+
+        Reads the user's own entries in the two spellings that survive
+        `standardize_param_names`, as Orbit._user_pinned does: a defaults.yaml
+        value is not a measurement anybody made, and a bare `initval` is a
+        start, not a prior.
+        """
+        user = self.config_manager.user_params
+        found = []
+        for param in self._MASS_PRIOR_PARAMS:
+            for key in (
+                f"{self.prefix}.{index}.{param}",
+                f"{self.prefix}.{param}",
+            ):
+                entry = user_entry(user, key)
+                if entry is None:
+                    continue
+                sigma = entry.get("sigma")
+                if sigma is not None and (
+                    sigma == 0 or entry.get("mu") is not None
+                ):
+                    found.append(param)
+                    break
+        return found
+
     def _resolve_chen(self, system):
         """Decide, per planet, whether the Chen & Kipping (2017) mass-radius
         relation applies (stage 3: every component's constructor and
@@ -1190,7 +1219,30 @@ class Planet(Component):
                     )
                 self.chen.append(user)
             else:
-                self.chen.append(radius_side != mass_side)
+                # A prior the user wrote on the mass is a mass measurement too
+                # (an RV fit's mass, quoted from a paper): with it, the
+                # relation would only act on the RADIUS, a population prior
+                # pulling a transit-measured radius toward the mass's predicted
+                # one.
+                # Measured on HAT-P-3 b (one KeplerCam transit, the paper's
+                # 0.599 +/- 0.026 MJ as a prior): T14 0.0867 -> 0.0908 d and
+                # Rp/R* 0.111 -> 0.116, five of nine parameters past 2 sigma
+                # of Torres et al. 2007; with the relation off, all nine
+                # within 0.95 sigma.
+                # Only ever turns the relation OFF: a fit with no transit and
+                # a mass prior keeps the default it always had.
+                default = radius_side != mass_side
+                prior_on = self._user_mass_priors(p)
+                muted = default and radius_side and bool(prior_on)
+                if muted:
+                    logger.info(
+                        f"planet '{nm}': not applying the Chen & Kipping "
+                        f"(2017) relation -- the params file gives the mass "
+                        f"a prior or a pin ({', '.join(prior_on)}), which "
+                        f"measures it "
+                        f"(set 'chen: true' on the planet to apply it anyway)."
+                    )
+                self.chen.append(default and not muted)
                 if self.chen[-1]:
                     constrained = (
                         "mass from radius"
