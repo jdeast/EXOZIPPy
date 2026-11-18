@@ -94,6 +94,7 @@ import shutil
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Callable, Iterator, Mapping
@@ -155,6 +156,12 @@ _cache_disabled_reason: str | None = None
 # attempted this process. Adoption costs a full md5 of a file we are
 # otherwise happy to trust on its size alone, so it happens at most once.
 _adoption_attempted: set[tuple[str, str]] = set()
+
+
+def _host(meta: Mapping[str, object]) -> str:
+    """The server an asset comes from, for messages (Zenodo, or e.g. the
+    OGLE archive for a third-party file exozippy-mkdust reads)."""
+    return urllib.parse.urlparse(str(meta["url"])).netloc
 
 
 def _md5(path: Path, chunk: int = 1 << 20) -> str:
@@ -570,7 +577,7 @@ def _download_verified(
             if digest != meta["md5"]:
                 raise RuntimeError(
                     f"{filename} has md5 {digest}, expected "
-                    f"{meta['md5']}. The file on Zenodo may have been "
+                    f"{meta['md5']}. The file on {_host(meta)} may have been "
                     f"replaced, or the download was corrupted."
                 )
             return
@@ -596,7 +603,7 @@ def _download_verified(
             time.sleep(delay)
 
     raise RuntimeError(
-        f"Could not download {filename} from Zenodo after "
+        f"Could not download {filename} from {_host(meta)} after "
         f"{_DOWNLOAD_ATTEMPTS} attempts: {last_error}"
     ) from last_error
 
@@ -633,7 +640,7 @@ def _fetch_via_cache(
 
         if on_fetch is not None:
             on_fetch(filename)
-        logger.info(f"Downloading {filename} from Zenodo...")
+        logger.info(f"Downloading {filename} from {_host(meta)}...")
 
         fd, tmp_name = tempfile.mkstemp(
             dir=cache, prefix=Path(filename).name + ".", suffix=".part"
@@ -741,7 +748,7 @@ def fetch_assets(
 
             if on_fetch is not None:
                 on_fetch(filename)
-            logger.info(f"Downloading {filename} from Zenodo...")
+            logger.info(f"Downloading {filename} from {_host(meta)}...")
 
             fd, tmp_name = tempfile.mkstemp(
                 dir=dest_dir, prefix=dest.name + ".", suffix=".part"

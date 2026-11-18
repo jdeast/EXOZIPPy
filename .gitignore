@@ -43,6 +43,9 @@ src/exozippy/models/NextGen/runtime/
 src/exozippy/models/Claret/ATLAS_L_vt2/
 src/exozippy/models/Claret/build/
 src/exozippy/models/Claret/sources/
+# Third-party extinction maps fetched on first use by exozippy-mkdust
+# (utilities/mkdust.py): Zelakiewicz+2025 (Zenodo) and Nataf+2013 Table 3.
+src/exozippy/models/dustmaps/
 src/exozippy/components/evolutionarymodel/testing.ipynb
 src/exozippy/components/evolutionarymodel/massradius_mann.py
 src/exozippy/components/evolutionarymodel/massradius_mist.py
