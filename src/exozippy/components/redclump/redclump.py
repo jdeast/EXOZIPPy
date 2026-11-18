@@ -569,7 +569,7 @@ class RedClump(Component):
         if not colour and not absolute:
             return
         teff, logg, feh = (self._start(p) for p in ("teff", "logg", "feh"))
-        rv = None
+        rv = alpha = None
         if sed.fit_rv_dust:
             from exozippy.components.sed.sed import RV_DUST
 
@@ -580,6 +580,7 @@ class RedClump(Component):
                     ]
                 )[0]
             )
+            alpha = sed.nir_alpha_start()
         lo = self._start_bound("av", "lower")
         hi = self._start_bound("av", "upper")
         if sed.grid_axes is not None and isinstance(sed.grid_axes, dict):
@@ -591,8 +592,8 @@ class RedClump(Component):
 
             def resid(av):
                 return (
-                    sed.bc_np(b, teff, logg, feh, av, rv)
-                    - sed.bc_np(a, teff, logg, feh, av, rv)
+                    sed.bc_np(b, teff, logg, feh, av, rv, alpha)
+                    - sed.bc_np(a, teff, logg, feh, av, rv, alpha)
                     - sed.mag[i]
                 )
 
@@ -601,14 +602,22 @@ class RedClump(Component):
             i = absolute[0]
             mi = self._start("mi")
             dist = self._start("distance")
-            bc_i0 = sed.bc_np(I_FILTER, teff, logg, feh, 0.0, rv)
+            bc_i0 = sed.bc_np(I_FILTER, teff, logg, feh, 0.0, rv, alpha)
             lum = 10.0 ** (-0.4 * (mi + bc_i0 - LOG_L0_CONST))
             radius = np.sqrt(lum / (LUM_CONST * teff**4))
 
             def resid(av):
                 return (
                     sed.appmag_np(
-                        sed.filters[i], teff, logg, feh, av, radius, dist, rv
+                        sed.filters[i],
+                        teff,
+                        logg,
+                        feh,
+                        av,
+                        radius,
+                        dist,
+                        rv,
+                        alpha,
                     )
                     - sed.mag[i]
                 )
@@ -698,10 +707,11 @@ class RedClump(Component):
         teff, logg, feh = (
             self._local_node(model, system, p) for p in ("teff", "logg", "feh")
         )
-        rv = None
+        rv = alpha = None
         if sed.fit_rv_dust:
             rv = self._local_node(model, system, RV_DUST_KEY)
-        bc0 = sed.bc_node(teff, logg, feh, pt.zeros_like(teff), rv)[0]
+            alpha = sed.nir_alpha_node(system)
+        bc0 = sed.bc_node(teff, logg, feh, pt.zeros_like(teff), rv, alpha)[0]
         out = {
             "bc_v0": bc0[sed.filter_column(V_FILTER)][None],
             "bc_i0": bc0[sed.filter_column(I_FILTER)][None],
@@ -709,7 +719,7 @@ class RedClump(Component):
         names = sorted(set(self.bands) | {x for c in self.colors for x in c})
         if names:
             av = self._local_node(model, system, "av")
-            bc_av = sed.bc_node(teff, logg, feh, av, rv)[0]
+            bc_av = sed.bc_node(teff, logg, feh, av, rv, alpha)[0]
             ext = {
                 b: bc0[sed.filter_column(self._band_filter(system, b))]
                 - bc_av[sed.filter_column(self._band_filter(system, b))]
@@ -767,12 +777,13 @@ class RedClump(Component):
             float(np.atleast_1d(getattr(self, p).initval)[0])
             for p in ("teff", "logg", "feh")
         )
-        rv = None
+        rv = alpha = None
         if sed.fit_rv_dust:
             # The sight line's start R_V (the clump's own is derived; under
             # the split it differs from this by the near mix -- a start
-            # check, warn-only).
+            # check, warn-only) and near-IR exponent.
             rv = float(np.atleast_1d(sed.rv_dust.initval)[0])
+            alpha = sed.nir_alpha_start()
         if self.dust_plan.on:
             # Derived: A(d_clump) = the anchor at the start (av_frac 0).
             anchor = float(np.atleast_1d(sed.dust_anchor.initval)[0])
@@ -796,8 +807,8 @@ class RedClump(Component):
                 )
         else:
             av = float(np.atleast_1d(self.av.initval)[0])
-        a_i = sed.bc_np(I_FILTER, teff, logg, feh, 0.0, rv) - sed.bc_np(
-            I_FILTER, teff, logg, feh, av, rv
+        a_i = sed.bc_np(I_FILTER, teff, logg, feh, 0.0, rv, alpha) - sed.bc_np(
+            I_FILTER, teff, logg, feh, av, rv, alpha
         )
         self._warn_ai_rc(system, a_i, "start")
 
@@ -812,16 +823,19 @@ class RedClump(Component):
         import pytensor
 
         sed = system.sed
-        rv = None
+        rv = alpha = None
         if sed.fit_rv_dust:
             rv = getattr(self, RV_DUST_KEY).value
+            alpha = sed.nir_alpha.value[0]
         teff, logg, feh, av = (
             getattr(self, p).value for p in ("teff", "logg", "feh", "av")
         )
         col = sed.filter_column(I_FILTER)
         a_i = (
-            sed.bc_node(teff, logg, feh, pt.zeros_like(teff), rv)[0, col]
-            - sed.bc_node(teff, logg, feh, av, rv)[0, col]
+            sed.bc_node(teff, logg, feh, pt.zeros_like(teff), rv, alpha)[
+                0, col
+            ]
+            - sed.bc_node(teff, logg, feh, av, rv, alpha)[0, col]
         )
         fn = pytensor.function(
             model.value_vars,

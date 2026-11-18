@@ -121,7 +121,7 @@ DISK source in front of the bar. Review 8.9.8's A_V(d) profile replaces it with 
 `bands:` gives `redclump.<name>.extinction_<k> = m_clump(band, A_V) - m_clump(band, 0)`, and
 `colors:` `redclump.<name>.color_excess_<k> = extinction(a) - extinction(b)` -- integrated
 through the passband on the clump's own spectrum at the fit's law (the tables, or the fitted
-`sed.rv_dust`), off the SED's one grid evaluation (`SED.bc_node`, injected as context nodes).
+`sed.rv_dust` and `sed.nir_alpha`), off the SED's one grid evaluation (`SED.bc_node`, injected as context nodes).
 A published value is a params-file prior on that element, with its citation:
 `redclump.RedClump.extinction_0: {mu: 1.80, sigma: 0.05, citation: ...}` (the owner spelling,
 `element_owners`). Better still, when the paper gives the calibrated I_RC and (V-I)_RC, write
@@ -144,10 +144,14 @@ caveat, not a feature).
   bulge fields measure, Nataf et al. 2013); A_V settles where it fits neither and the tension
   leaks into the source's Teff and radius (theta_star). The draft says so. A clump with only an I-band
   magnitude is still useful on the tables. Under `fit_rv_dust: true` the clump reads the sight
-  line's `sed.rv_dust` (sed.md). In the band-integrated CCM89 + O'Donnell family the bulge mean
-  A_I/E(V-I) = 1.217 is R_V ~ 1.98, NOT Nataf's 2.5, and no single R_V matches both the
-  optical and the NIR clump colors (E(J-Ks)/E(V-I) 0.30 at R_V = 2.0 against Nataf's 0.34):
-  with V, I, J and Ks clump rows the residual lands in errscale and the stars' Teff.
+  line's `sed.rv_dust` and `sed.nir_alpha` (sed.md). In the band-integrated CCM89 + O'Donnell
+  family the bulge mean A_I/E(V-I) = 1.217 is R_V ~ 1.98, NOT Nataf's 2.5, and no single R_V
+  matches both the optical and the NIR clump colors; the second law parameter, the near-IR
+  slope `sed.nir_alpha` (review 8.9.2; sed.md, "The near-infrared slope"), carries
+  E(I-J)/E(V-I) and A_V/A_Ks and leaves A_I/E(V-I) to R_V, so V, I, J and Ks clump rows now
+  constrain both. At R_V 1.95 and alpha 1.85 the law reproduces Nataf et al. (2016)'s four
+  bulge means to 2.5%; Nataf et al. (2013)'s E(J-Ks)/E(V-I) = 0.34 is not reachable with a
+  0.909 micron join (the two papers differ by 15% there).
 - **No R_V map prior beside a clump**: Nataf's R_I map is built from clump colors, so a sight-
   line prior from it on `sed.rv_dust` counts the clump twice.
 - **galacticmodel `source_selection: luminosity_function`** keeps its static `source_ai_rc`
@@ -162,4 +166,4 @@ caveat, not a feature).
 
 `tests/test_redclump.py` (the seam, the tie, the raises, the bar query, the clump physics),
 `tests/test_sed_differential_color.py` (the four-flux row), `tests/test_sed_fit_rv_dust.py`
-(one sight-line R_V); the synthetic recovery is `tests/test_redclump_recovery.py` (slow).
+(one sight-line R_V), `tests/test_nir_power_law.py` (the near-IR slope); the synthetic recovery is `tests/test_redclump_recovery.py` (slow).

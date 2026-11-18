@@ -1,7 +1,8 @@
 """Synthetic recovery through the red clump (review 8.9.11; slow).
 
 A Baade's-window source and the clump at the bar's mean distance, truth
-A_V = 4.0 and R_V = 2.0 for both (CCM89, the spectral path), photometry
+A_V = 4.0 and R_V = 2.0 for both (CCM89 + the near-IR power law at its
+prior center, the spectral path), photometry
 from an INDEPENDENT numpy integration (``SpectralBC.bc_np``, not the
 graph): the clump's calibrated I_RC and (V-I)_RC, Delta I (a same-filter
 differential) and Delta(V-I) (a differential color row).  The MAP recovers
@@ -41,6 +42,9 @@ def _grid():
 V, I = "Generic/Johnson.V", "Generic/Cousins.I"
 RA, DEC = 270.9, -30.0
 AV, RV = 4.0, 2.0
+# The near-IR exponent at its prior center (sed/defaults.yaml): V and I are
+# both blueward of the 0.909 micron join, so it moves neither row.
+ALPHA = 1.85
 
 
 def _mbol(r, t):
@@ -48,10 +52,10 @@ def _mbol(r, t):
 
 
 def _truth():
-    spec = SpectralBC(_grid(), [V, I], law="ccm89")
+    spec = SpectralBC(_grid(), [V, I], law="ccm89_nir")
 
     def bc(t, g, av):
-        return spec.bc_np(t, g, 0.0, av, RV)  # [V, I]
+        return spec.bc_np(t, g, 0.0, av, RV, ALPHA)  # [V, I]
 
     t_rc = brentq(
         lambda t: (bc(t, 2.5, 0)[1] - bc(t, 2.5, 0)[0]) - 1.06, 3000, 9000
