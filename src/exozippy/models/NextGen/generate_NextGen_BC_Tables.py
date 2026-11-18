@@ -1150,17 +1150,22 @@ def write_magsys_table(
     filter_sets: Dict[str, List[str]] = FILTER_SETS,
     model_root: Path = DEFAULT_MODEL_ROOT,
     native_systems: Dict[str, str] | None = None,
+    model: str = MODEL,
+    generator: str = GENERATOR,
 ) -> Path:
     """
     Write (or update) the magnitude-system record beside the tables,
-    `{model_root}/NextGen/BCs/NextGen.magsys.csv`, for the columns of
-    `filter_sets`. Rows for other columns already in the file are kept, so
+    `{model_root}/{model}/BCs/{model}.magsys.csv`, for the columns of
+    `filter_sets`.  `model` / `generator` name another model family whose
+    columns are Vega-referenced through the same profiles, weighting and
+    zeropoints (the PHOENIX tables, models/PHOENIX/
+    generate_PHOENIX_LD_Tables.py). Rows for other columns already in the file are kept, so
     a partial regeneration updates only what it rewrote.  Written beside
     and replaced, so a fit reading the record concurrently (the per-user
     synthesized-column cache, bc_synthesis.py) never sees half a file.
     `native_systems`: see magsys_table.
     """
-    path = magsys_table_path(model_root, MODEL)
+    path = magsys_table_path(model_root, model)
     new = magsys_table(filter_sets, native_systems)
     if path.is_file():
         old = pd.read_csv(path, comment="#", keep_default_na=False)
@@ -1171,8 +1176,8 @@ def write_magsys_table(
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     with open(tmp, "w") as f:
         f.write(
-            f"# Written by {GENERATOR} (write_magsys_table); do not edit.\n"
-            "# One row per NextGen BC column: the filter's native magnitude\n"
+            f"# Written by {generator} (write_magsys_table); do not edit.\n"
+            f"# One row per {model} BC column: the filter's native magnitude\n"
             "# system ('' = none; a .sed row in it must state magsys) and\n"
             "# ab_minus_vega = m_AB - m_Vega for the column's Vega zero,\n"
             "# from the same profile, flux weighting and Vega zeropoint as\n"

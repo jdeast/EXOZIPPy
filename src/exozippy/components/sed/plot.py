@@ -289,6 +289,9 @@ class Plot:
         # fit its figures -- but it is narrow now. A bare `except`
         # swallowed a corrupt CSV, a MemoryError and a KeyboardInterrupt
         # alike, and then reported all of them as "no spectra found".
+        # The model whose spectra (and so whose grid description) the
+        # figure draws: this one, or NextGen after the fallback below.
+        self._spectra_grid_yaml = spec_dir / f"{self.sedmodel}.grid.yaml"
         if not (spec_path.is_file() and wave_path.is_file()):
             fallback = DEFAULT_MODEL_ROOT / "NextGen" / "BCs"
             logger.warning(
@@ -302,6 +305,10 @@ class Plot:
             )
             spec_path = fallback / "NextGen.spectra.csv"
             wave_path = fallback / "NextGen.wavelength.csv"
+            # Its grid description too, even when this model has a grid
+            # yaml of its own (PHOENIX: the BC tables' axes, not those of
+            # the spectra being interpolated).
+            self._spectra_grid_yaml = fallback / "NextGen.grid.yaml"
 
         df_spec = _read_spectra_csv(spec_path)
         df_wave = _read_wavelength_csv(wave_path)
@@ -310,13 +317,10 @@ class Plot:
         self.df_wave = df_wave
 
     def _grid_yaml_path(self):
-        """Where this model's grid description lives, under ITS root."""
-        return (
-            self.model_root
-            / self.sedmodel
-            / "BCs"
-            / f"{self.sedmodel}.grid.yaml"
-        )
+        """The grid description of the spectra the figure draws: this
+        model's, under ITS root, or NextGen's once _load_spectra_data has
+        fallen back to the NextGen spectra."""
+        return self._spectra_grid_yaml
 
     def _load_model_grid_yaml(self):
         """

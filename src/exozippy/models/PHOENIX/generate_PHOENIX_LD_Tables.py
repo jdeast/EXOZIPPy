@@ -1,7 +1,9 @@
 """
-Build the limb-darkening tables from the PHOENIX-ACES specific
-intensities (Husser et al. 2013), for the filters the NextGen BC tables
-ship -- the LD analog of models/NextGen/generate_NextGen_BC_Tables.py.
+Build the limb-darkening tables -- and the bolometric-correction tables --
+from the PHOENIX-ACES specific intensities (Husser et al. 2013), for the
+filters the NextGen BC tables ship -- the analog of
+models/NextGen/generate_NextGen_BC_Tables.py.  ``products`` selects which
+(``ld``, ``bc``, or both); both come from ONE stream of the archive.
 
 Per (teff, logg, feh) node the intensity file I(lambda, mu) is streamed
 from the archive (specint.py), integrated through every filter profile
@@ -52,9 +54,39 @@ neighbours at the same (logg, feh), then fitted like any other; the
 table's ``meta["padding"]`` names every such node.  Edge planes with no
 such neighbours stay absent and the loader's complete box trims them.
 
+The bolometric corrections (``products`` containing ``bc``; review 8.9.12)
+are NextGen's (models/NextGen/bolometric_correction.py) with two inputs
+replaced.  The band flux is the specific intensities' own flux,
+2 pi int I_band(mu) mu dmu, from the SAME unnormalized band intensities the
+limb darkening is fitted to -- one atmosphere for the limb darkening and
+the flux of a star.  And the bolometric term is the MODEL's bolometric
+flux, not sigma Teff^4:
+
+    BC_X = 2.5 log10[ L0 / (4 pi (10 pc)^2 F_bol)
+                      * int(F_lam e^-tau S dlam) / (ZP_X int(S dlam)) ]
+
+because a PHOENIX flux is given at the model's outer radius, where it is
+smaller than sigma Teff^4 by (R_Teff / R_out)^2 -- 2 percent for a dwarf,
+22 percent at (4000 K, logg 0.5) (specint.py; measured 2026-11-18).  Only
+the RATIO of a band flux to the bolometric flux at one radius is physical,
+and with F_bol the 500-26000 A range of the intensities limits which
+filters get a column (COVERAGE_MIN: GALEX through 2MASS Ks; no WISE,
+Spitzer or Johnson M) but not their accuracy.  F_bol comes from the
+archive's flux spectrum of the same node (500 A - 5.5 um plus a
+Rayleigh-Jeans tail, specint.bolometric_flux), which equals the
+intensities' flux where both exist.  The tables are written in the NextGen
+format, ``models/PHOENIX/BCs/{FACILITY}.bc.parquet`` (Vega-referenced, the
+same SVO zeropoints and DetectorType weighting), with the magnitude-system
+record ``PHOENIX.magsys.csv`` beside them, and the per-node unnormalized
+band fluxes and F_bol are kept in the intensities intermediate, so either
+can be re-derived without the archive.  A node missing from the archive
+inside a (logg, [Fe/H]) row is filled by linear interpolation of the BCs
+along Teff and recorded in ``meta["padding"]``, as for the limb darkening.
+
 Run (hours of streaming; a compute node with network, not a laptop):
 
     python -m exozippy.models.PHOENIX.generate_PHOENIX_LD_Tables --workers 32
+    python -m exozippy.models.PHOENIX.generate_PHOENIX_LD_Tables --workers 32 --products bc
 """
 
 from __future__ import annotations
@@ -78,13 +110,20 @@ from exozippy.components.sed.bc_grid import (
     GRID_KEY_COLS,
     _load_alias_table,
     bc_table_filter_columns,
+    bc_table_path,
     read_bc_meta,
     read_bc_table,
     resolve_filter_name,
     write_bc_table,
 )
-from exozippy.models.NextGen.bolometric_correction import _filter_set_data
-from exozippy.models.NextGen.generate_NextGen_BC_Tables import FILTER_SETS
+from exozippy.models.NextGen.bolometric_correction import (
+    L0,
+    _filter_set_data,
+)
+from exozippy.models.NextGen.generate_NextGen_BC_Tables import (
+    FILTER_SETS,
+    write_magsys_table,
+)
 from exozippy.models.PHOENIX import specint
 
 logger = logging.getLogger(__name__)
@@ -115,6 +154,27 @@ COVERAGE_MIN = 0.99
 WORK_DIR_DEFAULT = Path(os.environ.get("TMPDIR", tempfile.gettempdir()))
 
 GRID_YAML = Path(__file__).parent / "LDs" / "PHOENIX.grid.yaml"
+
+# What a run writes: the limb-darkening tables, the bolometric-correction
+# tables, or both (one stream of the archive either way).
+PRODUCTS: Tuple[str, ...] = ("ld", "bc")
+# The BC tables' column provenance (filter_meta), the NextGen pipeline's
+# keys: what the band flux is and what it is divided by.
+MAG_SYSTEM = "Vega"
+SPECTRA_TAG = (
+    "PHOENIX-ACES-AGSS-COND-SPECINT-2011 (Husser+2013): flux 2 pi int I mu "
+    "dmu of the specific intensities, 500-26000 A, resampled to R=20000"
+)
+BOLOMETRIC = (
+    "the model's own bolometric flux at the radius its spectra are given "
+    "at: PHOENIX-ACES-AGSS-COND-2011 flux spectrum, 500 A - 5.5 um, plus a "
+    "Rayleigh-Jeans tail (not sigma Teff^4)"
+)
+# 10 pc in metres, squared, times 4 pi: L0 / FOUR_PI_D10_SQ is the
+# bolometric flux of an M_bol = 0 star at 10 pc, W/m^2.
+FOUR_PI_D10_SQ = 4.0 * np.pi * (10.0 * 3.0856775814913673e16) ** 2
+# erg/s/cm^2 -> W/m^2
+CGS_FLUX_TO_SI = 1e-3
 
 
 # -------------------------------------------------------------------
@@ -198,14 +258,31 @@ def interpolate_intensities(spec: dict) -> np.ndarray:
 def band_intensities(
     i_full: np.ndarray, fdata: dict, av_pts: Sequence[float]
 ) -> np.ndarray:
-    """I_band(mu; Av) for one node and one filter set.
+    """I_band(mu; Av) for one node and one filter set, normalized so that
+    mu = 1 is 1 per (Av, filter): only the shape of the profile matters
+    for the fit.  (n_av, n_filters, n_mu); see band_intensities_raw."""
+    return normalize_band_intensities(
+        band_intensities_raw(i_full, fdata, av_pts)
+    )
+
+
+def normalize_band_intensities(ib: np.ndarray) -> np.ndarray:
+    """``ib`` divided by its mu = 1 value (the last; mu ascending)."""
+    center = ib[:, :, -1][:, :, None]
+    return ib / np.where(center > 0, center, np.nan)
+
+
+def band_intensities_raw(
+    i_full: np.ndarray, fdata: dict, av_pts: Sequence[float]
+) -> np.ndarray:
+    """int I(lambda, mu) exp(-tau) S_w dlambda for one node and one filter
+    set, in the file's units times Angstrom -- NOT normalized.
 
     ``i_full`` is interpolate_intensities' array; ``fdata`` the filter
     set's _filter_set_data (profiles already carry the detector
     weighting, ``wave_mask`` its slice of the common grid).  Returns
-    (n_av, n_filters, n_mu), normalized so that mu = 1 is 1 per (Av,
-    filter): only the shape of the profile matters for the fit.  One
-    matrix product per Av: the trapezoid weights fold into the profiles.
+    (n_av, n_filters, n_mu).  One matrix product per Av: the trapezoid
+    weights fold into the profiles.
     """
     x = fdata["filter_wavelengths"][0]  # every row shares the grid
     inten = i_full[:, fdata["wave_mask"]]  # (n_mu, n_wave)
@@ -222,8 +299,29 @@ def band_intensities(
     for i, a in enumerate(av):
         w = s_trap * np.exp(-tau_unit * a)[None, :]  # (n_filt, n_wave)
         ib[i] = (inten @ w.T).T  # (n_filt, n_mu)
-    center = ib[:, :, -1][:, :, None]  # mu = 1 is last (ascending)
-    return ib / np.where(center > 0, center, np.nan)
+    return ib
+
+
+def band_fluxes(ib_raw: np.ndarray, mu: np.ndarray) -> np.ndarray:
+    """The band flux int F_lam exp(-tau) S_w dlam, erg/s/cm^2 (times the
+    profile's units: Angstrom for a photon counter), from the unnormalized
+    band intensities: F = 2 pi int I mu dmu over the node's own angles, and
+    the intensities' erg/s/cm^2/cm/sr per CENTIMETRE of wavelength times
+    1e-8 per Angstrom -- the units of NextGen's flux_in_filter, so the BC
+    divides it by the same filter_zero_flux.  (n_av, n_filters)."""
+    mu = np.asarray(mu, dtype=float)
+    return 2.0 * np.pi * 1e-8 * np.trapezoid(ib_raw * mu, mu, axis=-1)
+
+
+def bc_from_fluxes(
+    band_flux: np.ndarray, fbol: float, fdata: dict
+) -> np.ndarray:
+    """BC_X(Av) for one node and one filter set (the module docstring's
+    formula): ``band_flux`` (n_av, n_filters) from band_fluxes, ``fbol``
+    the model's bolometric flux at the same radius, erg/s/cm^2 (specint.
+    bolometric_flux), ``fdata`` the filter set's _filter_set_data."""
+    term1 = L0 / FOUR_PI_D10_SQ / (float(fbol) * CGS_FLUX_TO_SI)
+    return 2.5 * np.log10(term1 * band_flux / fdata["filter_zero_flux"])
 
 
 def remap_quasi_spherical(mu: np.ndarray, p: np.ndarray):
@@ -363,14 +461,82 @@ def covered_filters(filter_sets: Dict[str, List[str]]) -> Dict[str, List[int]]:
     return out
 
 
+_FLUX_WAVE: Dict[str, np.ndarray] = {}
+
+
+def _flux_wavelength(work_dir: Path) -> np.ndarray:
+    """The flux spectra's wavelength array, fetched into ``work_dir`` once
+    and kept (read once per worker process)."""
+    key = str(work_dir)
+    if key not in _FLUX_WAVE:
+        path = specint.fetch_flux_wavelength(work_dir)
+        _FLUX_WAVE[key] = specint.read_flux_wavelength(path)
+    return _FLUX_WAVE[key]
+
+
+def node_bolometric_flux(node, work_dir: Path) -> Dict[str, float]:
+    """specint.bolometric_flux of one node's flux spectrum, streamed into
+    ``work_dir`` and deleted; raises if the file is not that node's."""
+    teff, logg, feh = node
+    wave = _flux_wavelength(work_dir)
+    path = specint.fetch_flux(teff, logg, feh, work_dir)
+    try:
+        info = specint.bolometric_flux(path, wave)
+    finally:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+    got = (info["teff"], info["logg"], info["feh"])
+    if not np.allclose(got, node, atol=1e-6):
+        raise ValueError(
+            f"the flux spectrum fetched for node {node} is labelled {got}"
+        )
+    return info
+
+
+def covered_filter_sets(
+    filter_sets: Dict[str, List[str]] = FILTER_SETS,
+) -> Dict[str, List[str]]:
+    """``filter_sets`` restricted to the filters inside the intensity
+    spectra's wavelength range (covered_filters): the columns both the
+    limb-darkening and the bolometric-correction tables get.  A facility
+    with none left is dropped."""
+    keep = covered_filters(filter_sets)
+    return {
+        fac: [filter_sets[fac][i] for i in keep[fac]]
+        for fac in filter_sets
+        if keep[fac]
+    }
+
+
+def write_bc_magsys_table(
+    model_root: Path | str = DEFAULT_MODEL_ROOT,
+    filter_sets: Dict[str, List[str]] = FILTER_SETS,
+) -> Path:
+    """``PHOENIX/BCs/PHOENIX.magsys.csv``: each BC column's native
+    magnitude system and m_AB - m_Vega, computed exactly as the NextGen
+    record is (it depends on the filter profile, weighting and Vega
+    zeropoint only, so the two records agree column for column)."""
+    return write_magsys_table(
+        covered_filter_sets(filter_sets),
+        Path(model_root),
+        model=MODEL,
+        generator=GENERATOR,
+    )
+
+
 def process_node(
     node: Tuple[float, float, float],
     filter_sets: Dict[str, List[str]],
     av_pts: Sequence[float],
     work_dir: Path,
-) -> Tuple[Tuple[float, float, float], Dict[str, np.ndarray], np.ndarray]:
+    with_bc: bool = False,
+):
     """Fetch, read and band-integrate one node.  Returns (node,
-    {facility: (n_av, n_filters, n_mu) float32}, mu)."""
+    {facility: (n_av, n_filters, n_mu) float32 normalized intensities},
+    mu, {facility: (n_av, n_filters) band fluxes}, bolometric record) --
+    the last two empty / None unless ``with_bc``."""
     teff, logg, feh = node
     path = specint.fetch_specint(teff, logg, feh, work_dir)
     try:
@@ -381,11 +547,15 @@ def process_node(
         except OSError:
             pass
     i_full = interpolate_intensities(spec)
-    out = {}
+    out, fluxes = {}, {}
     for fac, (svo, _mist) in _facility_filters(filter_sets).items():
         fdata = _filter_set_data(svo, FLUX_WEIGHTING)
-        out[fac] = band_intensities(i_full, fdata, av_pts).astype(np.float32)
-    return node, out, spec["mu"]
+        raw = band_intensities_raw(i_full, fdata, av_pts)
+        out[fac] = normalize_band_intensities(raw).astype(np.float32)
+        if with_bc:
+            fluxes[fac] = band_fluxes(raw, spec["mu"])
+    fbol = node_bolometric_flux(node, work_dir) if with_bc else None
+    return node, out, spec["mu"], fluxes, fbol
 
 
 # -------------------------------------------------------------------
@@ -428,10 +598,53 @@ def load_intensities(model_root: Path | str, feh: float):
     return out, mus, filters
 
 
-def save_intensities(model_root, feh, store, mus, av_pts, filters_by_fac):
-    """One row per (node, facility), the node's mu array with it."""
+def load_band_fluxes(model_root: Path | str, feh: float):
+    """``(fluxes, fbols)`` of one feh's intermediate, save_intensities'
+    shapes; only the nodes that carry them (an intermediate written before
+    the bolometric corrections existed carries none)."""
+    path = intensities_path(model_root, feh)
+    if not path.is_file():
+        return {}, {}
+    df = pd.read_parquet(path)
+    if "band_flux" not in df.columns:
+        return {}, {}
+    n_av = len(df.attrs["meta"]["av"])
+    fluxes, fbols = {}, {}
+    for r in df.itertuples(index=False):
+        if r.band_flux is None or not np.isfinite(r.fbol):
+            continue
+        key = (float(r.teff), float(r.logg))
+        arr = np.asarray(r.band_flux, dtype=np.float64)
+        fluxes[key + (r.facility,)] = arr.reshape(n_av, arr.size // n_av)
+        fbols[key] = {
+            "fbol": float(r.fbol),
+            "tail_fraction": float(r.fbol_tail_fraction),
+        }
+    return fluxes, fbols
+
+
+def save_intensities(
+    model_root,
+    feh,
+    store,
+    mus,
+    av_pts,
+    filters_by_fac,
+    fluxes=None,
+    fbols=None,
+):
+    """One row per (node, facility), the node's mu array with it -- and,
+    for a node streamed for the bolometric corrections, its unnormalized
+    band fluxes (``fluxes``: {(teff, logg, facility): (n_av, n_f)}) and its
+    bolometric flux (``fbols``: {(teff, logg): specint.bolometric_flux
+    record}).  A node without them (streamed for the limb darkening only,
+    or a filled hole) stores None / NaN there."""
+    fluxes = fluxes or {}
+    fbols = fbols or {}
     rows = []
     for (teff, logg, fac), arr in sorted(store.items()):
+        flux = fluxes.get((teff, logg, fac))
+        fb = fbols.get((teff, logg))
         rows.append(
             {
                 "teff": teff,
@@ -441,6 +654,15 @@ def save_intensities(model_root, feh, store, mus, av_pts, filters_by_fac):
                 "filters": list(filters_by_fac[fac]),
                 "mu": np.asarray(mus[(teff, logg)], dtype=float),
                 "intensity": np.asarray(arr, dtype=np.float32).ravel(),
+                "band_flux": (
+                    None
+                    if flux is None
+                    else np.asarray(flux, dtype=np.float64).ravel()
+                ),
+                "fbol": np.nan if fb is None else float(fb["fbol"]),
+                "fbol_tail_fraction": (
+                    np.nan if fb is None else float(fb["tail_fraction"])
+                ),
             }
         )
     path = intensities_path(model_root, feh)
@@ -529,6 +751,140 @@ def _existing_nodes(model_root, law, fac):
     }
 
 
+def _existing_bc_nodes(model_root, fac):
+    path = bc_table_path(model_root, MODEL, fac)
+    if not path.is_file():
+        return set()
+    df = pd.read_parquet(path, columns=GRID_KEY_COLS)
+    return {
+        (float(t), float(g), float(z))
+        for t, g, z in zip(df.teff, df.logg, df.feh)
+    }
+
+
+def fill_bc_holes_along_teff(bcs, teff_pts, logg_pts, facilities):
+    """The BC analog of fill_holes_along_teff: ``bcs`` {(teff, logg, fac):
+    (n_av, n_f) BC} gains every grid node whose two nearest TEFF
+    neighbours at the same logg it holds (all facilities), by linear
+    interpolation of the BCs; returns the padding records."""
+    records = []
+    teffs = sorted(float(t) for t in teff_pts)
+
+    def have(t, g):
+        return all((t, g, f) in bcs for f in facilities)
+
+    for logg in logg_pts:
+        logg = float(logg)
+        for k, teff in enumerate(teffs):
+            if have(teff, logg):
+                continue
+            lo = next((t for t in reversed(teffs[:k]) if have(t, logg)), None)
+            hi = next((t for t in teffs[k + 1 :] if have(t, logg)), None)
+            if lo is None or hi is None:
+                continue
+            wgt = (teff - lo) / (hi - lo)
+            for fac in facilities:
+                bcs[(teff, logg, fac)] = (1 - wgt) * bcs[
+                    (lo, logg, fac)
+                ] + wgt * bcs[(hi, logg, fac)]
+            records.append(
+                {"teff": teff, "logg": logg, "axis": "teff", "from": [lo, hi]}
+            )
+    return records
+
+
+def _write_bc_tables(
+    model_root,
+    feh,
+    sets,
+    svo_of,
+    mist_of,
+    av_pts,
+    grid,
+    fluxes,
+    fbols,
+    generated,
+):
+    """One [Fe/H]'s BC rows, every facility: BCs at every node holding a
+    band flux and a bolometric flux, interior holes filled along Teff,
+    merged into ``PHOENIX/BCs/{FACILITY}.bc.parquet``.  Returns the number
+    of holes filled."""
+    bcs = {}
+    for (teff, logg, fac), flux in fluxes.items():
+        if fac not in sets:
+            continue
+        fdata = _filter_set_data(tuple(svo_of[fac]), FLUX_WEIGHTING)
+        bcs[(teff, logg, fac)] = bc_from_fluxes(
+            flux, fbols[(teff, logg)]["fbol"], fdata
+        )
+    padding = fill_bc_holes_along_teff(
+        bcs, grid["teff"], grid["logg"], list(sets)
+    )
+    for fac in sets:
+        fdata = _filter_set_data(tuple(svo_of[fac]), FLUX_WEIGHTING)
+        recs = []
+        for (teff, logg, f2), bc in sorted(bcs.items()):
+            if f2 != fac:
+                continue
+            for i, av in enumerate(av_pts):
+                recs.append(
+                    {
+                        "teff": teff,
+                        "logg": logg,
+                        "feh": feh,
+                        "alpha": 0.0,
+                        "Av": av,
+                        "Rv": RV,
+                        **dict(zip(mist_of[fac], bc[i])),
+                    }
+                )
+        if not recs:
+            continue
+        fmeta = {
+            col: {
+                "svo_id": svo_of[fac][j],
+                "zeropoint_Fl_Vega": float(fdata["filter_zero_pts"][j]),
+                "flux_weighting": fdata["filter_weightings"][j],
+                "spectra": SPECTRA_TAG,
+                "bolometric": BOLOMETRIC,
+                "generator": GENERATOR,
+                "generated": generated,
+            }
+            for j, col in enumerate(mist_of[fac])
+        }
+        path = bc_table_path(model_root, MODEL, fac)
+        old_pad = (
+            read_bc_meta(path).get("padding", []) if path.is_file() else []
+        )
+        new_pad = [
+            {**p, "feh": feh}
+            for p in padding
+            if not any(
+                q.get("teff") == p["teff"]
+                and q.get("logg") == p["logg"]
+                and q.get("feh") == feh
+                for q in old_pad
+            )
+        ]
+        df = pd.DataFrame(recs)
+        write_bc_table(
+            df[BC_PARAM_COLS + list(mist_of[fac])],
+            path,
+            fmeta,
+            table_meta={
+                "facility": fac,
+                "mag_system": MAG_SYSTEM,
+                "Rv": RV,
+                "L0_W": L0,
+                "model": MODEL,
+                "bolometric": BOLOMETRIC,
+                "padding": old_pad + new_pad,
+            },
+            allow_new_nodes=True,
+        )
+    return len(padding)
+
+
 def generate_ld_tables(
     filter_sets: Dict[str, List[str]] = FILTER_SETS,
     model_root: Path | str = DEFAULT_MODEL_ROOT,
@@ -537,22 +893,30 @@ def generate_ld_tables(
     n_workers: int = 4,
     fehs: Optional[Sequence[float]] = None,
     laws: Sequence[str] = LAWS,
+    products: Sequence[str] = PRODUCTS,
 ) -> Dict[str, int]:
     """Stream the archive node by node and write the tables, one [Fe/H] at
     a time (checkpointed), computing only the nodes the tables lack.
 
+    ``products``: ``"ld"`` writes the limb-darkening tables, ``"bc"`` the
+    bolometric-correction tables (``PHOENIX/BCs/``) and their
+    magnitude-system record; a node is streamed once for whichever of them
+    lacks it.  A "bc" node also needs the archive's flux spectrum (its
+    bolometric flux), so only the nodes BOTH archives hold get a BC row.
+
     Returns {feh: nodes processed}.
     """
+    products = tuple(products)
+    unknown = [p for p in products if p not in PRODUCTS]
+    if unknown or not products:
+        raise ValueError(
+            f"products must be a subset of {PRODUCTS}: {products}"
+        )
     model_root = Path(model_root)
     grid = read_grid_yaml(model_root) if grid is None else grid
     av_pts = [float(a) for a in grid["av"]]
     keep = covered_filters(filter_sets)
-    fac_filters = _facility_filters(filter_sets)
-    sets = {
-        fac: [filter_sets[fac][i] for i in keep[fac]]
-        for fac in filter_sets
-        if keep[fac]
-    }
+    sets = covered_filter_sets(filter_sets)
     dropped = {
         fac: [
             filter_sets[fac][i]
@@ -564,68 +928,97 @@ def generate_ld_tables(
     dropped = {k: v for k, v in dropped.items() if v}
     if dropped:
         print(
-            f"filters outside the intensity spectra's 500-26000 A (no LD column): {dropped}"
+            f"filters outside the intensity spectra's 500-26000 A (no column): {dropped}"
         )
+    alias_df = _load_alias_table()
     mist_of = {
-        fac: [
-            resolve_filter_name(f, _load_alias_table(), alias="MIST")
-            for f in fs
-        ]
+        fac: [resolve_filter_name(f, alias_df, alias="MIST") for f in fs]
         for fac, fs in sets.items()
     }
     svo_of = {
-        fac: [
-            resolve_filter_name(f, _load_alias_table(), alias="SVO")
-            for f in fs
-        ]
+        fac: [resolve_filter_name(f, alias_df, alias="SVO") for f in fs]
         for fac, fs in sets.items()
     }
     generated = datetime.date.today().isoformat()
     work_dir = Path(work_dir) / "phoenix_specint"
+    listing_cache = model_root / MODEL / "LDs" / "cache"
     done = {}
     for feh in fehs if fehs is not None else grid["feh"]:
         feh = float(feh)
-        available = specint.list_available(
-            feh, cache_dir=model_root / MODEL / "LDs" / "cache"
-        )
+        available = specint.list_available(feh, cache_dir=listing_cache)
         wanted = [
             (float(t), float(g), feh)
             for g in grid["logg"]
             for t in grid["teff"]
             if (float(t), float(g)) in available
         ]
-        have = (
-            set.intersection(
-                *[
-                    _existing_nodes(model_root, law, fac)
-                    for law in laws
-                    for fac in sets
-                ]
-            )
-            if sets
-            else set()
-        )
         store, mus, _f = load_intensities(model_root, feh)
-        todo = [
-            n
-            for n in wanted
-            if n not in have
-            and not all((n[0], n[1], fac) in store for fac in sets)
-        ]
+        fluxes, fbols = load_band_fluxes(model_root, feh)
+        todo_ld, todo_bc = [], []
+        if "ld" in products:
+            have = (
+                set.intersection(
+                    *[
+                        _existing_nodes(model_root, law, fac)
+                        for law in laws
+                        for fac in sets
+                    ]
+                )
+                if sets
+                else set()
+            )
+            todo_ld = [
+                n
+                for n in wanted
+                if n not in have
+                and not all((n[0], n[1], fac) in store for fac in sets)
+            ]
+        if "bc" in products:
+            with_flux = specint.list_available(
+                feh, cache_dir=listing_cache, product="flux"
+            )
+            have_bc = (
+                set.intersection(
+                    *[_existing_bc_nodes(model_root, fac) for fac in sets]
+                )
+                if sets
+                else set()
+            )
+            todo_bc = [
+                n
+                for n in wanted
+                if (n[0], n[1]) in with_flux
+                and n not in have_bc
+                and not (
+                    (n[0], n[1]) in fbols
+                    and all((n[0], n[1], fac) in fluxes for fac in sets)
+                )
+            ]
+        bc_set = set(todo_bc)
+        todo = sorted(set(todo_ld) | bc_set)
         print(
-            f"feh={feh:+.1f}: {len(available)} nodes in the archive, {len(wanted)} on the grid, {len(todo)} to stream"
+            f"feh={feh:+.1f}: {len(available)} nodes in the archive, "
+            f"{len(wanted)} on the grid, {len(todo)} to stream "
+            f"({len(todo_ld)} for ld, {len(todo_bc)} for bc)"
         )
         if todo:
             with ProcessPoolExecutor(max_workers=max(1, n_workers)) as pool:
                 futures = {
-                    pool.submit(process_node, n, sets, av_pts, work_dir): n
+                    pool.submit(
+                        process_node, n, sets, av_pts, work_dir, n in bc_set
+                    ): n
                     for n in todo
                 }
                 for k, fut in enumerate(as_completed(futures), 1):
-                    node, arrs, mu_node = fut.result()
-                    mus[(node[0], node[1])] = np.asarray(mu_node, dtype=float)
+                    node, arrs, mu_node, flux_node, fbol = fut.result()
+                    key = (node[0], node[1])
+                    mus[key] = np.asarray(mu_node, dtype=float)
                     for fac, arr in arrs.items():
-                        store[(node[0], node[1], fac)] = arr
+                        store[key + (fac,)] = arr
+                    for fac, arr in flux_node.items():
+                        fluxes[key + (fac,)] = arr
+                    if fbol is not None:
+                        fbols[key] = fbol
                     if k % 50 == 0 or k == len(todo):
                         print(
                             f"  feh={feh:+.1f}: {k}/{len(todo)} nodes",
@@ -637,7 +1030,28 @@ def generate_ld_tables(
         padding = fill_holes_along_teff(
             store, mus, grid["teff"], grid["logg"], list(sets)
         )
-        save_intensities(model_root, feh, store, mus, av_pts, mist_of)
+        save_intensities(
+            model_root, feh, store, mus, av_pts, mist_of, fluxes, fbols
+        )
+        if "bc" in products and fluxes:
+            n_pad = _write_bc_tables(
+                model_root,
+                feh,
+                sets,
+                svo_of,
+                mist_of,
+                av_pts,
+                grid,
+                fluxes,
+                fbols,
+                generated,
+            )
+            print(
+                f"feh={feh:+.1f}: wrote {len(sets)} BC tables; {n_pad} hole(s) filled"
+            )
+        if "ld" not in products:
+            done[feh] = len(todo)
+            continue
         # fit and write every facility and law for this feh
         for fac in sets:
             n_f = len(mist_of[fac])
@@ -719,17 +1133,30 @@ def generate_ld_tables(
         print(
             f"feh={feh:+.1f}: wrote {len(sets)} facilities x {len(laws)} laws; {len(padding)} hole(s) filled"
         )
+    if "bc" in products:
+        # A property of the columns' filter profiles, weighting and
+        # zeropoints only, rewritten with them (the NextGen rule).
+        write_bc_magsys_table(model_root, filter_sets)
     return done
 
 
 def main(argv=None):
-    p = argparse.ArgumentParser(description="PHOENIX limb-darkening tables")
+    p = argparse.ArgumentParser(
+        description="PHOENIX limb-darkening and bolometric-correction tables"
+    )
     p.add_argument(
         "--workers", type=int, default=int(os.environ.get("NSLOTS", 4))
     )
     p.add_argument("--model-root", default=str(DEFAULT_MODEL_ROOT))
     p.add_argument("--work-dir", default=str(WORK_DIR_DEFAULT))
     p.add_argument("--feh", type=float, nargs="*", default=None)
+    p.add_argument(
+        "--products",
+        nargs="+",
+        choices=PRODUCTS,
+        default=list(PRODUCTS),
+        help="which tables to write (default: both)",
+    )
     args = p.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     done = generate_ld_tables(
@@ -737,6 +1164,7 @@ def main(argv=None):
         work_dir=args.work_dir,
         n_workers=args.workers,
         fehs=args.feh,
+        products=args.products,
     )
     print(done)
 

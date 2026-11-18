@@ -151,3 +151,8 @@ src/exozippy/**/*.part
 src/exozippy/models/PHOENIX/LDs/*/*.parquet
 src/exozippy/models/PHOENIX/LDs/*/*.parquet.*
 src/exozippy/models/PHOENIX/LDs/cache/
+# The PHOENIX bolometric-correction tables (same generator, review 8.9.12;
+# record `phoenix_bc_tables`).  The grid yaml, the magnitude-system record
+# and plot.py beside them are tracked.
+src/exozippy/models/PHOENIX/BCs/*.bc.parquet
+src/exozippy/models/PHOENIX/BCs/*.bc.parquet.*

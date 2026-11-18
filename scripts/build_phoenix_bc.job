@@ -1,0 +1,31 @@
+# /bin/sh
+#$ -S /bin/sh
+#$ -pe mthread 32
+#$ -q mThC.q
+#$ -cwd
+#$ -j y
+#$ -N phoenixbc
+#$ -o scripts/build_phoenix_bc.$JOB_ID.log
+#
+# Build the PHOENIX bolometric-correction tables (models/PHOENIX/
+# generate_PHOENIX_LD_Tables.py --products bc; models/PHOENIX/README.md,
+# "The bolometric-correction tables"): streams each node's specific
+# intensities (16 MB) AND its flux spectrum (6 MB, for the bolometric flux)
+# from the Goettingen archive's gwdg mirror into $TMPDIR, one node per
+# worker, and writes models/PHOENIX/BCs/{FACILITY}.bc.parquet,
+# PHOENIX.magsys.csv and the band fluxes into the intensities intermediate
+# (models/PHOENIX/LDs/intensities/), all in the package tree.  The
+# limb-darkening tables are NOT touched.  ~1 GB RSS per worker, ~11 s per
+# node.  Resumable: a rerun streams only the nodes the BC tables and the
+# intermediate both lack.
+module purge
+module load tools/python/3.13
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+cd $HOME/python/EXOZIPPy
+echo "commit $(git rev-parse --short HEAD) on $(git branch --show-current)   $(date)   slots $NSLOTS   tmp ${TMPDIR:-/tmp}"
+python -u -m exozippy.models.PHOENIX.generate_PHOENIX_LD_Tables --workers $NSLOTS --work-dir ${TMPDIR:-/tmp} --products bc
+echo "exit $?   $(date)"

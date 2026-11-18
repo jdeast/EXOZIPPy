@@ -1,4 +1,4 @@
-# The PHOENIX limb-darkening tables
+# The PHOENIX limb-darkening and bolometric-correction tables
 
 The band component's limb-darkening tie (`band.star_constrains_ld`, see
 `components/sed/sed.md`, "The limb-darkening tie") can read two table
@@ -11,10 +11,22 @@ corrections. They reach 2300 K and logg 6, cover every filter the BC
 tables ship inside 500-26000 A (WISE and Johnson M are outside), and carry
 A_V as a fourth axis.
 
+An SED file saying `model: PHOENIX` reads the bolometric-correction
+tables built from the same stream of the same archive (section "The
+bolometric-correction tables" below; `components/sed/sed.md`, "Choosing
+the atmospheres").
+
 ```
 models/PHOENIX/
     specint.py                       # the archive: names, fetch, read
     generate_PHOENIX_LD_Tables.py    # the generator (streams the archive)
+    ld_tables.py                     # fetch of the published LD tables
+    bc_tables.py                     # fetch of the published BC tables
+    BCs/
+        PHOENIX.grid.yaml            # the BC axes (= the LD axes) + coverage (tracked)
+        PHOENIX.magsys.csv           # per-column magnitude-system record (tracked)
+        plot.py                      # the SED figure (NextGen spectra; tracked)
+        {FACILITY}.bc.parquet        # one column per filter, NextGen format
     LDs/
         PHOENIX.grid.yaml            # the (teff, logg, feh, av) axes (tracked)
         linear/{FACILITY}.ld.parquet     # one column per filter: u
@@ -49,10 +61,11 @@ it; the raw archive (~110 GB) is never rehosted. What is kept is the
 band-integrated intensities, about 0.6 MB per node (float32), from which
 any other law or fit recipe can be refitted without the archive.
 
-The PHOENIX-ACES grid is not the BT-NextGen grid the BC tables use
-(different code versions and abundance tables). This is the v1 mismatch
-the 2026-08-04 plan accepted; the BC tables stay NextGen until a
-flux-plus-intensity product from one atmosphere set exists.
+The PHOENIX-ACES grid is not the BT-NextGen grid the default BC tables
+use (different code versions and abundance tables). This was the v1
+mismatch the 2026-08-04 plan accepted; since review 8.9.12 the same
+stream also writes PHOENIX BC tables, so `model: PHOENIX` with
+`ld_source: phoenix` describes a star with one atmosphere.
 
 ## What is computed
 
@@ -130,12 +143,65 @@ neighbours at the same (logg, feh), then fitted like any other node, and
 recorded in `meta["padding"]`. Edge planes with no such neighbours stay
 absent; the loader's complete box (`bc_grid.complete_axes`) trims them.
 
+## The bolometric-correction tables
+
+`--products bc` (the default writes both) computes, per node and
+filter, NextGen's BC (`models/NextGen/bolometric_correction.py`) with two
+inputs replaced:
+
+    BC_X = 2.5 log10[ L0 / (4 pi (10 pc)^2 F_bol)
+                      * int(F_lam e^-tau S dlam) / (ZP_X int(S dlam)) ]
+
+* the band flux is 2 pi int I_band(mu) mu dmu of the unnormalized band
+  intensities above (the intensities are per centimetre of wavelength;
+  1e-8 makes them per Angstrom, NextGen's unit), so the limb darkening
+  and the flux of a star come from one atmosphere;
+* F_bol is the model's OWN bolometric flux, not sigma Teff^4. A PHOENIX
+  flux is given at the model's outer radius, where it is smaller than
+  sigma Teff^4 by (R_Teff / R_out)^2 -- 0.985 at (5800 K, 4.5), 0.93 at
+  (4500, 2.0), 0.78 at (4000, 0.5) over 500 A - 5.5 um -- and only the
+  ratio of band to bolometric flux at one radius is physical. F_bol is
+  read from the archive's flux spectrum of the node (HiResFITS, 6 MB,
+  500 A - 5.5 um, plus a Rayleigh-Jeans tail of 0.1-3 percent;
+  `specint.bolometric_flux`), which equals the intensities' flux to 1e-4.
+
+With F_bol in the denominator, the 2.6 um end of the intensities limits
+which filters get a column (99 percent of the weighted bandpass inside
+500-26000 A: GALEX through 2MASS Ks; not WISE, Spitzer IRAC or Johnson
+M), not their accuracy. A node needs both archives; an interior hole is
+filled by interpolating the BCs along Teff (`meta["padding"]`). The
+unnormalized band fluxes and F_bol are added to the intensities
+intermediate (`band_flux`, `fbol`, `fbol_tail_fraction`); an intermediate
+written before them has neither, and its nodes are streamed again for
+`bc`.
+
+A subset check (2026-11-18; 2MASS, Gaia DR3, Bessell V, Cousins I and
+TESS at [Fe/H] = 0), PHOENIX minus the published NextGen tables:
+0.005-0.04 mag at (5800 K, 4.0-4.5); 0.06-0.11 mag at (4500, 2.0);
+0.29 mag at (4000, 0.5); 0.02-0.14 mag at (3000, 4.5), largest in Gaia
+BP. With sigma Teff^4 in place of F_bol the giants would agree with
+NextGen to 0.02-0.04 mag -- the NextGen tables divide by sigma Teff^4,
+and their spectra integrate to 0.77 sigma Teff^4 at (4000, 0.5) -- while
+MIST's BCs (ATLAS, normalized to sigma Teff^4) agree with the F_bol
+version: at (4000, 0.5) V -0.894 / -0.990 / -1.290 and J 1.601 / 1.606 /
+1.315 for MIST / PHOENIX / NextGen.
+
+The tables are published as Zenodo record `phoenix_bc_tables`
+(`utilities/zenodo_assets.py`, PENDING until it exists) and fetched per
+facility on first use by `bc_tables.py`; `exozippy-fetch-phoenix-bc-tables`
+pre-fetches them. `PHOENIX.magsys.csv` is written by the same run and
+depends only on the filter profiles, so it is tracked and identical, row
+for row, to NextGen's for every shared column.
+
 ## Running it
 
 ```bash
 # ~7000 nodes streamed; a compute node with network, 32 workers, ~1 h
 python -m exozippy.models.PHOENIX.generate_PHOENIX_LD_Tables --workers 32
 qsub scripts/build_phoenix_ld.job        # the same on Hydra
+# the BC tables only (also streams each node's 6 MB flux spectrum)
+python -m exozippy.models.PHOENIX.generate_PHOENIX_LD_Tables --workers 32 --products bc
+qsub scripts/build_phoenix_bc.job        # the same on Hydra
 ```
 
 Resumable and incremental: a rerun computes only the nodes the tables

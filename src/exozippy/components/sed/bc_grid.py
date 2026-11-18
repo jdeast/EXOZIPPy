@@ -1,8 +1,8 @@
 """
 Bolometric Correction (BC) grid loader and pytensor interpolator.
 
-Given a set of filter names and a model name ("NextGen" in v1),
-it loads the matching per-facility BC tables from the `{MODEL}/BCs/`
+Given a set of filter names and a model name ("NextGen", the default, or
+"PHOENIX" -- PUBLISHED_BC_MODELS), it loads the matching per-facility BC tables from the `{MODEL}/BCs/`
 tree and builds a pytensor-compatible RegularGridInterpolator over
 (teff, logg, feh, Av) returning a vector of BC values, one per
 requested filter.
@@ -57,8 +57,9 @@ Grid assumptions in v1:
     build_bc_grid and peek_grid_axes)
   * the grid assembled from these tables has axes (teff, logg, feh, av)
 
-These assumptions hold for the NextGen tree as it currently ships.
-When MIST is added, this loader grows a `model` dispatch so each
+These assumptions hold for the NextGen and PHOENIX trees (the PHOENIX
+tables are written in the NextGen format by models/PHOENIX/
+generate_PHOENIX_LD_Tables.py).  When MIST is added, this loader grows a `model` dispatch so each
 family can parse its own layout; the interpolator interface stays
 the same.
 """
@@ -312,6 +313,17 @@ def bc_table_path(model_root: Path | str, model: str, facility: str) -> Path:
     return Path(model_root) / model / "BCs" / f"{facility}{_BC_TABLE_SUFFIX}"
 
 
+# The model families whose BC tables are PUBLISHED on Zenodo, and the module
+# that owns each set's pins and fetch (each exposes published_tables() and
+# ensure_tables(names, allow_local_changes=...)).  The SED file's `model:`
+# names one of them; another model is read only from an explicit
+# `model_root:` tree.
+PUBLISHED_BC_MODELS: Dict[str, str] = {
+    "NextGen": "exozippy.models.NextGen.bc_tables",
+    "PHOENIX": "exozippy.models.PHOENIX.bc_tables",
+}
+
+
 def ensure_bc_tables(
     model_root: Path | str,
     model: str,
@@ -320,9 +332,11 @@ def ensure_bc_tables(
 ) -> None:
     """Fetch the PUBLISHED tables for these facilities if they are not on disk.
 
-    The NextGen tables are not shipped in the package: they are published
-    on Zenodo and pinned by size and md5 in models/NextGen/bc_tables.py,
-    which fetches them on first use (through utilities/zenodo, the same
+    The NextGen and PHOENIX tables are not shipped in the package: they are
+    published on Zenodo and pinned by size and md5 (utilities/
+    zenodo_assets.py), and the model's module in PUBLISHED_BC_MODELS
+    (models/NextGen/bc_tables.py, models/PHOENIX/bc_tables.py) fetches
+    them on first use (through utilities/zenodo, the same
     machinery and machine cache as the spectra and the MIST EEP grid).
     Every reader of a table here calls this first, for exactly the
     facilities it is about to read; `facilities=None` means every published
@@ -337,9 +351,13 @@ def ensure_bc_tables(
     file; see bc_tables.ensure_tables. `allow_local_changes` is for the
     generators, which merge new cells into these files.
     """
-    if model != "NextGen" or Path(model_root) != Path(DEFAULT_MODEL_ROOT):
+    if model not in PUBLISHED_BC_MODELS or Path(model_root) != Path(
+        DEFAULT_MODEL_ROOT
+    ):
         return
-    from ...models.NextGen import bc_tables
+    import importlib
+
+    bc_tables = importlib.import_module(PUBLISHED_BC_MODELS[model])
 
     published = set(bc_tables.published_tables())
     if facilities is None:
@@ -999,7 +1017,18 @@ def _bracket(pts: np.ndarray, lo, hi) -> Tuple[float, float]:
     return float(pts[idx[0]]), float(pts[idx[-1]])
 
 
-def _refuse_missing(facility, svo_names, model, detail):
+def model_coverage(model: str, model_root: Path | str) -> str | None:
+    """The ``coverage:`` sentence of {model}.grid.yaml -- which filters a
+    model family's tables can carry at all (PHOENIX: the intensities stop at
+    2.6 um) -- or None when the model states none."""
+    path = Path(model_root) / model / "BCs" / f"{model}.grid.yaml"
+    if not path.is_file():
+        return None
+    with open(path, "r") as f:
+        return yaml.safe_load(f).get("coverage")
+
+
+def _refuse_missing(facility, svo_names, model, detail, model_root=None):
     """The message for a filter neither the published tables nor the
     synthesized-column cache cover.
 
@@ -1014,7 +1043,21 @@ def _refuse_missing(facility, svo_names, model, detail):
     component reads.  So reaching this message means the filter is a .sed
     row's, or synthesis does not apply (an explicit model_root, the machine
     cache switched off, a model other than NextGen).
+
+    A model with no synthesis (PHOENIX) says what its tables can cover
+    (model_coverage) and how to get a fit that reads the filter.
     """
+    coverage = (
+        model_coverage(model, model_root) if model_root is not None else None
+    )
+    if model != "NextGen" and coverage is not None:
+        return (
+            f"Bolometric corrections for {list(svo_names)} ({model}, "
+            f"facility '{facility}') are not in the {model} tables: "
+            f"{detail} {coverage}  Remove the .sed row (or the reader of "
+            f"the band's flux) in that filter, or fit with the default "
+            f"`model: NextGen` in the SED file."
+        )
     return (
         f"Bolometric corrections for {list(svo_names)} ({model}, facility "
         f"'{facility}') are not in the published tables: {detail} The grid "
@@ -1112,7 +1155,7 @@ def build_bc_grid(
             except FileNotFoundError as e:
                 fac_svo = [svo_names[idx] for idx, _ in items]
                 raise NotImplementedError(
-                    _refuse_missing(fac, fac_svo, model, str(e))
+                    _refuse_missing(fac, fac_svo, model, str(e), model_root)
                 ) from e
             if path is None:
                 missing.append(mist)
@@ -1129,7 +1172,7 @@ def build_bc_grid(
                 else f"facility '{fac}' has no published table."
             )
             raise NotImplementedError(
-                _refuse_missing(fac, miss_svo, model, detail)
+                _refuse_missing(fac, miss_svo, model, detail, model_root)
             )
 
         # Bracket the bounds on each table's own points (a cheap read of
