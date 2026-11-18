@@ -29,6 +29,35 @@ sed:
     upper: 6.0
     init_scale: 0.05
     initval: 3.1
+  # THE sight line's near-infrared extinction exponent, declared with
+  # rv_dust only under sed.fit_rv_dust (review 8.9.2; sed.md, "The
+  # near-infrared slope"; sed/extinction.py): redward of 0.909 micron the
+  # law is A_lam ~ lambda**-nir_alpha, joined continuously to CCM89 +
+  # O'Donnell (1994).  ONE number for the whole sight line: every star,
+  # the red clump, and both layers of the dust profile's near/far split.
+  # Prior N(1.85, 0.25) (JDE ruling 2026-11-09): 1.85 with R_V ~ 1.96
+  # reproduces all four Nataf et al. (2016) bulge red-clump ratios
+  # (A_I/E(V-I), E(I-J)/E(V-I), E(J-Ks)/E(V-I), A_V/A_Ks) to ~1% in THIS
+  # band-integrated model; the width spans the near-IR-only bulge
+  # measurements (Nishiyama et al. 2009 ~2.0, Wang & Chen 2019 2.07) and
+  # CCM's own 1.61 at ~1 sigma.  It is this family's shape knob, NOT a
+  # literature alpha (a broad-band fit's alpha depends on the wavelength
+  # convention).  Bounds [1.2, 3.0] are validity limits far outside it.
+  # 1.61 is CCM89's infrared exponent: pinned there (initval 1.61, sigma 0)
+  # the law is the pre-8.9.2 one up to CCM's own break at the join (0.05% of
+  # the near-IR extinction at R_V 3.1, 0.3% at 1.5; extinction.py).  When Nataf's Roman-band bulge curve is
+  # published, re-center or replace (extinction.py, the SEAM comment).
+  nir_alpha:
+    mu: 1.85
+    sigma: 0.25
+    lower: 1.2
+    upper: 3.0
+    initval: 1.85
+    init_scale: 0.05
+    unit: ""
+    internal_unit: ""
+    latex: "\\alpha_{\\rm NIR}"
+    description: "Near-infrared extinction power-law exponent of the sight line"
   # ---------------------------------------------------------------------
   # The sight-line dust profile (review 8.9.8; sed.md, "The sight-line dust
   # profile"), declared only when SED.dust_plan is on.
@@ -85,16 +114,17 @@ sed:
   # Under the near/far split (sed.fit_rv_dust_near): the R_V of the dust in
   # front of dust_boundary.  Prior: the diffuse ISM, Schlafly et al.
   # (2016)'s R'(V) = 3.32 +/- 0.18 (their eq. 8 proxy, calibrated on
-  # Fitzpatrick 1999), mapped into THIS band-integrated CCM89 + O'Donnell
-  # family through the same proxy computed on their reference giant (4500 K,
-  # logg 2.5, [Fe/H] 0) at A_V = 2: R_V = 2.88 +/- 0.19 (sed.md).  The far
-  # dust's R_V is sed.rv_dust.
+  # Fitzpatrick 1999), mapped into THIS band-integrated law (CCM89 +
+  # O'Donnell with the near-IR power law at nir_alpha's prior center 1.85)
+  # through the same proxy computed on their reference giant (4500 K, logg
+  # 2.5, [Fe/H] 0) at A_V = 2: R_V = 2.84 +/- 0.18 (sed.md).  The far dust's
+  # R_V is sed.rv_dust; both layers share sed.nir_alpha.
   rv_dust_near:
-    mu: 2.88
-    sigma: 0.19
+    mu: 2.84
+    sigma: 0.18
     lower: 1.5
     upper: 6.0
-    initval: 2.88
+    initval: 2.84
     init_scale: 0.05
     unit: ""
     internal_unit: ""
