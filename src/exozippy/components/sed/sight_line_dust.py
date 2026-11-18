@@ -539,23 +539,28 @@ class SightLineDust:
     # The reference spectrum (an anchor band other than V)
     # ------------------------------------------------------------------
     def reference_band_extinction_np(self, band, av, system, rv=None):
-        """A_band on the reference spectrum at A_V = ``av`` (numpy)."""
+        """A_band on the reference spectrum at A_V = ``av`` (numpy), at
+        ``rv`` (default: sed.rv_dust's start) and sed.nir_alpha's start
+        under fit_rv_dust."""
         teff, logg, feh = dp.REFERENCE_SPECTRUM
-        if self.fit_rv_dust and rv is None:
-            from .sed import RV_DUST
+        alpha = None
+        if self.fit_rv_dust:
+            alpha = self.nir_alpha_start()
+            if rv is None:
+                from .sed import RV_DUST
 
-            rv = float(
-                np.atleast_1d(
-                    self.config_manager.resolve("sed", RV_DUST, element=0)[
-                        "initval"
-                    ]
-                )[0]
-            )
-        return self.bc_np(band, teff, logg, feh, 0.0, rv) - self.bc_np(
-            band, teff, logg, feh, av, rv
+                rv = float(
+                    np.atleast_1d(
+                        self.config_manager.resolve("sed", RV_DUST, element=0)[
+                            "initval"
+                        ]
+                    )[0]
+                )
+        return self.bc_np(band, teff, logg, feh, 0.0, rv, alpha) - self.bc_np(
+            band, teff, logg, feh, av, rv, alpha
         )
 
-    def _anchor_av_from_band(self, a_band, rv):
+    def _anchor_av_from_band(self, a_band, rv, alpha=None):
         """A_V on the reference spectrum whose A_band is ``a_band`` (graph):
         the band-integrated A_band(A_V) inverted by ANCHOR_ITERATIONS
         fixed-point steps A_V <- A_V a_band / A_band(A_V), started from the
@@ -566,14 +571,16 @@ class SightLineDust:
         )
         col = self.filter_column(self._dust_plan.anchor_band)
         rv_vec = None if rv is None else pt.reshape(rv, (1,))
-        bc0 = self.bc_node(teff, logg, feh, pt.zeros((1,)), rv_vec)[0, col]
+        bc0 = self.bc_node(teff, logg, feh, pt.zeros((1,)), rv_vec, alpha)[
+            0, col
+        ]
 
         def a_of(av):
             return (
                 bc0
-                - self.bc_node(teff, logg, feh, pt.reshape(av, (1,)), rv_vec)[
-                    0, col
-                ]
+                - self.bc_node(
+                    teff, logg, feh, pt.reshape(av, (1,)), rv_vec, alpha
+                )[0, col]
             )
 
         av = a_band / a_of(pt.as_tensor_variable(np.float64(1.0)))
@@ -686,7 +693,11 @@ class SightLineDust:
         """Context nodes for the SED's own derived dust parameters."""
         if param_name == AV_ANCHOR:
             a_band = self._dust_param(system, DUST_ANCHOR)[0]
-            av = self._anchor_av_from_band(a_band, self._anchor_rv(system))
+            av = self._anchor_av_from_band(
+                a_band,
+                self._anchor_rv(system),
+                self.nir_alpha_node(system) if self.fit_rv_dust else None,
+            )
             return {"anchor_av": pt.reshape(av, (1,))}
         return {}
 
@@ -910,12 +921,12 @@ class SightLineDust:
                 r"The dust in front of a sampled boundary (3--6~kpc) has its "
                 r"own $R_V$, with the diffuse-ISM prior of "
                 r"\citet{Schlafly:2016} mapped into the extinction law used "
-                r"here ($2.88 \pm 0.19$); because the law is linear in "
+                r"here ($2.84 \pm 0.18$); because the law is linear in "
                 r"$1/R_V$, each object sees the $A_V$-weighted mean of "
-                r"$1/R_V$ in front of it.  This makes the law consistent "
-                r"along the sight line within one law family, which cannot "
-                r"match the bulge's optical and near-infrared extinction "
-                r"ratios at once. ",
+                r"$1/R_V$ in front of it.  Both layers share the sight "
+                r"line's near-infrared slope.  This makes the law consistent "
+                r"along the sight line within one law family, not "
+                r"necessarily right for the dust in front of a lens. ",
                 section="priors",
                 key=f"{self.prefix}.dust_split",
                 rank=20.55,

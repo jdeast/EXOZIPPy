@@ -66,6 +66,9 @@ SED_ROW = "sed photometry"
 # The star parameter the fitted-R_V mode adds (sed.md, "The spectral mode").
 # Not "rv": that is the star's systemic radial velocity.
 RV_DUST = "rv_dust"
+# The sight line's near-infrared extinction exponent, declared with rv_dust
+# under fit_rv_dust (sed.md, "The near-infrared slope"; extinction.py).
+NIR_ALPHA = "nir_alpha"
 
 
 def fit_rv_dust_from_config(block):
@@ -270,7 +273,9 @@ class SED(SightLineDust, Component):
       star.logg (which uses star.radius).
     * By default R_V is the BC tables' (3.1 for NextGen).  ``fit_rv_dust:
       true`` computes the BCs from the spectra at a fitted per-star R_V
-      (``star.rv_dust``; spectral_bc.py, sed.md "The spectral mode").
+      (``star.rv_dust``; spectral_bc.py, sed.md "The spectral mode") and a
+      fitted near-infrared slope (``sed.nir_alpha``; "The near-infrared
+      slope").
     """
 
     # factory.discover_components() maps a Component subclass to a
@@ -740,6 +745,10 @@ class SED(SightLineDust, Component):
         # read star's star.rv_dust derives from (sed/defaults.yaml).
         if self.fit_rv_dust:
             self.manifest[RV_DUST] = None
+            # ...and its near-infrared extinction exponent (extinction.py):
+            # one sampled number for the whole sight line, every layer and
+            # every source.
+            self.manifest[NIR_ALPHA] = None
 
         # The SED's own temperature is what its colors pin, independently
         # of everything else, so a contradiction elsewhere must not move it
@@ -777,7 +786,8 @@ class SED(SightLineDust, Component):
                 if inv.n_rows == 0
                 else f"{inv.n_rows} photometric row(s) against {inv.n_free} "
                 f"free SED parameters (errscale + "
-                f"{inv.n_free - 1} stellar), so the rows leave no residual "
+                f"{inv.n_free - 1} stellar and sight-line), so the rows leave "
+                f"no residual "
                 f"scatter to measure it from"
             )
             log = logger.debug if inv.n_rows == 0 else logger.warning
@@ -1608,7 +1618,7 @@ class SED(SightLineDust, Component):
             self.spectral = SpectralBC(
                 load_runtime_grid(self.model_root),
                 [first[m] for m in uniq],
-                law="ccm89",
+                law="ccm89_nir",
             )
             if self.spectral.filters_mist != uniq:
                 raise RuntimeError(
@@ -1618,6 +1628,31 @@ class SED(SightLineDust, Component):
             take = [uniq.index(m) for m in mist]
             self._spectral_take = (
                 None if take == list(range(len(uniq))) else np.asarray(take)
+            )
+            self._warn_mid_ir_law()
+
+    #: Past this mean wavelength (micron) the near-IR power law is
+    #: EXTRAPOLATED: every Galactic-center study finds the law grayer
+    #: there (extinction.py).
+    MID_IR_LAW_MICRON = 3.0
+
+    def _warn_mid_ir_law(self):
+        """Under fit_rv_dust, say which fitted filters lie where the near-IR
+        power law is extrapolated (WISE W2-W4, Spitzer IRAC): their
+        extinction is underestimated by an unknown factor."""
+        sp = self.spectral
+        lam = (sp.M @ sp.centre_um) / sp.M.sum(axis=1)
+        far = [
+            f for f, w in zip(sp.filters, lam) if w > self.MID_IR_LAW_MICRON
+        ]
+        if far:
+            logger.warning(
+                f"{self.log_tag()} The near-infrared extinction power law is "
+                f"extrapolated past {self.MID_IR_LAW_MICRON:g} micron, where "
+                f"the measured law is grayer, so the extinction in "
+                f"{', '.join(far)} is underestimated.\nOn a reddened sight "
+                f"line, drop those rows from the .sed file or widen their "
+                f"errors."
             )
 
     def _check_color_columns(self):
@@ -1952,20 +1987,55 @@ class SED(SightLineDust, Component):
             out[key] = pt.concatenate([out[key], pt.stack(extra)])
         return out
 
-    def bc_node(self, teff, logg, feh, av, rv=None):
+    def nir_alpha_node(self, system):
+        """The sight line's near-IR extinction exponent, ``sed.nir_alpha``
+        (a scalar node), materialized for THIS build if it is not current
+        -- the forward model, the red clump and the dust anchor can each
+        ask for it at stage 6 before the topological order reaches it."""
+        if not self.fit_rv_dust:
+            raise ValueError(
+                f"[{self.prefix}] nir_alpha exists only under fit_rv_dust."
+            )
+        model = pm.modelcontext(None)
+        if not Component._parameter_is_current(self, NIR_ALPHA, model):
+            self.add_parameter(model, NIR_ALPHA, system)
+        # The singleton's one element: a SCALAR, so it broadcasts over every
+        # source and every bin alike.
+        return self.nir_alpha.value[0]
+
+    def nir_alpha_start(self):
+        """``sed.nir_alpha``'s start (numpy start-value solvers), read the
+        way they read sed.rv_dust's."""
+        if not self.fit_rv_dust:
+            raise ValueError(
+                f"[{self.prefix}] nir_alpha exists only under fit_rv_dust."
+            )
+        return float(
+            np.atleast_1d(
+                self.config_manager.resolve("sed", NIR_ALPHA, element=0)[
+                    "initval"
+                ]
+            )[0]
+        )
+
+    def bc_node(self, teff, logg, feh, av, rv=None, alpha=None):
         """(n, n_all_filters) bolometric corrections at (n,) coordinate
         vectors: the table interpolator, or under ``fit_rv_dust`` the
-        spectral path at ``rv`` (required there, ignored here).  THE one
-        evaluation of this SED's grid -- the forward model calls it, and a
-        component reading a BC directly (the red clump's (V-I)_0 and its
-        band extinctions) calls it too, so there is never a second grid
-        (components.md, "A plot never recomputes the model")."""
+        spectral path at ``rv`` and the sight line's near-IR exponent
+        ``alpha`` (``nir_alpha_node``; both required there, ignored here).
+        THE one evaluation of this SED's grid -- the forward model calls
+        it, and a component reading a BC directly (the red clump's (V-I)_0
+        and its band extinctions) calls it too, so there is never a second
+        grid (components.md, "A plot never recomputes the model")."""
         if self.fit_rv_dust:
-            if rv is None:
-                raise ValueError("SED.bc_node: fit_rv_dust needs rv.")
-            # Interpolate the spectrum, redden it at the star's own R_V,
-            # integrate the bands (spectral_bc.py).
-            bc = self.spectral.bc_node(teff, logg, feh, av, rv)
+            if rv is None or alpha is None:
+                raise ValueError(
+                    "SED.bc_node: fit_rv_dust needs rv and alpha "
+                    "(sed.nir_alpha_node)."
+                )
+            # Interpolate the spectrum, redden it at the star's own R_V and
+            # the sight line's alpha, integrate the bands (spectral_bc.py).
+            bc = self.spectral.bc_node(teff, logg, feh, av, rv, alpha)
             if self._spectral_take is not None:
                 bc = bc[:, self._spectral_take]
             return bc
@@ -1973,15 +2043,18 @@ class SED(SightLineDust, Component):
         coords = pt.stack([teff, logg, feh, av], axis=-1)
         return self.bc_interpolator.evaluate(coords)  # (n, n_filters)
 
-    def bc_np(self, filter_key, teff, logg, feh, av, rv=None):
+    def bc_np(self, filter_key, teff, logg, feh, av, rv=None, alpha=None):
         """``bc_node`` for one point and one filter, as numpy (start-value
         solvers), with coordinates clipped to the grid -- the twin
-        ``predict_flux_fraction_at`` uses."""
+        ``predict_flux_fraction_at`` uses.  Under ``fit_rv_dust`` ``rv``
+        and ``alpha`` (``nir_alpha_start``) are required."""
         col = self.filter_column(filter_key)
         if self.fit_rv_dust:
             if self._spectral_take is not None:
                 col = int(self._spectral_take[col])
-            return float(self.spectral.bc_np(teff, logg, feh, av, rv)[col])
+            return float(
+                self.spectral.bc_np(teff, logg, feh, av, rv, alpha)[col]
+            )
         from scipy.interpolate import RegularGridInterpolator as _RGI
 
         axes, bc_values = self._bc_grid_np
@@ -1992,12 +2065,21 @@ class SED(SightLineDust, Component):
         return float(_RGI(axes, bc_values[..., col])([coords])[0])
 
     def appmag_np(
-        self, filter_key, teff, logg, feh, av, radius, distance, rv=None
+        self,
+        filter_key,
+        teff,
+        logg,
+        feh,
+        av,
+        radius,
+        distance,
+        rv=None,
+        alpha=None,
     ):
         """Predicted apparent magnitude of one source in one filter, as
         numpy: the forward model of ``_predicted_appmag_node`` at a point
         (start-value solvers; the red clump's extinction seed)."""
-        bc = self.bc_np(filter_key, teff, logg, feh, av, rv)
+        bc = self.bc_np(filter_key, teff, logg, feh, av, rv, alpha)
         lbol = LUM_CONST * radius**2 * teff**4
         mbol = -2.5 * np.log10(lbol) + LOG_L0_CONST
         return float(mbol - bc + 5.0 * np.log10(distance) - 5.0)
@@ -2013,7 +2095,12 @@ class SED(SightLineDust, Component):
         radiussed = v["radiussed"]
         distance = v["distance"]
         bc = self.bc_node(
-            teffsed, v["loggsed"], v["feh"], v["av"], v.get(RV_DUST)
+            teffsed,
+            v["loggsed"],
+            v["feh"],
+            v["av"],
+            v.get(RV_DUST),
+            self.nir_alpha_node(system) if self.fit_rv_dust else None,
         )
 
         # Bolometric luminosity
@@ -2322,14 +2409,15 @@ class SED(SightLineDust, Component):
         prov_read = self.provider_readers(system)
         read_providers = [p for p in self.providers if prov_read[p.name]]
         n_free += sum(p.photometric_dof for p in read_providers)
-        # The sight line's R_V is ONE free coordinate however many sources
-        # the rows read (unless the user pinned it).
-        if (
-            self.fit_rv_dust
-            and (row_stars or read_providers)
-            and not self._rv_dust_user_pinned()
-        ):
-            n_free += 1
+        # The sight line's R_V and near-IR exponent are ONE free coordinate
+        # each however many sources the rows read (unless the user pinned
+        # it).
+        if self.fit_rv_dust and (row_stars or read_providers):
+            n_free += sum(
+                1
+                for name in (RV_DUST, NIR_ALPHA)
+                if not self._sightline_param_user_pinned(name)
+            )
         if plan.on and (row_stars or read_providers):
             n_free += 1 + (2 if plan.split else 0)
         return DataFreeInventory(
@@ -2353,13 +2441,13 @@ class SED(SightLineDust, Component):
             "av_frac" if p == "av" else p for p in self.PHOTOMETRIC_DOF
         )
 
-    def _rv_dust_user_pinned(self):
-        """Did the params file pin sed.rv_dust (sigma: 0)?"""
+    def _sightline_param_user_pinned(self, name):
+        """Did the params file pin sed.<name> (sigma: 0)?"""
         user = getattr(self.config_manager, "user_params", None) or {}
         for key in (
-            f"{self.prefix}.{RV_DUST}",
-            f"{self.prefix}.0.{RV_DUST}",
-            f"{self.prefix}.{self.names[0]}.{RV_DUST}",
+            f"{self.prefix}.{name}",
+            f"{self.prefix}.0.{name}",
+            f"{self.prefix}.{self.names[0]}.{name}",
         ):
             entry = user_entry(user, key)
             if entry is not None and entry.get("sigma") == 0:
@@ -2597,6 +2685,7 @@ class SED(SightLineDust, Component):
                     values["feh"][j],
                     values["av"][j],
                     values[RV_DUST][j],
+                    self.nir_alpha_start(),
                 )
             else:
                 coords = [
@@ -2895,9 +2984,16 @@ class SED(SightLineDust, Component):
             ]
             # (nsources,) each: the stars' inputs, then each flux source's
             source_vectors = self._source_vectors(system)
+            # The figure reddens with the fit's law, so it also needs the
+            # sight line's near-IR exponent: one value, broadcast per source.
+            figure_inputs = dict(source_vectors)
+            if self.fit_rv_dust:
+                figure_inputs[NIR_ALPHA] = pt.ones_like(
+                    source_vectors["av"]
+                ) * self.nir_alpha_node(system)
         loggsed_node = source_vectors["loggsed"]
         self._source_input_keys = tuple(
-            k for k in source_vectors if k != "loggsed"
+            k for k in figure_inputs if k != "loggsed"
         )
 
         # Retain a symbolic model node so plot_data can derive param_deps
@@ -2925,7 +3021,7 @@ class SED(SightLineDust, Component):
             # parameter paths), never from the draw dict by hand.
             self._compiled_source_inputs = pytensor.function(
                 inputs=param_symbols,
-                outputs=[source_vectors[k] for k in self._source_input_keys],
+                outputs=[figure_inputs[k] for k in self._source_input_keys],
                 on_unused_input="ignore",
             )
             if self.nfilters > 0:
@@ -3685,7 +3781,12 @@ class SED(SightLineDust, Component):
             r"interpolated linearly in the logarithm of the flux, reddened "
             r"with the \citet{Cardelli:1989} extinction law with the "
             r"optical coefficients of \citet{ODonnell:1994} at each star's "
-            r"own $A_V$ and $R_V$, and integrated through each filter's "
+            r"own $A_V$ and $R_V$ blueward of $0.909\,\mu$m, joined "
+            r"continuously there to a near-infrared power law "
+            r"$A_\lambda \propto \lambda^{-\alpha_{\rm NIR}}$ whose "
+            r"exponent is a parameter of the sight line "
+            r"\citep[cf.][]{Nishiyama:2009, Nataf:2013, Nataf:2016}, and "
+            r"integrated through each filter's "
             r"transmission curve with the same flux weighting and Vega "
             r"zero point as the tabulated corrections.",
             section="stellar",

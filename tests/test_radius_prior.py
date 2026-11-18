@@ -21,6 +21,12 @@ from exozippy.system import System
 
 JACOBIAN = "planet.radius_jacobian"
 
+# A SAMPLED radius in a harness with no data.  Since review 2.8.17 a planet
+# radius nothing reads is inactive (Planet.radius_consumers), and an initval
+# alone is not a reader; a user-stated support is.  These are the
+# defaults.yaml bounds restated, so the density under test is unchanged.
+SAMPLED = {"initval": 1.0, "lower": 0.000001, "upper": 100.0}
+
 
 def _values(model, nodes):
     """`nodes` rewritten onto the model's VALUE variables (compiling a
@@ -65,7 +71,7 @@ def _build(radius_entries, n_planets=1, star_radius=None):
 
 @pytest.fixture(scope="module")
 def free_model():
-    return _build([{"initval": 1.0}])
+    return _build([dict(SAMPLED)])
 
 
 @pytest.fixture(scope="module")
@@ -103,7 +109,7 @@ def test_only_the_sampled_planet_of_a_mixed_pair_gets_the_term():
     """One planet sampled, one pinned: the potential is -log R_* exactly
     once (both planets orbit the one star)."""
     system, model = _build(
-        [{"initval": 1.0}, {"initval": 0.5, "sigma": 0.0}], n_planets=2
+        [dict(SAMPLED), {"initval": 0.5, "sigma": 0.0}], n_planets=2
     )
     pots = _jacobian_potentials(model)
     assert len(pots) == 1

@@ -637,6 +637,114 @@ class Planet(Component):
             self._push_rv_mass_hints(system, k_ms_guess)
 
         self._resolve_chen(system)
+        # After _resolve_chen: the relation is one of the radius's readers.
+        self._apply_radius_activity(system)
+
+    # The planet-local parameters that read `radius` (planet/defaults.yaml):
+    # a user prior on any of them is a likelihood term in R_P.
+    RADIUS_READERS = ("radius", "p", "density", "logg")
+
+    def radius_consumers(self, system):
+        """Per planet: the readers of its radius in this topology.
+
+        THE readership predicate for `planet.radius` (review 2.8.17), the
+        planet's counterpart of ``Star.structure_consumers``: a list, one per
+        planet, of the labels of what reads it.  An empty list means nothing
+        in the likelihood does, and ``_apply_radius_activity`` makes that
+        planet's radius INACTIVE.
+
+        What counts is a term in the likelihood, not an expression that
+        merely mentions the radius: `density` and `logg` read it for every
+        planet always, and nothing reads them back.  The complete list, each
+        entry naming the code that reads it:
+
+        * **transit** -- every transit file models every planet's disc
+          through `p` (transit.py), so any transit block marks every planet.
+        * **rm** -- an rvinstrument ``rm:`` key: the Rossiter-McLaughlin
+          kernel reads `p` (rm.py ``compute_rm_rv``).  Every planet, the
+          conservative direction, as for transit.
+        * **dopptom** -- the Doppler-tomography model reads `p`
+          (dopptom.py).  Every planet.
+        * **chen** -- the Chen & Kipping (2017) potential is a Gaussian in
+          R_P (``_add_chen_potential``), on the planets ``_resolve_chen``
+          enabled.  On by default in an RV- or astrometry-only fit, which is
+          why every RV-only example keeps its radius.
+        * **orbit chord** -- an orbit sampling the transit chord derives its
+          cos i from `p` (orbit/defaults.yaml ``from_chord``), so its one
+          planet's radius is read.  Asked of the orbit through the
+          side-effect-free ``Orbit.chord_planets``, because stage 3 follows
+          the config key order and the orbit's may not have run.
+          (A `cosi` orbit REPORTS its chord from `p`, but without
+          ``fitchord`` that mode needs a transit block, which already marked
+          every planet.)
+        * **user prior** -- a ``mu``/``sigma``/``lower``/``upper`` on the
+          radius or on a planet-local quantity derived from it
+          (``RADIUS_READERS``), with ``sigma: 0`` a pin the inactive role
+          subsumes (``Component.user_constrained_elements``).
+
+        NOT a reader: the base prior (``_add_radius_prior``, uniform in
+        R_P/R_*).  It is the prior OF the radius, and applying it to a
+        dimension nothing else reads is exactly the dead, prior-only
+        dimension this predicate exists to remove.  Microlensing reads the
+        planet's MASS (through q), never its radius.
+        """
+        from ..rm import rm_enabled
+
+        out = [[] for _ in range(self.n_elements)]
+        everyone = []
+        if in_topology(system, "transit") is not None:
+            everyone.append("transit")
+        if rm_enabled(system):
+            everyone.append("rm")
+        if in_topology(system, "dopptom") is not None:
+            everyone.append("dopptom")
+        for labels in out:
+            labels.extend(everyone)
+
+        for i, on in enumerate(self.chen):
+            if on:
+                out[i].append("chen")
+
+        orbit = system.active_components.get("orbit")
+        if orbit is not None:
+            for i, o_name in orbit.chord_planets(system).items():
+                out[i].append(f"orbit {o_name} (fitchord)")
+
+        for param in self.RADIUS_READERS:
+            for i in self.user_constrained_elements(param):
+                out[i].append(f"user prior on {param}")
+        return out
+
+    def _apply_radius_activity(self, system):
+        """Make `radius` INACTIVE on the planets nothing reads it for.
+
+        A microlensing planet (review 2.8.17) is the case: the lens reads its
+        mass through q, nothing reads its radius, and a free radius was one
+        sampled dimension refilling its prior plus R_P, rho_P and log g_P
+        table rows that were pure prior.  The treatment is
+        ``Star._apply_structure_activity``'s, and for the same reason the
+        radius stays DECLARED (wholly inactive) rather than dropped:
+        `density`, `logg` and -- with an orbit -- `p` name it in their deps,
+        and everything that derives from it (those three, then the transit
+        durations and probabilities through `p`) inherits the role through
+        ``Component._inherit_inactivity``.  Inactive means no raw
+        coordinate, no prior or potential, no table row, no trace report.
+        """
+        active = [bool(c) for c in self.radius_consumers(system)]
+        if all(active):
+            return
+        self.manifest["radius"] = merge_options(
+            self.manifest["radius"], mask=active
+        )
+        names = ", ".join(n for n, on in zip(self.names, active) if not on)
+        logger.debug(
+            f"{self.log_tag()} nothing in this topology reads the radius of "
+            f"{names}, so it is not a parameter of this fit: held at its "
+            f"resolved value, sampled by nothing and not reported (nor is "
+            f"anything derived from it).  A transit, RM or Doppler-tomography "
+            f"data set, the Chen & Kipping relation, 'fitchord: true' on its "
+            f"orbit or a params prior on the radius makes it free."
+        )
 
     # The keys that state a planet's mass, in any of its coordinates.  A user
     # value on one of them and RVInstrument's semi-amplitude estimate are two
