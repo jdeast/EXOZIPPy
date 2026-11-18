@@ -1635,3 +1635,94 @@ def test_companion_star_ndx_on_a_rel_dataset_warns_and_is_ignored(
     # Assert
     assert comp._sed_fluxfrac == [False]
     assert "companion_star_ndx is ignored: it is a gaia/abs key" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# A jitter needs degrees of freedom (review 7.6.5, ruling 2026-11-09)
+# ---------------------------------------------------------------------------
+
+
+def _jitter_pin_component(counts, names=None):
+    """An AstrometryInstrument carrying only what the pin decision reads."""
+    from exozippy.components.astrometryinstrument.astrometryinstrument import (
+        AstrometryInstrument,
+    )
+
+    comp = AstrometryInstrument.__new__(AstrometryInstrument)
+    comp.n_elements = len(counts)
+    comp.names = names or [f"I{i}" for i in range(len(counts))]
+    comp.n_obs_per_element = list(counts)
+    return comp
+
+
+def test_short_astrometry_file_pins_its_jitter_at_zero(caplog):
+    """
+    Given: a two-epoch astrometry file (MOA-2008-BLG-379's Keck lensrel) and
+           a 300-epoch one in the same component
+    When:  register_parameters decides the jitter's fate
+    Then:  only the short file's jitter_variance is pinned at 0, through the
+           manifest "overrides" channel, and the log says how to override it
+
+    Review 7.6.5: the free jitter on those two Keck epochs came back
+    4.7 +8.2/-2.6 mas against measured 0.44-1.55 mas errors, which did not
+    measure noise -- it discarded the constraint and moved theta_E by
+    +1.4 sigma.
+    """
+    # Arrange
+    comp = _jitter_pin_component([2, 300], names=["Keck", "Gaia"])
+    manifest = {"jitter_variance": {}}
+
+    # Act
+    with caplog.at_level(logging.INFO):
+        comp._pin_underdetermined_jitter(manifest)
+
+    # Assert
+    ov = manifest["jitter_variance"]["overrides"]
+    assert ov["sigma"] == [0.0, None]
+    assert ov["initval"] == [0.0, None]
+    assert "2 epochs is too few" in caplog.text
+    assert "sigma: null" in caplog.text  # the documented way back out
+
+
+def test_long_astrometry_files_keep_a_free_jitter():
+    """
+    Given: only files with enough epochs to estimate a jitter
+    When:  register_parameters decides
+    Then:  the manifest entry is untouched -- no overrides are installed
+
+    Gaia epoch astrometry has hundreds of epochs; the ruling is about
+    under-determination, not about astrometric jitters in general.
+    """
+    # Arrange
+    comp = _jitter_pin_component([300, 5])
+    manifest = {"jitter_variance": {"mask": [True, True]}}
+
+    # Act
+    comp._pin_underdetermined_jitter(manifest)
+
+    # Assert
+    assert manifest["jitter_variance"] == {"mask": [True, True]}
+
+
+def test_jitter_pin_keeps_a_user_value_it_finds_in_the_overrides():
+    """
+    Given: a short file whose jitter_variance already carries an initval in
+           the same overrides dict (another component decision upstream)
+    When:  the pin is installed
+    Then:  the pin reuses that value instead of overwriting it with 0
+
+    A pin must say what it pins to (components/parameter.md), and the value
+    is the user's to choose -- the component only supplies 0 when nobody
+    else has.
+    """
+    # Arrange
+    comp = _jitter_pin_component([3])
+    manifest = {"jitter_variance": {"overrides": {"initval": [0.25]}}}
+
+    # Act
+    comp._pin_underdetermined_jitter(manifest)
+
+    # Assert
+    ov = manifest["jitter_variance"]["overrides"]
+    assert ov["sigma"] == [0.0]
+    assert ov["initval"] == [0.25]
