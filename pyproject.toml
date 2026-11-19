@@ -234,6 +234,7 @@ exozippy-gui = "exozippy.gui.app:main"
 # main()s, kept for the historical `python scripts/X.py` spelling).
 exozippy-getdata = "exozippy.utilities.getdata:main"
 exozippy-mkticsed = "exozippy.utilities.mkticsed:main"
+exozippy-mkdust = "exozippy.utilities.mkdust:main"
 exozippy-exofast2exozippy = "exozippy.utilities.exofast2exozippy:main"
 # Example data that is NOT redistributed with EXOZIPPy (licence
 # compatibility -- see components/pharmacokinetics/fetch_theoph.py).

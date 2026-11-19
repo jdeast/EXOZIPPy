@@ -65,8 +65,10 @@ sed:
   # The anchored total: the extinction in sed.dust_anchor_band (default A_V
   # itself) at the anchor -- the red clump's distance when a clump is in the
   # fit, else the whole column.  It carries the AMOUNT; the bins only the
-  # shape.  A 2D map's value is a prior HERE (mu/sigma + citation), in the
-  # map's own band (dust_anchor_band), with no law conversion by hand.
+  # shape.  A 2D map's value is a prior HERE (mu/sigma + citation):
+  # `exozippy-mkdust` writes one per map (docs/dust_maps.md), the default as
+  # A_V through Nataf+2013's bulge ratios, since the law's fixed NIR slope
+  # makes a Ks anchor (dust_anchor_band) put too little dust in the optical.
   # DEFAULT_WEAK: a user's A_V start on a star seeds it (a hint), and this
   # default yields to any other start.  Lower bound strictly positive (the
   # anchor-band inversion divides by the band extinction).

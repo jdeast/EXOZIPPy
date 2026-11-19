@@ -25,6 +25,7 @@ MKTICSED = (
     / "utilities"
     / "mkticsed.py"
 )
+MKDUST = MKTICSED.with_name("mkdust.py")
 
 
 # --- normalization at the params-file boundary --------------------------------
@@ -298,15 +299,16 @@ def test_blanking_a_cited_priors_last_field_in_the_gui_removes_the_entry(
 # --- mkticsed only writes keys the bibliography has ---------------------------
 
 
-def test_every_key_mkticsed_can_write_exists_in_references_bib():
+@pytest.mark.parametrize("source", [MKTICSED, MKDUST], ids=lambda p: p.name)
+def test_every_key_mkticsed_can_write_exists_in_references_bib(source):
     """
-    Given every Author:Year key literal in mkticsed.py,
+    Given every Author:Year key literal in mkticsed.py (and mkdust.py),
     When checked against the shipped references.bib,
     Then each one exists -- so no generated note can print "?".
     """
     # Arrange
     keys = set(
-        re.findall(r"[\"']([A-Z][A-Za-z]+:\d{4})[\"']", MKTICSED.read_text())
+        re.findall(r"[\"']([A-Z][A-Za-z]+:\d{4})[\"']", source.read_text())
     )
 
     # Act

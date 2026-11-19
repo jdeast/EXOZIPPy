@@ -125,7 +125,10 @@ through the passband on the clump's own spectrum at the fit's law (the tables, o
 A published value is a params-file prior on that element, with its citation:
 `redclump.RedClump.extinction_0: {mu: 1.80, sigma: 0.05, citation: ...}` (the owner spelling,
 `element_owners`). Better still, when the paper gives the calibrated I_RC and (V-I)_RC, write
-them as SED rows naming the clump: that is the measurement, not a derived number.
+them as SED rows naming the clump: that is the measurement, not a derived number. A 2D MAP value
+(Surot et al. 2020, Zelakiewicz et al. 2025, Nataf et al. 2013) goes on `sed.dust_anchor` instead,
+written by `exozippy-mkdust` (`docs/dust_maps.md`) -- and not beside calibrated clump rows,
+since the maps are built from the same clump stars.
 
 This REPLACES the monochromatic inversions (review 2.9.16(b)): `extinction.
 av_from_band_extinction` / `av_from_colour_excess` and mkticsed's `band_extinction` (which now
