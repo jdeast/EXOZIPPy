@@ -744,6 +744,35 @@ RECORDS: Mapping[str, ZenodoRecord] = MappingProxyType(
                 }
             ),
         ),
+        # Zelakiewicz et al. (2025)'s UKIRT A_Ks / E(H-Ks) red-clump map of
+        # the bulge (a third-party record, CC-BY-4.0).  Consumer:
+        # utilities/mkdust.py, the dust-map prior tool.  ON DEMAND: only that
+        # tool reads it.  Cited through the paper (Zelakiewicz:2025).
+        "zelakiewicz2025_ukirt_extinction": ZenodoRecord(
+            record_id=14919461,
+            concept_record_id=14919460,
+            title=(
+                'Data for "A Near-Infrared Extinction and Reddening Map '
+                'Towards the Galactic Bulge Using UKIRT"'
+            ),
+            creators=(
+                "Zelakiewicz, Aiden",
+                "Johnson, Samson",
+                "Gaudi, B. Scott",
+                "Bryden, Geoffrey",
+                "Nataf, David",
+                "Shvartzvald, Yossi",
+            ),
+            citation_key=None,
+            files=_pins(
+                {
+                    "ukirt_map.csv": (
+                        741243,
+                        "910fea2e7f03de661cb8cc9acc22cd30",
+                    ),
+                }
+            ),
+        ),
     }
 )
 
@@ -759,6 +788,7 @@ ON_DEMAND: frozenset[str] = frozenset(
     {
         "nextgen_spectra_r20000",
         "nextgen_runtime_spectra",
+        "zelakiewicz2025_ukirt_extinction",
         # Read only by a fit that selects the PHOENIX model (the SED file's
         # `model: PHOENIX`); NextGen is the default.
         "phoenix_bc_tables",
@@ -805,6 +835,7 @@ OWNERS: Mapping[str, str] = MappingProxyType(
         "phoenix_ld_tables": "exozippy.models.PHOENIX.ld_tables",
         "nextgen_spectra_r20000": "exozippy.models.NextGen.bc_synthesis",
         "nextgen_runtime_spectra": "exozippy.models.NextGen.runtime_spectra",
+        "zelakiewicz2025_ukirt_extinction": "exozippy.utilities.mkdust",
     }
 )
 

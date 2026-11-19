@@ -584,7 +584,7 @@ class SED(SightLineDust, Component):
 
     @classmethod
     def get_utilities(cls):
-        from ...utilities import mkticsed
+        from ...utilities import mkdust, mkticsed
         from ...utilities.registry import (
             UtilitySpec,
             argparse_subprocess_runner,
@@ -602,6 +602,19 @@ class SED(SightLineDust, Component):
                 available=True,
                 build_parser=mkticsed.build_parser,
                 run=argparse_subprocess_runner("exozippy.utilities.mkticsed"),
+            ),
+            UtilitySpec(
+                name="mkdust",
+                label="Dust-map prior for the sight line",
+                description=(
+                    "Query the extinction maps at a position and write the "
+                    "sed.dust_anchor prior (every map, all but one commented "
+                    "out)."
+                ),
+                component_keys=["sed"],
+                available=True,
+                build_parser=mkdust.build_parser,
+                run=argparse_subprocess_runner("exozippy.utilities.mkdust"),
             ),
         ]
 

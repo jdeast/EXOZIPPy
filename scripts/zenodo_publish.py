@@ -835,7 +835,18 @@ def load_registry(path: Path):
 
 
 def _q(s: str) -> str:
-    """A double-quoted Python string literal, as ruff format writes it."""
+    """A Python string literal, as ruff format writes it.
+
+    Double-quoted, unless the text holds a double quote and no single one:
+    then ruff prefers single quotes to escaping (a Zenodo title that quotes
+    its paper's title, e.g. 'Data for "..."').
+    """
+    if '"' in s and "'" not in s:
+        return (
+            "'"
+            + json.dumps(s, ensure_ascii=True)[1:-1].replace('\\"', '"')
+            + "'"
+        )
     return json.dumps(s, ensure_ascii=True)
 
 
