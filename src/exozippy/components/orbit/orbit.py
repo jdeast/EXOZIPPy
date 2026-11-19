@@ -727,6 +727,23 @@ class Orbit(Component):
         _, fitchord = self._resolve_switches(system, log=False)
         return self._inc_modes_for(fitchord, system)
 
+    def chord_planets(self, system):
+        """``{planet index: orbit name}`` for every orbit that SAMPLES the
+        transit chord, computed without side effects.
+
+        A `chord` orbit derives its cos i from its one planet's `p`
+        (``from_chord``), so that planet's radius is read by the likelihood
+        whatever else the topology holds.  ``Planet.radius_consumers`` asks
+        this at its own stage 3, which may run before this orbit's; the modes
+        come from ``inclination_modes`` for the same reason.
+        """
+        planets = self._chord_planet_indices()
+        return {
+            int(planets[o]): self.names[o]
+            for o, mode in enumerate(self.inclination_modes(system))
+            if mode == "chord"
+        }
+
     def _parse_ecc_parameterization(self, system=None):
         """Read `fitvcve:`/`fitchord:` into per-orbit mode lists.
 

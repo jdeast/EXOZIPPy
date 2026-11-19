@@ -414,8 +414,8 @@ class Plot:
 
     def _calc_source_inputs(self):
         """Per draw, each source's spectrum inputs -- {key: (nsources,)}
-        for teffsed, feh, av, radiussed, distance (and rv_dust under
-        fit_rv_dust) -- from the SED's compiled ``_compiled_source_inputs``,
+        for teffsed, feh, av, radiussed, distance (and rv_dust and the sight
+        line's nir_alpha under fit_rv_dust) -- from the SED's compiled ``_compiled_source_inputs``,
         i.e. off the very nodes the forward model reads.
 
         Created Class Attribute
@@ -486,26 +486,29 @@ class Plot:
         optical_depth_draws = np.zeros(
             (self.ndraws, self.nstars, len(self.df_wave))
         )
-        # The fitted-R_V mode reddens with CCM89 at each star's own R_V
-        # (sed.md, "The spectral mode"), so the figure must too, or it would
-        # draw a spectrum the fit never evaluated.  getattr: the plot classes
-        # are also driven from tests with a stubbed system (see model_root).
+        # The fitted-R_V mode reddens with CCM89 + the near-IR power law at
+        # each star's own R_V and the sight line's alpha (sed.md, "The
+        # spectral mode"), so the figure must too, or it would draw a
+        # spectrum the fit never evaluated.  getattr: the plot classes are
+        # also driven from tests with a stubbed system (see model_root).
         if getattr(self.system.sed, "fit_rv_dust", False):
-            from .extinction import ccm89_ab
-            from .sed import RV_DUST
+            from .extinction import ccm89_nir_basis
+            from .sed import NIR_ALPHA, RV_DUST
 
-            ccm_a, ccm_b = ccm89_ab(
+            ext_a, ext_b, ext_L = ccm89_nir_basis(
                 np.asarray(self.df_wave["wavelength_micron"], float)
             )
             for d in range(self.ndraws):
                 av = self.source_input_draws[d]["av"]
                 rv = self.source_input_draws[d][RV_DUST]
+                alpha = self.source_input_draws[d][NIR_ALPHA]
                 optical_depth_draws[d, :] = (
                     av[:, np.newaxis]
                     * (
-                        ccm_a[np.newaxis]
-                        + ccm_b[np.newaxis] / rv[:, np.newaxis]
+                        ext_a[np.newaxis]
+                        + ext_b[np.newaxis] / rv[:, np.newaxis]
                     )
+                    * np.exp(alpha[:, np.newaxis] * ext_L[np.newaxis])
                     / 1.086
                 )
             self.optical_depth_draws = optical_depth_draws

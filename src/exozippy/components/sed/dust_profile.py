@@ -82,13 +82,15 @@ ANCHOR_ITERATIONS = 3
 #: inner-Galaxy dust toward the bulge (JDE 2026-11-09, ruling 13).
 BOUNDARY_RANGE_PC = (3000.0, 6000.0)
 
-#: The near (disk) dust's R_V prior in OUR band-integrated CCM89 +
-#: O'Donnell family: Schlafly et al. (2016)'s diffuse-ISM R'(V) = 3.32 +/-
-#: 0.18 (their eq. 8 proxy, calibrated on Fitzpatrick 1999) mapped through
-#: the proxy computed on their reference giant (4500 K, logg 2.5, [Fe/H] 0)
-#: at A_V = 2 with our spectral path: R_V = 2.88 +/- 0.19 (sed.md).
-NEAR_RV_MU = 2.88
-NEAR_RV_SIGMA = 0.19
+#: The near (disk) dust's R_V prior in OUR band-integrated law (CCM89 +
+#: O'Donnell, near-IR power law at sed.nir_alpha's prior center 1.85):
+#: Schlafly et al. (2016)'s diffuse-ISM R'(V) = 3.32 +/- 0.18 (their eq. 8
+#: proxy, calibrated on Fitzpatrick 1999) mapped through the proxy computed
+#: on their reference giant (4500 K, logg 2.5, [Fe/H] 0) at A_V = 2 with
+#: our spectral path: R_V = 2.84 +/- 0.18 (sed.md; 2.88 +/- 0.19 under
+#: CCM's own alpha 1.61, before review 8.9.2).
+NEAR_RV_MU = 2.84
+NEAR_RV_SIGMA = 0.18
 
 
 def default_bins(n_groups):

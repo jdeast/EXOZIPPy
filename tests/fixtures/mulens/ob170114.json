@@ -1,6 +1,6 @@
 {
  "config": "examples/ob170114/ob170114.yaml",
- "n_terms": 94,
+ "n_terms": 92,
  "params": "examples/ob170114/ob170114.params.yaml",
  "platform": {
   "blas": "scipy-openblas",
@@ -51,9 +51,6 @@
    0.0
   ],
   "planet.log_q_raw": [
-   0.0
-  ],
-  "planet.radius_raw": [
    0.0
   ],
   "source.t_0_raw": [
@@ -117,7 +114,6 @@
   "POT:logit_uniform_prior.orbit.xbigomega": -1.3863031568263726,
   "POT:logit_uniform_prior.orbit.ybigomega": -1.3863855696114586,
   "POT:logit_uniform_prior.planet.log_q": -1.6336116906951328,
-  "POT:logit_uniform_prior.planet.radius": -4.615221501842092,
   "POT:logit_uniform_prior.source.t_0": -2.4397022381963143,
   "POT:logit_uniform_prior.source.u_0": -1.386358363167978,
   "POT:logit_uniform_prior.star.distance": -5.976788841910725,
@@ -178,7 +174,6 @@
   "RV:orbit.xbigomega_raw": -0.9189385332046727,
   "RV:orbit.ybigomega_raw": -0.9189385332046727,
   "RV:planet.log_q_raw": -0.9189385332046727,
-  "RV:planet.radius_raw": -0.9189385332046727,
   "RV:source.t_0_raw": -0.9189385332046727,
   "RV:source.u_0_raw": -0.9189385332046727,
   "RV:star.distance_raw": -1.8378770664093453,
@@ -190,5 +185,5 @@
   "RV:star.rv_raw": -1.8378770664093453,
   "RV:star.teff_raw": -0.9189385332046727
  },
- "total_logp": 5851.727910976616
+ "total_logp": 5857.2620710116635
 }

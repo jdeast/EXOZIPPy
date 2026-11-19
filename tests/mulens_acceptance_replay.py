@@ -227,6 +227,15 @@ moves only by the heliocentric-to-geocentric frame shift at the new
 absolute motions, +3.7e-4 nats; `kinematic_prior` +0.2691, the three
 low-bound barriers (mu_rel_geo_mag, pi_rel, t_E) from up to 1e-3 to ~0,
 `event_rate_prior` -1e-6; total +0.2705 each.
+
+One fixture was re-recorded when a planet radius nothing reads became
+inactive (star.md, "Which planets have a radius"; review 2.8.17, PR #608):
+ob170114, the only microlensing example whose lens planet's radius was not
+already pinned by hand.  `planet.radius_raw` and its two terms left
+(`RV:planet.radius_raw` -0.9189, `logit_uniform_prior.planet.radius`
+-4.6152; total +5.5342 to 5857.2620710116635); every stored start value and
+every other term is bit-identical.  The hand-pinned fixtures (DC2018_128,
+KMT-2019-BLG-1806, OGLE_0383LD) did not move.
 """
 
 import glob

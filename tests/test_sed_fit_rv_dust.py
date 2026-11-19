@@ -3,7 +3,9 @@ spectral mode").
 
 The BCs come from the spectrum at every evaluation -- the R = 3000 runtime
 grid (models/NextGen/runtime_spectra.py) interpolated in log flux, reddened
-with CCM89 at each star's ``star.rv_dust``, integrated through each filter
+with CCM89 + the near-IR power law at each star's ``star.rv_dust`` and the
+sight line's ``sed.nir_alpha`` (the law's own tests are
+test_nir_power_law.py), integrated through each filter
 exactly as the tables are (components/sed/spectral_bc.py).  The real grid
 is 656 MB; these tests use a synthetic one of blackbody spectra on the
 same R = 3000 bins (``_bb_grid``), so the numbers they pin are about the
@@ -150,19 +152,21 @@ def test_the_graph_matches_numpy_and_has_a_gradient_in_rv():
       signs of a greyer law: at fixed A_V a larger R_V extincts less
       blueward of V (B brighter, BC up) and more redward (J fainter).
     """
-    s = SpectralBC(_bb_grid(), FILTERS, law="ccm89")
+    s = SpectralBC(_bb_grid(), FILTERS, law="ccm89_nir")
     t, g, z, a, r = (pt.dvector(n) for n in "tgzar")
-    out = s.bc_node(t, g, z, a, r)
+    al = pt.dscalar("alpha")
+    out = s.bc_node(t, g, z, a, r, al)
     fn = pytensor.function(
-        [t, g, z, a, r], [out, pt.grad(out[0, 4], r), pt.grad(out[0, 0], r)]
+        [t, g, z, a, r, al],
+        [out, pt.grad(out[0, 4], r), pt.grad(out[0, 0], r)],
     )
-    bc, dB, dJ = fn([5000.0], [4.3], [-0.2], [3.0], [3.1])
+    bc, dB, dJ = fn([5000.0], [4.3], [-0.2], [3.0], [3.1], 1.61)
     np.testing.assert_allclose(
-        bc[0], s.bc_np(5000.0, 4.3, -0.2, 3.0, 3.1), atol=1e-9
+        bc[0], s.bc_np(5000.0, 4.3, -0.2, 3.0, 3.1, 1.61), atol=1e-9
     )
     assert np.isfinite(dB).all() and dB[0] > 0
     assert np.isfinite(dJ).all() and dJ[0] < 0
-    other = s.bc_np(5000.0, 4.3, -0.2, 3.0, 2.5)
+    other = s.bc_np(5000.0, 4.3, -0.2, 3.0, 2.5, 1.61)
     assert np.all(np.abs(other - bc[0]) > 1e-3)
 
 
@@ -256,16 +260,17 @@ def test_one_sight_line_rv_is_counted_once_and_inactive_on_an_unread_star(
     Given fit_rv_dust on a two-star system whose rows name only A,
     When the inventory is taken and the model built,
     Then R_V is ONE free coordinate, sed.rv_dust (counted once toward the
-      errscale pin: 1 + 4 + 1 = 6 rows leave errscale free), not a per-star
-      knob; A's star.rv_dust is derived from it and B's is inactive.
+      errscale pin, as is the sight line's sed.nir_alpha: 1 + 4 + 1 + 1 = 7
+      against 6 rows pins errscale), not a per-star knob; A's star.rv_dust
+      is derived from it and B's is inactive.
     """
     system = _system(
         tmp_path, monkeypatch, fit_rv_dust=True, stars=("A", "B"), pos="A"
     )
     inv = system.sed.data_free_inventory(system)
     assert "rv_dust" not in inv.star_knobs
-    assert inv.n_free == 1 + 4 + 1
-    assert not inv.pin_errscale
+    assert inv.n_free == 1 + 4 + 1 + 1
+    assert inv.pin_errscale
     assert inv.unread_stars == (1,)
     model = system.build_model()
     free = [v.name for v in model.free_RVs if "rv_dust" in v.name]

@@ -37,9 +37,19 @@ def sbc_rows(tmp_path_factory):
 
     out = tmp_path_factory.mktemp("sbc")
     spec = sbc.PKSpec()
-    spec.tune, spec.draws, spec.chains, spec.cores = 300, 300, 2, 2
+    # cores=1: the two chains run in THIS process, one after the other.  With
+    # cores=2 every pm.sample call (21 here: the prior run + 20 replicates)
+    # starts two worker processes with the platform's default start method --
+    # fork on Linux up to Python 3.13, forkserver from 3.14.  A forkserver
+    # worker re-imports pymc/exozippy and rebuilds the compiled model, which
+    # measured ~45 s per call against ~2 s for fork on the same box (CPython
+    # 3.12, mp_ctx forced).  That made this fixture 2.5-4x slower on the 3.14
+    # CI legs (226-606 s, vs 112-387 s on 3.12) and pushed it past the 600 s
+    # pytest-timeout.  This model samples 2 x 600 iterations in ~1-2 s, so
+    # worker processes only ever cost time here.
+    spec.tune, spec.draws, spec.chains, spec.cores = 300, 300, 2, 1
     spec.prior_tune, spec.prior_chains = 600, 2
-    common = dict(model="pk", outdir=str(out), seed=7164, cores=2)
+    common = dict(model="pk", outdir=str(out), seed=7164, cores=1)
     sbc.cmd_prior(
         argparse.Namespace(**common, n=N_REP, raw_per_draw=40), spec=spec
     )

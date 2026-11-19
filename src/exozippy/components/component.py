@@ -354,6 +354,100 @@ class Component(ABC):
                 wrote[i] = True
         return wrote
 
+    # The fields that state a posterior term or a support, exactly as
+    # Parameter._user_constraint_fields defines them -- and deliberately NOT
+    # `initval`, which is a start value and cannot move a posterior.  A star
+    # whose params file carries only an initval for its radius has said where
+    # the number is, not that anything should fit it.
+    USER_CONSTRAINT_FIELDS = ("mu", "sigma", "lower", "upper")
+
+    def user_constrained_elements(self, param):
+        """Elements whose ``param`` the USER constrained in the params file.
+
+        The user-prior half of a readership predicate: a parameter the user
+        put a prior or a support on is READ, whatever the topology says.
+        Written for ``Star.structure_consumers`` (review 3.8.1) and shared
+        with ``Planet.radius_consumers`` (review 2.8.17), so the two cannot
+        disagree about what counts as a user constraint.
+
+        A ``mu``/``sigma`` is a term in the logp -- the user asserting a
+        spectroscopic measurement -- so it makes the parameter read by
+        definition, and the element has to stay free for it to apply to.
+        Five shipped examples do exactly this (kelt17's 7454 +/- 75 K and
+        [Fe/H] 0.21 +/- 0.08, hd80606, GaiaBH1, HIP1349, kelt4):
+        deactivating those would DROP a real constraint and stop reporting a
+        quantity the user measured, which is the opposite of the point.  It
+        is also why readership cannot be answered from the component topology
+        alone.
+
+        ``lower``/``upper`` count too, and that is a deliberate widening
+        rather than an oversight.  It is arguable that a bound on a quantity
+        nothing reads restrains nothing -- but the user has stated an opinion
+        about this parameter, and the cost of ignoring it is concrete:
+        ``solve_api._bounds_diagnostics`` skips inactive elements, so a bound
+        that excludes its own initval stopped being reported to the GUI at
+        all (caught by
+        ``test_solve_api.py::test_bounds_excluding_initval_yields_diagnostic``,
+        which sets exactly ``star.0.teff: {initval: 6207, lower: 7000}``).
+        Silently dropping a user's input is the failure mode this whole item
+        is about; do not narrow this back.
+
+        ``sigma: 0`` is the ONE exception, and it overrides the rest of the
+        entry.  That is a pin, and the inactive role subsumes it exactly --
+        the value is held, nothing is sampled, no prior applies -- so
+        honoring it here would make review 3.8.1's fix a no-op on the very
+        files it exists for (ob08092 and DC2018_128 pinned all six that way
+        by hand).  Those entries become redundant, and ``build_pymc`` says so
+        per element.
+
+        Read from ``user_params`` (standardized to the index spelling at
+        ConfigManager construction, i.e. before this runs) and never from the
+        resolved vectors -- every parameter has bounds and many have a sigma
+        from defaults.yaml, so a resolved value says nothing about who asked
+        for it.  Most specific spelling wins, as everywhere else: the index
+        and name forms are checked before the broadcast.  Any lookup fault
+        degrades to "the user wrote nothing", which is the conservative
+        direction here only in the sense that it matches the old behavior;
+        it cannot happen for a well-formed params file.
+        """
+
+        def is_constrained(entry):
+            sigma = entry.get("sigma")
+            if isinstance(sigma, (int, float)) and float(sigma) == 0.0:
+                return False  # an explicit pin, which inactive subsumes
+            return any(f in entry for f in self.USER_CONSTRAINT_FIELDS)
+
+        return self.user_entry_elements(param, is_constrained)
+
+    def user_entry_elements(self, param, predicate):
+        """Elements whose most specific params-file entry satisfies
+        ``predicate``.
+
+        The one lookup behind ``user_constrained_elements`` and
+        ``Star.user_pinned_stars``, so the two cannot disagree about which entry
+        they are reading.  Most specific spelling wins, as everywhere else,
+        which is why this stops at the first hit rather than unioning the
+        three (contrast ``Parameter._user_constraint_fields``, whose union is
+        a warning heuristic and does not have to adjudicate).
+        """
+        params = getattr(self.config_manager, "user_params", None) or {}
+        if not params:
+            return []
+        out = []
+        for i in range(self.n_elements):
+            keys = [f"{self.prefix}.{i}.{param}"]
+            if i < len(self.names):
+                keys.append(f"{self.prefix}.{self.names[i]}.{param}")
+            keys.append(f"{self.prefix}.{param}")
+            for key in keys:
+                entry = user_entry(params, key)
+                if entry is None:
+                    continue
+                if predicate(entry):
+                    out.append(i)
+                break  # most specific spelling wins
+        return out
+
     def direct_angle_requests(self, angle):
         """``(flag, per-element request)`` for an angle with direction latents.
 
