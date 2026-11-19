@@ -7,9 +7,26 @@ creating_BC_Table.ipynb`` with the physics unchanged:
     BC_X = 2.5 log10[ L0 / (4 pi (10 pc)^2 sigma Teff^4)
                       * int(F_lam e^-tau S dlam) / (ZP_X int(S dlam)) ]
 
-i.e. M_bol from sigma*Teff^4 and the IAU 2015 zero point L0 = 3.0128e28 W,
-a band-averaged flux density, and the filter's SVO Vega F_lambda
-zeropoint (specified value when SVO quotes one, else calculated).
+i.e. M_bol from the IAU 2015 zero point L0 = 3.0128e28 W, a band-averaged
+flux density, and the filter's SVO Vega F_lambda zeropoint (specified
+value when SVO quotes one, else calculated) -- EXCEPT that sigma*Teff^4
+is replaced by the spectrum's OWN bolometric flux (below).
+
+The bolometric flux is the spectrum's own (review 8.9.13, JDE ruling
+2026-11-19): F_bol = int F_lambda dlambda over the whole 0.03 - 30 micron
+grid plus the Rayleigh-Jeans tail F(lam_max) lam_max / 3
+(``bolometric_flux``), not sigma Teff^4.  BT-NextGen (spherical PHOENIX)
+spectra are fluxes at the model's OUTER radius, not at the Teff radius,
+so for a giant they integrate to much less than sigma Teff^4 (0.766 at
+4000 K, log g 0.5; 0.945 at 4800 K, 2.5), and dwarfs fall 1-3% short too.
+A BC is the ratio of a band flux to the bolometric flux, so both must
+come from the SAME spectrum; dividing by sigma Teff^4 made every giant's
+predicted magnitude too faint at fixed L (0.29 mag at log g 0.5, 0.06 at
+the red clump).  Since sigma Teff^4 entered as one factor per spectrum,
+the change is one additive constant per (teff, logg, feh) node,
+2.5 log10(sigma Teff^4 / F_bol), the same for every filter and A_V; the
+per-node values are ``BCs/NextGen.fbol.parquet`` (``generate_NextGen_BC_
+Tables.write_fbol_table``).
 Extinction: tau(lam) = ext(lam)/ext(0.55 um) * Av / 1.086, with ext from
 models/extinction_law.ascii (R_V = 3.1).
 
@@ -74,6 +91,7 @@ from exozippy.components.sed.bc_grid import (
 from exozippy.filters.filter import Filter
 from exozippy.models.NextGen.nextgen_spectra import (
     SPECTRA_RAW_PATH_DEFAULT,
+    WAVELENGTH_PTS,
     load_spectrum,
 )
 
@@ -91,6 +109,37 @@ C_ANGSTROM_PER_S = const.c.to(u.Angstrom / u.s).value
 def trapezoid(x, y):
     dx = x[..., 1:] - x[..., :-1]
     return np.sum(0.5 * (y[..., 1:] + y[..., :-1]) * dx, axis=-1)
+
+
+# How a BC column is normalized, recorded per column (filter_meta
+# "normalization") and checked before a column is reused
+# (generate_NextGen_BC_Tables._reusable), so a column normalized by
+# sigma Teff^4 -- every column before review 8.9.13, and any synthesized
+# cache column made before it -- is never taken as current.
+NORMALIZATION = (
+    "own F_bol: int F_lambda over 0.03-30 micron + Rayleigh-Jeans tail "
+    "F(lam_max) lam_max/3"
+)
+
+# erg/s/cm^2 -> W/m^2
+_CGS_TO_SI_FLUX = 1.0e-3
+
+
+def bolometric_flux(wavelength, flux) -> np.ndarray:
+    """The spectrum's own bolometric flux (erg/s/cm^2 for F_lambda in
+    erg/s/cm^2/A on an Angstrom grid): the trapezoid integral over the
+    whole grid plus the Rayleigh-Jeans tail beyond its last point,
+    int_{lam_max}^inf F(lam_max) (lam_max/lam)^4 dlam = F(lam_max)
+    lam_max / 3.  ``flux`` may carry leading axes (one spectrum per row).
+
+    The ONE definition: the BC generator, the per-node table
+    (``BCs/NextGen.fbol.parquet``) and the checks of the runtime grid and the
+    R = 150 plotting spectra all call this.  On the R = 20000 grid the
+    tail is ~1e-6 of F_bol for the coolest spectra.
+    """
+    w = np.asarray(wavelength, dtype=float)
+    f = np.asarray(flux, dtype=float)
+    return trapezoid(w, f) + f[..., -1] * w[-1] / 3.0
 
 
 def _read_extinction_law() -> pd.DataFrame:
@@ -286,6 +335,9 @@ class BolometricCorrection:
         a scalar av)
     alpha : float
         [alpha/Fe] of the spectrum actually used.
+    fbol : float
+        The spectrum's own bolometric flux, erg/s/cm^2
+        (``bolometric_flux``), the BC's normalization.
     filters_SVO, filters_MIST : list of str
     filter_weightings : list of str
         "energy" or "photon", per filter, as actually applied.
@@ -334,7 +386,18 @@ class BolometricCorrection:
                 self.teff, self.logg, self.feh, spectra_dir
             )
         self.alpha, spectrum_full = spectrum
-        self.spectrum = np.asarray(spectrum_full)[self.wave_mask]
+        spectrum_full = np.asarray(spectrum_full)
+        if spectrum_full.shape != (len(WAVELENGTH_PTS),):
+            raise ValueError(
+                f"Spectrum for teff={self.teff}, logg={self.logg}, "
+                f"feh={self.feh} has shape {spectrum_full.shape}; the "
+                f"bolometric flux needs the whole grid, "
+                f"({len(WAVELENGTH_PTS)},)."
+            )
+        # The FULL spectrum, not the filter-set support below: F_bol is the
+        # normalization of every band at once.
+        self.fbol = float(bolometric_flux(WAVELENGTH_PTS, spectrum_full))
+        self.spectrum = spectrum_full[self.wave_mask]
 
     ######## functions used in calculating flux within a filter ########
 
@@ -355,13 +418,10 @@ class BolometricCorrection:
         self.flux_in_filter = flux_in_filter  # units of erg/s/cm^2
 
     def _calc_BC(self):
+        # M_bol from the spectrum's own F_bol, not sigma Teff^4 (module
+        # docstring; review 8.9.13).
         term1 = L0 / (
-            100
-            * u.pc.to(u.m) ** 2
-            * 4
-            * np.pi
-            * const.sigma_sb.value
-            * self.teff**4
+            100 * u.pc.to(u.m) ** 2 * 4 * np.pi * (self.fbol * _CGS_TO_SI_FLUX)
         )
         term2 = self.flux_in_filter / self.filter_zero_flux
         BC = 2.5 * np.log10(term1 * term2)

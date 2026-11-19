@@ -20,6 +20,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from exozippy.constants import SIGMA_SB_CGS
 from exozippy.models.NextGen.BCs.plot import NextGenPlot
 
 _WAVE = np.array([5000.0, 6000.0])
@@ -66,6 +67,11 @@ def _plot_stub(teff, logg, feh, drop_node=None):
         {"teffsed": np.array([teff]), "feh": np.array([feh])}
     ]
     obj.logg_vals_draws = np.array([[logg]])
+    # F_bol = sigma Teff^4 everywhere, so the own-F_bol rescale
+    # (review 8.9.13) is exactly 1 and the fake spectra are read unchanged.
+    obj._log_fbol_rgi = lambda pts: np.log10(
+        SIGMA_SB_CGS * np.asarray(pts, float)[:, 0] ** 4
+    )
     return obj
 
 

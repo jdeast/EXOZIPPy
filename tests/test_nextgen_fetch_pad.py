@@ -101,6 +101,7 @@ def _synthetic_table(
                 "svo_id": c,
                 "generator": gen.GENERATOR,
                 "spectra": gen.SPECTRA_TAG,
+                "normalization": gen.NORMALIZATION,
             }
             for c in cols
         },

@@ -68,7 +68,7 @@
  "terms": {
   "POT:galacticmodel.imf_prior": 0.0,
   "POT:galacticmodel.kinematic_prior": -13.950797321495083,
-  "POT:gaussian_prior.mulensinstrument.zeropoint": -1.087633661769849,
+  "POT:gaussian_prior.mulensinstrument.zeropoint": -1.807776718597618,
   "POT:gaussian_prior.star.av": -4.106939323308058e-31,
   "POT:gaussian_prior.star.feh": -9.860761315262648e-32,
   "POT:gaussian_prior.star.logmass": 0.0,
@@ -96,10 +96,10 @@
   "POT:low_bound.mulensevent.mu_dec_rel_geo": -9.85967654375977e-305,
   "POT:low_bound.mulensevent.mu_ra_rel": -9.85967654375977e-305,
   "POT:low_bound.mulensevent.mu_ra_rel_geo": -9.85967654375977e-305,
-  "POT:low_bound.mulensevent.mu_rel_geo_mag": -1.8587554269425074e-148,
-  "POT:low_bound.mulensevent.mu_rel_mag": -4.03775268274396e-161,
-  "POT:low_bound.mulensevent.pi_rel": -3.163216579345182e-193,
-  "POT:low_bound.mulensevent.t_E": -1.0546776817820778e-160,
+  "POT:low_bound.mulensevent.mu_rel_geo_mag": -9.85967654375977e-305,
+  "POT:low_bound.mulensevent.mu_rel_mag": -5.540915457193619e-304,
+  "POT:low_bound.mulensevent.pi_rel": -9.85967654375977e-305,
+  "POT:low_bound.mulensevent.t_E": -9.85967654375977e-305,
   "POT:low_bound.mulensevent.theta_E": -9.85967654375977e-305,
   "POT:low_bound.star.loggsed": -9.85967654375977e-305,
   "POT:mulensevent.event_rate_prior": 2.510771619945996,
@@ -121,7 +121,7 @@
   "RV:mulensinstrument.log_f_total_raw": -1.8378770664093453,
   "RV:mulensinstrument.model": -1193.3050936916943,
   "RV:mulensinstrument.q_source_raw": -1.8378770664093453,
-  "RV:sed.model": -737.5401112837291,
+  "RV:sed.model": -925.7662387397468,
   "RV:source.t_0_raw": -0.9189385332046727,
   "RV:source.u_0_raw": -0.9189385332046727,
   "RV:star.av_raw": -0.9189385332046727,
@@ -136,5 +136,5 @@
   "RV:star.teff_raw": -0.9189385332046727,
   "RV:star.teffsed_raw": -0.9189385332046727
  },
- "total_logp": -1999.717849863115
+ "total_logp": -2188.66412037596
 }

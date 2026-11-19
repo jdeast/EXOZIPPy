@@ -235,9 +235,12 @@ def fetch_all() -> list[Path]:
 class RuntimeGrid:
     """The runtime grid, memory-mapped: ``axes`` (teff, logg, feh lists),
     ``edges`` (bin edges, Angstrom), ``logflux`` (n_teff, n_logg, n_feh,
-    n_bin float32 memmap) and the full ``meta``."""
+    n_bin float32 memmap), ``log_fbol`` (n_teff, n_logg, n_feh: each
+    node's log10 F_bol, erg/s/cm^2, READ from the per-node table published
+    with the BC tables -- review 8.9.13; never integrated from the bins)
+    and the full ``meta``."""
 
-    def __init__(self, directory: Path):
+    def __init__(self, directory: Path, fbol_path: Path):
         self.directory = Path(directory)
         self.meta = json.loads((self.directory / META_FILE).read_text())
         self.axes = {
@@ -256,6 +259,9 @@ class RuntimeGrid:
                 f"{self.directory / GRID_FILE} has shape {self.logflux.shape}, "
                 f"but its metadata describes {want}."
             )
+        from exozippy.models.NextGen.bc_tables import read_fbol_grid
+
+        self.log_fbol = read_fbol_grid(fbol_path, self.axes)
 
 
 _GRIDS: dict = {}
@@ -264,7 +270,9 @@ _GRIDS: dict = {}
 def load_runtime_grid(model_root=None) -> RuntimeGrid:
     """The runtime grid under ``model_root`` (fetched into the default
     root on first use), cached per directory."""
+    from exozippy.models.NextGen.bc_tables import ensure_fbol_table
+
     d = ensure_runtime_grid(model_root)
     if d not in _GRIDS:
-        _GRIDS[d] = RuntimeGrid(d)
+        _GRIDS[d] = RuntimeGrid(d, ensure_fbol_table(model_root))
     return _GRIDS[d]

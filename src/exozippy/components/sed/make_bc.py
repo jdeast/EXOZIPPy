@@ -23,10 +23,13 @@ and names the request path.
 
 Conventions
 -----------
-* BC_X = M_bol - M_X with M_bol from sigma*Teff^4 and the IAU 2015
-  bolometric zero point (L0 = 3.0128e35 erg/s), matching how the SED
-  component consumes the BC (star.physics.calc_luminosity uses
-  sigma*T^4).
+* BC_X = M_bol - M_X with M_bol from the spectrum's OWN bolometric flux
+  (``bolometric_correction.bolometric_flux``: the integral over the whole
+  wavelength grid plus a Rayleigh-Jeans tail) and the IAU 2015 bolometric
+  zero point (L0 = 3.0128e35 erg/s).  Not sigma*Teff^4: the spectra are
+  fluxes at the model's outer radius, so a giant's integrates to less
+  (review 8.9.13; models/NextGen/README.md).  The SED still converts the
+  BC with L = 4 pi R^2 sigma Teff^4 (star.physics.calc_luminosity).
 * Band-averaged flux density is photon-weighted:
   <f> = int(f S lambda dlam) / int(S lambda dlam).
 * Vega zeropoints from SVO (specified value when quoted, else SVO's
@@ -80,6 +83,10 @@ import pandas as pd
 import yaml
 
 from ...filters.filter import Filter
+from ...models.NextGen.bolometric_correction import (
+    NORMALIZATION,
+    bolometric_flux,
+)
 from ...utilities import zenodo_assets
 from ...utilities.zenodo import fetch_assets
 from .bc_grid import (
@@ -99,7 +106,6 @@ from .bc_grid import (
 
 logger = logging.getLogger(__name__)
 
-SIGMA_SB = 5.670374419e-5  # erg s^-1 cm^-2 K^-4
 L0 = 3.0128e35  # IAU 2015 resolution B2, erg/s
 PC_CM = 3.0856775814913673e18
 F0_10PC = L0 / (4.0 * np.pi * (10.0 * PC_CM) ** 2)  # erg s^-1 cm^-2
@@ -386,6 +392,7 @@ def make_bc_tables(
     )
 
     plan = {}
+    stale: Dict[str, List[str]] = {}
     for fac, items in by_facility.items():
         path = bc_table_path(model_root, model, fac)
         if path.is_file() and not overwrite:
@@ -404,12 +411,27 @@ def make_bc_tables(
             items = [(s_, c) for s_, c in items if c not in foreign]
         if not items:
             continue
+        # A make_bc column normalized by sigma Teff^4 (written before
+        # review 8.9.13) is recomputed in full, never extended: one column,
+        # one normalization.
         todo = bc_nodes_to_compute(
             path,
             axes,
             [c for _, c in items],
-            reusable=(lambda meta: False) if overwrite else None,
+            reusable=(
+                (lambda meta: False)
+                if overwrite
+                else (lambda meta: meta.get("normalization") == NORMALIZATION)
+            ),
         )
+        if path.is_file():
+            fmeta = read_bc_meta(path).get("filters", {})
+            stale[fac] = [
+                c
+                for _, c in items
+                if c in fmeta
+                and fmeta[c].get("normalization") != NORMALIZATION
+            ]
         if len(todo):
             plan[fac] = (items, todo)
         else:
@@ -462,8 +484,10 @@ def make_bc_tables(
                 )
                 / S_norm[None, :]
             )
-            # BC = M_bol - M_X ; the (R/d)^2 factor cancels
-            mbol_term = SIGMA_SB * teff**4 / F0_10PC
+            # BC = M_bol - M_X ; the (R/d)^2 factor cancels.  M_bol from
+            # the spectrum's own F_bol, as the full-resolution tables
+            # (review 8.9.13).
+            mbol_term = bolometric_flux(wave_ang, spec) / F0_10PC
             bc = 2.5 * np.log10(fmean / zps[None, :] / mbol_term)
             # NaN leaves a cell the table already holds untouched.
             bc = np.where(node[new_cols].values, bc, np.nan)
@@ -501,6 +525,7 @@ def make_bc_tables(
                 "flux_weighting": "photon",
                 "spectra": f"{model}.spectra.csv (Zenodo, R=150)",
                 "generator": GENERATOR,
+                "normalization": NORMALIZATION,
             }
             for (svo_id, col), zp in zip(items, zps)
         }
@@ -511,7 +536,7 @@ def make_bc_tables(
             filter_meta,
             table_meta={"model": model, "facility": fac, "mag_system": "Vega"},
             allow_new_nodes=True,
-            replace_columns=new_cols if overwrite else (),
+            replace_columns=(new_cols if overwrite else stale.get(fac, ())),
         )
         written.append(path)
         logger.info(f"Wrote {path}")

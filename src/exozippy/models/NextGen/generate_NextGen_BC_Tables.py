@@ -55,10 +55,13 @@ from exozippy.components.sed.bc_grid import (
 )
 from exozippy.components.sed.magsys import MAGSYS_COLUMNS, magsys_table_path
 from exozippy.filters.filter import Filter
+from exozippy.models.NextGen.bc_tables import FBOL_TABLE
 from exozippy.models.NextGen.bolometric_correction import (
     L0,
+    NORMALIZATION,
     BolometricCorrection,
     _filter_set_data,
+    bolometric_flux,
 )
 from exozippy.models.NextGen.nextgen_spectra import (
     SPECTRA_RAW_PATH_DEFAULT,
@@ -557,9 +560,13 @@ SPECTRA_TAG = (
 
 
 def _reusable(filter_meta: dict) -> bool:
+    # "normalization" since review 8.9.13: a column normalized by sigma
+    # Teff^4 (every column before it, including a synthesized cache
+    # column) is not current and is recomputed in full.
     return (
         filter_meta.get("generator") == GENERATOR
         and filter_meta.get("spectra") == SPECTRA_TAG
+        and filter_meta.get("normalization") == NORMALIZATION
     )
 
 
@@ -693,6 +700,7 @@ def generate_bc_tables(
         "Rv": RV,
         "L0_W": L0,
         "model": MODEL,
+        "normalization": NORMALIZATION,
     }
 
     # Existing columns this run recomputes from scratch (written by another
@@ -801,6 +809,7 @@ def generate_bc_tables(
                         "flux_weighting": weighting,
                         "spectra": SPECTRA_TAG,
                         "generator": GENERATOR,
+                        "normalization": NORMALIZATION,
                         "generated": generated,
                     }
             if not recs:
@@ -900,6 +909,135 @@ def _pad_spectrum(df_spec, grid, teff, logg, feh, processed_path):
         "from_logg": float(source),
     }
     return row, record
+
+
+# -------------------------------------------------------------------
+# The per-node bolometric flux (review 8.9.13)
+# -------------------------------------------------------------------
+
+FBOL_COLUMNS = [
+    "teff",
+    "logg",
+    "feh",
+    "alpha",
+    "fbol",
+    "fbol_over_sigmaT4",
+    "source",
+]
+
+
+def fbol_table_path(model_root: Path | str = DEFAULT_MODEL_ROOT) -> Path:
+    return Path(model_root) / MODEL / "BCs" / FBOL_TABLE
+
+
+def write_fbol_table(
+    processed_path: Path = SPECTRA_PROCESSED_PATH_DEFAULT,
+    model_root: Path = DEFAULT_MODEL_ROOT,
+    unavailable: Sequence[tuple] | None = None,
+    raw_path: Path = SPECTRA_RAW_PATH_DEFAULT,
+    out_path: Path | None = None,
+) -> pd.DataFrame:
+    """The bolometric flux of the spectrum behind every grid node, the
+    normalization of every BC column (``bolometric_correction.
+    bolometric_flux``), written to ``BCs/NextGen.fbol.parquet``.
+
+    One row per (teff, logg, feh) node of NextGen.grid.yaml: ``fbol``
+    (erg/s/cm^2, at the model's outer radius), ``fbol_over_sigmaT4`` and
+    ``source`` -- ``"own"``, or for a node no spectrum exists for the
+    spectrum step 2 computes it from (``_pad_spectrum``): ``"from_logg
+    <g>"`` for the hot end of the logg 5.5 plane, ``"from_teff <t0>
+    <t1>"`` for the four interior holes, whose F_bol is then that of the
+    spectrum linearly interpolated along Teff (the one the runtime grid
+    and every column added since #495 use; the tables' older columns hold
+    values from the original spectra SVO no longer serves, whose F_bol is
+    unknown).  ``alpha`` is the [alpha/Fe] of the spectrum used.
+
+    A ONE-TIME product published with the tables: no consumer integrates
+    a spectrum for F_bol at fit or load time (``spectral_bc.py`` and the
+    SED figure read this table).  `unavailable` as for
+    ``generate_bc_tables`` (the synthesis passes the bundle's own list).
+    """
+    grid = read_grid_yaml(model_root)
+    key = lambda *v: tuple(round(float(x), _KEY_DECIMALS) for x in v)
+    if unavailable is not None:
+        unavailable = {key(*n) for n in unavailable}
+    from astropy import constants as const
+
+    sigma_cgs = const.sigma_sb.cgs.value
+    recs = []
+    for feh in tqdm(grid["feh"], desc="feh"):
+        df_spec = _index_spectra(load_processed_spectra(feh, processed_path))
+        for logg in grid["logg"]:
+            for teff in grid["teff"]:
+                teff, logg = float(teff), float(logg)
+                k = (round(teff, _KEY_DECIMALS), round(logg, _KEY_DECIMALS))
+                if k in df_spec.index:
+                    r = df_spec.loc[k]
+                    alpha, flux, source = r["alpha"], r["flux"], "own"
+                else:
+                    if unavailable is None:
+                        unavailable = {
+                            key(*n)
+                            for n in unavailable_grid_nodes(grid, raw_path)
+                        }
+                    if key(teff, logg, feh) not in unavailable:
+                        raise FileNotFoundError(
+                            f"No step-1 spectrum for teff={teff}, "
+                            f"logg={logg}, feh={feh} in {processed_path}; "
+                            f"re-run step 1."
+                        )
+                    row, record = _pad_spectrum(
+                        df_spec, grid, teff, logg, feh, processed_path
+                    )
+                    alpha, flux = row["alpha"], row["flux"]
+                    if "from_teff" in record:
+                        t0, t1 = record["from_teff"]
+                        source = f"from_teff {t0:g} {t1:g}"
+                    else:
+                        source = f"from_logg {record['from_logg']:g}"
+                fbol = float(bolometric_flux(WAVELENGTH_PTS, flux))
+                recs.append(
+                    (
+                        teff,
+                        logg,
+                        float(feh),
+                        float(alpha),
+                        fbol,
+                        fbol / (sigma_cgs * teff**4),
+                        source,
+                    )
+                )
+        del df_spec
+    df = pd.DataFrame(recs, columns=FBOL_COLUMNS)
+    df = df.sort_values(["feh", "logg", "teff"]).reset_index(drop=True)
+    df.attrs = {
+        "meta": {
+            "model": MODEL,
+            "quantity": (
+                "fbol: the spectrum's own bolometric flux, erg/s/cm^2 "
+                "(F_lambda at the model's outer radius); "
+                "fbol_over_sigmaT4 = fbol / (sigma_SB teff^4)"
+            ),
+            "normalization": NORMALIZATION,
+            "spectra": SPECTRA_TAG,
+            "generator": GENERATOR + " (write_fbol_table)",
+            "generated": datetime.date.today().isoformat(),
+            "padding": (
+                "source 'from_logg g': no spectrum exists, F_bol of the "
+                "nearest lower-gravity spectrum the BC rows were padded "
+                "from; 'from_teff t0 t1': one of the four interior nodes "
+                "SVO serves no spectrum for, F_bol of the spectrum "
+                "linearly interpolated between the two Teff neighbours "
+                "(_pad_spectrum)"
+            ),
+        }
+    }
+    out = fbol_table_path(model_root) if out_path is None else Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_name(out.name + ".tmp")
+    df.to_parquet(tmp, index=False)
+    os.replace(tmp, out)
+    return df
 
 
 def _table_alphas(path) -> dict:
