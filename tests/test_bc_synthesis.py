@@ -423,6 +423,7 @@ def _write_tiny_column(path, col, value, generator=gen.GENERATOR, svo=None):
         "flux_weighting": "energy",
         "spectra": gen.SPECTRA_TAG,
         "generator": generator,
+        "normalization": gen.NORMALIZATION,
     }
     write_bc_table(
         df[BC_PARAM_COLS + [col]],

@@ -117,12 +117,15 @@ def test_every_pin_is_a_bc_table_with_a_size_and_an_md5():
     """
     Given the pinned manifest,
     When each entry is inspected,
-    Then it names a .bc.parquet table and pins a positive size and a
+    Then it names a .bc.parquet table (or the per-node F_bol table the
+    tables are normalized by, review 8.9.13) and pins a positive size and a
     32-hex-digit md5 -- what fetch_assets checks a download against.
     """
     assert bc_tables.published_tables(), "no tables pinned"
     for name, meta in bc_tables._BC_TABLE_FILES.items():
-        assert name.endswith(".bc.parquet"), name
+        assert name.endswith(".bc.parquet") or name == bc_tables.FBOL_TABLE, (
+            name
+        )
         assert isinstance(meta["size"], int) and meta["size"] > 0, name
         assert len(meta["md5"]) == 32, name
         int(meta["md5"], 16)

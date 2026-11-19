@@ -33,6 +33,8 @@ src/exozippy/models/NextGen/BCs/NextGen.wavelength.csv
 # tests/test_tracked_file_sizes.py is the second guard (size, not name).
 src/exozippy/models/NextGen/BCs/*.bc.parquet
 src/exozippy/models/NextGen/BCs/*.bc.parquet.*
+src/exozippy/models/NextGen/BCs/NextGen.fbol.parquet
+src/exozippy/models/NextGen/BCs/NextGen.fbol.parquet.*
 # The R = 3000 runtime grid of the SED's fitted-R_V mode (656 MB), fetched
 # from Zenodo on first use (models/NextGen/runtime_spectra.py).
 src/exozippy/models/NextGen/runtime/
