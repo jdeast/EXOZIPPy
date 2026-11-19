@@ -15,8 +15,19 @@ integrates every band, at every evaluation:
                 ccm89_nir_basis; alpha is the sight line's sed.nir_alpha)
     flux_f      sum_b F_b exp(-A_b / 1.086) Sint_fb, with Sint_fb the
                 integral over bin b of the filter's weighted profile
-    BC_f        2.5 log10[ L0 / (4 pi (10 pc)^2 sigma Teff^4)
+    log10 F_bol trilinear in (teff, logg, feh) on the same nodes: each
+                node's OWN bolometric flux, read from the published
+                per-node table (BCs/NextGen.fbol.parquet), never
+                integrated here
+    BC_f        2.5 log10[ L0 / (4 pi (10 pc)^2 F_bol)
                            * flux_f / (ZP_f int S_f dlam) ]
+
+F_bol, not sigma Teff^4 (review 8.9.13): the spectra are fluxes at the
+model's outer radius, so a BC must divide a band flux by the bolometric
+flux of the SAME spectrum, as the tables do
+(models/NextGen/bolometric_correction.py, ``bolometric_flux``).
+log10 F_bol is carried as one extra column of the interpolated array, so
+it is interpolated exactly as the band fluxes are, in one evaluation.
 
 -- the same formula, filter profiles, DetectorType weighting and Vega
 zeropoints as the shipped tables (models/NextGen/bolometric_correction.py,
@@ -36,10 +47,10 @@ from __future__ import annotations
 import numpy as np
 import pytensor
 import pytensor.tensor as pt
-from astropy import constants as const
 from astropy import units as u
 
 from exozippy.models.NextGen.bolometric_correction import (
+    _CGS_TO_SI_FLUX,
     L0,
     _filter_set_data,
 )
@@ -50,10 +61,11 @@ from .extinction import a_lambda_over_av, ccm89_nir_basis
 
 LAWS = ("ccm89_nir", "shipped")
 LN10 = float(np.log(10.0))
-# 2.5 log10 of the BC's constant factor L0 / (4 pi (10 pc)^2 sigma), so
-# BC = BC_CONST + 2.5 log10(flux / zero_flux) - 10 log10(Teff).
+# 2.5 log10 of the BC's constant factor L0 / (4 pi (10 pc)^2), with F_bol
+# in erg/s/cm^2 (1e-3 W/m^2), so
+# BC = BC_CONST + 2.5 log10(flux / zero_flux) - 2.5 log10(F_bol).
 BC_CONST = 2.5 * float(
-    np.log10(L0 / (100 * u.pc.to(u.m) ** 2 * 4 * np.pi * const.sigma_sb.value))
+    np.log10(L0 / (100 * u.pc.to(u.m) ** 2 * 4 * np.pi * _CGS_TO_SI_FLUX))
 )
 
 
@@ -63,6 +75,8 @@ class SpectralBC:
     Parameters
     ----------
     grid : models.NextGen.runtime_spectra.RuntimeGrid
+        Its ``log_fbol`` (n_teff, n_logg, n_feh) is each node's log10
+        F_bol, read from the published per-node table.
     filters : sequence of str
         Filter names in any convention the alias table knows; the output
         columns are in this order.
@@ -99,8 +113,24 @@ class SpectralBC:
             self.ext_b = np.zeros_like(self.ext_a)
             self.ext_L = np.zeros_like(self.ext_a)
         self.axes = [grid.axes["teff"], grid.axes["logg"], grid.axes["feh"]]
-        # (n_teff, n_logg, n_feh, n_used): only the bins the filters touch
-        self.logflux = np.ascontiguousarray(grid.logflux[..., used])
+        # (n_teff, n_logg, n_feh, n_used + 1): only the bins the filters
+        # touch, and log10 F_bol as the LAST column, so one trilinear
+        # evaluation interpolates both exactly alike.
+        log_fbol = np.asarray(grid.log_fbol, float)
+        if log_fbol.shape != grid.logflux.shape[:3]:
+            raise ValueError(
+                f"The runtime grid's log_fbol has shape {log_fbol.shape}; "
+                f"its spectra are on {grid.logflux.shape[:3]}."
+            )
+        self.logflux = np.ascontiguousarray(
+            np.concatenate(
+                [
+                    np.asarray(grid.logflux[..., used], float),
+                    log_fbol[..., None],
+                ],
+                axis=-1,
+            )
+        )
         self._interp = None
         self._np_interp = None
 
@@ -131,13 +161,14 @@ class SpectralBC:
             k = (
                 k + pt.as_tensor_variable(self.ext_b)[None, :] / rv[:, None]
             ) * pt.exp(alpha * pt.as_tensor_variable(self.ext_L))[None, :]
-        flux_bins = pt.exp(LN10 * lg - av[:, None] * k / 1.086)
+        log_fbol = lg[:, -1]
+        flux_bins = pt.exp(LN10 * lg[:, :-1] - av[:, None] * k / 1.086)
         flux = pt.dot(flux_bins, pt.as_tensor_variable(self.M.T))
         return (
             BC_CONST
             + 2.5
             * pt.log10(flux / pt.as_tensor_variable(self.zero_flux)[None, :])
-            - 10.0 * pt.log10(teff)[:, None]
+            - 2.5 * log_fbol[:, None]
         )
 
     # --------------------------------------------------------------- numpy
@@ -161,9 +192,5 @@ class SpectralBC:
             k = (k + self.ext_b / float(rv)) * np.exp(
                 float(alpha) * self.ext_L
             )
-        flux = self.M @ np.exp(LN10 * lg - float(av) * k / 1.086)
-        return (
-            BC_CONST
-            + 2.5 * np.log10(flux / self.zero_flux)
-            - 10.0 * np.log10(x[0])
-        )
+        flux = self.M @ np.exp(LN10 * lg[:-1] - float(av) * k / 1.086)
+        return BC_CONST + 2.5 * np.log10(flux / self.zero_flux) - 2.5 * lg[-1]

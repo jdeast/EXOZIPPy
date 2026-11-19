@@ -26,7 +26,10 @@ from exozippy.components.sed import extinction
 from exozippy.components.sed.sed import fit_rv_dust_from_config
 from exozippy.components.sed.spectral_bc import SpectralBC
 from exozippy.models.NextGen import runtime_spectra as rs
-from exozippy.models.NextGen.bolometric_correction import BolometricCorrection
+from exozippy.models.NextGen.bolometric_correction import (
+    BolometricCorrection,
+    bolometric_flux,
+)
 from exozippy.models.NextGen.nextgen_spectra import WAVELENGTH_PTS
 from exozippy.system import System
 
@@ -45,15 +48,19 @@ def _bb(teff):
 
 def _bb_grid(teffs=(2600.0, 10000.0), loggs=(0.0, 5.5), fehs=(-4.0, 0.5)):
     """A RuntimeGrid stand-in: blackbodies, binned exactly as the real grid
-    is, the same spectrum at every (logg, feh)."""
+    is, the same spectrum at every (logg, feh), with each node's log10
+    F_bol computed as the published per-node table's is
+    (``bolometric_flux`` of the R = 20000 spectrum)."""
     edges = rs.bin_edges()
     lf = np.zeros(
         (len(teffs), len(loggs), len(fehs), len(edges) - 1), np.float32
     )
+    log_fbol = np.zeros((len(teffs), len(loggs), len(fehs)))
     for i, t in enumerate(teffs):
         fbar = rs.bin_spectrum(_bb(t), edges)
         with np.errstate(divide="ignore"):
             lf[i] = np.where(fbar > 0, np.log10(fbar), rs.LOG10_FLOOR)
+        log_fbol[i] = np.log10(bolometric_flux(WAVELENGTH_PTS, _bb(t)))
     return types.SimpleNamespace(
         axes={
             "teff": np.asarray(teffs, float),
@@ -62,6 +69,7 @@ def _bb_grid(teffs=(2600.0, 10000.0), loggs=(0.0, 5.5), fehs=(-4.0, 0.5)):
         },
         edges=edges,
         logflux=lf,
+        log_fbol=log_fbol,
     )
 
 

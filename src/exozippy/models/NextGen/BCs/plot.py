@@ -1,9 +1,11 @@
 import logging
 
 import numpy as np
-from scipy.interpolate import interpn
+from scipy.interpolate import RegularGridInterpolator, interpn
 
+from exozippy.components.sed.bc_grid import DEFAULT_MODEL_ROOT
 from exozippy.components.sed.plot import Plot
+from exozippy.constants import SIGMA_SB_CGS
 
 logger = logging.getLogger(__name__)
 
@@ -222,7 +224,59 @@ class NextGenPlot(Plot):
                     fill_value=None,
                 )
 
+            # Rescale to the BCs' normalization (review 8.9.13): a BC
+            # divides the band flux by the spectrum's OWN F_bol, so a star
+            # of radius R emits sigma Teff^4 F_lambda / F_bol at its
+            # surface, not F_lambda (an outer-radius flux).  F_bol is READ
+            # from the published per-node table and interpolated in log10
+            # as the spectral BCs do, never integrated here.
+            teff_d = np.atleast_1d(pt_dict["teff"]).astype(float)
+            log_fbol = self._log_fbol_interp()(
+                np.column_stack(
+                    [
+                        teff_d,
+                        np.atleast_1d(pt_dict["logg"]).astype(float),
+                        np.atleast_1d(pt_dict["feh"]).astype(float),
+                    ]
+                )
+            )
+            interp_flux *= (SIGMA_SB_CGS * teff_d**4 / 10.0**log_fbol)[:, None]
+
             model_spectrum_flux_draws[d, :] = interp_flux
 
         self._log_off_grid(off_grid)
         self.model_spectrum_flux_draws = model_spectrum_flux_draws
+
+    def _log_fbol_interp(self):
+        """Trilinear interpolator of log10 F_bol over (teff, logg, feh),
+        from the per-node table published with the BC tables
+        (``bc_tables.ensure_fbol_table``); linear extrapolation off the
+        grid, as the spectra above."""
+        if getattr(self, "_log_fbol_rgi", None) is None:
+            from exozippy.models.NextGen.bc_tables import (
+                ensure_fbol_table,
+                read_fbol_grid,
+            )
+            from exozippy.models.NextGen.generate_NextGen_BC_Tables import (
+                read_grid_yaml,
+            )
+
+            # The root the spectra came from: _load_spectra_data falls back
+            # to the packaged NextGen spectra when the configured root has
+            # none, and _load_model_grid_yaml follows it.
+            root = (
+                self.model_root
+                if self._grid_yaml_path().is_file()
+                else DEFAULT_MODEL_ROOT
+            )
+            axes = read_grid_yaml(root)
+            axes = {
+                k: np.asarray(axes[k], float) for k in ("teff", "logg", "feh")
+            }
+            self._log_fbol_rgi = RegularGridInterpolator(
+                (axes["teff"], axes["logg"], axes["feh"]),
+                read_fbol_grid(ensure_fbol_table(root), axes),
+                bounds_error=False,
+                fill_value=None,
+            )
+        return self._log_fbol_rgi

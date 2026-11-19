@@ -82,12 +82,18 @@ BC_TABLE_DIR = current_dir / "BCs"
 _RECORD = zenodo_assets.record("nextgen_bc_tables")
 ZENODO_RECORD = _RECORD.record_id
 ZENODO_CONCEPT_RECORD = _RECORD.concept_record_id
-# Only the tables: the record also carries the publish script's
-# MANIFEST.txt, which no reader opens (the Claret record's rule).
+# The per-node bolometric flux of every spectrum the tables were computed
+# from (review 8.9.13; generate_NextGen_BC_Tables.write_fbol_table): the
+# tables' normalization, published with them, and read -- never recomputed
+# -- by the SED's fitted-R_V mode (spectral_bc.py) and the SED figure.
+FBOL_TABLE = "NextGen.fbol.parquet"
+
+# Only the tables (and the F_bol table): the record also carries the publish
+# script's MANIFEST.txt, which no reader opens (the Claret record's rule).
 _BC_TABLE_FILES = {
     name: {"size": pin.size, "md5": pin.md5}
     for name, pin in _RECORD.files.items()
-    if name.endswith(".bc.parquet")
+    if name.endswith(".bc.parquet") or name == FBOL_TABLE
 }
 # md5s of each table in EARLIER published versions (zenodo_assets
 # ZenodoRecord.superseded): a checkout that fetched the previous version
@@ -107,8 +113,42 @@ _verified: set[tuple[str, int, int, int]] = set()
 
 
 def published_tables() -> List[str]:
-    """Filenames of every published table, sorted."""
-    return sorted(_BC_TABLE_FILES)
+    """Filenames of every published BC table, sorted (not the F_bol
+    table, which is no facility's)."""
+    return sorted(n for n in _BC_TABLE_FILES if n.endswith(".bc.parquet"))
+
+
+def ensure_fbol_table(model_root: Path | str | None = None) -> Path:
+    """The per-node F_bol table (``FBOL_TABLE``), fetched on first use.
+
+    Under the default model root it is fetched like a table and checked
+    against its pin; an explicit ``model_root`` is the caller's own tree,
+    used as given (``bc_grid.ensure_bc_tables``' rule), so a missing file
+    there raises naming the path.  A pinned record version that does not
+    carry the table predates the own-F_bol normalization (review 8.9.13)
+    and raises: its BC tables are normalized by sigma Teff^4, and nothing
+    may silently mix the two normalizations.
+    """
+    from ...components.sed.bc_grid import DEFAULT_MODEL_ROOT
+
+    if model_root is not None and Path(model_root) != Path(DEFAULT_MODEL_ROOT):
+        path = Path(model_root) / "NextGen" / "BCs" / FBOL_TABLE
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"{path} is missing. An explicit model_root is used as "
+                f"given; copy the published {FBOL_TABLE} (record "
+                f"{record_url()}) there, or drop model_root to fetch it."
+            )
+        return path
+    if FBOL_TABLE not in _BC_TABLE_FILES:
+        raise RuntimeError(
+            f"The pinned NextGen BC record ({record_url()}) has no "
+            f"{FBOL_TABLE}: it predates the own-F_bol normalization "
+            f"(review 8.9.13), so its tables are normalized by sigma "
+            f"Teff^4. Pin the version that carries {FBOL_TABLE} in "
+            f"utilities/zenodo_assets.py ('nextgen_bc_tables')."
+        )
+    return ensure_tables([FBOL_TABLE])[0]
 
 
 def record_url() -> str:
@@ -251,9 +291,49 @@ def ensure_tables(
     return [dest_dir / n for n in names]
 
 
+def read_fbol_grid(path: Path | str, axes: dict):
+    """log10 F_bol (erg/s/cm^2) on the (teff, logg, feh) box `axes`, an
+    (n_teff, n_logg, n_feh) array, from the per-node table at `path`.
+    Every node of the box must be in the table; a missing one raises
+    naming it."""
+    import numpy as np
+    import pandas as pd
+
+    from ...components.sed.bc_grid import _KEY_DECIMALS
+
+    df = pd.read_parquet(path, columns=["teff", "logg", "feh", "fbol"])
+    lookup = {
+        (
+            round(float(t), _KEY_DECIMALS),
+            round(float(g), _KEY_DECIMALS),
+            round(float(z), _KEY_DECIMALS),
+        ): float(f)
+        for t, g, z, f in zip(df.teff, df.logg, df.feh, df.fbol)
+    }
+    teffs, loggs, fehs = (
+        [round(float(x), _KEY_DECIMALS) for x in axes[k]]
+        for k in ("teff", "logg", "feh")
+    )
+    out = np.empty((len(teffs), len(loggs), len(fehs)), dtype=float)
+    for i, t in enumerate(teffs):
+        for j, g in enumerate(loggs):
+            for k, z in enumerate(fehs):
+                f = lookup.get((t, g, z))
+                if f is None or not f > 0:
+                    raise KeyError(
+                        f"{path} has no positive F_bol for teff={t}, "
+                        f"logg={g}, feh={z}, a node of the grid being "
+                        f"interpolated."
+                    )
+                out[i, j, k] = np.log10(f)
+    return out
+
+
 def fetch_all(dest_dir: Path | str | None = None) -> List[Path]:
-    """Fetch every published table (pre-fetch for offline use)."""
-    return ensure_tables(None, dest_dir=dest_dir)
+    """Fetch every published table, and the F_bol table when the pinned
+    version carries it (pre-fetch for offline use)."""
+    extra = [FBOL_TABLE] if FBOL_TABLE in _BC_TABLE_FILES else []
+    return ensure_tables(published_tables() + extra, dest_dir=dest_dir)
 
 
 def build_parser() -> argparse.ArgumentParser:
