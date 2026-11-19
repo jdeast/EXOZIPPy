@@ -13,7 +13,6 @@ import arviz as az
 import numpy as np
 import pytest
 from test_runner import (  # noqa: E402  (tests/ is on sys.path via conftest)
-    REACH_SAMPLING_TIMEOUT,
     _poll_until,
     _poll_while_progressing,
     _write_ptde_config,
@@ -27,8 +26,12 @@ from exozippy.gui import TERMINAL_PHASES, runner
 # give up and the failure is reported as a dead xdist worker with no test name
 # instead of the assertion that says what was actually stuck.
 #
-#   REACH_SAMPLING_TIMEOUT (360 s, from test_runner)  subprocess + imports +
-#       model build + a COLD pytensor compile + tune + 100 draws
+#   REACH_SAMPLING_TIMEOUT 600 s  subprocess + imports + model build + a COLD
+#       pytensor compile + tune + 100 draws. Same budget as
+#       test_run_endpoints.py, not test_runner's 360 s: this wait spans the
+#       whole opaque "compiling" phase (no status update until sampling), so
+#       it cannot be progress-aware, and on a CI shard shared with other heavy
+#       files it has measured 90-340 s passing and >360 s failing.
 #   SNAPSHOT_TIMEOUT       30 s   file-visibility lag only (see below)
 #   GRACEFUL_STALL_TIMEOUT 180 s  wrap-up may go this long with NO new console
 #                                 output before the test calls it hung
@@ -40,8 +43,9 @@ from exozippy.gui import TERMINAL_PHASES, runner
 # each, and how many modes this short stochastic fit finds is a coin flip.
 #
 # Worst case, counting the ~50 s that handle.stop(force=True) itself blocks for
-# (graceful_timeout 30 + kill_timeout 10 + 10): 360 + 30 + 720 + 50 + 30 + 50 +
-# 30 = 1270 s < 1320 s. Warm, the whole test measures 57-81 s.
+# (graceful_timeout 30 + kill_timeout 10 + 10): 600 + 30 + 720 + 50 + 30 + 50 +
+# 30 = 1510 s < 1560 s. Warm, the whole test measures 57-81 s.
+REACH_SAMPLING_TIMEOUT = 600.0
 SNAPSHOT_TIMEOUT = 30.0
 GRACEFUL_STALL_TIMEOUT = 180.0
 GRACEFUL_EXIT_CEILING = 720.0
@@ -49,7 +53,7 @@ FORCE_EXIT_TIMEOUT = 30.0
 
 
 @pytest.mark.slow
-@pytest.mark.timeout(1320)
+@pytest.mark.timeout(1560)
 def test_run_lifecycle_status_snapshot_and_graceful_stop(
     kelt4_workdir, tmp_path
 ):
