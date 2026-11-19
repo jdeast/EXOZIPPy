@@ -36,6 +36,7 @@ from ..star.physics import calc_logg_from_logmass, calc_luminosity
 from . import physics
 from .bc_grid import (
     DEFAULT_MODEL_ROOT,
+    PUBLISHED_BC_MODELS,
     RegularGridInterpolator,
     _load_alias_table,
     build_bc_grid,
@@ -307,7 +308,7 @@ class SED(SightLineDust, Component):
         # read in sed file to get model
         with open(self.sedfile, "r") as f:
             self.SED_yaml = yaml.safe_load(f)
-        self.sedmodel = self.SED_yaml.get("model", "NextGen")
+        self.sedmodel = self._resolve_sed_model(self.SED_yaml.get("model"))
 
         self.teffsedfloor = self.config.get("teffsedfloor", 0.020)
         self.fbolsedfloor = self.config.get("fbolsedfloor", 0.024)
@@ -617,6 +618,43 @@ class SED(SightLineDust, Component):
             ),
         ]
 
+    # The model the SED file's `model:` key defaults to.
+    DEFAULT_SED_MODEL = "NextGen"
+
+    def _resolve_sed_model(self, raw):
+        """The SED file's ``model:`` -- which family of bolometric-correction
+        tables the fit reads (``bc_grid.PUBLISHED_BC_MODELS``: NextGen, the
+        default, or PHOENIX).  Absent means NextGen.  The name is
+        CASE-SENSITIVE: a case variant of a published model raises naming
+        the right spelling rather than being accepted.  Under the default
+        model root only a published model exists; an explicit
+        ``model_root:`` may hold any family with a ``{model}/BCs/`` tree,
+        whose absence the readers report."""
+        if raw is None:
+            return self.DEFAULT_SED_MODEL
+        where = f"SED file {self.sedfile}: model: {raw!r}"
+        if not isinstance(raw, str):
+            raise ValueError(
+                f"{where} must be a model name, one of "
+                f"{sorted(PUBLISHED_BC_MODELS)}."
+            )
+        if raw in PUBLISHED_BC_MODELS:
+            return raw
+        variant = [m for m in PUBLISHED_BC_MODELS if m.lower() == raw.lower()]
+        if variant:
+            raise ValueError(
+                f"{where} is not a model name; model names are "
+                f"case-sensitive -- did you mean {variant[0]!r}?"
+            )
+        if Path(self.model_root) == Path(DEFAULT_MODEL_ROOT):
+            raise ValueError(
+                f"{where} has no published bolometric-correction tables; "
+                f"the published models are {sorted(PUBLISHED_BC_MODELS)} "
+                f"(another family is read from a `model_root:` tree holding "
+                f"{raw}/BCs/)."
+            )
+        return raw
+
     @classmethod
     def config_schema(cls):
         return [
@@ -626,7 +664,9 @@ class SED(SightLineDust, Component):
                 "accepts": "*.sed",
                 "required": True,
                 "doc": (
-                    "SED photometry file (YAML content): declares 'model', "
+                    "SED photometry file (YAML content): declares 'model' "
+                    "(the bolometric-correction tables: NextGen, the "
+                    "default, or PHOENIX), "
                     "'nstars', and a 'filters' list of per-band rows "
                     "(bandname, magnitude, errors, photType blend spec; "
                     "neg_filter makes a row a color between two filters)."
@@ -2789,6 +2829,7 @@ class SED(SightLineDust, Component):
         self._add_data_free_prose(system)
         self._add_synthesized_prose(system)
         self._add_spectral_prose(system)
+        self._add_model_prose(system)
         self._add_dust_prose(system)
 
     # ------------------------------------------------------------------
@@ -3766,6 +3807,24 @@ class SED(SightLineDust, Component):
             section="data",
             key=f"{self.prefix}.synthesized_bcs",
             rank=21.6,
+        )
+
+    def _add_model_prose(self, system):
+        """Which atmospheres the bolometric corrections come from, declared
+        only for the PHOENIX tables (a NextGen draft is unchanged)."""
+        if self.sedmodel != "PHOENIX":
+            return
+        get_collector(system).add(
+            r"The bolometric corrections are interpolated from tables "
+            r"computed from the PHOENIX-ACES model atmospheres "
+            r"\citep{Husser:2013}: each band flux is integrated from the "
+            r"models' specific intensities through the filter's "
+            r"transmission curve, reddened with the tables' extinction law, "
+            r"and referenced to the model's own bolometric flux at the same "
+            r"radius. ",
+            section="stellar",
+            key=f"{self.prefix}.bc_model",
+            rank=20.1,
         )
 
     def _add_spectral_prose(self, system):
