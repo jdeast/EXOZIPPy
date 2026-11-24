@@ -102,9 +102,9 @@ own ephemeris.
 
 | threshold | what exceeds it |
 |---|---|
-| 1 m/s | the additive correction for any star; the correction at the midpoint of a 60-min exposure far from the meridian; a pm error or wrong epoch for any star within ~10 pc; Barnard-class perspective acceleration |
-| 10 cm/s | a 1-arcsec position error; the correction at the midpoint of a typical 30-60 min exposure; the companion cross term for K >~ 3 km/s; a stellar companion's gravitational redshift |
-| 1 cm/s | the companion cross term at K >~ 300 m/s; a giant planet's gravitational redshift; a frozen pm at 70 pc; the star's light-travel time at K >~ 1.7 km/s |
+| 1 m/s | the additive correction for any star; the correction at the midpoint of a 60-min exposure far from the meridian; a white-light exposure meter applied to the blue orders without an ADC; a pm error or wrong epoch for any star within ~10 pc; Barnard-class perspective acceleration |
+| 10 cm/s | a 1-arcsec position error; the correction at the midpoint of a typical 30-60 min exposure; a white-light exposure meter applied to the blue or red orders of an off-meridian 30-60 min exposure, ADC or not; the companion cross term for K >~ 3 km/s; a stellar companion's gravitational redshift |
+| 1 cm/s | the companion cross term at K >~ 300 m/s; a giant planet's gravitational redshift; a frozen pm at 70 pc; the star's light-travel time at K >~ 1.7 km/s; a white-light meter for per-order data under drifting seeing, even on the meridian |
 
 ## What a release must carry, per spectrum
 
@@ -116,12 +116,19 @@ own ephemeris.
    the WGS84 ellipsoid to ~10 m, or ITRF XYZ. For a spacecraft, give the ephemeris it used
    (a NAIF id, or the Horizons query).
 3. **The exposure itself, not just its midpoint** (see "The exposure: what to release
-   and why" below). In order of preference: the exposure-meter record (a side file); at
-   the very least the exposure time.
+   and why" below). In order of preference: a chromatic exposure-meter record (one per
+   meter channel, a side file), the white-light record, at the very least the exposure
+   time.
 4. **`c * z_meas` and its uncertainty**, in m/s, defined as `c (lambda_obs / lambda_ref -
    1)`. This is NOT the output of a log or relativistic "velocity" formula, which differ
    by `c z^2 / 2` (1.5 m/s at 30 km/s). If the pipeline works in `ln(lambda)`, convert
-   before publishing.
+   before publishing. **Per order** where the pipeline measures per order (one row per
+   order, every row with the exposure's time tag), each row naming the meter channel
+   that describes its photons, and with the exposure's **common-mode error** (the part
+   of the error every order shares: drift correction, wavelength-solution common mode)
+   given separately from each order's own (see "Per-order rows and a chromatic meter"
+   below). A combined velocity can be released too, but it cannot be modeled exactly:
+   its orders' photons arrived at different mean times.
 5. **The template / zero-point definition**: what `lambda_ref` is (a stellar template, its
    own rest frame, a line list, a laser frequency comb with an absolute calibration).
    State whether the zero point is meant to be absolute or only relative within the
@@ -160,7 +167,8 @@ What a release can carry, best first:
 
 | what is released | what EXOZIPPy does | residual (1-hour exposure, worst geometry) |
 |---|---|---|
-| the exposure-meter record (side file, below) | the Gauss rule of the recorded photon distribution | < 0.001 mm/s from the rule; the meter's bins add ~`dt^2 f' / (12 f)` of mean time (0.03 mm/s for 2-s bins on a ramp) |
+| per-order rows with a chromatic exposure-meter record (below) | each order averaged with its own channel's photons | as the next row, per channel; the channel's wavelength span is the remaining approximation |
+| the exposure-meter record (side file, below) | the Gauss rule of the recorded photon distribution | < 0.001 mm/s from the rule; the meter's bins add ~`dt^2 f' / (12 f)` of mean time (0.03 mm/s for 2-s bins on a ramp). For per-order data, the chromatic error below: 1 cm/s to 1 m/s |
 | `exptime_s` alone | uniform flux over the exposure | exact on a clear night; under clouds the true `Var(t)` can differ from `T^2/12` by tens of percent, which is tens of cm/s |
 | nothing | the model at the midpoint | the full term, 1.3 m/s x (T / 1 h)^2 |
 
@@ -184,6 +192,77 @@ A bin finds its exposure by `t_mid`, matched to the data file's time column with
 d (0.09 s). A `t_mid` that matches no exposure, or two, is an error. Use bins as short as
 the meter allows: each bin is taken to be uniform inside, which moves the mean time by
 about `dt^2 f' / (12 f)` when the flux changes within it.
+
+A **chromatic** meter adds a fifth column, the channel (any number: a wavelength in nm,
+a channel index), written exactly as in the data file's `channel` column. A four-field
+bin is the exposure's white-light record; a file may mix both:
+
+```
+# columns: t_mid  t  dt[s]  counts  [channel]
+2460401.732514 2460401.727343 30.0 39520            # white light
+2460401.732514 2460401.727343 30.0  8120 450.0      # the 450-nm channel
+2460401.732514 2460401.727343 30.0 14388 650.0
+...
+```
+
+### Per-order rows and a chromatic meter
+
+The atmosphere's extinction, the seeing and the atmospheric dispersion all depend on
+wavelength, so as the airmass and the seeing change during an exposure the blue and red
+photons arrive with different mean times, and each order's redshift is the mean over its
+own photons. EXOZIPPy's redshift model gives the size
+(`scripts/chromatic_exposure_effect.py`; Las Campanas, a 0.35-arcsec-radius fiber, a
+simple stated flux model; each cell is the 380 / 900 nm order's redshift averaged with
+its own photons minus the same averaged with the white light's):
+
+| dec | HA (center) | T | ADC, steady seeing | ADC, seeing 0.65 -> 0.85" | no ADC, seeing 0.65 -> 0.85" |
+|---|---|---|---|---|---|
+| 0 | 0 h | 30 min | < 0.001 / < 0.001 mm/s | -13.6 / +8.1 cm/s | +216 / +19 cm/s |
+| 0 | 0 h | 60 min | -0.007 / +0.002 mm/s | -26.6 / +16.1 cm/s | +444 / +39 cm/s |
+| 0 | 3 h | 30 min | -26.6 / +5.3 cm/s | -31.7 / +9.1 cm/s | +230 / +24 cm/s |
+| 0 | 3 h | 60 min | -105.6 / +20.9 cm/s | -113.5 / +28.4 cm/s | -403 / -32 cm/s |
+| -70 | 0 h | 30 min | < 0.001 / < 0.001 mm/s | -4.1 / +2.6 cm/s | +188 / +16 cm/s |
+| -70 | 0 h | 60 min | -0.002 / < 0.001 mm/s | -8.1 / +5.1 cm/s | +376 / +33 cm/s |
+| -70 | 3 h | 30 min | -3.0 / +0.6 cm/s | -5.4 / +2.2 cm/s | +154 / +15 cm/s |
+| -70 | 3 h | 60 min | -11.9 / +2.4 cm/s | -16.5 / +5.7 cm/s | +208 / +20 cm/s |
+
+Only an exposure centered on the meridian under a perfectly steady sky is symmetric
+enough for the white light to serve every order (< 0.01 mm/s). Off the meridian, or with
+the seeing drifting, the blue and red orders move by centimeters to a meter per second
+in opposite directions, with the sign set by the hour angle and the sky: far above 1 cm/s,
+let alone 1 mm/s, and absorbed by nothing. Without an ADC it is meters per second. So
+for precise RVs at the cm/s level and below, release the redshift PER ORDER and the
+meter PER CHANNEL. A velocity combined over orders weights them by their Doppler
+information, not by the white light, so even its exposure average is not the white
+light's.
+
+The data file then carries one row per order, all rows of an exposure with its time
+tag, plus two columns:
+
+- `channel`: which meter channel's record describes the row's photons (several orders
+  may share one);
+- `err_shared`: the exposure's common-mode error, the same on each of its rows, in the
+  unit of `err`. Every two orders of one exposure covary by `err_shared^2`, and each
+  order's variance is `err^2 + err_shared^2` (plus any fitted jitter). Report in `err`
+  only what is independent between orders.
+
+```
+# columns: JD_UTC  cz[m/s]  cz_err[m/s]  exptime[s]  channel  cz_err_shared[m/s]
+2460401.732514 -24103.112 1.91 900 450.0 0.12
+2460401.732514 -24102.870 1.42 900 450.0 0.12
+2460401.732514 -24103.402 2.37 900 650.0 0.12
+...
+```
+
+```yaml
+    columns: {time: 0, rv: 1, err: 2, exptime_s: 3, channel: 4, err_shared: 5}
+    exposure_meter: "star.GCLEF.expmeter"
+```
+
+Each order uses its own channel's record where the meter has one for that exposure, else
+the exposure's white-light record, else its exposure time, else the midpoint. A
+per-channel bin without a `channel` column in the data file, or a channel no data row
+names, is an error.
 
 **A moment description existed and was removed.** From #565 a file could give each
 exposure's photon-time RMS and third central moment (`t_rms`, `t_skew3` columns), modeled
@@ -228,8 +307,9 @@ rvinstrument:
     exposure_meter: "star.GCLEF.expmeter"   # overrides the columns where present
 ```
 
-Each exposure uses the most complete description it has: its meter bins, else its
-exposure time, else (neither) the model at the midpoint.
+Each exposure uses the most complete description it has: its meter bins (its own
+channel's, then the white light's, for per-order rows), else its exposure time, else
+(neither) the model at the midpoint.
 
 The `#` lines are ignored by the reader, which is the point of putting the metadata
 there: the file stays the document of record. If a release interleaves several
@@ -253,7 +333,9 @@ fitted parameters. The full description is in
   velocity (Earth orbit + rotation with full Earth orientation, or a spacecraft
   ephemeris) and the solar-system gravitational and Shapiro terms.
 - Each spectrum's prediction is the photon-weighted mean of that whole instantaneous
-  model over its exposure (Tronsgaard et al. 2019), from whatever the release gives.
+  model over its exposure (Tronsgaard et al. 2019), from whatever the release gives --
+  per order, over that order's own photons, where the release gives a chromatic meter;
+  the orders of one exposure share a common-mode error where the release states one.
 - Each instrument keeps one zero point, which absorbs the template, the star's
   gravitational redshift and convective blueshift. The star's absolute rv comes from a
   prior, such as a Gaia radial velocity.

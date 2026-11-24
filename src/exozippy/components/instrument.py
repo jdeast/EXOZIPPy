@@ -590,6 +590,13 @@ class Instrument(TimeSystem, Component):
         self._load_gp_config()
         self._load_likelihood_config()
         self._load_exposure_config()
+        # Per-exposure shared (common-mode) noise: file -> (rows into the
+        # concatenated arrays, each row's exposure index, each exposure's
+        # shared variance), filled by a child that reads an ``err_shared``
+        # column (rvinstrument) and scored by the dispatcher
+        # (``add_observation_likelihood``, ``shared_noise_logp``).  Empty --
+        # and the likelihood unchanged -- otherwise.
+        self._shared_noise = {}
 
     # ------------------------------------------------------------------
     # Per-instrument plot styling (config, not Parameters -- no sampling)
@@ -1564,7 +1571,9 @@ class Instrument(TimeSystem, Component):
             )
         if system is not None:
             self._add_observation_prose(system)
-        if not (self.has_gp or self.has_robust_likelihood):
+        if not (
+            self.has_gp or self.has_robust_likelihood or self._shared_noise
+        ):
             return pm.Normal(name, mu=mu, sigma=sigma, observed=observed)
 
         if self.has_gp and self._gp_time is None:
@@ -1584,6 +1593,8 @@ class Instrument(TimeSystem, Component):
             special[idx] = True
         for idx in self._robust_obs_index.values():
             special[idx] = True
+        for idx, _, _ in self._shared_noise.values():
+            special[idx] = True
 
         plain = np.flatnonzero(~special)
         if plain.size:
@@ -1595,6 +1606,14 @@ class Instrument(TimeSystem, Component):
             )
 
         self._add_robust_likelihoods(name, mu, sigma, observed)
+        for i in sorted(self._shared_noise):
+            idx, group, s2 = self._shared_noise[i]
+            pm.Potential(
+                f"{name}.shared.{self.names[i]}",
+                self.shared_noise_logp(
+                    observed[idx] - mu[idx], sigma[idx], group, s2
+                ),
+            )
 
         if not self.has_gp:
             return
@@ -2200,6 +2219,17 @@ class Instrument(TimeSystem, Component):
     #: REMOVED (``REMOVED_EXPOSURE_ROLES``).
     EXPOSURE_ROLES = ("exptime_s",)
 
+    #: Optional per-row column roles that are NOT exposure durations, split
+    #: off with the exposure columns (``_read_data_with_exposure``; never
+    #: detrend columns) into ``self.row_columns[i]``.  ``channel``: the
+    #: exposure-meter channel whose record describes the row's photons --
+    #: one row per spectral order (or any wavelength channel) of an
+    #: exposure, all rows of the exposure sharing its time tag; the
+    #: ``exposure_meter:`` file's fifth column names the same channels
+    #: (``_read_exposure_meter``; rvinstrument.md, "Per-order rows").  A
+    #: child may extend the tuple with roles of its own.
+    ROW_ROLES = ("channel",)
+
     #: Column roles that no longer exist; naming one RAISES.  The 2-node
     #: moment description (#565) was removed: no pipeline publishes the
     #: moments, the exposure-meter record is strictly better, and it was
@@ -2297,6 +2327,9 @@ class Instrument(TimeSystem, Component):
         self.ninterp_stated = ["ninterp" in c for c in self.config]
         self.exposure_meters = [c.get("exposure_meter") for c in self.config]
         self._exposure_read_roles = {}
+        #: Per file, the ``ROW_ROLES`` columns it names (role -> (N,) in the
+        #: returned row order), filled by ``_read_data_with_exposure``.
+        self.row_columns = {}
         # The automatic node count (review 8.5.11; instrument.md, "Choosing
         # ninterp"): a file that describes its exposure (an accepted
         # exptime_s:, or a per-row description) and states no ninterp has
@@ -2457,9 +2490,12 @@ class Instrument(TimeSystem, Component):
                 "Path of an exposure-meter file, one row per meter bin: "
                 "t_mid (the exposure's midpoint exactly as the data file "
                 "writes it), t (bin center, the data file's time system), "
-                "dt (bin width, s), counts. The model is averaged over each "
-                "exposure's photons (Tronsgaard et al. 2019); overrides the "
-                "exposure columns for that exposure."
+                "dt (bin width, s), counts, and optionally a fifth, the "
+                "channel (matched to the data file's channel column; a bin "
+                "without one is the exposure's white-light record). The "
+                "model is averaged over each exposure's photons (Tronsgaard "
+                "et al. 2019): a row's own channel record, else the "
+                "white-light one, else the exposure columns."
             ),
         }
 
@@ -2973,17 +3009,33 @@ class Instrument(TimeSystem, Component):
         ``exposure_meter:`` key, and error messages).  ``roles`` and ``kw``
         are ``_read_data``'s."""
         spec = self.column_specs[i] or {}
-        extra = tuple(r for r in self.EXPOSURE_ROLES if r in spec)
+        extra = tuple(
+            r for r in self.EXPOSURE_ROLES + self.ROW_ROLES if r in spec
+        )
         read_roles = tuple(roles) + extra
         df, disk_rows = self._read_data(
             i, roles=read_roles, detrend=detrend, row_index=True, **kw
         )
-        # The meter matches its bins against the time column as written,
-        # selected with these same roles (_read_exposure_meter).
+        # The meter matches its bins against the time column (and the
+        # channel column) as written, selected with these same roles
+        # (_read_exposure_meter).
         self._exposure_read_roles[i] = (read_roles, detrend)
-        moments = {}
+        moments, row_columns = {}, {}
         for k, role in enumerate(extra):
-            moments[role] = df.pop(len(roles) + k).values.astype(float)
+            vals = df.pop(len(roles) + k).values.astype(float)
+            if role in self.EXPOSURE_ROLES:
+                moments[role] = vals
+            else:
+                row_columns[role] = vals
+        for role, vals in row_columns.items():
+            if not np.all(np.isfinite(vals)):
+                raise ValueError(
+                    f"[{self.prefix}.{self.names[i]}] {role} column: must be "
+                    f"finite; data rows "
+                    f"{sorted(int(r) for r in disk_rows[~np.isfinite(vals)])}"
+                    f" are not."
+                )
+        self.row_columns[i] = row_columns
         df.columns = range(df.shape[1])
         return df, moments, disk_rows
 
@@ -3003,11 +3055,14 @@ class Instrument(TimeSystem, Component):
         and its weight (each row's summing to 1).  instrument.md,
         "Exposure smearing"; rvinstrument.md, "The exposure average".
 
-        Per exposure, the most complete description it has wins:
+        Per row, the most complete description it has wins:
 
         1. its ``exposure_meter:`` bins -> the n-node Gauss rule of the
            meter's photon distribution, each bin a uniform box
-           (``exposure.weighted_exposure_rule``; exact to degree 2n - 1);
+           (``exposure.weighted_exposure_rule``; exact to degree 2n - 1).
+           A row with a ``channel`` reads its exposure's bins FOR THAT
+           CHANNEL where the meter has them, else the exposure's
+           achromatic bins (``_read_exposure_meter``);
         2. its ``exptime_s`` COLUMN -> n-node Gauss-Legendre over
            ``[t - exptime/2, t + exptime/2]``, uniform flux;
         3. the file's ``exptime_s:`` KEY -> ``exposure_nodes(i)`` (this
@@ -3090,54 +3145,134 @@ class Instrument(TimeSystem, Component):
             )
         return np.concatenate(rows), np.concatenate(ts), np.concatenate(ws)
 
+    @staticmethod
+    def _parse_exposure_meter(path, where):
+        """The ``exposure_meter:`` file's bins: ``(t_mid, t, dt, counts,
+        channel, chromatic)``, one entry per bin.  A line is four fields
+        (``t_mid t dt counts``: an ACHROMATIC bin, the white-light record)
+        or five (the same plus ``channel``: that channel's record);
+        ``chromatic`` marks the five-field bins, and ``channel`` is 0 on
+        the others (never read there).  ``#`` starts a comment.  Any other
+        field count, a non-numeric field or a non-finite channel RAISES
+        naming the line."""
+        try:
+            with open(path) as fh:
+                lines = fh.read().splitlines()
+        except OSError as e:
+            raise ValueError(f"{where} could not be read: {e}") from e
+        rows, chans, chromatic = [], [], []
+        for k, line in enumerate(lines, start=1):
+            fields = line.split("#", 1)[0].split()
+            if not fields:
+                continue
+            if len(fields) not in (4, 5):
+                raise ValueError(
+                    f"{where} line {k}: {len(fields)} fields; a bin is four "
+                    f"(t_mid, t, dt[s], counts) or five (the same plus its "
+                    f"channel)."
+                )
+            try:
+                vals = [float(x) for x in fields]
+            except ValueError as e:
+                raise ValueError(
+                    f"{where} line {k} is not numeric: {e}"
+                ) from e
+            if len(vals) == 5 and not np.isfinite(vals[4]):
+                raise ValueError(
+                    f"{where} line {k}: channel {fields[4]!r} must be a "
+                    f"finite number (write a white-light bin as four "
+                    f"fields, without a channel)."
+                )
+            rows.append(vals[:4])
+            chans.append(vals[4] if len(vals) == 5 else 0.0)
+            chromatic.append(len(vals) == 5)
+        if not rows:
+            raise ValueError(
+                f"{where} must have four columns (t_mid, t, dt[s], counts; "
+                f"optionally a fifth, channel) and at least one row."
+            )
+        t_mid, t, dt, counts = np.array(rows, dtype=float).T
+        return (
+            t_mid,
+            t,
+            dt,
+            counts,
+            np.array(chans, dtype=float),
+            np.array(chromatic, dtype=bool),
+        )
+
     def _read_exposure_meter(self, i, disk_rows, observer_time=None):
         """File ``i``'s ``exposure_meter:`` file as ``{row: (t, counts)}``
         keyed by the file-local (sorted, unmasked) row, each bin expanded
         into its 3-node Gauss-Legendre sub-points (a bin is a uniform box
         of photons: its moments through degree 5 are then exact), times
         converted exactly as the data's (``observer_time`` as in
-        ``_read_data``).  ``{}`` without one.
+        ``_read_data``).  ``{}`` without one.  A row with no record is
+        absent (``exposure_node_table`` then takes the next description).
 
         The file (long format; rvinstrument.md, docs/raw_redshift_data.md):
-        whitespace columns ``t_mid t dt counts``, ``#`` comments.
+        whitespace columns ``t_mid t dt counts [channel]``, ``#`` comments.
         ``t_mid`` is the exposure's midpoint EXACTLY as the data file's
         time column writes it, which is how a bin finds its exposure
-        (within ``METER_MATCH_TOL_D``; no match, or more than one, raises
-        -- a bin of a masked exposure is ignored); ``t`` the bin center in
-        the data file's own time system, ``dt`` its width (s), ``counts``
-        the photons (or anything proportional) in it.
+        (within ``METER_MATCH_TOL_D``; no match RAISES, and so do two
+        different tags -- or, in a file without a ``channel`` column, two
+        rows: such a file has one row per exposure; a bin of a masked
+        exposure is ignored); ``t`` the bin center in the data file's own
+        time system, ``dt`` its width (s), ``counts`` the photons (or
+        anything proportional) in it.
+
+        Per-order rows (rvinstrument.md, "Per-order rows"): the data file's
+        ``channel`` column names, per row, the meter channel whose record
+        describes its photons, and a five-field bin belongs to that
+        channel's record.  Each row of an exposure reads its own channel's
+        bins where the meter has them, else the exposure's four-field
+        (achromatic) bins, else nothing here.  A five-field bin in a file
+        without a ``channel`` column, or a meter channel no data row
+        names, RAISES (a typo would otherwise drop the record silently).
         """
         path = self.exposure_meters[i]
         if path is None:
             return {}
         where = f"[{self.prefix}.{self.names[i]}] exposure_meter: {path!r}"
-        try:
-            tab = np.loadtxt(path, comments="#", ndmin=2)
-        except (OSError, ValueError) as e:
-            raise ValueError(
-                f"{where} could not be read as four numeric columns "
-                f"(t_mid, t, dt, counts): {e}"
-            ) from e
-        if tab.shape[1] != 4 or tab.shape[0] == 0:
-            raise ValueError(
-                f"{where} must have four columns (t_mid, t, dt[s], counts) "
-                f"and at least one row; got shape {tab.shape}."
-            )
-        t_mid, t, dt, counts = tab.T
+        t_mid, t, dt, counts, chan, chromatic = self._parse_exposure_meter(
+            path, where
+        )
         if not np.all(np.isfinite(dt) & (dt > 0.0)):
             raise ValueError(f"{where}: dt (bin width, s) must be > 0.")
         if not np.all(np.isfinite(counts) & (counts >= 0.0)):
             raise ValueError(f"{where}: counts must be finite and >= 0.")
-        # The data file's tags as written, every on-disk row (masked ones
-        # too, so a masked exposure's bins are recognized, not unmatched).
+        # The data file's tags (and channels) as written, every on-disk row
+        # (masked ones too, so a masked exposure's bins are recognized, not
+        # unmatched).
         roles, detrend = self._exposure_read_roles[i]
-        tags = (
-            self._select_columns(self._read_table(i), i, roles, detrend)
-            .iloc[:, 0]
-            .values.astype(float)
+        table = self._select_columns(self._read_table(i), i, roles, detrend)
+        tags = table.iloc[:, 0].values.astype(float)
+        has_channel = "channel" in roles
+        disk_chan = (
+            table.iloc[:, roles.index("channel")].values.astype(float)
+            if has_channel
+            else None
         )
+        if chromatic.any():
+            if not has_channel:
+                raise ValueError(
+                    f"{where}: has per-channel bins (a fifth column), but "
+                    f"the data file names no 'channel' column "
+                    f"(columns: {{..., channel: <k>}}); a row's channel is "
+                    f"what picks its record."
+                )
+            unknown = sorted(
+                set(np.unique(chan[chromatic]).tolist())
+                - set(disk_chan.tolist())
+            )
+            if unknown:
+                raise ValueError(
+                    f"{where}: channel(s) {unknown} name no row of the data "
+                    f"file's channel column; write each channel exactly as "
+                    f"the data file does."
+                )
         local = {int(r): j for j, r in enumerate(disk_rows)}
-        out_t, out_c, out_row = [], [], []
+        out = {}
         x3, w3 = exposure_rules.gauss_legendre_rule(3)
         if observer_time is None:
             t_conv = self._to_bjd_tdb(t, i)
@@ -3145,33 +3280,91 @@ class Instrument(TimeSystem, Component):
             t_conv = self._to_observer_tdb(t, i, observer_time)
         for m in np.unique(t_mid):
             hit = np.nonzero(np.abs(tags - m) < self.METER_MATCH_TOL_D)[0]
-            if hit.size != 1:
+            # One exposure: one row, or (per-order rows) one tag.
+            n_found = np.unique(tags[hit]).size if has_channel else hit.size
+            if n_found != 1:
                 raise ValueError(
                     f"{where}: t_mid {m!r} matches "
-                    + ("no" if hit.size == 0 else f"{hit.size}")
+                    + ("no" if n_found == 0 else f"{n_found}")
                     + f" data-file time tags within "
                     f"{self.METER_MATCH_TOL_D} d; write each exposure's "
-                    f"midpoint exactly as the data file does."
+                    f"midpoint exactly as the data file does"
+                    + (
+                        "."
+                        if has_channel or n_found == 0
+                        else " (several rows of one exposure need a "
+                        "'channel' column)."
+                    )
                 )
-            r = int(hit[0])
-            if r not in local:
+            rows_here = [int(r) for r in hit if int(r) in local]
+            if not rows_here:
                 continue  # a masked exposure
-            sel = t_mid == m
-            if not np.any(counts[sel] > 0.0):
-                raise ValueError(
-                    f"{where}: exposure t_mid {m!r} has no counts."
+            in_exp = t_mid == m
+            records = {}
+            keys = [None] + sorted(set(chan[in_exp & chromatic].tolist()))
+            for key in keys:
+                sel = in_exp & (
+                    ~chromatic if key is None else chromatic & (chan == key)
                 )
-            sub_t = (
-                t_conv[sel][:, None]
-                + x3[None, :]
-                * dt[sel][:, None]
-                / exposure_rules.SECONDS_PER_DAY
+                if not sel.any():
+                    continue
+                if not np.any(counts[sel] > 0.0):
+                    raise ValueError(
+                        f"{where}: exposure t_mid {m!r}"
+                        + ("" if key is None else f" channel {key!r}")
+                        + " has no counts."
+                    )
+                sub_t = (
+                    t_conv[sel][:, None]
+                    + x3[None, :]
+                    * dt[sel][:, None]
+                    / exposure_rules.SECONDS_PER_DAY
+                )
+                sub_c = counts[sel][:, None] * w3[None, :]
+                records[key] = (sub_t.ravel(), sub_c.ravel())
+            for r in rows_here:
+                own = float(disk_chan[r]) if has_channel else None
+                key = own if own in records else None
+                if key in records:
+                    out[local[r]] = records[key]
+        return out
+
+    @staticmethod
+    def shared_noise_logp(resid, sigma, group, s2):
+        """The Gaussian log-likelihood of ``resid`` (N,) whose covariance is
+        ``diag(sigma**2)`` plus ``s2[g]`` between every two rows of the same
+        exposure ``g`` (``group`` (N,), constant ints; ``s2`` (G,) constant
+        shared variances, >= 0): a common-mode offset per exposure, e.g. the
+        orders of one spectrum sharing a drift or calibration error
+        (rvinstrument.md, "Per-order rows").
+
+        Each exposure's covariance ``D + s2 1 1^T`` is rank-one past the
+        diagonal, so the matrix determinant lemma and Sherman-Morrison give
+        it in closed form, with segment sums over ``group`` (O(N), no
+        matrix, no branch): with ``a = sum r/d``, ``b = sum 1/d`` and
+        ``q = s2 b`` per exposure,
+
+            log L = -1/2 [sum r^2/d + sum log d + N log 2 pi]
+                    + 1/2 sum s2 a^2 / (1 + q) - 1/2 sum log(1 + q).
+
+        ``s2 = 0`` reduces each exposure to the diagonal Normal exactly.
+        """
+        d = pt.sqr(sigma)
+        n_groups = int(np.asarray(s2).size)
+        a = pt.inc_subtensor(pt.zeros(n_groups)[group], resid / d)
+        b = pt.inc_subtensor(pt.zeros(n_groups)[group], 1.0 / d)
+        q = s2 * b
+        n = int(np.asarray(group).size)
+        return (
+            -0.5
+            * (
+                pt.sum(pt.sqr(resid) / d)
+                + pt.sum(pt.log(d))
+                + n * np.log(2.0 * np.pi)
             )
-            sub_c = counts[sel][:, None] * w3[None, :]
-            out_row.append(local[r])
-            out_t.append(sub_t.ravel())
-            out_c.append(sub_c.ravel())
-        return {r: (tt, cc) for r, tt, cc in zip(out_row, out_t, out_c)}
+            + 0.5 * pt.sum(s2 * pt.sqr(a) / (1.0 + q))
+            - 0.5 * pt.sum(pt.log1p(q))
+        )
 
     @staticmethod
     def node_mean(x, row, w, n_rows):
