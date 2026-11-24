@@ -42,6 +42,11 @@ class RVInstrument(Instrument):
     supports_exposure = True
     EXPOSURE_RULE = "gauss"
     reads_exposure_rows = True
+    # Per-order rows (rvinstrument.md, "Per-order rows"): the base's
+    # ``channel`` (which exposure-meter record a row's photons follow) and
+    # ``err_shared``, the per-exposure common-mode error shared by every
+    # row of one exposure (``_prepare_shared_noise``).
+    ROW_ROLES = ("channel", "err_shared")
 
     def __init__(self, config, config_manager):
         super().__init__(config, config_manager)
@@ -311,7 +316,13 @@ class RVInstrument(Instrument):
                     "uniform-flux exposure's duration); the model is "
                     "averaged over the exposure it describes (a raw file's "
                     "predicted redshift, a corrected file's reflex "
-                    "velocity). The removed 't_rms'/'t_skew3' roles raise."
+                    "velocity). The removed 't_rms'/'t_skew3' roles raise. "
+                    "Per-order rows (several rows per exposure, one time "
+                    "tag): 'channel' names the exposure_meter: channel "
+                    "whose record each row's photons follow, and "
+                    "'err_shared' the exposure's common-mode error (same "
+                    "unit as err; the rows of one exposure covary by "
+                    "err_shared^2)."
                 ),
             ),
             *cls._time_config_schema(),
@@ -439,6 +450,7 @@ class RVInstrument(Instrument):
             user_factor=(u.solRad / u.d).to(u.m / u.s),
             hint_unit="m/s",
         )
+        self._prepare_shared_noise()
         # The velocities every SEED reads (the K estimate, the Lomb-Scargle
         # search, the conjunction-epoch information): the data themselves
         # for a corrected file -- the very same array, so nothing moves --
@@ -461,6 +473,60 @@ class RVInstrument(Instrument):
         # window at stage 2 from whatever start it can see).
         self.ls_signal = None
         self._seed_from_lombscargle(system)
+
+    def _prepare_shared_noise(self):
+        """Index each file's ``err_shared`` column for the likelihood
+        (rvinstrument.md, "Per-order rows"; ``Instrument.shared_noise_logp``).
+
+        The rows of one exposure are the rows with the same time tag (the
+        orders of one spectrum).  ``err_shared`` (the file's ``unit:``) is
+        the exposure's common-mode error: every two of its rows covary by
+        ``err_shared**2``, and each row's own variance is ``err**2`` plus
+        the jitter plus ``err_shared**2``.  It is user input, so a value
+        that is negative, or differs between the rows of one exposure,
+        RAISES naming the rows; and a file with ``gp:`` or ``likelihood:``
+        raises too (each of those is its own likelihood for the file's
+        rows, and neither composes with this one).
+        """
+        self._shared_noise = {}
+        for i in range(self.n_elements):
+            if "err_shared" not in self.row_columns[i]:
+                continue
+            where = f"[{self.prefix}.{self.names[i]}] err_shared"
+            if self.gp_terms[i] or self.likelihood_kinds[i]:
+                raise ValueError(
+                    f"{where}: a per-exposure shared error cannot be "
+                    f"combined with 'gp:' or 'likelihood:' on one file (each "
+                    f"is its own likelihood for the file's rows). Choose one."
+                )
+            s = self.row_columns[i]["err_shared"]
+            lo, hi = self.row_ranges[i]
+            t = self.time[lo:hi]
+            if np.any(s < 0.0):
+                raise ValueError(
+                    f"{where}: must be >= 0; file rows "
+                    f"{np.flatnonzero(s < 0.0)[:10].tolist()} are not."
+                )
+            _, group = np.unique(t, return_inverse=True)
+            n_groups = int(group.max()) + 1
+            s_max = np.full(n_groups, -np.inf)
+            s_min = np.full(n_groups, np.inf)
+            np.maximum.at(s_max, group, s)
+            np.minimum.at(s_min, group, s)
+            bad = np.flatnonzero(s_max != s_min)
+            if bad.size:
+                rows = np.flatnonzero(group == bad[0])
+                raise ValueError(
+                    f"{where}: the rows of one exposure (one time tag) "
+                    f"share one value; file rows {rows.tolist()} (sorted "
+                    f"order) carry {sorted(set(s[rows].tolist()))}."
+                )
+            factor = float(self.units[i].to(u.solRad / u.d))
+            self._shared_noise[i] = (
+                np.arange(lo, hi),
+                group.astype(int),
+                (s_max * factor) ** 2,
+            )
 
     # ------------------------------------------------------------------
     # data_format: raw_redshift (rvinstrument.md, "Raw redshifts")

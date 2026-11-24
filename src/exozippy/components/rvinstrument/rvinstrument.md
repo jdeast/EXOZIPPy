@@ -325,10 +325,12 @@ review 4.5.4 folded #565's machinery into it, #588; the rules are in `components
 
 1. **`exposure_meter: <file>`**, the full record. Long format, one row per meter bin:
    `t_mid` (the exposure's midpoint EXACTLY as the data file's time column writes it --
-   that is how a bin finds its exposure: within 1e-6 d, and no match or two matches
+   that is how a bin finds its exposure: within 1e-6 d, and no match or two exposures
    raise; bins of a masked exposure are ignored), `t` (the bin center, in the data file's
-   time system), `dt` (the bin width, s) and `counts`. Each bin is a uniform box of
-   photons. The model uses the `ninterp`-node Gauss rule OF THAT PHOTON DISTRIBUTION
+   time system), `dt` (the bin width, s), `counts`, and optionally a fifth column, the
+   `channel` whose record the bin belongs to (per-order rows read their own channel's
+   record; "Per-order rows and the chromatic exposure meter", below). Each bin is a
+   uniform box of photons. The model uses the `ninterp`-node Gauss rule OF THAT PHOTON DISTRIBUTION
    (Golub-Welsch on the discrete measure, `exposure.weighted_exposure_rule`): positive
    weights, nodes inside the record, and the photon-weighted mean of every polynomial of
    degree `2 ninterp - 1` reproduced exactly, so a 1000-bin record costs 3 model
@@ -377,6 +379,101 @@ up to 1.13 m/s, agrees to 0.0012 mm/s with Gauss-Legendre and 0.034 mm/s with a 
 meter; convergence with a fast binary; the removed moment roles raising; and the
 example's likelihood against `make_data.py`'s 9-point-per-step integration, for both
 kinds of input.
+
+### Per-order rows and the chromatic exposure meter
+
+A cross-dispersed spectrograph measures a redshift per ORDER, and each order has its own
+photon arrival distribution: extinction, seeing and atmospheric dispersion are functions
+of wavelength, so as the airmass and the seeing change during an exposure the blue and
+red photons arrive with different mean times, and each order's redshift is the mean of
+the instantaneous one over ITS photons. A white-light meter averages every order with
+the wrong weights. `scripts/chromatic_exposure_effect.py` measures the error with this
+model (`redshift.py`), at Las Campanas with a G-CLEF-like fiber (0.35 arcsec radius) and
+a simple, stated flux model (Rayleigh plus aerosol extinction, seeing `~ lambda^-0.2
+X^0.6`, Edlen dispersion with an ADC leaving 5% of it, or none). The white-light record
+is the photon-weighted sum over 350-950 nm; each cell is the order's chromatic minus
+achromatic `c z_meas`, at 380 / 900 nm:
+
+| dec | HA (center) | T | zenith angle | ADC, steady seeing | ADC, seeing 0.65 -> 0.85" | no ADC, seeing 0.65 -> 0.85" |
+|---|---|---|---|---|---|---|
+| 0 | 0 h | 30 min | 29 deg | < 0.001 / < 0.001 mm/s | -13.6 / +8.1 cm/s | +216 / +19 cm/s |
+| 0 | 0 h | 60 min | 30 deg | -0.007 / +0.002 mm/s | -26.6 / +16.1 cm/s | +444 / +39 cm/s |
+| 0 | 3 h | 30 min | 49-55 deg | -26.6 / +5.3 cm/s | -31.7 / +9.1 cm/s | +230 / +24 cm/s |
+| 0 | 3 h | 60 min | 46-58 deg | -105.6 / +20.9 cm/s | -113.5 / +28.4 cm/s | -403 / -32 cm/s |
+| -70 | 0 h | 30 min | 41 deg | < 0.001 / < 0.001 mm/s | -4.1 / +2.6 cm/s | +188 / +16 cm/s |
+| -70 | 0 h | 60 min | 41 deg | -0.002 / < 0.001 mm/s | -8.1 / +5.1 cm/s | +376 / +33 cm/s |
+| -70 | 3 h | 30 min | 47-49 deg | -3.0 / +0.6 cm/s | -5.4 / +2.2 cm/s | +154 / +15 cm/s |
+| -70 | 3 h | 60 min | 46-50 deg | -11.9 / +2.4 cm/s | -16.5 / +5.7 cm/s | +208 / +20 cm/s |
+
+The mechanism is the order's photon-weighted mean time, shifted from the white light's
+by `Delta t_c`, times the slope of the barycentric velocity (3.5 cm/s per second here at
+dec 0 on the meridian: the Earth's rotation, 3.0, plus its orbital acceleration): shifts
+of up to 46 s with an ADC, 60-290 s without one. An exposure centered on the meridian under
+a steady sky is symmetric in airmass and the shift vanishes (< 0.01 mm/s); anything that
+breaks the symmetry -- an off-meridian exposure, the seeing drifting, a cloud -- moves
+the blue and red ends by centimeters to a meter per second in OPPOSITE directions. So
+the effect matters at 1 cm/s for nearly every exposure, and at 1 mm/s for every one
+that is not exactly symmetric. It is not a constant: it changes sign across the
+meridian and with the sky, and nothing absorbs it. A pipeline that combines its orders
+into one velocity weights them by their Doppler information, not by the white light, so
+its combined velocity carries the information-weighted mean of these residuals.
+
+**The spelling.** A raw (or corrected) file may carry several rows per exposure, one per
+order, each with its own `c z_meas` and error and all with the exposure's time tag:
+
+```yaml
+    columns: {time: 0, rv: 1, err: 2, exptime_s: 3, channel: 4, err_shared: 5}
+    exposure_meter: "star.GCLEF.expmeter"
+```
+
+- **`channel`** (a number: an order number, a central wavelength in nm, any label written
+  the same way in both files) names the exposure-meter channel whose record describes
+  the row's photons. Several orders may share one channel. The meter file's optional
+  FIFTH column is that channel: a five-field bin belongs to its channel's record, a
+  four-field bin to the exposure's white-light (achromatic) record, and one file may
+  hold both.
+- **Per row, the most complete description wins** (`Instrument.exposure_node_table`,
+  `_read_exposure_meter`): its own channel's bins in its exposure -> the exposure's
+  white-light bins -> its `exptime_s` column -> the file's `exptime_s:` key -> one node
+  at the tag (with the warning naming such rows). These are documented defaults for
+  user input, the ladder an achromatic file always had with one rung added at the top:
+  a meter that records only some channels, or only some exposures, is used where it
+  exists.
+- **Refusals**: a five-field bin when the data file names no `channel` column (it cannot
+  be assigned); a meter channel no row of the data file names (a typo would drop the
+  record silently); several rows sharing one tag in a file WITHOUT a `channel` column
+  when a meter names that tag (an exposure is then one row, as before); a line of other
+  than four or five fields; a non-finite channel. Channels are numbers, so there is no
+  case question; they match by exact equality of the parsed values.
+
+**Correlated errors between orders: `err_shared`.** The orders of one spectrum share
+error sources -- the simultaneous-reference drift correction, the wavelength solution's
+common mode, the time tag, the common-mode part of telluric or activity residuals -- so
+their errors are not independent. `err_shared` (same `unit:` as `err`, one value per
+exposure, repeated on each of its rows) is that common-mode error: within an exposure
+every two rows covary by `err_shared^2`, and each row's variance is `err^2 + jitter^2 +
+err_shared^2`. Exposures are the rows with one time tag. The likelihood
+(`Instrument.shared_noise_logp`, one `pm.Potential` per such file,
+`rvinstrument.model.shared.<name>`) is exact: each exposure's covariance is the diagonal
+plus a rank-one block, so the matrix determinant lemma and Sherman-Morrison give it in
+closed form with segment sums -- O(N), no matrix, no branch, and the plain Normal exactly
+when `err_shared = 0`. Why this and not a full per-exposure covariance: no pipeline
+estimates an n_orders x n_orders covariance well per spectrum, the dominant correlated
+terms are common-mode (rank one), the per-order independent part already is `err` plus
+the fitted jitter, and the closed form drops into the existing likelihood without a
+dense solve. A full covariance (or a fitted common-mode jitter) would be the next step
+if a pipeline ever publishes one. `err_shared` with `gp:` or `likelihood:` on the same
+file raises (each is its own likelihood for the rows); `noise_model: err_scale` scales
+`err` and leaves `err_shared` alone. The shared term enters only the likelihood: the
+`ninterp` choice, the plots and the robust audit read the diagonal sigma, and the rows
+of such a file are not in the observed Normal's pointwise log-likelihood (as for a
+`likelihood: hogg` file).
+
+Tests: `tests/test_chromatic_exposure_meter.py` -- a simulated chromatic exposure (three
+orders ramping up, flat and down across an hour) recovered to < 1 mm/s per channel,
+while the white-light record leaves exactly the forward model's residual (meters per
+second); the ladder rung by rung; the refusals; `shared_noise_logp` against scipy's
+dense multivariate normal; and a built model's Potential against the same.
 
 ### Corrected velocities are exposure-averaged too
 
@@ -597,4 +694,4 @@ WE14; the TEMPO comparison rules it out as a term this model misses).
 6. Default ephemeris `builtin` (0.27 cm/s against DE430); `time_ephemeris: de440` is
    one key away.
 
-Tests: `tests/test_raw_redshift.py`, `tests/test_raw_redshift_orbits.py`, `tests/test_raw_redshift_time_dilation.py`.
+Tests: `tests/test_raw_redshift.py`, `tests/test_raw_redshift_orbits.py`, `tests/test_raw_redshift_time_dilation.py`, `tests/test_chromatic_exposure_meter.py`.
