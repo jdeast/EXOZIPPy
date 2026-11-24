@@ -115,6 +115,102 @@ def test_download_does_not_retry_a_404(tmp_path, monkeypatch):
     assert len(calls) == 1, "a 404 is not transient; do not retry it"
 
 
+@pytest.mark.parametrize(
+    "code, reason", [(429, "Too Many Requests"), (403, "Forbidden")]
+)
+def test_download_retries_a_rate_limit(tmp_path, monkeypatch, code, reason):
+    """
+    Given Zenodo refuses a burst with a 429 or 403 once and then succeeds,
+    When fetch_assets runs,
+    Then it retries and the file lands.
+
+    Regression (#614): one CI shard got `HTTP Error 403: Forbidden` for the
+    freshly published BC tables while every other shard fetched the same
+    files -- a rate limit, not a permission -- and ~90 tests failed with it.
+    """
+    # ARRANGE
+    payload = b"hello"
+    monkeypatch.setattr(zenodo.time, "sleep", lambda *a: None)
+
+    calls = []
+
+    def limited(url, dest):
+        calls.append(url)
+        if len(calls) == 1:
+            raise urllib.error.HTTPError(url, code, reason, {}, None)
+        Path(dest).write_bytes(payload)
+
+    monkeypatch.setattr(zenodo, "_urlretrieve", limited)
+
+    # ACT
+    zenodo.fetch_assets(_fake_assets(payload), tmp_path)
+
+    # ASSERT
+    assert len(calls) == 2, f"a {code} is a rate limit; retry it once"
+    assert (tmp_path / "f.csv").read_bytes() == payload
+
+
+@pytest.mark.parametrize(
+    "header, expected",
+    [("30", 30.0), ("600", 60.0), (None, 5.0), ("Wed, 21 Oct 2026", 5.0)],
+)
+def test_a_retry_after_header_sets_the_pause(
+    tmp_path, monkeypatch, header, expected
+):
+    """
+    Given a 429 carrying Retry-After (seconds, a huge value, none, or the
+    HTTP-date form),
+    When the download is retried,
+    Then the first pause is max(backoff, Retry-After) capped at
+    _RETRY_AFTER_CAP, and the plain 5 s backoff when the header gives no
+    number of seconds.
+    """
+    # ARRANGE
+    sleeps = []
+    monkeypatch.setattr(zenodo.time, "sleep", sleeps.append)
+    payload = b"hello"
+    calls = []
+
+    def limited(url, dest):
+        calls.append(url)
+        if len(calls) == 1:
+            headers = {} if header is None else {"Retry-After": header}
+            raise urllib.error.HTTPError(
+                url, 429, "Too Many Requests", headers, None
+            )
+        Path(dest).write_bytes(payload)
+
+    monkeypatch.setattr(zenodo, "_urlretrieve", limited)
+
+    # ACT
+    zenodo.fetch_assets(_fake_assets(payload), tmp_path)
+
+    # ASSERT
+    assert sleeps == [expected]
+
+
+def test_download_does_not_retry_other_client_errors(tmp_path, monkeypatch):
+    """
+    Given a 401 (a client error that is not one of Zenodo's rate limits),
+    When fetch_assets runs,
+    Then it raises at once, as for a 404.
+    """
+    # ARRANGE
+    monkeypatch.setattr(zenodo.time, "sleep", lambda *a: None)
+    calls = []
+
+    def unauthorized(url, dest):
+        calls.append(url)
+        raise urllib.error.HTTPError(url, 401, "Unauthorized", {}, None)
+
+    monkeypatch.setattr(zenodo, "_urlretrieve", unauthorized)
+
+    # ACT / ASSERT
+    with pytest.raises(urllib.error.HTTPError):
+        zenodo.fetch_assets(_fake_assets(), tmp_path)
+    assert len(calls) == 1
+
+
 def test_download_gives_up_after_the_attempt_budget(tmp_path, monkeypatch):
     """
     Given every attempt fails,
