@@ -154,6 +154,15 @@ SHOWN_NM = (380.0, 550.0, 900.0)
 
 
 def main():
+    import argparse
+
+    argparse.ArgumentParser(
+        description=(
+            "Print the chromatic-minus-achromatic exposure-average table "
+            "(docs/raw_redshift_data.md, 'Per-order rows and a chromatic "
+            "meter'). No options."
+        )
+    ).parse_args()
     print(
         "| dec | HA | T | optics | zenith angle | "
         + " | ".join(f"{int(lam)} nm" for lam in SHOWN_NM)
