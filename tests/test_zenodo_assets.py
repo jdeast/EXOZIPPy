@@ -89,13 +89,14 @@ def test_the_consumers_read_their_pins_from_the_registry():
     assert bc_tables.ZENODO_CONCEPT_RECORD == bc.concept_record_id
     # The record also carries the publish script's MANIFEST.txt, which the
     # owner lists among no table and never fetches (the Claret record's rule).
+    # The per-node F_bol table (#614) is pinned alongside the BC tables.
     assert {
         name: (meta["size"], meta["md5"])
         for name, meta in bc_tables._BC_TABLE_FILES.items()
     } == {
         name: (p.size, p.md5)
         for name, p in bc.files.items()
-        if name.endswith(".bc.parquet")
+        if name.endswith(".bc.parquet") or name == bc_tables.FBOL_TABLE
     }
     assert bc_tables._assets(bc_tables.published_tables()) == {
         name: asset

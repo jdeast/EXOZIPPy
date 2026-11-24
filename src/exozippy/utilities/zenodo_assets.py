@@ -160,7 +160,7 @@ RECORDS: Mapping[str, ZenodoRecord] = MappingProxyType(
         # models/NextGen/bc_tables.py (fetched per facility on first use,
         # via components/sed/bc_grid.py).
         "nextgen_bc_tables": ZenodoRecord(
-            record_id=24017359,
+            record_id=24502316,
             concept_record_id=23074950,
             title="Bolometric Correction Grids for EXOZIPPy",
             creators=("Eastman, Jason", "Sandhaus, Phoebe"),
@@ -168,115 +168,170 @@ RECORDS: Mapping[str, ZenodoRecord] = MappingProxyType(
             files=_pins(
                 {
                     "2MASS.bc.parquet": (
-                        4566065,
-                        "df84dc4426a1b29e7eceebb55d798c08",
+                        4569353,
+                        "e1652abdc37fdaa0d5184082c934d556",
                     ),
                     "DECam.bc.parquet": (
-                        7629667,
-                        "70125ddd529509a919dbd8e581b581fa",
+                        7633956,
+                        "d1de7d2982f3d063d30e4c61f9158d4d",
                     ),
                     "Euclid.bc.parquet": (
-                        6037422,
-                        "bdb1ae5800983b1e0d5c409fbe626bef",
+                        6041200,
+                        "62024fc0e1c50282d6c7f4316ded6514",
                     ),
                     "GAIA.bc.parquet": (
-                        8975523,
-                        "0c9654322c0d31ea8fa79a8dee7a3093",
+                        8980305,
+                        "2cc2d287845c545311d3603d9d8e7ca1",
                     ),
                     "GALEX.bc.parquet": (
-                        3096721,
-                        "d2e5d6ff3d9684d5a9bcf95ff3e56221",
+                        3099515,
+                        "312aa5c70cb4af590f4c3ea72c7c2a2f",
                     ),
                     "Gemini.bc.parquet": (
-                        3096953,
-                        "efae58a2bd2ec304f096279749bdec37",
+                        3099750,
+                        "338a0e5c881dbc74c90178f1e6877484",
                     ),
                     "Generic.bc.parquet": (
-                        26609685,
-                        "a652a7f764e5e59666cdc04fc8cfe866",
+                        26620455,
+                        "8be88a528f8c44cfef3938fbb3fe8aca",
                     ),
                     "HST.bc.parquet": (
-                        16706872,
-                        "e3d1aa595ddaed04abd3864f5428d5ac",
+                        16714152,
+                        "e15b38a7954be5965bd7aa4308d793d6",
                     ),
                     "Keck.bc.parquet": (
-                        7505242,
-                        "73ac7988b7b485955190ce43f62151af",
+                        7509518,
+                        "63cba00fba46704f3bc8f8441793c648",
                     ),
                     "Kepler.bc.parquet": (
-                        1627111,
-                        "6e506f9f70df6480522cc84842a55773",
+                        1629395,
+                        "606e467e3c667fe9dbc0c3bd8fa26e08",
                     ),
                     "MANIFEST.txt": (
-                        1167,
-                        "10c38a1260e0b7c05169e47d62a57ccd",
+                        1285,
+                        "8c65d179e6c6c24e33bb0321bf76739c",
                     ),
                     "MOA.bc.parquet": (
-                        1673715,
-                        "6626f019e4bfea76729c99742d2125bd",
+                        1676007,
+                        "3d79808e26f102186d775261ef34a1c8",
+                    ),
+                    "NextGen.fbol.parquet": (
+                        155502,
+                        "cb7e31ce485339d7a4fd2cd904f7c69e",
+                    ),
+                    "NextGen.magsys.csv": (
+                        6288,
+                        "329bf1f6472232aac6a99cd1030d206f",
                     ),
                     "PAN-STARRS.bc.parquet": (
-                        6035220,
-                        "99051cdc9a0aedbdcdfb73ed97026916",
+                        6039010,
+                        "1c76d5b1521cd837f02d55b9dfc91751",
                     ),
                     "Roman.bc.parquet": (
-                        11913657,
-                        "e573360c53ad4d8bfd2df39973e208df",
+                        11919432,
+                        "991c29ea7d093b6a00dba3b2b2d01f6d",
                     ),
                     "SLOAN.bc.parquet": (
-                        7504799,
-                        "de6cccbd1aa0d3369d917c1169e6212d",
+                        7509081,
+                        "51b6c69b2ff514c9c8a27568197c14d1",
                     ),
                     "Spitzer.bc.parquet": (
-                        1673749,
-                        "b8be7a6b8eafc0c032c1e3a76a162d52",
+                        1676029,
+                        "348c1cb2ec201be2f7587c72de974434",
                     ),
                     "TESS.bc.parquet": (
-                        1626938,
-                        "a5d1b015f0defe7fd36162cd23834c71",
+                        1629230,
+                        "3dd067c5d3fda3b763eab4e19e360784",
                     ),
                     "TYCHO.bc.parquet": (
-                        8974993,
-                        "5fe4ed31af26dc765d84d5dfef8ed4cd",
+                        8979781,
+                        "2de0966f5e079f2da7895f9d53169473",
                     ),
                     "UKIRT.bc.parquet": (
-                        1673729,
-                        "c030d83c8f74dcba384523551b00ddf4",
+                        1676013,
+                        "2c27deca8fd0c6ef467305e98295fdbe",
                     ),
                     "VISTA.bc.parquet": (
-                        7631590,
-                        "db43d98f986e61339d60241a3cb8814c",
+                        7635878,
+                        "94efb16c0d4f9f3eb33a0caaf4278f67",
                     ),
                     "WISE.bc.parquet": (
-                        6035458,
-                        "8d48b1c02b733f10c0e77d49f246372e",
+                        6039244,
+                        "a33bed3bf859c6648d5874573ddcc6b9",
                     ),
                 }
             ),
             superseded=MappingProxyType(
                 {
-                    "2MASS.bc.parquet": ("41ff8f2f6e9a1b88f3f085f128dfcc2a",),
+                    "2MASS.bc.parquet": (
+                        "df84dc4426a1b29e7eceebb55d798c08",
+                        "41ff8f2f6e9a1b88f3f085f128dfcc2a",
+                    ),
+                    "DECam.bc.parquet": ("70125ddd529509a919dbd8e581b581fa",),
                     "Euclid.bc.parquet": (
+                        "bdb1ae5800983b1e0d5c409fbe626bef",
                         "cc8ab258863d077a7b9aec4b57fbf927",
                         "44925baf29ad0d1d4d3cedd4d45abc07",
                     ),
-                    "GAIA.bc.parquet": ("073dcf7acbd6195478954cc13a9fd742",),
-                    "GALEX.bc.parquet": ("e5f774a917144a0c942ea65e2a613b11",),
-                    "Gemini.bc.parquet": ("73e689d4edafe76052f29f16e5ee9d52",),
+                    "GAIA.bc.parquet": (
+                        "0c9654322c0d31ea8fa79a8dee7a3093",
+                        "073dcf7acbd6195478954cc13a9fd742",
+                    ),
+                    "GALEX.bc.parquet": (
+                        "d2e5d6ff3d9684d5a9bcf95ff3e56221",
+                        "e5f774a917144a0c942ea65e2a613b11",
+                    ),
+                    "Gemini.bc.parquet": (
+                        "efae58a2bd2ec304f096279749bdec37",
+                        "73e689d4edafe76052f29f16e5ee9d52",
+                    ),
                     "Generic.bc.parquet": (
+                        "a652a7f764e5e59666cdc04fc8cfe866",
                         "4e067a46d646edd2991141f5a3cdd728",
                     ),
-                    "Keck.bc.parquet": ("7b0be59aef0304dcc68b03a7831b7b85",),
-                    "Kepler.bc.parquet": ("9b21575a77dd737b6f0fa4d43c00b52d",),
-                    "MANIFEST.txt": ("17928a49ba335de1754341dae2ab9b74",),
+                    "HST.bc.parquet": ("e3d1aa595ddaed04abd3864f5428d5ac",),
+                    "Keck.bc.parquet": (
+                        "73ac7988b7b485955190ce43f62151af",
+                        "7b0be59aef0304dcc68b03a7831b7b85",
+                    ),
+                    "Kepler.bc.parquet": (
+                        "6e506f9f70df6480522cc84842a55773",
+                        "9b21575a77dd737b6f0fa4d43c00b52d",
+                    ),
+                    "MANIFEST.txt": (
+                        "10c38a1260e0b7c05169e47d62a57ccd",
+                        "17928a49ba335de1754341dae2ab9b74",
+                    ),
+                    "MOA.bc.parquet": ("6626f019e4bfea76729c99742d2125bd",),
                     "PAN-STARRS.bc.parquet": (
+                        "99051cdc9a0aedbdcdfb73ed97026916",
                         "8f5d5a4c24ad21a93028b52e4414e1ab",
                     ),
-                    "Roman.bc.parquet": ("5e431ef09b0a65a4471f6598f7f7cdae",),
-                    "SLOAN.bc.parquet": ("95c997b768f763faf51ed41305ff2dcb",),
-                    "TESS.bc.parquet": ("af9cabbe4018da49e57ccf88c48072ca",),
-                    "TYCHO.bc.parquet": ("6cbe366d4c185da85d9ab399d609b517",),
-                    "WISE.bc.parquet": ("7738d148d3dd9e0a37c84720d3737614",),
+                    "Roman.bc.parquet": (
+                        "e573360c53ad4d8bfd2df39973e208df",
+                        "5e431ef09b0a65a4471f6598f7f7cdae",
+                    ),
+                    "SLOAN.bc.parquet": (
+                        "de6cccbd1aa0d3369d917c1169e6212d",
+                        "95c997b768f763faf51ed41305ff2dcb",
+                    ),
+                    "Spitzer.bc.parquet": (
+                        "b8be7a6b8eafc0c032c1e3a76a162d52",
+                    ),
+                    "TESS.bc.parquet": (
+                        "a5d1b015f0defe7fd36162cd23834c71",
+                        "af9cabbe4018da49e57ccf88c48072ca",
+                    ),
+                    "TYCHO.bc.parquet": (
+                        "5fe4ed31af26dc765d84d5dfef8ed4cd",
+                        "6cbe366d4c185da85d9ab399d609b517",
+                    ),
+                    "UKIRT.bc.parquet": ("c030d83c8f74dcba384523551b00ddf4",),
+                    "VISTA.bc.parquet": ("db43d98f986e61339d60241a3cb8814c",),
+                    "WISE.bc.parquet": (
+                        "8d48b1c02b733f10c0e77d49f246372e",
+                        "7738d148d3dd9e0a37c84720d3737614",
+                    ),
                 }
             ),
         ),
