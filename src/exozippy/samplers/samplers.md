@@ -545,6 +545,14 @@ worth knowing before changing it:
   wedged worker never returns (2.4.1). **`polish.polish_raw_starts` now does
   the same** -- it used to `close()` + `join()`, which was survivable only
   while nothing in that stage could wedge a worker.
+- **A worker dies with its parent (Linux).** `_shutdown_pool` covers a parent
+  that stops its pool; a parent that is itself killed (a scheduler's SIGKILL, a
+  wall-clock `timeout`) runs no teardown, and a worker still inside a long logp
+  call then has nobody to stop it and ignores SIGTERM. On one box, two seed
+  polishes stopped by a 1200 s limit left such a worker behind (examples
+  ogle0383 and ob09020). `_worker_init` therefore also sets
+  `prctl(PR_SET_PDEATHSIG, SIGKILL)`, which SIG_IGN cannot block. Tests:
+  `tests/test_worker_parent_death.py`.
 
 **The seed polish and the whitening probe enforce it too, on every method
 (reviews 3.4.4, 2.6.35, 2.6.41).** `ptde.polish_seed_starts` and
