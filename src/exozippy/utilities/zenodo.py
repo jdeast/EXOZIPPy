@@ -111,6 +111,16 @@ logger = logging.getLogger(__name__)
 # in CI without making a genuinely dead URL take minutes to report.
 _DOWNLOAD_ATTEMPTS = 4
 _RETRY_BACKOFF = 5  # seconds; doubles each attempt
+# Zenodo also refuses a burst of requests with a 4xx, not only a 5xx: 429
+# (Too Many Requests) and 403 (Forbidden). A 403 failed one CI shard of #614
+# while every other shard fetched the same freshly published files, i.e. a
+# rate limit, not a permission. Both are retried like a 5xx; every other 4xx
+# (404 above all) is a wrong URL or record and is raised at once.
+_RETRYABLE_CLIENT_ERRORS = frozenset({403, 429})
+# A Retry-After header (seconds) is honored when it asks for longer than the
+# backoff step, up to this cap, so a server-requested pause is never ignored
+# and never stalls a fit for minutes.
+_RETRY_AFTER_CAP = 60  # seconds
 
 # Socket timeout for the download, applied to the connect AND to every
 # individual read. It is NOT a budget for the whole transfer: a healthy 250 MB
@@ -545,6 +555,26 @@ def _copy_with_progress_floor(response, handle, url: str) -> None:
             window_bytes = 0
 
 
+def _retry_after_seconds(error: urllib.error.HTTPError) -> float:
+    """The server's Retry-After pause in seconds, capped; 0 when absent.
+
+    Only the delta-seconds form is read. The HTTP-date form, or any value
+    that is not a non-negative number, means "no request" and falls back to
+    the plain backoff -- the header is advisory, and the backoff still waits.
+    """
+    headers = error.headers
+    value = headers.get("Retry-After") if headers is not None else None
+    if value is None:
+        return 0.0
+    try:
+        seconds = float(value)
+    except ValueError:
+        return 0.0
+    if not seconds >= 0.0:
+        return 0.0
+    return min(seconds, float(_RETRY_AFTER_CAP))
+
+
 def _download_verified(
     meta: Mapping[str, object], filename: str, part: Path
 ) -> None:
@@ -559,12 +589,15 @@ def _download_verified(
     requests that had touched nothing related. A transient gateway error
     should cost a few seconds, not a whole run.
 
-    Only transport and integrity errors are retried. A 404 means the URL or
-    record is wrong, and retrying that just delays a real failure by
-    _RETRY_BACKOFF seconds, so it is re-raised at once.
+    Only transport and integrity errors, 5xx, and Zenodo's rate-limit
+    answers (403, 429: `_RETRYABLE_CLIENT_ERRORS`) are retried. A 404 means
+    the URL or record is wrong, and retrying that just delays a real failure
+    by _RETRY_BACKOFF seconds, so it is re-raised at once.
     """
     last_error: BaseException | None = None
+    retry_after = 0.0
     for attempt in range(1, _DOWNLOAD_ATTEMPTS + 1):
+        retry_after = 0.0
         try:
             _urlretrieve(str(meta["url"]), part)
             size = part.stat().st_size
@@ -582,16 +615,17 @@ def _download_verified(
                 )
             return
         except urllib.error.HTTPError as e:
-            if e.code < 500:
+            if e.code < 500 and e.code not in _RETRYABLE_CLIENT_ERRORS:
                 part.unlink(missing_ok=True)
                 raise
+            retry_after = _retry_after_seconds(e)
             last_error = e
         except (urllib.error.URLError, TimeoutError, RuntimeError) as e:
             last_error = e
         part.unlink(missing_ok=True)
 
         if attempt < _DOWNLOAD_ATTEMPTS:
-            delay = _RETRY_BACKOFF * 2 ** (attempt - 1)
+            delay = max(_RETRY_BACKOFF * 2 ** (attempt - 1), retry_after)
             logger.warning(
                 "Download of %s failed (attempt %d/%d): %s. Retrying in %ds.",
                 filename,

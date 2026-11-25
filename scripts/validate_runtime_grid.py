@@ -17,6 +17,7 @@ from exozippy.components.sed.bc_grid import (
 )
 from exozippy.components.sed.spectral_bc import SpectralBC
 from exozippy.models.NextGen import generate_NextGen_BC_Tables as gen
+from exozippy.models.NextGen.bc_tables import ensure_fbol_table
 from exozippy.models.NextGen.runtime_spectra import RuntimeGrid
 
 HOLES = {
@@ -34,7 +35,14 @@ def main():
         "grid_dir",
         help="directory holding NextGen.R3000.logflux.npy and its meta.json",
     )
-    grid = RuntimeGrid(Path(ap.parse_args().grid_dir))
+    ap.add_argument(
+        "--fbol",
+        default=None,
+        help="the per-node F_bol table (default: the published one)",
+    )
+    args = ap.parse_args()
+    fbol = Path(args.fbol) if args.fbol else ensure_fbol_table()
+    grid = RuntimeGrid(Path(args.grid_dir), fbol)
 
     rng = np.random.default_rng(3)
     nodes = [
